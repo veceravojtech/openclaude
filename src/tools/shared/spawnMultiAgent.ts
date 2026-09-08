@@ -104,6 +104,10 @@ export function resolveTeammateModel(
 // Types
 // ============================================================================
 
+/** Thrown by the pane/window spawn handlers when no prompt is given. */
+export const IDLE_SPAWN_UNSUPPORTED_ERROR =
+  'idle spawn (no prompt) is only supported for in-process teammates'
+
 export type SpawnOutput = {
   teammate_id: string
   agent_id: string
@@ -121,7 +125,8 @@ export type SpawnOutput = {
 
 export type SpawnTeammateConfig = {
   name: string
-  prompt: string
+  /** Omit to spawn an idle teammate that waits for work (in-process only). */
+  prompt?: string
   team_name?: string
   cwd?: string
   use_splitpane?: boolean
@@ -139,7 +144,7 @@ export type SpawnTeammateConfig = {
 // Internal input type matching TeammateTool's spawn parameters
 type SpawnInput = {
   name: string
-  prompt: string
+  prompt?: string
   team_name?: string
   cwd?: string
   use_splitpane?: boolean
@@ -376,8 +381,10 @@ async function ensureTeamFileExists(
  * Handle spawn operation using split-pane view (default).
  * When inside tmux: Creates teammates in a shared window with leader on left, teammates on right.
  * When outside tmux: Creates a claude-swarm session with all teammates in a tiled layout.
+ *
+ * Exported for testing.
  */
-async function handleSpawnSplitPane(
+export async function handleSpawnSplitPane(
   input: SpawnInput,
   context: ToolUseContext,
 ): Promise<{ data: SpawnOutput }> {
@@ -387,6 +394,9 @@ async function handleSpawnSplitPane(
   // Resolve model: 'inherit' → leader's model; undefined → default Opus
   const model = resolveTeammateModel(input.model, getAppState().mainLoopModel)
 
+  if (prompt === undefined) {
+    throw new Error(IDLE_SPAWN_UNSUPPORTED_ERROR)
+  }
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
   }
@@ -629,6 +639,9 @@ async function handleSpawnSeparateWindow(
   // Resolve model: 'inherit' → leader's model; undefined → default Opus
   const model = resolveTeammateModel(input.model, getAppState().mainLoopModel)
 
+  if (prompt === undefined) {
+    throw new Error(IDLE_SPAWN_UNSUPPORTED_ERROR)
+  }
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
   }
@@ -921,8 +934,15 @@ async function handleSpawnInProcess(
   const modelWasToolSpecified =
     input.modelWasToolSpecified ?? input.model !== undefined
 
-  if (!name || !prompt) {
-    throw new Error('name and prompt are required for spawn operation')
+  // prompt may be omitted (idle spawn: the teammate waits for work) but an
+  // empty prompt is still rejected, as it was before idle spawns existed.
+  if (!name) {
+    throw new Error('name is required for spawn operation')
+  }
+  if (prompt === '') {
+    throw new Error(
+      'prompt must not be empty; omit it to spawn an idle teammate',
+    )
   }
 
   // Get team name from input or inherit from leader's team context
@@ -1112,6 +1132,17 @@ async function handleSpawn(
   input: SpawnInput,
   context: ToolUseContext,
 ): Promise<{ data: SpawnOutput }> {
+  // Idle spawns (no prompt) only exist in-process: pane/window teammates are
+  // separate processes that block on their first mailbox message and cannot
+  // be parked idle. Route them in-process regardless of teammate mode so the
+  // Agent tool's use_splitpane default never lands them on a pane backend.
+  if (input.prompt === undefined) {
+    logForDebugging(
+      `[handleSpawn] idle spawn (no prompt) for ${input.name}: forcing in-process`,
+    )
+    return handleSpawnInProcess(input, context)
+  }
+
   // Check if in-process mode is enabled via feature flag
   if (isInProcessEnabled()) {
     return handleSpawnInProcess(input, context)

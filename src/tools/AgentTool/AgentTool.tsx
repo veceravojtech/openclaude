@@ -2,7 +2,7 @@ import { feature } from 'bun:bundle';
 import { statSync } from 'fs';
 import { isAbsolute } from 'path';
 import * as React from 'react';
-import { buildTool, type ToolDef, toolMatchesName } from 'src/Tool.js';
+import { buildTool, type ToolDef, toolMatchesName, type ValidationResult } from 'src/Tool.js';
 import type { Message as MessageType, NormalizedUserMessage } from 'src/types/message.js';
 import { getQuerySourceForAgent } from 'src/utils/promptCategory.js';
 import { z } from 'zod/v4';
@@ -92,7 +92,7 @@ function getAutoBackgroundMs(): number {
 // Base input schema without multi-agent parameters
 const baseInputSchema = lazySchema(() => z.object({
   description: z.string().describe('A short (3-5 word) description of the task'),
-  prompt: z.string().describe('The task for the agent to perform'),
+  prompt: z.string().optional().describe('The task for the agent to perform. May be omitted only together with `name`: the teammate then starts idle and waits for work (SendMessage, the team task list, or a message typed into its view).'),
   subagent_type: z.string().optional().describe('The type of specialized agent to use for this task'),
   model: z.string().trim().min(1, 'Model cannot be empty').optional().describe("Optional model override for this agent. Accepts aliases such as sonnet, opus, haiku, inherit, or a provider-supported model ID. Takes precedence over the agent definition's model frontmatter. If omitted, uses the agent definition's model, or inherits from the parent."),
   run_in_background: z.boolean().optional().describe('Set to true to run this agent in the background. You will be notified when it completes.')
@@ -151,6 +151,26 @@ type AgentToolInput = z.infer<ReturnType<typeof baseInputSchema>> & {
   cwd?: string;
 };
 type AgentToolIsolation = AgentToolInput['isolation'];
+
+export const IDLE_TEAMMATE_PROMPT_REQUIRED_ERROR =
+  'prompt is required unless name is given (idle teammate)';
+export const IDLE_TEAMMATE_TEAMS_DISABLED_ERROR =
+  'Spawning an idle teammate (name without prompt) requires Agent Teams, which is not enabled in this session. Provide a prompt to run a subagent instead.';
+
+/**
+ * A missing prompt is only valid for an idle teammate spawn: `name` must be
+ * given and Agent Teams must be enabled. Shared by validateInput() and call()
+ * so direct call() paths (SDK, tests) get the same error text.
+ */
+export function getMissingPromptError(input: {
+  prompt?: string;
+  name?: string;
+}): string | undefined {
+  if (input.prompt !== undefined) return undefined;
+  if (!input.name) return IDLE_TEAMMATE_PROMPT_REQUIRED_ERROR;
+  if (!isAgentSwarmsEnabled()) return IDLE_TEAMMATE_TEAMS_DISABLED_ERROR;
+  return undefined;
+}
 type AgentToolWorktreeInfo = {
   worktreePath: string;
 } | null | undefined;
@@ -262,7 +282,8 @@ type Output = z.input<OutputSchema>;
 // The 'teammate_spawned' status string is only included when ENABLE_AGENT_SWARMS is true
 type TeammateSpawnedOutput = {
   status: 'teammate_spawned';
-  prompt: string;
+  /** Absent for idle spawns (teammate started without a prompt). */
+  prompt?: string;
   teammate_id: string;
   agent_id: string;
   agent_type?: string;
@@ -327,6 +348,19 @@ export const AgentTool = buildTool({
   get outputSchema(): OutputSchema {
     return outputSchema();
   },
+  async validateInput(input: AgentToolInput): Promise<ValidationResult> {
+    const missingPromptError = getMissingPromptError(input);
+    if (missingPromptError) {
+      return {
+        result: false,
+        message: missingPromptError,
+        errorCode: 1
+      };
+    }
+    return {
+      result: true
+    };
+  },
   async call({
     prompt,
     subagent_type,
@@ -348,6 +382,14 @@ export const AgentTool = buildTool({
     // In-process teammates get a no-op setAppState; setAppStateForTasks
     // reaches the root store so task registration/progress/kill stay visible.
     const rootSetAppState = toolUseContext.setAppStateForTasks ?? toolUseContext.setAppState;
+
+    // A missing prompt is only valid for an idle teammate spawn. validateInput
+    // already rejects this on the normal tool path; repeat it here for direct
+    // call() paths that bypass validation.
+    const missingPromptError = getMissingPromptError({ prompt, name });
+    if (missingPromptError) {
+      throw new Error(missingPromptError);
+    }
 
     // Check if user is trying to use agent teams without access
     if (team_name && !isAgentSwarmsEnabled()) {
@@ -458,6 +500,13 @@ export const AgentTool = buildTool({
       } as unknown as {
         data: Output;
       };
+    }
+
+    // Only a teammate spawn may omit the prompt (idle spawn, handled above).
+    // Getting here without one means `name` was given but no team resolved,
+    // so the call would otherwise run a plain subagent with no task.
+    if (prompt === undefined) {
+      throw new Error('Spawning an idle teammate (name without prompt) requires a team. Pass team_name or spawn from within an existing team, or provide a prompt to run a subagent instead.');
     }
 
     // Fork subagent experiment routing:
@@ -1466,7 +1515,7 @@ export const AgentTool = buildTool({
     const i = input as AgentToolInput;
     const tags = [i.subagent_type, i.mode ? `mode=${i.mode}` : undefined].filter((t): t is string => t !== undefined);
     const prefix = tags.length > 0 ? `(${tags.join(', ')}): ` : ': ';
-    return `${prefix}${i.prompt}`;
+    return `${prefix}${i.prompt ?? '(idle teammate, no prompt)'}`;
   },
   isConcurrencySafe() {
     // When Copilot optimizations are disabled, sub-agents are fully

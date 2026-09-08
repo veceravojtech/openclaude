@@ -551,8 +551,8 @@ export type InProcessRunnerConfig = {
   identity: TeammateIdentity
   /** Task ID in AppState */
   taskId: string
-  /** Initial prompt for the teammate */
-  prompt: string
+  /** Initial prompt for the teammate. Omit to start idle and wait for work. */
+  prompt?: string
   /** Optional agent definition (for specialized agents) */
   agentDefinition?: CustomAgentDefinition
   /** Teammate context for AsyncLocalStorage */
@@ -952,6 +952,160 @@ async function waitForNextPromptOrShutdown(
 }
 
 /**
+ * Turns a wait result into the teammate's next prompt, mirroring it into
+ * task.messages for transcript display where needed. Returns undefined when
+ * the runner should exit.
+ */
+function resolveNextPrompt(
+  identity: TeammateIdentity,
+  taskId: string,
+  setAppState: SetAppStateFn,
+  waitResult: WaitResult,
+): string | undefined {
+  switch (waitResult.type) {
+    case 'shutdown_request': {
+      // Pass shutdown request to model for decision
+      // Format as teammate-message for consistency with how tmux teammates receive it
+      // The model will use approveShutdown or rejectShutdown tool
+      logForDebugging(
+        `[inProcessRunner] ${identity.agentId} received shutdown request - passing to model`,
+      )
+      const nextPrompt = formatAsTeammateMessage(
+        waitResult.request?.from || 'team-lead',
+        waitResult.originalMessage,
+      )
+      // Add shutdown request to task.messages for transcript display
+      appendTeammateMessage(
+        taskId,
+        createUserMessage({ content: nextPrompt }),
+        setAppState,
+      )
+      return nextPrompt
+    }
+
+    case 'new_message': {
+      // New prompt from leader or teammate
+      logForDebugging(
+        `[inProcessRunner] ${identity.agentId} received new message from ${waitResult.from}`,
+      )
+      // Messages from the user should be plain text (not wrapped in XML)
+      // Messages from other teammates get XML wrapper for identification
+      if (waitResult.from === 'user') {
+        return waitResult.message
+      }
+      const nextPrompt = formatAsTeammateMessage(
+        waitResult.from,
+        waitResult.message,
+        waitResult.color,
+        waitResult.summary,
+      )
+      // Add to task.messages for transcript display (only for non-user messages)
+      // Messages from 'user' come from pendingUserMessages which are already
+      // added by injectUserMessageToTeammate
+      appendTeammateMessage(
+        taskId,
+        createUserMessage({ content: nextPrompt }),
+        setAppState,
+      )
+      return nextPrompt
+    }
+
+    case 'aborted':
+      logForDebugging(
+        `[inProcessRunner] ${identity.agentId} aborted while waiting`,
+      )
+      return undefined
+  }
+}
+
+/**
+ * Parks the teammate: flags the task idle, fires onIdleCallbacks, tells the
+ * lead once per idle transition, then blocks until the next prompt, shutdown
+ * request, or abort. Returns the next prompt to run, or undefined when the
+ * runner should exit. Shared by the post-turn path and the idle-spawn path so
+ * a teammate spawned without a prompt is parked exactly like one that has
+ * just finished a turn.
+ */
+async function idleUntilNextPrompt(params: {
+  identity: TeammateIdentity
+  taskId: string
+  abortController: AbortController
+  toolUseContext: ToolUseContext
+  allMessages: Message[]
+  workWasAborted: boolean
+  /** Notify the lead even if the task is already flagged idle (idle spawn:
+   *  the task is registered idle, but the lead has not been told yet). */
+  forceIdleNotification?: boolean
+}): Promise<string | undefined> {
+  const {
+    identity,
+    taskId,
+    abortController,
+    toolUseContext,
+    allMessages,
+    workWasAborted,
+    forceIdleNotification = false,
+  } = params
+  const { setAppState } = toolUseContext
+
+  // Check if already idle before updating (to skip duplicate notification)
+  const prevAppState = toolUseContext.getAppState()
+  const prevTask = prevAppState.tasks[taskId]
+  const wasAlreadyIdle =
+    !forceIdleNotification &&
+    prevTask?.type === 'in_process_teammate' &&
+    prevTask.isIdle
+
+  // Mark task as idle (NOT completed) and notify any waiters
+  updateTaskState(
+    taskId,
+    task => {
+      // Call any registered idle callbacks
+      task.onIdleCallbacks?.forEach(cb => cb())
+      return { ...task, isIdle: true, onIdleCallbacks: [] }
+    },
+    setAppState,
+  )
+
+  // Note: We do NOT automatically send the teammate's response to the leader.
+  // Teammates should use the Teammate tool to communicate with the leader.
+  // This matches process-based teammates where output is not visible to the leader.
+
+  // Only send idle notification on transition to idle (not if already idle)
+  if (!wasAlreadyIdle) {
+    await sendIdleNotification(
+      identity.agentName,
+      identity.color,
+      identity.teamName,
+      {
+        idleReason: workWasAborted ? 'interrupted' : 'available',
+        summary: getLastPeerDmSummary(allMessages),
+      },
+    )
+  } else {
+    logForDebugging(
+      `[inProcessRunner] Skipping duplicate idle notification for ${identity.agentName}`,
+    )
+  }
+
+  logForDebugging(
+    `[inProcessRunner] ${identity.agentId} finished prompt, waiting for next`,
+  )
+
+  // Wait for next message or shutdown
+  const waitResult = await waitForNextPromptOrShutdown(
+    identity,
+    abortController,
+    taskId,
+    toolUseContext.getAppState,
+    setAppState,
+    identity.parentSessionId,
+  )
+
+  return resolveNextPrompt(identity, taskId, setAppState, waitResult)
+}
+
+/**
  * Runs an in-process teammate with a continuous prompt loop.
  *
  * Executes runAgent() within the teammate's AsyncLocalStorage context,
@@ -1091,35 +1245,42 @@ export async function runInProcessTeammate(
 
   // All messages across all prompts
   const allMessages: Message[] = []
-  // Wrap initial prompt with XML for proper styling in transcript view
-  const wrappedInitialPrompt = formatAsTeammateMessage(
-    'team-lead',
-    prompt,
-    undefined,
-    description,
-  )
-  let currentPrompt = wrappedInitialPrompt
+  // Wrap initial prompt with XML for proper styling in transcript view.
+  // Undefined for an idle spawn: the teammate waits for its first message.
+  const wrappedInitialPrompt =
+    prompt === undefined
+      ? undefined
+      : formatAsTeammateMessage('team-lead', prompt, undefined, description)
+  let currentPrompt = wrappedInitialPrompt ?? ''
   let shouldExit = false
 
   // Try to claim an available task immediately so the UI can show activity
   // from the very start. The idle loop handles claiming for subsequent tasks.
   // Use parentSessionId as the task list ID since the leader creates tasks
   // under its session ID, not the team name.
-  await tryClaimNextTask(identity.parentSessionId, identity.agentName)
+  // A prompted spawn is driven by the lead's prompt, so the claimed task's
+  // text is not used here; an idle spawn has no other prompt, so the claimed
+  // task becomes its first turn (see below).
+  const claimedTaskPrompt = await tryClaimNextTask(
+    identity.parentSessionId,
+    identity.agentName,
+  )
 
   try {
     // Add initial prompt to task.messages for display (wrapped with XML)
-    updateTaskState(
-      taskId,
-      task => ({
-        ...task,
-        messages: appendCappedMessage(
-          task.messages,
-          createUserMessage({ content: wrappedInitialPrompt }),
-        ),
-      }),
-      setAppState,
-    )
+    if (wrappedInitialPrompt !== undefined) {
+      updateTaskState(
+        taskId,
+        task => ({
+          ...task,
+          messages: appendCappedMessage(
+            task.messages,
+            createUserMessage({ content: wrappedInitialPrompt }),
+          ),
+        }),
+        setAppState,
+      )
+    }
 
     // Per-teammate content replacement state. The while-loop below calls
     // runAgent repeatedly over an accumulating `allMessages` buffer (which
@@ -1146,6 +1307,39 @@ export async function runInProcessTeammate(
     const resolveActivity = createActivityDescriptionResolver(
       toolUseContext.options.tools,
     )
+
+    // Idle spawn: no initial turn. Queued task-list work claimed above is
+    // taken up immediately; otherwise park the teammate exactly as after a
+    // turn (idle flag, callbacks, 'available' notification, wait) so the
+    // lead learns it is ready and the first message starts the first turn.
+    // Mirrors the loop guard below: a teammate killed while the setup above
+    // was awaiting must not touch the killed task or tell the lead it is
+    // available, exactly as a prompted spawn killed in the same window.
+    if (wrappedInitialPrompt === undefined && !abortController.signal.aborted) {
+      const firstPrompt =
+        claimedTaskPrompt !== undefined
+          ? resolveNextPrompt(identity, taskId, setAppState, {
+              type: 'new_message',
+              message: claimedTaskPrompt,
+              from: 'task-list',
+            })
+          : await idleUntilNextPrompt({
+              identity,
+              taskId,
+              abortController,
+              toolUseContext,
+              allMessages,
+              workWasAborted: false,
+              // The task is registered idle at spawn, but the lead has not
+              // been told yet.
+              forceIdleNotification: true,
+            })
+      if (firstPrompt === undefined) {
+        shouldExit = true
+      } else {
+        currentPrompt = firstPrompt
+      }
+    }
 
     // Main teammate loop - runs until abort or shutdown approved
     while (!abortController.signal.aborted && !shouldExit) {
@@ -1463,111 +1657,19 @@ export async function runInProcessTeammate(
         )
       }
 
-      // Check if already idle before updating (to skip duplicate notification)
-      const prevAppState = toolUseContext.getAppState()
-      const prevTask = prevAppState.tasks[taskId]
-      const wasAlreadyIdle =
-        prevTask?.type === 'in_process_teammate' && prevTask.isIdle
-
-      // Mark task as idle (NOT completed) and notify any waiters
-      updateTaskState(
-        taskId,
-        task => {
-          // Call any registered idle callbacks
-          task.onIdleCallbacks?.forEach(cb => cb())
-          return { ...task, isIdle: true, onIdleCallbacks: [] }
-        },
-        setAppState,
-      )
-
-      // Note: We do NOT automatically send the teammate's response to the leader.
-      // Teammates should use the Teammate tool to communicate with the leader.
-      // This matches process-based teammates where output is not visible to the leader.
-
-      // Only send idle notification on transition to idle (not if already idle)
-      if (!wasAlreadyIdle) {
-        await sendIdleNotification(
-          identity.agentName,
-          identity.color,
-          identity.teamName,
-          {
-            idleReason: workWasAborted ? 'interrupted' : 'available',
-            summary: getLastPeerDmSummary(allMessages),
-          },
-        )
-      } else {
-        logForDebugging(
-          `[inProcessRunner] Skipping duplicate idle notification for ${identity.agentName}`,
-        )
-      }
-
-      logForDebugging(
-        `[inProcessRunner] ${identity.agentId} finished prompt, waiting for next`,
-      )
-
-      // Wait for next message or shutdown
-      const waitResult = await waitForNextPromptOrShutdown(
+      // Park the teammate and wait for the next prompt or shutdown
+      const nextPrompt = await idleUntilNextPrompt({
         identity,
-        abortController,
         taskId,
-        toolUseContext.getAppState,
-        setAppState,
-        identity.parentSessionId,
-      )
-
-      switch (waitResult.type) {
-        case 'shutdown_request':
-          // Pass shutdown request to model for decision
-          // Format as teammate-message for consistency with how tmux teammates receive it
-          // The model will use approveShutdown or rejectShutdown tool
-          logForDebugging(
-            `[inProcessRunner] ${identity.agentId} received shutdown request - passing to model`,
-          )
-          currentPrompt = formatAsTeammateMessage(
-            waitResult.request?.from || 'team-lead',
-            waitResult.originalMessage,
-          )
-          // Add shutdown request to task.messages for transcript display
-          appendTeammateMessage(
-            taskId,
-            createUserMessage({ content: currentPrompt }),
-            setAppState,
-          )
-          break
-
-        case 'new_message':
-          // New prompt from leader or teammate
-          logForDebugging(
-            `[inProcessRunner] ${identity.agentId} received new message from ${waitResult.from}`,
-          )
-          // Messages from the user should be plain text (not wrapped in XML)
-          // Messages from other teammates get XML wrapper for identification
-          if (waitResult.from === 'user') {
-            currentPrompt = waitResult.message
-          } else {
-            currentPrompt = formatAsTeammateMessage(
-              waitResult.from,
-              waitResult.message,
-              waitResult.color,
-              waitResult.summary,
-            )
-            // Add to task.messages for transcript display (only for non-user messages)
-            // Messages from 'user' come from pendingUserMessages which are already
-            // added by injectUserMessageToTeammate
-            appendTeammateMessage(
-              taskId,
-              createUserMessage({ content: currentPrompt }),
-              setAppState,
-            )
-          }
-          break
-
-        case 'aborted':
-          logForDebugging(
-            `[inProcessRunner] ${identity.agentId} aborted while waiting`,
-          )
-          shouldExit = true
-          break
+        abortController,
+        toolUseContext,
+        allMessages,
+        workWasAborted,
+      })
+      if (nextPrompt === undefined) {
+        shouldExit = true
+      } else {
+        currentPrompt = nextPrompt
       }
     }
 

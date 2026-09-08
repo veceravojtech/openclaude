@@ -26,7 +26,7 @@ export type InProcessTeammateTaskState = TaskStateBase & {
   // Stored as plain data in AppState, NOT a reference to AsyncLocalStorage
   identity: TeammateIdentity
 
-  // Execution
+  // Execution. Empty string for teammates spawned idle (no initial prompt).
   prompt: string
   // Optional model override for this teammate
   model?: string

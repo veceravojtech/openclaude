@@ -70,8 +70,8 @@ export type InProcessSpawnConfig = {
   name: string
   /** Team this teammate belongs to */
   teamName: string
-  /** Initial prompt/task for the teammate */
-  prompt: string
+  /** Initial prompt/task for the teammate. Omit to start idle (waiting for work). */
+  prompt?: string
   /** Optional UI color for the teammate */
   color?: string
   /** Whether teammate must enter plan mode before implementing */
@@ -165,8 +165,12 @@ export async function spawnInProcessTeammate(
       registerPerfettoAgent(agentId, name, parentSessionId)
     }
 
-    // Create task state
-    const description = `${name}: ${prompt.substring(0, 50)}${prompt.length > 50 ? '...' : ''}`
+    // Create task state. An idle spawn (no prompt) is registered already idle
+    // so the panel shows it waiting for work from the very first render.
+    const isIdleSpawn = prompt === undefined
+    const description = isIdleSpawn
+      ? `${name}: idle (waiting for work)`
+      : `${name}: ${prompt.substring(0, 50)}${prompt.length > 50 ? '...' : ''}`
 
     const taskState: InProcessTeammateTaskState = {
       ...createTaskStateBase(
@@ -178,14 +182,18 @@ export async function spawnInProcessTeammate(
       type: 'in_process_teammate',
       status: 'running',
       identity,
-      prompt,
+      // Kept as a string (empty for idle spawns) rather than widening the
+      // task type to `prompt?: string`: the UI consumers (TeammateViewHeader,
+      // InProcessTeammateDetailDialog's truncateToWidth, the SDK task_started
+      // event) all assume a string, and the idle marker lives in description.
+      prompt: prompt ?? '',
       model,
       abortController,
       awaitingPlanApproval: false,
       spinnerVerb: sample(getSpinnerVerbs()),
       pastTenseVerb: sample(TURN_COMPLETION_VERBS),
       permissionMode: planModeRequired ? 'plan' : 'default',
-      isIdle: false,
+      isIdle: isIdleSpawn,
       shutdownRequested: false,
       lastReportedToolCount: 0,
       lastReportedTokenCount: 0,
