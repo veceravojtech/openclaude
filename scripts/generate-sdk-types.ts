@@ -124,6 +124,7 @@ const EXPORT_ORDER = [
   'SessionEndHookInputSchema',
   'StopHookInputSchema',
   'StopFailureHookInputSchema',
+  'StreamStalledHookInputSchema',
   'SubagentStartHookInputSchema',
   'SubagentStopHookInputSchema',
   'PreCompactHookInputSchema',
@@ -131,6 +132,7 @@ const EXPORT_ORDER = [
   'PermissionRequestHookInputSchema',
   'SetupHookInputSchema',
   'TeammateIdleHookInputSchema',
+  'TeammateIdleTimeoutHookInputSchema',
   'TaskCreatedHookInputSchema',
   'TaskCompletedHookInputSchema',
   'ElicitationHookInputSchema',
@@ -159,6 +161,7 @@ const EXPORT_ORDER = [
   'ElicitationHookSpecificOutputSchema',
   'ElicitationResultHookSpecificOutputSchema',
   'WorktreeCreateHookSpecificOutputSchema',
+  'TeammateIdleTimeoutHookSpecificOutputSchema',
   'SyncHookJSONOutputSchema',
   'HookJSONOutputSchema',
   // Prompt

@@ -90,9 +90,11 @@ import type {
   SetupHookInput,
   StopHookInput,
   StopFailureHookInput,
+  StreamStalledHookInput,
   SubagentStartHookInput,
   SubagentStopHookInput,
   TeammateIdleHookInput,
+  TeammateIdleTimeoutHookInput,
   TaskCreatedHookInput,
   TaskCompletedHookInput,
   ConfigChangeHookInput,
@@ -542,7 +544,14 @@ export interface HookResult {
   watchPaths?: string[]
   elicitationResultResponse?: ElicitationResponse
   retry?: boolean
+  teammateIdleTimeoutAction?: TeammateIdleTimeoutAction
   hook: HookCommand | HookCallback | FunctionHook
+}
+
+/** Action requested by a TeammateIdleTimeout hook's JSON hookSpecificOutput. */
+export type TeammateIdleTimeoutAction = {
+  action: 'shutdown'
+  reason?: string
 }
 
 export type AggregatedHookResult = {
@@ -562,6 +571,7 @@ export type AggregatedHookResult = {
   elicitationResponse?: ElicitationResponse
   elicitationResultResponse?: ElicitationResponse
   retry?: boolean
+  teammateIdleTimeoutAction?: TeammateIdleTimeoutAction
 }
 
 /**
@@ -890,6 +900,14 @@ function processHookJSONOutput({
                 json.reason || 'Elicitation result blocked by hook',
               command,
             }
+          }
+        }
+        break
+      case 'TeammateIdleTimeout':
+        if (json.hookSpecificOutput.action === 'shutdown') {
+          result.teammateIdleTimeoutAction = {
+            action: 'shutdown',
+            reason: json.hookSpecificOutput.reason ?? json.reason,
           }
         }
         break
@@ -1842,6 +1860,9 @@ export async function getMatchingHooks(
       case 'StopFailure':
         matchQuery = hookInput.error
         break
+      case 'StreamStalled':
+        matchQuery = hookInput.stage
+        break
       case 'SubagentStart':
         matchQuery = hookInput.agent_type
         break
@@ -1849,6 +1870,7 @@ export async function getMatchingHooks(
         matchQuery = hookInput.agent_type
         break
       case 'TeammateIdle':
+      case 'TeammateIdleTimeout':
       case 'TaskCreated':
       case 'TaskCompleted':
         break
@@ -2106,6 +2128,18 @@ export function getTeammateIdleHookMessage(
   blockingError: HookBlockingError,
 ): string {
   return `TeammateIdle hook feedback:\n${blockingError.blockingError}`
+}
+
+/**
+ * Format a blocking error from a TeammateIdleTimeout hook. The text becomes
+ * the idle teammate's next prompt.
+ * @param blockingError The blocking error from the hook
+ * @returns Formatted message to give feedback to the model
+ */
+export function getTeammateIdleTimeoutHookMessage(
+  blockingError: HookBlockingError,
+): string {
+  return `TeammateIdleTimeout hook feedback:\n${blockingError.blockingError}`
 }
 
 /**
@@ -3104,6 +3138,12 @@ async function* executeHooks({
         elicitationResultResponse: result.elicitationResultResponse,
       }
     }
+    // Yield the shutdown request if provided (from TeammateIdleTimeout hooks)
+    if (result.teammateIdleTimeoutAction) {
+      yield {
+        teammateIdleTimeoutAction: result.teammateIdleTimeoutAction,
+      }
+    }
 
     // Invoke session hook callback if this is a command/prompt/function hook (not a callback hook)
     if (appState && result.hook.type !== 'callback') {
@@ -3851,6 +3891,60 @@ export async function executeStopFailureHooks(
   })
 }
 
+export type StreamStalledHookParams = {
+  stage: StreamStalledHookInput['stage']
+  sinceLastEventMs: number
+  timeoutMs: number
+  model: string
+  requestId: string | null | undefined
+  agentId?: string
+  agentName?: string
+  teamName?: string
+}
+
+/**
+ * Execute StreamStalled hooks when a model response stream stops producing
+ * tokens (warning at half the idle timeout, timeout on abort, recovered when a
+ * chunk finally arrives). Fire-and-forget like StopFailure: the result is
+ * ignored and the stream is never blocked. Callers must not await this on the
+ * stream path; the returned promise never rejects.
+ */
+export async function executeStreamStalledHooks(
+  params: StreamStalledHookParams,
+  timeoutMs: number = TOOL_HOOK_EXECUTION_TIMEOUT_MS,
+): Promise<void> {
+  try {
+    // Outside-REPL hooks are keyed by the main session id (see
+    // executeStopFailureHooks), so gate on the same id.
+    if (!hasHookForEvent('StreamStalled', undefined, getSessionId())) return
+
+    const hookInput: StreamStalledHookInput = {
+      ...createBaseHookInput(undefined, undefined, {
+        agentId: params.agentId,
+      }),
+      hook_event_name: 'StreamStalled',
+      stage: params.stage,
+      since_last_event_ms: params.sinceLastEventMs,
+      timeout_ms: params.timeoutMs,
+      model: params.model,
+      request_id: params.requestId ?? 'unknown',
+      agent_name: params.agentName,
+      team_name: params.teamName,
+    }
+
+    await executeHooksOutsideREPL({
+      hookInput,
+      timeoutMs,
+      matchQuery: params.stage,
+    })
+  } catch (error) {
+    logForDebugging(
+      `StreamStalled hook (${params.stage}) failed: ${errorMessage(error)}`,
+      { level: 'error' },
+    )
+  }
+}
+
 /**
  * Execute stop hooks if configured
  * @param toolUseContext ToolUseContext for prompt-based hooks
@@ -3950,6 +4044,46 @@ export async function* executeTeammateIdleHooks(
     toolUseID: randomUUID(),
     signal,
     timeoutMs,
+  })
+}
+
+/**
+ * Execute TeammateIdleTimeout hooks after an in-process teammate has been
+ * continuously idle for CLAUDE_CODE_TEAMMATE_IDLE_TIMEOUT_MS (and again every
+ * further interval). Mirrors TeammateIdle: a blocking error (exit code 2)
+ * carries text the teammate should work on next; a JSON hookSpecificOutput
+ * with action 'shutdown' asks the teammate to shut down cleanly. Yields
+ * nothing when no such hook is configured.
+ */
+export async function* executeTeammateIdleTimeoutHooks(params: {
+  teammateName: string
+  teamName: string
+  agentId: string
+  idleMs: number
+  occurrence: number
+  permissionMode?: string
+  signal?: AbortSignal
+  timeoutMs?: number
+}): AsyncGenerator<AggregatedHookResult> {
+  const sessionId = getSessionId()
+  if (!hasHookForEvent('TeammateIdleTimeout', undefined, sessionId)) return
+
+  const hookInput: TeammateIdleTimeoutHookInput = {
+    ...createBaseHookInput(params.permissionMode, undefined, {
+      agentId: params.agentId,
+    }),
+    hook_event_name: 'TeammateIdleTimeout',
+    teammate_name: params.teammateName,
+    team_name: params.teamName,
+    idle_ms: params.idleMs,
+    occurrence: params.occurrence,
+  }
+
+  yield* executeHooks({
+    hookInput,
+    toolUseID: randomUUID(),
+    signal: params.signal,
+    timeoutMs: params.timeoutMs ?? TOOL_HOOK_EXECUTION_TIMEOUT_MS,
   })
 }
 

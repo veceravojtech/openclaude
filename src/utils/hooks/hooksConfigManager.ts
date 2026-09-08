@@ -114,6 +114,15 @@ export const getHookEventMetadata = memoize(
           ],
         },
       },
+      StreamStalled: {
+        summary: 'When a model response stream stops producing tokens',
+        description:
+          'Input to command is JSON with stage (warning, timeout, or recovered), since_last_event_ms, timeout_ms, model, request_id, and agent_id/agent_name/team_name when the request belongs to an agent.\nFire-and-forget — hook output and exit codes are ignored; the stream is never blocked or altered.',
+        matcherMetadata: {
+          fieldToMatch: 'stage',
+          values: ['warning', 'timeout', 'recovered'],
+        },
+      },
       SubagentStart: {
         summary: 'When a subagent (Agent tool call) is started',
         description:
@@ -182,6 +191,12 @@ export const getHookEventMetadata = memoize(
         summary: 'When a teammate is about to go idle',
         description:
           'Input to command is JSON with teammate_name and team_name.\nExit code 0 - stdout/stderr not shown\nExit code 2 - show stderr to teammate and prevent idle (teammate continues working)\nOther exit codes - show stderr to user only',
+      },
+      TeammateIdleTimeout: {
+        summary:
+          'When an in-process teammate has been idle for CLAUDE_CODE_TEAMMATE_IDLE_TIMEOUT_MS',
+        description:
+          'Fires after a teammate has been continuously idle for CLAUDE_CODE_TEAMMATE_IDLE_TIMEOUT_MS (default 5 minutes) and again every further interval. Input to command is JSON with teammate_name, team_name, agent_id, idle_ms, and occurrence.\nExit code 0 - keep waiting; JSON {"hookSpecificOutput":{"hookEventName":"TeammateIdleTimeout","action":"shutdown","reason":"..."}} shuts the teammate down cleanly\nExit code 2 - stderr becomes the teammate\'s next prompt (teammate wakes and works on it)\nOther exit codes - show stderr to user only',
       },
       TaskCreated: {
         summary: 'When a task is being created',
@@ -282,6 +297,7 @@ export function groupHooksByEventAndMatcher(
     SessionEnd: {},
     Stop: {},
     StopFailure: {},
+    StreamStalled: {},
     SubagentStart: {},
     SubagentStop: {},
     PreCompact: {},
@@ -289,6 +305,7 @@ export function groupHooksByEventAndMatcher(
     PermissionRequest: {},
     Setup: {},
     TeammateIdle: {},
+    TeammateIdleTimeout: {},
     TaskCreated: {},
     TaskCompleted: {},
     Elicitation: {},

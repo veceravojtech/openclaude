@@ -160,6 +160,11 @@ export const syncHookResponseSchema = lazySchema(() =>
           hookEventName: z.literal('WorktreeCreate'),
           worktreePath: z.string(),
         }),
+        z.object({
+          hookEventName: z.literal('TeammateIdleTimeout'),
+          action: z.enum(['shutdown']).optional(),
+          reason: z.string().optional(),
+        }),
       ])
       .optional(),
   }),

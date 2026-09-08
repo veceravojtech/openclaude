@@ -386,6 +386,7 @@ export const HOOK_EVENTS = [
   'SessionEnd',
   'Stop',
   'StopFailure',
+  'StreamStalled',
   'SubagentStart',
   'SubagentStop',
   'PreCompact',
@@ -394,6 +395,7 @@ export const HOOK_EVENTS = [
   'PermissionDenied',
   'Setup',
   'TeammateIdle',
+  'TeammateIdleTimeout',
   'TaskCreated',
   'TaskCompleted',
   'Elicitation',
@@ -561,6 +563,36 @@ export const StopFailureHookInputSchema = lazySchema(() =>
   ),
 )
 
+export const StreamStalledHookInputSchema = lazySchema(() =>
+  BaseHookInputSchema().and(
+    z.object({
+      hook_event_name: z.literal('StreamStalled'),
+      stage: z
+        .enum(['warning', 'timeout', 'recovered'])
+        .describe(
+          "'warning' at half the idle timeout without a chunk, 'timeout' when " +
+            "the stream is aborted for idleness, 'recovered' when a chunk " +
+            'finally arrives after a long gap.',
+        ),
+      since_last_event_ms: z
+        .number()
+        .describe('Milliseconds since the last stream event when the stage fired'),
+      timeout_ms: z
+        .number()
+        .describe('Configured stream idle timeout (CLAUDE_STREAM_IDLE_TIMEOUT_MS)'),
+      model: z.string(),
+      request_id: z
+        .string()
+        .describe("Server request id, or 'unknown' before headers arrive"),
+      agent_name: z
+        .string()
+        .optional()
+        .describe('Teammate name or subagent type, when the request belongs to an agent'),
+      team_name: z.string().optional(),
+    }),
+  ),
+)
+
 export const SubagentStartHookInputSchema = lazySchema(() =>
   BaseHookInputSchema().and(
     z.object({
@@ -618,6 +650,22 @@ export const TeammateIdleHookInputSchema = lazySchema(() =>
       hook_event_name: z.literal('TeammateIdle'),
       teammate_name: z.string(),
       team_name: z.string(),
+    }),
+  ),
+)
+
+export const TeammateIdleTimeoutHookInputSchema = lazySchema(() =>
+  BaseHookInputSchema().and(
+    z.object({
+      hook_event_name: z.literal('TeammateIdleTimeout'),
+      teammate_name: z.string(),
+      team_name: z.string(),
+      idle_ms: z
+        .number()
+        .describe('How long the teammate has been continuously idle'),
+      occurrence: z
+        .number()
+        .describe('1 for the first firing in this idle period, 2 for the next interval, ...'),
     }),
   ),
 )
@@ -800,6 +848,7 @@ export const HookInputSchema = lazySchema(() =>
     SessionEndHookInputSchema(),
     StopHookInputSchema(),
     StopFailureHookInputSchema(),
+    StreamStalledHookInputSchema(),
     SubagentStartHookInputSchema(),
     SubagentStopHookInputSchema(),
     PreCompactHookInputSchema(),
@@ -807,6 +856,7 @@ export const HookInputSchema = lazySchema(() =>
     PermissionRequestHookInputSchema(),
     SetupHookInputSchema(),
     TeammateIdleHookInputSchema(),
+    TeammateIdleTimeoutHookInputSchema(),
     TaskCreatedHookInputSchema(),
     TaskCompletedHookInputSchema(),
     ElicitationHookInputSchema(),
@@ -928,6 +978,19 @@ export const FileChangedHookSpecificOutputSchema = lazySchema(() =>
   }),
 )
 
+export const TeammateIdleTimeoutHookSpecificOutputSchema = lazySchema(() =>
+  z
+    .object({
+      hookEventName: z.literal('TeammateIdleTimeout'),
+      action: z.enum(['shutdown']).optional(),
+      reason: z.string().optional(),
+    })
+    .describe(
+      "Hook-specific output for the TeammateIdleTimeout event. action 'shutdown' " +
+        'asks the idle teammate to shut down cleanly; omit it to keep waiting.',
+    ),
+)
+
 export const SyncHookJSONOutputSchema = lazySchema(() =>
   z.object({
     continue: z.boolean().optional(),
@@ -953,6 +1016,7 @@ export const SyncHookJSONOutputSchema = lazySchema(() =>
         CwdChangedHookSpecificOutputSchema(),
         FileChangedHookSpecificOutputSchema(),
         WorktreeCreateHookSpecificOutputSchema(),
+        TeammateIdleTimeoutHookSpecificOutputSchema(),
       ])
       .optional(),
   }),

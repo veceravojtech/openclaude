@@ -76,6 +76,10 @@ import { count } from '../array.js'
 import { logForDebugging } from '../debug.js'
 import { cloneFileStateCache } from '../fileStateCache.js'
 import {
+  executeTeammateIdleTimeoutHooks,
+  getTeammateIdleTimeoutHookMessage,
+} from '../hooks.js'
+import {
   getMaxActiveMessagesHardCap,
   isAboveMaxActiveMessagesLimit,
   parseMaxActiveMessagesLimit,
@@ -105,7 +109,13 @@ import { emitTaskTerminatedSdk } from '../sdkEventQueue.js'
 import { sleep } from '../sleep.js'
 import { jsonStringify } from '../slowOperations.js'
 import { asSystemPrompt } from '../systemPromptType.js'
-import { claimTask, listTasks, type Task, updateTask } from '../tasks.js'
+import {
+  claimTask,
+  listTasks,
+  type Task,
+  unassignTeammateTasks,
+  updateTask,
+} from '../tasks.js'
 import type { TeammateContext } from '../teammateContext.js'
 import { runWithTeammateContext } from '../teammateContext.js'
 import {
@@ -128,6 +138,7 @@ import {
   createPermissionRequest,
   sendPermissionRequestViaMailbox,
 } from './permissionSync.js'
+import { removeMemberByAgentId } from './teamHelpers.js'
 import { TEAMMATE_SYSTEM_PROMPT_ADDENDUM } from './teammatePromptAddendum.js'
 import { createInProcessPermissionAbortCompleter } from './inProcessPermissionAbort.js'
 
@@ -759,6 +770,208 @@ type WaitResult =
   | {
       type: 'aborted'
     }
+  | {
+      /** The idle policy ended the wait: the runner exits cleanly. */
+      type: 'idle_shutdown'
+      reason: 'idle_timeout' | 'hook'
+      idleMs: number
+      detail?: string
+    }
+
+const DEFAULT_TEAMMATE_IDLE_TIMEOUT_MS = 300_000
+/** Pseudo-sender for prompts a TeammateIdleTimeout hook hands to the teammate. */
+const IDLE_TIMEOUT_HOOK_SENDER = 'idle-timeout-hook'
+
+/**
+ * Parses a millisecond env var for the idle policy. Unset or blank yields the
+ * default (undefined disables); anything but a positive integer disables.
+ */
+function parseIdleMsEnv(
+  raw: string | undefined,
+  defaultMs: number | undefined,
+): number | undefined {
+  const trimmed = raw?.trim()
+  if (!trimmed) return defaultMs
+  if (!/^\d+$/.test(trimmed)) return undefined
+  const parsed = Number(trimmed)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
+}
+
+type IdleTimeoutHookOutcome =
+  | { kind: 'wake'; message: string }
+  | { kind: 'shutdown'; reason?: string }
+
+type IdlePolicy = {
+  /** Returns a WaitResult when the policy ends the wait, else undefined. */
+  check(idleMs: number): WaitResult | undefined
+  /**
+   * Called once the wait has ended for any reason: aborts an in-flight hook
+   * and persists an undelivered wake message to the teammate's own mailbox.
+   */
+  dispose(): void
+}
+
+/**
+ * Idle policy for one idle period of a teammate. Fires TeammateIdleTimeout
+ * hooks after CLAUDE_CODE_TEAMMATE_IDLE_TIMEOUT_MS of continuous idleness
+ * (occurrence 1, 2, ...) without blocking the poll loop and never
+ * concurrently with itself; the next occurrence is scheduled one interval
+ * after the previous hook FINISHED, so a slow hook cannot re-fire back to
+ * back. A blocking hook result wakes the teammate with the text as its next
+ * prompt; a JSON shutdown action ends the wait. Once
+ * CLAUDE_CODE_TEAMMATE_IDLE_SHUTDOWN_MS has passed and no in-flight hook
+ * could still assign work, the wait ends with an idle shutdown; that check
+ * runs before a new occurrence is launched, so an always-running hook cannot
+ * starve it. A shutdown request from the lead needs no special handling: the
+ * mailbox scan returns it before the policy is consulted, and the sticky
+ * task.shutdownRequested flag (never cleared after a rejected request) must
+ * not silence the policy for the rest of the teammate's life.
+ */
+function createIdlePolicy(
+  identity: TeammateIdentity,
+  permissionMode: string | undefined,
+): IdlePolicy {
+  const hookIntervalMs = parseIdleMsEnv(
+    process.env.CLAUDE_CODE_TEAMMATE_IDLE_TIMEOUT_MS,
+    DEFAULT_TEAMMATE_IDLE_TIMEOUT_MS,
+  )
+  const shutdownMs = parseIdleMsEnv(
+    process.env.CLAUDE_CODE_TEAMMATE_IDLE_SHUTDOWN_MS,
+    undefined,
+  )
+  const hookAbort = new AbortController()
+  let occurrence = 0
+  let hookInFlight = false
+  let pendingOutcome: IdleTimeoutHookOutcome | undefined
+  /** Idle time at which the next hook occurrence may fire. */
+  let nextHookAtMs = hookIntervalMs
+  /** Idle time seen by the most recent check(); anchors rescheduling. */
+  let lastIdleMs = 0
+
+  /**
+   * A wake message the poll loop will never deliver (the wait ended for
+   * another reason first) is written to the teammate's own mailbox so it is
+   * picked up on the next idle round instead of being lost: a stateful hook
+   * may have recorded the work as assigned.
+   */
+  function persistWake(message: string): void {
+    try {
+      void writeToMailbox(
+        identity.agentName,
+        {
+          from: IDLE_TIMEOUT_HOOK_SENDER,
+          text: message,
+          timestamp: new Date().toISOString(),
+        },
+        identity.teamName,
+      ).catch((err: unknown) => {
+        logForDebugging(
+          `[inProcessRunner] ${identity.agentName} could not persist TeammateIdleTimeout wake message: ${err}`,
+        )
+      })
+    } catch (err) {
+      logForDebugging(
+        `[inProcessRunner] ${identity.agentName} could not persist TeammateIdleTimeout wake message: ${err}`,
+      )
+    }
+  }
+
+  async function runHook(idleMs: number): Promise<void> {
+    let wakeMessage: string | undefined
+    let shutdown: { reason?: string } | undefined
+    try {
+      for await (const result of executeTeammateIdleTimeoutHooks({
+        teammateName: identity.agentName,
+        teamName: identity.teamName,
+        agentId: identity.agentId,
+        idleMs,
+        occurrence,
+        permissionMode,
+        signal: hookAbort.signal,
+      })) {
+        if (result.blockingError) {
+          wakeMessage = getTeammateIdleTimeoutHookMessage(result.blockingError)
+        }
+        if (result.teammateIdleTimeoutAction?.action === 'shutdown') {
+          shutdown = { reason: result.teammateIdleTimeoutAction.reason }
+        }
+      }
+    } catch (err) {
+      logForDebugging(
+        `[inProcessRunner] ${identity.agentName} TeammateIdleTimeout hook failed: ${err}`,
+      )
+    } finally {
+      hookInFlight = false
+      // Reschedule relative to when this hook finished, not to idle start.
+      if (hookIntervalMs !== undefined) {
+        nextHookAtMs = lastIdleMs + hookIntervalMs
+      }
+    }
+    if (hookAbort.signal.aborted) {
+      // The wait already ended; do not drop work the hook handed over.
+      if (wakeMessage !== undefined) persistWake(wakeMessage)
+      return
+    }
+    // Work handed over by one hook beats a shutdown asked by another: the
+    // shutdown is only meant for a teammate nobody has work for.
+    if (wakeMessage !== undefined) {
+      pendingOutcome = { kind: 'wake', message: wakeMessage }
+    } else if (shutdown) {
+      pendingOutcome = { kind: 'shutdown', reason: shutdown.reason }
+    }
+  }
+
+  return {
+    check(idleMs) {
+      lastIdleMs = idleMs
+      // 1. Deliver what the previous hook decided.
+      const outcome = pendingOutcome
+      pendingOutcome = undefined
+      if (outcome?.kind === 'wake') {
+        return {
+          type: 'new_message',
+          message: outcome.message,
+          from: IDLE_TIMEOUT_HOOK_SENDER,
+        }
+      }
+      if (outcome?.kind === 'shutdown') {
+        return {
+          type: 'idle_shutdown',
+          reason: 'hook',
+          idleMs,
+          detail: outcome.reason,
+        }
+      }
+      // 2. Idle shutdown, evaluated BEFORE launching another occurrence so a
+      //    hook that is always in flight cannot starve it.
+      if (shutdownMs !== undefined && !hookInFlight && idleMs >= shutdownMs) {
+        return { type: 'idle_shutdown', reason: 'idle_timeout', idleMs }
+      }
+      // 3. Next hook occurrence.
+      if (
+        hookIntervalMs !== undefined &&
+        nextHookAtMs !== undefined &&
+        !hookInFlight &&
+        idleMs >= nextHookAtMs
+      ) {
+        occurrence++
+        hookInFlight = true
+        logForDebugging(
+          `[inProcessRunner] ${identity.agentName} idle for ${idleMs}ms, firing TeammateIdleTimeout hooks (occurrence ${occurrence})`,
+        )
+        void runHook(idleMs)
+      }
+      return undefined
+    },
+    dispose() {
+      hookAbort.abort()
+      if (pendingOutcome?.kind === 'wake') {
+        persistWake(pendingOutcome.message)
+      }
+      pendingOutcome = undefined
+    },
+  }
+}
 
 /**
  * Waits for new prompts or shutdown request.
@@ -766,6 +979,7 @@ type WaitResult =
  * - Shutdown request from leader (returned to caller for model decision)
  * - New messages/prompts from leader
  * - Abort signal
+ * - The idle policy (TeammateIdleTimeout hooks, idle self-shutdown)
  *
  * This keeps the teammate alive in 'idle' state instead of terminating.
  * Does NOT auto-approve shutdown - the model should make that decision.
@@ -778,12 +992,42 @@ async function waitForNextPromptOrShutdown(
   setAppState: SetAppStateFn,
   taskListId: string,
 ): Promise<WaitResult> {
+  const task = getAppState().tasks[taskId]
+  const idlePolicy = createIdlePolicy(
+    identity,
+    task?.type === 'in_process_teammate' ? task.permissionMode : undefined,
+  )
+  try {
+    return await pollForNextPromptOrShutdown(
+      identity,
+      abortController,
+      taskId,
+      getAppState,
+      setAppState,
+      taskListId,
+      idlePolicy,
+    )
+  } finally {
+    idlePolicy.dispose()
+  }
+}
+
+async function pollForNextPromptOrShutdown(
+  identity: TeammateIdentity,
+  abortController: AbortController,
+  taskId: string,
+  getAppState: () => AppState,
+  setAppState: SetAppStateFn,
+  taskListId: string,
+  idlePolicy: IdlePolicy,
+): Promise<WaitResult> {
   const POLL_INTERVAL_MS = 500
 
   logForDebugging(
     `[inProcessRunner] ${identity.agentName} starting poll loop (abort=${abortController.signal.aborted})`,
   )
 
+  const idleStartedAt = Date.now()
   let pollCount = 0
   while (!abortController.signal.aborted) {
     // Check for in-memory pending messages on every iteration (from transcript viewing)
@@ -943,12 +1187,83 @@ async function waitForNextPromptOrShutdown(
         from: 'task-list',
       }
     }
+
+    // Nothing to do this round: let the idle policy fire TeammateIdleTimeout
+    // hooks or end the wait with an idle shutdown.
+    const idleResult = idlePolicy.check(Date.now() - idleStartedAt)
+    if (idleResult) {
+      return idleResult
+    }
   }
 
   logForDebugging(
     `[inProcessRunner] ${identity.agentName} exiting poll loop (abort=${abortController.signal.aborted}, polls=${pollCount})`,
   )
   return { type: 'aborted' }
+}
+
+/**
+ * Cleans up after an idle self-shutdown so the teammate leaves no trace a
+ * kill or an approved shutdown would have removed: the team-file member (as
+ * killInProcessTeammate does), the teamContext entry, and its unfinished
+ * tasks (as the lead does on an approved shutdown), then tells the lead. The
+ * runner's completion tail then marks the task completed, evicts it and emits
+ * the SDK terminated event exactly as for a normal exit.
+ */
+async function finalizeIdleShutdown(
+  identity: TeammateIdentity,
+  setAppState: SetAppStateFn,
+  taskListId: string,
+  result: Extract<WaitResult, { type: 'idle_shutdown' }>,
+): Promise<void> {
+  const idleSeconds = Math.round(result.idleMs / 1000)
+  const cause =
+    result.reason === 'hook'
+      ? `TeammateIdleTimeout hook requested shutdown${result.detail ? `: ${result.detail}` : ''}`
+      : `idle for ${idleSeconds}s, over CLAUDE_CODE_TEAMMATE_IDLE_SHUTDOWN_MS`
+  logForDebugging(
+    `[inProcessRunner] ${identity.agentId} shutting down after idle timeout (${cause})`,
+  )
+
+  try {
+    removeMemberByAgentId(identity.teamName, identity.agentId)
+  } catch (err) {
+    logForDebugging(
+      `[inProcessRunner] ${identity.agentId} failed to leave team file: ${err}`,
+    )
+  }
+  setAppState(prev => {
+    if (!prev.teamContext?.teammates) return prev
+    if (!(identity.agentId in prev.teamContext.teammates)) return prev
+    const { [identity.agentId]: _, ...remainingTeammates } =
+      prev.teamContext.teammates
+    return {
+      ...prev,
+      teamContext: { ...prev.teamContext, teammates: remainingTeammates },
+    }
+  })
+
+  let notificationMessage = `${identity.agentName} has shut down.`
+  try {
+    notificationMessage = (
+      await unassignTeammateTasks(
+        taskListId,
+        identity.agentId,
+        identity.agentName,
+        'shutdown',
+      )
+    ).notificationMessage
+  } catch (err) {
+    logForDebugging(
+      `[inProcessRunner] ${identity.agentId} failed to unassign tasks: ${err}`,
+    )
+  }
+  await sendMessageToLeader(
+    identity.agentName,
+    `${notificationMessage} Reason: shut down after idle timeout (${cause}).`,
+    identity.color,
+    identity.teamName,
+  )
 }
 
 /**
@@ -1014,6 +1329,11 @@ function resolveNextPrompt(
       logForDebugging(
         `[inProcessRunner] ${identity.agentId} aborted while waiting`,
       )
+      return undefined
+
+    case 'idle_shutdown':
+      // finalizeIdleShutdown has already cleaned up; the runner exits its
+      // loop and completes like any other termination.
       return undefined
   }
 }
@@ -1101,6 +1421,14 @@ async function idleUntilNextPrompt(params: {
     setAppState,
     identity.parentSessionId,
   )
+  if (waitResult.type === 'idle_shutdown') {
+    await finalizeIdleShutdown(
+      identity,
+      setAppState,
+      identity.parentSessionId,
+      waitResult,
+    )
+  }
 
   return resolveNextPrompt(identity, taskId, setAppState, waitResult)
 }

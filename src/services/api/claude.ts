@@ -194,9 +194,14 @@ import {
 } from 'src/utils/fastMode.js'
 import { returnValue } from 'src/utils/generators.js'
 import { headlessProfilerCheckpoint } from 'src/utils/headlessProfiler.js'
+import {
+  executeStreamStalledHooks,
+  type StreamStalledHookParams,
+} from 'src/utils/hooks.js'
 import { isMcpInstructionsDeltaEnabled } from 'src/utils/mcpInstructionsDelta.js'
 import { calculateUSDCost } from 'src/utils/modelCost.js'
 import { endQueryProfile, queryCheckpoint } from 'src/utils/queryProfiler.js'
+import { getAgentId, getAgentName, getTeamName } from 'src/utils/teammate.js'
 import {
   modelSupportsAdaptiveThinking,
   shouldUseThinkingForModel,
@@ -710,6 +715,43 @@ export function assistantMessageToMessageParam(
   return {
     role: 'assistant',
     content: message.message.content,
+  }
+}
+
+type StreamStalledAgentIdentity = Pick<
+  StreamStalledHookParams,
+  'agentId' | 'agentName' | 'teamName'
+>
+
+/**
+ * Agent identity attached to StreamStalled hook payloads. In-process
+ * teammates and Agent-tool subagents carry it in the AsyncLocalStorage agent
+ * context; tmux teammates in the teammate context; plain subagents fall back
+ * to options.agentId. Captured once when the stream starts so the watchdog
+ * timers (which fire outside the generator frame) see the same identity.
+ */
+function resolveStreamStalledAgentIdentity(
+  optionsAgentId: string | undefined,
+): StreamStalledAgentIdentity {
+  const context = getAgentContext()
+  if (context?.agentType === 'teammate') {
+    return {
+      agentId: context.agentId,
+      agentName: context.agentName,
+      teamName: context.teamName,
+    }
+  }
+  if (context?.agentType === 'subagent') {
+    return {
+      agentId: context.agentId,
+      agentName: context.subagentName,
+      teamName: getTeamName(),
+    }
+  }
+  return {
+    agentId: optionsAgentId ?? getAgentId(),
+    agentName: getAgentName(),
+    teamName: getTeamName(),
   }
 }
 
@@ -2145,6 +2187,37 @@ async function* queryModel(
     let streamWatchdogFiredAt: number | null = null
     let streamIdleWarningTimer: ReturnType<typeof setTimeout> | null = null
     let streamIdleTimer: ReturnType<typeof setTimeout> | null = null
+    const stalledAgentIdentity = resolveStreamStalledAgentIdentity(
+      options.agentId,
+    )
+
+    // StreamStalled hooks are fire-and-forget observers: never awaited on the
+    // stream path, and nothing they do can throw into the stream loop.
+    function fireStreamStalledHook(
+      stage: StreamStalledHookParams['stage'],
+      sinceLastEventMs: number,
+    ): void {
+      try {
+        void executeStreamStalledHooks({
+          stage,
+          sinceLastEventMs,
+          timeoutMs: STREAM_IDLE_TIMEOUT_MS,
+          model: options.model,
+          requestId: streamRequestId,
+          ...stalledAgentIdentity,
+        }).catch((error: unknown) => {
+          logForDebugging(
+            `StreamStalled hook (${stage}) rejected: ${errorMessage(error)}`,
+            { level: 'error' },
+          )
+        })
+      } catch (error) {
+        logForDebugging(
+          `StreamStalled hook (${stage}) threw: ${errorMessage(error)}`,
+          { level: 'error' },
+        )
+      }
+    }
 
     function clearStreamIdleTimers(): void {
       if (streamIdleWarningTimer !== null) {
@@ -2169,6 +2242,7 @@ async function* queryModel(
         model: options.model,
         sinceLastYieldMs: warnMs,
       })
+      fireStreamStalledHook('warning', warnMs)
     }
 
     function closeStreamIterator(
@@ -2230,6 +2304,7 @@ async function* queryModel(
           'unknown') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         timeout_ms: STREAM_IDLE_TIMEOUT_MS,
       })
+      fireStreamStalledHook('timeout', STREAM_IDLE_TIMEOUT_MS)
 
       closeStreamIterator(
         iterator,
@@ -2370,6 +2445,7 @@ async function* queryModel(
               request_id: (streamRequestId ??
                 'unknown') as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
             })
+            fireStreamStalledHook('recovered', timeSinceLastEvent)
           }
         }
         lastEventTime = now

@@ -288,7 +288,7 @@ export type PermissionResult = ({
 /** Permission mode for controlling how tool executions are handled. 'default' - Standard behavior, prompts for dangerous operations. 'acceptEdits' - Auto-accept file edit operations. 'bypassPermissions' - Bypass normal permission prompts while preserving hard safety checks (requires allowDangerouslySkipPermissions). 'fullAccess' - Bypass normal permission prompts and hard safety-check prompts (requires allowDangerouslySkipPermissions). 'plan' - Planning mode, no actual tool execution. 'dontAsk' - Don't prompt for permissions, deny if not pre-approved. */
 export type PermissionMode = "default" | "acceptEdits" | "bypassPermissions" | "fullAccess" | "plan" | "dontAsk"
 
-export type HookEvent = "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "Notification" | "UserPromptSubmit" | "SessionStart" | "SessionEnd" | "Stop" | "StopFailure" | "SubagentStart" | "SubagentStop" | "PreCompact" | "PostCompact" | "PermissionRequest" | "PermissionDenied" | "Setup" | "TeammateIdle" | "TaskCreated" | "TaskCompleted" | "Elicitation" | "ElicitationResult" | "ConfigChange" | "WorktreeCreate" | "WorktreeRemove" | "InstructionsLoaded" | "CwdChanged" | "FileChanged"
+export type HookEvent = "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "Notification" | "UserPromptSubmit" | "SessionStart" | "SessionEnd" | "Stop" | "StopFailure" | "StreamStalled" | "SubagentStart" | "SubagentStop" | "PreCompact" | "PostCompact" | "PermissionRequest" | "PermissionDenied" | "Setup" | "TeammateIdle" | "TeammateIdleTimeout" | "TaskCreated" | "TaskCompleted" | "Elicitation" | "ElicitationResult" | "ConfigChange" | "WorktreeCreate" | "WorktreeRemove" | "InstructionsLoaded" | "CwdChanged" | "FileChanged"
 
 export type BaseHookInput = {
   session_id: string
@@ -438,6 +438,24 @@ export type StopFailureHookInput = {
   last_assistant_message?: string
 }
 
+export type StreamStalledHookInput = {
+  session_id: string
+  transcript_path: string
+  cwd: string
+  permission_mode?: string
+  agent_id?: string
+  agent_type?: string
+} & {
+  hook_event_name: "StreamStalled"
+  stage: "warning" | "timeout" | "recovered"
+  since_last_event_ms: number
+  timeout_ms: number
+  model: string
+  request_id: string
+  agent_name?: string
+  team_name?: string
+}
+
 export type SubagentStartHookInput = {
   session_id: string
   transcript_path: string
@@ -566,6 +584,21 @@ export type TeammateIdleHookInput = {
   hook_event_name: "TeammateIdle"
   teammate_name: string
   team_name: string
+}
+
+export type TeammateIdleTimeoutHookInput = {
+  session_id: string
+  transcript_path: string
+  cwd: string
+  permission_mode?: string
+  agent_id?: string
+  agent_type?: string
+} & {
+  hook_event_name: "TeammateIdleTimeout"
+  teammate_name: string
+  team_name: string
+  idle_ms: number
+  occurrence: number
 }
 
 export type TaskCreatedHookInput = {
@@ -842,6 +875,22 @@ export type HookInput = ({
   agent_id?: string
   agent_type?: string
 } & {
+  hook_event_name: "StreamStalled"
+  stage: "warning" | "timeout" | "recovered"
+  since_last_event_ms: number
+  timeout_ms: number
+  model: string
+  request_id: string
+  agent_name?: string
+  team_name?: string
+}) | ({
+  session_id: string
+  transcript_path: string
+  cwd: string
+  permission_mode?: string
+  agent_id?: string
+  agent_type?: string
+} & {
   hook_event_name: "SubagentStart"
   agent_id: string
   agent_type: string
@@ -950,6 +999,19 @@ export type HookInput = ({
   hook_event_name: "TeammateIdle"
   teammate_name: string
   team_name: string
+}) | ({
+  session_id: string
+  transcript_path: string
+  cwd: string
+  permission_mode?: string
+  agent_id?: string
+  agent_type?: string
+} & {
+  hook_event_name: "TeammateIdleTimeout"
+  teammate_name: string
+  team_name: string
+  idle_ms: number
+  occurrence: number
 }) | ({
   session_id: string
   transcript_path: string
@@ -1212,6 +1274,13 @@ export type WorktreeCreateHookSpecificOutput = {
   worktreePath: string
 }
 
+/** Hook-specific output for the TeammateIdleTimeout event. action 'shutdown' asks the idle teammate to shut down cleanly; omit it to keep waiting. */
+export type TeammateIdleTimeoutHookSpecificOutput = {
+  hookEventName: "TeammateIdleTimeout"
+  action?: "shutdown"
+  reason?: string
+}
+
 export type SyncHookJSONOutput = {
   continue?: boolean
   suppressOutput?: boolean
@@ -1316,6 +1385,10 @@ export type SyncHookJSONOutput = {
   }) | ({
     hookEventName: "WorktreeCreate"
     worktreePath: string
+  }) | ({
+    hookEventName: "TeammateIdleTimeout"
+    action?: "shutdown"
+    reason?: string
   })
 }
 
@@ -1426,6 +1499,10 @@ export type HookJSONOutput = ({
   }) | ({
     hookEventName: "WorktreeCreate"
     worktreePath: string
+  }) | ({
+    hookEventName: "TeammateIdleTimeout"
+    action?: "shutdown"
+    reason?: string
   })
 })
 

@@ -31,8 +31,12 @@ import {
 } from '../../utils/interruptionTrace.js'
 import { EMPTY_USAGE } from './emptyUsage.js'
 import type { Options } from './claude.js'
+import { runWithAgentContext } from '../../utils/agentContext.js'
+import type { StreamStalledHookParams } from '../../utils/hooks.js'
+import type { AgentId } from '../../types/ids.js'
 
 const actualClientModule = await import('./client.js')
+const actualHooksModule = await import('../../utils/hooks.js')
 const originalEnv = { ...process.env }
 const hadSavedMacro = Object.hasOwn(globalThis, 'MACRO')
 const savedMacro = (globalThis as Record<string, unknown>).MACRO
@@ -219,6 +223,66 @@ function makeCompleteStream(): Stream<BetaRawMessageStreamEvent> {
     controller,
     [Symbol.asyncIterator]: () => iterator,
   } as Stream<BetaRawMessageStreamEvent>
+}
+
+/**
+ * A stream that completes normally but whose second chunk arrives after the
+ * virtual clock jumped past the passive 30s stall threshold.
+ */
+function makeGappyStream(
+  beforeSecondChunk: () => void,
+): Stream<BetaRawMessageStreamEvent> {
+  const controller = new AbortController()
+  const events = makeCompleteStreamEvents()
+  let nextCount = 0
+  const iterator: AsyncIterator<BetaRawMessageStreamEvent> = {
+    next() {
+      nextCount++
+      if (nextCount === 2) {
+        beforeSecondChunk()
+      }
+      const value = events.shift()
+      return Promise.resolve(
+        value === undefined
+          ? { done: true, value: undefined }
+          : { done: false, value },
+      )
+    },
+  }
+
+  return {
+    controller,
+    [Symbol.asyncIterator]: () => iterator,
+  } as Stream<BetaRawMessageStreamEvent>
+}
+
+function installStreamStalledSpy(
+  impl: (params: StreamStalledHookParams) => Promise<void>,
+): { calls: StreamStalledHookParams[]; restore: () => void } {
+  const calls: StreamStalledHookParams[] = []
+  const spy = spyOn(
+    actualHooksModule,
+    'executeStreamStalledHooks',
+  ).mockImplementation(params => {
+    calls.push(params)
+    return impl(params)
+  })
+  return { calls, restore: () => spy.mockRestore() }
+}
+
+function makeFallbackHandler(
+  wedged: ReturnType<typeof makeWedgedStream>,
+): CreateHandler {
+  return params => {
+    if (params.stream === true) {
+      return makeWithResponse(wedged.stream)
+    }
+    return Promise.resolve(
+      makeBetaMessage('msg-fallback', [
+        { type: 'text', text: 'fallback ok', citations: null },
+      ]),
+    )
+  }
 }
 
 function makeWithResponse(stream: Stream<BetaRawMessageStreamEvent>) {
@@ -658,6 +722,174 @@ describe('Claude stream watchdog', () => {
       process.off('unhandledRejection', onUnhandledRejection)
       wedged.rejectPendingNext(new Error('test cleanup'))
       await settleForCleanup(request)
+    }
+  })
+
+  test('fires StreamStalled hooks for the warning and timeout stages with the agent identity', async () => {
+    const hook = installStreamStalledSpy(async () => {})
+    const wedged = makeWedgedStream()
+    createHandler = makeFallbackHandler(wedged)
+
+    const request = runWithAgentContext(
+      {
+        agentType: 'teammate',
+        agentId: 'reviewer@alpha',
+        agentName: 'reviewer',
+        teamName: 'alpha',
+        planModeRequired: false,
+        parentSessionId: 'lead-session',
+        isTeamLead: false,
+      },
+      () => collectStreamingMessages(new AbortController().signal, makeOptions()),
+    )
+    await wedged.nextStarted
+
+    try {
+      const result = await Promise.race([request, delay(250)])
+      expect(result).not.toBe('timeout')
+      expect(hook.calls.map(call => call.stage)).toEqual(['warning', 'timeout'])
+      const identity = {
+        timeoutMs: 25,
+        model: 'claude-watchdog-test',
+        requestId: 'req-stream-watchdog',
+        agentId: 'reviewer@alpha',
+        agentName: 'reviewer',
+        teamName: 'alpha',
+      }
+      expect(hook.calls[0]).toEqual({
+        stage: 'warning',
+        sinceLastEventMs: 12.5,
+        ...identity,
+      })
+      expect(hook.calls[1]).toEqual({
+        stage: 'timeout',
+        sinceLastEventMs: 25,
+        ...identity,
+      })
+    } finally {
+      hook.restore()
+      wedged.rejectPendingNext(new Error('test cleanup'))
+      await settleForCleanup(request)
+    }
+  })
+
+  test('StreamStalled identity falls back to options.agentId outside an agent context', async () => {
+    const hook = installStreamStalledSpy(async () => {})
+    const wedged = makeWedgedStream()
+    createHandler = makeFallbackHandler(wedged)
+
+    const request = collectStreamingMessages(new AbortController().signal, {
+      ...makeOptions(),
+      agentId: 'agent-1234' as AgentId,
+    })
+    await wedged.nextStarted
+
+    try {
+      const result = await Promise.race([request, delay(250)])
+      expect(result).not.toBe('timeout')
+      expect(hook.calls.length).toBeGreaterThanOrEqual(1)
+      for (const call of hook.calls) {
+        expect(call.agentId).toBe('agent-1234')
+        expect(call.agentName).toBeUndefined()
+        expect(call.teamName).toBeUndefined()
+      }
+    } finally {
+      hook.restore()
+      wedged.rejectPendingNext(new Error('test cleanup'))
+      await settleForCleanup(request)
+    }
+  })
+
+  test('a throwing StreamStalled hook breaks neither the stream nor its fallback', async () => {
+    const hook = installStreamStalledSpy(params => {
+      if (params.stage === 'warning') {
+        throw new Error('synchronous hook failure')
+      }
+      return Promise.reject(new Error('asynchronous hook failure'))
+    })
+    const unhandledRejections: unknown[] = []
+    const onUnhandledRejection = (reason: unknown) => {
+      unhandledRejections.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandledRejection)
+    const wedged = makeWedgedStream()
+    createHandler = makeFallbackHandler(wedged)
+
+    const request = collectStreamingMessages(
+      new AbortController().signal,
+      makeOptions(),
+    )
+    await wedged.nextStarted
+
+    try {
+      const result = await Promise.race([request, delay(250)])
+      expect(result).not.toBe('timeout')
+      expect(hook.calls.map(call => call.stage)).toEqual(['warning', 'timeout'])
+      expect(
+        (result as unknown[]).some(
+          message =>
+            typeof message === 'object' &&
+            message !== null &&
+            (message as { type?: unknown }).type === 'assistant' &&
+            JSON.stringify(message).includes('fallback ok'),
+        ),
+      ).toBe(true)
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(unhandledRejections).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandledRejection)
+      hook.restore()
+      wedged.rejectPendingNext(new Error('test cleanup'))
+      await settleForCleanup(request)
+    }
+  })
+
+  test('fires the recovered stage when a chunk arrives after a long gap', async () => {
+    const hook = installStreamStalledSpy(async () => {})
+    const realNow = Date.now
+    let clockOffset = 0
+    const nowSpy = spyOn(Date, 'now').mockImplementation(
+      () => realNow.call(Date) + clockOffset,
+    )
+    let fallbackCount = 0
+    createHandler = params => {
+      if (params.stream === true) {
+        return makeWithResponse(
+          makeGappyStream(() => {
+            clockOffset += 31_000
+          }),
+        )
+      }
+      fallbackCount++
+      return Promise.resolve(makeBetaMessage('msg-unexpected-fallback'))
+    }
+
+    try {
+      const messages = await collectStreamingMessages(
+        new AbortController().signal,
+        makeOptions(),
+      )
+      expect(fallbackCount).toBe(0)
+      expect(
+        messages.some(
+          message =>
+            typeof message === 'object' &&
+            message !== null &&
+            (message as { type?: unknown }).type === 'assistant' &&
+            JSON.stringify(message).includes('stream ok'),
+        ),
+      ).toBe(true)
+      expect(hook.calls.map(call => call.stage)).toEqual(['recovered'])
+      expect(hook.calls[0]).toMatchObject({
+        stage: 'recovered',
+        timeoutMs: 25,
+        model: 'claude-watchdog-test',
+        requestId: 'req-stream-watchdog',
+      })
+      expect(hook.calls[0]!.sinceLastEventMs).toBeGreaterThanOrEqual(31_000)
+    } finally {
+      nowSpy.mockRestore()
+      hook.restore()
     }
   })
 })

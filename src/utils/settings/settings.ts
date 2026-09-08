@@ -649,6 +649,8 @@ export function getManagedSettingsKeysForLogging(
       'PreCompact',
       'PostCompact',
       'TeammateIdle',
+      'TeammateIdleTimeout',
+      'StreamStalled',
       'TaskCreated',
       'TaskCompleted',
     ]),
