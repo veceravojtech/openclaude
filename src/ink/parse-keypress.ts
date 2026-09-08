@@ -184,6 +184,12 @@ export type KeyParseState = {
   incomplete: string
   pasteBuffer: string
   utf8Incomplete?: Buffer
+  /** True when the last key emitted by the previous call was a lone Escape
+   *  produced by an incomplete-escape FLUSH (App's NORMAL_TIMEOUT timer), so
+   *  a cursor/navigation tail arriving as text on this call is an orphan of
+   *  that Escape rather than typed input. Arms the re-synthesis in
+   *  parseMultipleKeypresses' text branch. */
+  escapeFlushed?: boolean
   // Internal tokenizer instance
   _tokenizer?: Tokenizer
 }
@@ -333,19 +339,57 @@ export function parseMultipleKeypresses(
         /^\[M[\x60-\x7f][\x20-\uffff]{2}$/.test(token.value)
       ) {
         // Orphaned SGR/X10 mouse tail (fullscreen only — mouse tracking is off
-        // otherwise). A heavy render blocked the event loop past App's 50ms
-        // flush timer, so the buffered ESC was flushed as a lone Escape and
-        // the continuation `[<btn;col;rowM` arrived as text. Re-synthesize
-        // with the ESC prefix so the scroll event still fires instead of
-        // leaking into the prompt. The spurious Escape is gone; App.tsx's
-        // readableLength check prevents it. The X10 Cb slot is narrowed to
-        // the wheel range [\x60-\x7f] (0x40|modifiers + 32) — a full [\x20-]
-        // range would match typed input like `[MAX]` batched into one read
-        // and silently drop it as a phantom click. Click/drag orphans leak
-        // as visible garbage instead; deletable garbage beats silent loss.
+        // otherwise). A heavy render blocked the event loop past App's 300ms
+        // flush timer (NORMAL_TIMEOUT, App.tsx), so the buffered ESC was
+        // flushed as a lone Escape and the continuation `[<btn;col;rowM`
+        // arrived as text. Re-synthesize with the ESC prefix so the scroll
+        // event still fires instead of leaking into the prompt. App.tsx's
+        // readableLength check suppresses the spurious Escape only when the
+        // tail is already in the pty buffer when the timer fires; when it is
+        // not (a slow link), the Escape has already been dispatched and
+        // cannot be retracted from here — see the cursor-tail branch below.
+        //
+        // The X10 Cb slot is narrowed to the wheel range [\x60-\x7f]
+        // (0x40|modifiers + 32) — a full [\x20-] range would match typed
+        // input like `[MAX]` batched into one read and silently drop it as a
+        // phantom click. Click/drag orphans leak as visible garbage instead;
+        // deletable garbage beats silent loss.
         const resynthesized = '\x1b' + token.value
         const mouse = parseMouseEvent(resynthesized)
         keys.push(mouse ?? parseKeypress(resynthesized))
+      } else if (
+        prevState.escapeFlushed &&
+        keys.length === 0 &&
+        (/^\[(?:[A-DHF]|I|O|\d+~)$/.test(token.value) ||
+          /^O[A-D]$/.test(token.value))
+      ) {
+        // Orphaned cursor/navigation tail — the same split as the mouse tail
+        // above, for arrows (`[A`..`[D`), Home/End (`[H`/`[F`), focus reports
+        // (`[I`/`[O`), the tilde keys (`[3~`, `[5~`, …) and the DECCKM
+        // application-cursor forms (`OA`..`OD`). Over a slow link the tail is
+        // not yet in the pty buffer when App's 300ms NORMAL_TIMEOUT fires
+        // (readableLength === 0, so App's re-arm does not help), the buffered
+        // ESC is flushed as a lone Escape, and the tail lands as plain text
+        // on the next read.
+        //
+        // Only HALF of this is fixable here. Re-synthesizing the key AND
+        // dropping the spurious Escape is IMPOSSIBLE at this layer: that
+        // Escape was emitted — and already dispatched to the UI — by an
+        // EARLIER call, and a pure token→key function cannot un-send it. The
+        // delivered Escape is an accepted residual. What is fixable is the
+        // tail: re-synthesize it as the real key so a DOWN at least moves the
+        // selection, instead of leaking a nameless '' key into the prompt.
+        //
+        // Two guards keep typed text safe — strictly more than the mouse
+        // branch above has: the whitelist is anchored and narrow, and the
+        // tail must be the FIRST key of the read immediately following a
+        // flushed lone Escape. Typing `[` then `B` puts them in separate
+        // reads and is untouched. Only a user who types exactly `[B`
+        // coalesced into a single read, as the very next input after an
+        // Escape that timed out 300ms earlier, is misread — and gets a cursor
+        // move instead of two characters. Same trade-off as the mouse branch:
+        // a recoverable misfire beats silent loss.
+        keys.push(parseKeypress('\x1b' + token.value))
       } else {
         // IMEs and some terminals emit decomposed Unicode (NFD) — e.g.
         // U+0061 + U+0306 instead of precomposed U+0103 (ă). Normalize
@@ -365,6 +409,16 @@ export function parseMultipleKeypresses(
 
   const tokenizerIncomplete = tokenizer.buffer()
 
+  // Arm the orphaned-cursor-tail re-synthesis above for the NEXT call: only a
+  // FLUSH that ended in a lone Escape can strand a tail, and only the very
+  // next read can carry it.
+  const lastKey = keys.at(-1)
+  const escapeFlushed =
+    isFlush &&
+    lastKey?.kind === 'key' &&
+    lastKey.name === 'escape' &&
+    lastKey.sequence === '\x1b'
+
   // Build new state
   const newState: KeyParseState = {
     mode: inPaste ? 'IN_PASTE' : 'NORMAL',
@@ -373,6 +427,7 @@ export function parseMultipleKeypresses(
       : tokenizerIncomplete,
     pasteBuffer,
     utf8Incomplete: isFlush ? undefined : converted.pendingUtf8,
+    escapeFlushed,
     _tokenizer: tokenizer,
   }
 

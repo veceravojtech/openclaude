@@ -1,9 +1,9 @@
 import { getSdkAgentProgressSummariesEnabled } from '../../bootstrap/state.js';
-import { OUTPUT_FILE_TAG, STATUS_TAG, SUMMARY_TAG, TASK_ID_TAG, TASK_NOTIFICATION_TAG, TOOL_USE_ID_TAG, WORKTREE_BRANCH_TAG, WORKTREE_PATH_TAG, WORKTREE_TAG } from '../../constants/xml.js';
+import { OUTPUT_FILE_TAG, RESUMED_PROMPT_TAG, RESUMED_TAG, STATUS_TAG, SUMMARY_TAG, TASK_ID_TAG, TASK_NOTIFICATION_TAG, TOOL_USE_ID_TAG, WORKTREE_BRANCH_TAG, WORKTREE_PATH_TAG, WORKTREE_TAG } from '../../constants/xml.js';
 import { abortSpeculation } from '../../services/PromptSuggestion/speculation.js';
 import type { AppState } from '../../state/AppState.js';
 import type { SetAppState, Task, TaskStateBase } from '../../Task.js';
-import { createTaskStateBase } from '../../Task.js';
+import { createTaskStateBase, isTerminalTaskStatus } from '../../Task.js';
 import type { Tools } from '../../Tool.js';
 import { findToolByName } from '../../Tool.js';
 import type { AgentToolResult } from '../../tools/AgentTool/agentToolUtils.js';
@@ -19,6 +19,7 @@ import { getAgentTranscriptPath } from '../../utils/sessionStorage.js';
 import { requestAbort } from '../../utils/interruptionTrace.js';
 import { evictTaskOutput, getTaskOutputPath, initTaskOutputAsSymlink } from '../../utils/task/diskOutput.js';
 import { PANEL_GRACE_MS, registerTask, updateTaskState } from '../../utils/task/framework.js';
+import { isRetainedOrWithinGrace } from '../../utils/task/retention.js';
 import { emitTaskProgress } from '../../utils/task/sdkProgress.js';
 import type { TaskState } from '../types.js';
 export type ToolActivity = {
@@ -146,6 +147,10 @@ export type LocalAgentTaskState = TaskStateBase & {
   // timestamp = hide + GC-eligible after this time. Set at terminal transition
   // and on unselect; cleared on retain.
   evictAfter?: number;
+  // How many times this agent has been resumed. 0/undefined = original run.
+  // A resume re-registers under the SAME task id, so this is what tells the
+  // resumed run's completion notification apart from the original's.
+  resumeCount?: number;
 };
 export function isLocalAgentTask(task: unknown): task is LocalAgentTaskState {
   return typeof task === 'object' && task !== null && 'type' in task && task.type === 'local_agent';
@@ -159,6 +164,41 @@ export function isLocalAgentTask(task: unknown): task is LocalAgentTaskState {
  */
 export function isPanelAgentTask(t: unknown): t is LocalAgentTaskState {
   return isLocalAgentTask(t) && t.agentType !== 'main-session';
+}
+
+/**
+ * Does this task currently occupy a row in the CoordinatorTaskPanel?
+ *
+ * isPanelAgentTask is the *type* gate; this is the *visibility* gate, and the
+ * two together are what every pill/panel filter must agree on. Two branches
+ * are visible, nothing else is:
+ *
+ * 1. `in_process_teammate` — visible while it is still running. A terminal
+ *    teammate has no row.
+ * 2. panel local agent — hidden outright once dismissed with `x`
+ *    (`evictAfter === 0`); otherwise visible while running/pending, or while
+ *    "completed but kept": held by the UI (`retain`) or still inside its
+ *    eviction grace window (`evictAfter` in the future — the same deadline
+ *    evictTerminalTask honours in utils/task/framework.ts).
+ *
+ * Everything else — main-session agents, shell/monitor/remote/workflow/dream
+ * tasks — is never a panel row, so it keeps its background-task pill.
+ *
+ * `now` defaults to Date.now(); the explicit parameter keeps the eviction
+ * deadline testable without timers.
+ */
+export function isPanelVisibleAgent(t: unknown, now: number = Date.now()): boolean {
+  if (typeof t === 'object' && t !== null && 'type' in t && t.type === 'in_process_teammate') {
+    return !isTerminalTaskStatus((t as TaskStateBase).status);
+  }
+  if (!isPanelAgentTask(t) || t.evictAfter === 0) {
+    return false;
+  }
+  // isRetainedOrWithinGrace is the shared "held by the UI, or still inside the
+  // grace window" rule — the SAME predicate both GC paths in
+  // utils/task/framework.ts apply, so a row the panel draws is never a row the
+  // evictors can delete. Full rationale lives on the predicate.
+  return !isTerminalTaskStatus(t.status) || isRetainedOrWithinGrace(t, now);
 }
 export function queuePendingMessage(taskId: string, msg: string, setAppState: (f: (prev: AppState) => AppState) => void): void {
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => ({
@@ -226,11 +266,21 @@ export function enqueueAgentNotification({
   // If the task was already marked as notified (e.g., by TaskStopTool), skip
   // enqueueing to avoid sending redundant messages to the model.
   let shouldEnqueue = false;
+  // A resume re-registers the task under the same id, so the second completion
+  // would otherwise be byte-identical to the first. Read the counter here (the
+  // updater is the one place that already holds the task) to mark it.
+  let resumeCount = 0;
+  // …and the follow-up prompt alongside it. A user-initiated resume never puts
+  // its request in the leader's context, so without this the leader sees a
+  // result it never asked for and discards it as unexplained output.
+  let resumedPrompt = '';
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
     if (task.notified) {
       return task;
     }
     shouldEnqueue = true;
+    resumeCount = task.resumeCount ?? 0;
+    resumedPrompt = task.prompt ?? '';
     return {
       ...task,
       notified: true
@@ -244,16 +294,24 @@ export function enqueueAgentNotification({
   // results may reference stale task output. The prompt suggestion text is
   // preserved; only the pre-computed response is discarded.
   abortSpeculation(setAppState);
-  const summary = status === 'completed' ? `Agent "${description}" completed` : status === 'failed' ? `Agent "${description}" failed: ${error || 'Unknown error'}` : `Agent "${description}" was stopped`;
+  const completedSummary = resumeCount > 0 ? `Agent "${description}" completed a resumed run (resume #${resumeCount})` : `Agent "${description}" completed`;
+  const summary = status === 'completed' ? completedSummary : status === 'failed' ? `Agent "${description}" failed: ${error || 'Unknown error'}` : `Agent "${description}" was stopped`;
   const outputPath = getTaskOutputPath(taskId);
   const toolUseIdLine = toolUseId ? `\n<${TOOL_USE_ID_TAG}>${toolUseId}</${TOOL_USE_ID_TAG}>` : '';
   const resultSection = finalMessage ? `\n<result>${finalMessage}</result>` : '';
   const usageSection = usage ? `\n<usage><total_tokens>${usage.totalTokens}</total_tokens><tool_uses>${usage.toolUses}</tool_uses><duration_ms>${usage.durationMs}</duration_ms></usage>` : '';
   const worktreeSection = worktreePath ? `\n<${WORKTREE_TAG}><${WORKTREE_PATH_TAG}>${worktreePath}</${WORKTREE_PATH_TAG}>${worktreeBranch ? `<${WORKTREE_BRANCH_TAG}>${worktreeBranch}</${WORKTREE_BRANCH_TAG}>` : ''}</${WORKTREE_TAG}>` : '';
+  // Machine-readable twin of the summary wording, so a reader doesn't have to
+  // parse prose to know this notification is a resumed run's, not a replay.
+  const resumedLine = resumeCount > 0 ? `\n<${RESUMED_TAG}>${resumeCount}</${RESUMED_TAG}>` : '';
+  // What was asked on the resumed run. Emitted verbatim, matching the
+  // neighbouring <result> convention, and only when there is a resume and a
+  // prompt — an original run's block stays byte-identical.
+  const resumedPromptLine = resumeCount > 0 && resumedPrompt ? `\n<${RESUMED_PROMPT_TAG}>${resumedPrompt}</${RESUMED_PROMPT_TAG}>` : '';
   const message = `<${TASK_NOTIFICATION_TAG}>
 <${TASK_ID_TAG}>${taskId}</${TASK_ID_TAG}>${toolUseIdLine}
 <${OUTPUT_FILE_TAG}>${outputPath}</${OUTPUT_FILE_TAG}>
-<${STATUS_TAG}>${status}</${STATUS_TAG}>
+<${STATUS_TAG}>${status}</${STATUS_TAG}>${resumedLine}${resumedPromptLine}
 <${SUMMARY_TAG}>${summary}</${SUMMARY_TAG}>${resultSection}${usageSection}${worktreeSection}
 </${TASK_NOTIFICATION_TAG}>`;
   enqueuePendingNotification({
@@ -484,7 +542,8 @@ export function registerAsyncAgent({
   selectedAgent,
   setAppState,
   parentAbortController,
-  toolUseId
+  toolUseId,
+  resumeCount = 0
 }: {
   agentId: string;
   description: string;
@@ -493,6 +552,9 @@ export function registerAsyncAgent({
   setAppState: SetAppState;
   parentAbortController?: AbortController;
   toolUseId?: string;
+  /** How many times this agent has been resumed; resumeAgentBackground passes
+   *  the prior task's count + 1. Omit (0) for an original run. */
+  resumeCount?: number;
 }): LocalAgentTaskState {
   void initTaskOutputAsSymlink(agentId, getAgentTranscriptPath(asAgentId(agentId)));
 
@@ -520,7 +582,8 @@ export function registerAsyncAgent({
     // registerAsyncAgent immediately backgrounds
     pendingMessages: [],
     retain: false,
-    diskLoaded: false
+    diskLoaded: false,
+    resumeCount
   };
 
   // Register cleanup handler

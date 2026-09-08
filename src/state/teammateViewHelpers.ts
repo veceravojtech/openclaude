@@ -156,3 +156,25 @@ export function stopOrDismissAgent(
     }
   })
 }
+
+/**
+ * Reverse-lookup an agent's registered name (`/rename`, AgentTool `name`) from
+ * agentNameRegistry, which is keyed name -> taskId. Shared by the transcript-view
+ * header, the swarm banner and the prompt placeholder so the three never
+ * disagree on what a viewed local agent is called.
+ *
+ * Latest-wins on collision is the registry's own contract, so first match wins
+ * here too. The `Pick<AppState, …>` parameter keeps this module free of the
+ * LocalAgentTask runtime import that would re-create the cycle noted above.
+ */
+export function getRegisteredAgentName(
+  state: Pick<AppState, 'agentNameRegistry'>,
+  taskId: string,
+): string | undefined {
+  for (const [name, id] of state.agentNameRegistry) {
+    if (id === taskId) {
+      return name
+    }
+  }
+  return undefined
+}

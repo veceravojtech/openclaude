@@ -4,6 +4,7 @@ import {
   getActiveAgentForInput,
   getViewedTeammateTask,
 } from '../../state/selectors.js'
+import { getRegisteredAgentName } from '../../state/teammateViewHelpers.js'
 import {
   AGENT_COLOR_TO_THEME_COLOR,
   AGENT_COLORS,
@@ -104,17 +105,12 @@ export function useSwarmBanner(): SwarmBannerInfo {
 
   // Viewing a background agent (CoordinatorTaskPanel): local_agent tasks aren't
   // InProcessTeammates, so getViewedTeammateTask misses them. Reverse-lookup the
-  // name from agentNameRegistry the same way CoordinatorAgentStatus does.
+  // name from agentNameRegistry through the shared getRegisteredAgentName helper,
+  // so this banner and the transcript-view header always agree.
   const active = getActiveAgentForInput(state)
   if (active.type === 'named_agent') {
     const task = active.task
-    let name: string | undefined
-    for (const [n, id] of state.agentNameRegistry) {
-      if (id === task.id) {
-        name = n
-        break
-      }
-    }
+    const name = getRegisteredAgentName(state, task.id)
     return {
       text: name ? `@${name}` : task.description,
       bgColor: getAgentColor(task.agentType) ?? 'cyan_FOR_SUBAGENTS_ONLY',

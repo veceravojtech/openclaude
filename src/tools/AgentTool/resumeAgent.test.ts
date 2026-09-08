@@ -1,4 +1,5 @@
 import { beforeEach, expect, mock, test } from 'bun:test'
+import type { LocalAgentTaskState } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import type { ToolUseContext } from '../../Tool.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
 import { resumeAgentBackground } from './resumeAgent.js'
@@ -17,13 +18,8 @@ mock.module('../../utils/sessionStorage.js', () => ({
   getAgentTranscript: async () => mockTranscript,
   readAgentMetadata: async () => mockMetadata,
   writeAgentMetadata: async () => {},
-}))
-
-mock.module('../../tasks/LocalAgentTask/LocalAgentTask.js', () => ({
-  registerAsyncAgent: () => ({
-    agentId: 'test-agent',
-    abortController: new AbortController(),
-  }),
+  // Used by the real registerAsyncAgent for the task-output symlink target.
+  getAgentTranscriptPath: (agentId: string) => `/tmp/${agentId}.jsonl`,
 }))
 
 mock.module('./agentToolUtils.js', () => ({
@@ -41,14 +37,22 @@ beforeEach(() => {
   }
 })
 
-function makeToolUseContext(activeAgents: AgentDefinition[]): ToolUseContext {
-  const appState = {
+function makeToolUseContext(
+  activeAgents: AgentDefinition[],
+  tasks: Record<string, unknown> = {},
+): ToolUseContext {
+  // A real (if minimal) store: registerAsyncAgent writes the resumed task
+  // back through setAppState, and that write is what the resume-counter
+  // tests assert on.
+  let appState: Record<string, unknown> = {
     toolPermissionContext: {
       mode: 'default',
       additionalWorkingDirectories: new Map(),
       alwaysDenyRules: {},
     },
     mcp: { tools: [], clients: [] },
+    speculation: { status: 'idle' },
+    tasks,
   }
 
   return {
@@ -59,9 +63,22 @@ function makeToolUseContext(activeAgents: AgentDefinition[]): ToolUseContext {
       mcpClients: [],
     },
     getAppState: () => appState,
-    setAppState: () => {},
+    setAppState: (f: (prev: unknown) => Record<string, unknown>) => {
+      appState = f(appState)
+    },
     contentReplacementState: { replacements: new Map() },
   } as unknown as ToolUseContext
+}
+
+/** The local_agent task the context's store holds for `agentId`. */
+function registeredTask(
+  context: ToolUseContext,
+  agentId: string,
+): LocalAgentTaskState | undefined {
+  const tasks = (context.getAppState() as unknown as {
+    tasks: Record<string, LocalAgentTaskState>
+  }).tasks
+  return tasks[agentId]
 }
 
 test('fails closed when resuming an unavailable agent instead of falling back', async () => {
@@ -173,4 +190,142 @@ test('successfully resumes when legacy metadata lacks a source and agent is not 
   })
 
   expect(result.agentId).toBe('test-agent')
+})
+
+// A resume re-registers under the SAME agentId, so the resumed run's
+// completion notification collides with the original's unless it carries a
+// discriminator. resumeAgentBackground derives it from the prior task.
+const CODE_REVIEWER = {
+  agentType: 'code-reviewer',
+  source: 'built-in',
+  getSystemPrompt: () => 'review code',
+} as unknown as AgentDefinition
+
+function priorAgentTask(resumeCount?: number): Record<string, unknown> {
+  return {
+    id: 'test-agent',
+    type: 'local_agent',
+    status: 'completed',
+    agentId: 'test-agent',
+    notified: true,
+    ...(resumeCount === undefined ? {} : { resumeCount }),
+  }
+}
+
+test('first resume registers with resumeCount 1 when the prior run has none', async () => {
+  const context = makeToolUseContext([CODE_REVIEWER], {
+    'test-agent': priorAgentTask(),
+  })
+
+  await resumeAgentBackground({
+    agentId: 'test-agent',
+    prompt: 'continue',
+    toolUseContext: context,
+    canUseTool: async () => ({ behavior: 'allow' } as any),
+  })
+
+  expect(registeredTask(context, 'test-agent')?.resumeCount).toBe(1)
+})
+
+test('a second resume increments the count instead of flipping a flag', async () => {
+  const context = makeToolUseContext([CODE_REVIEWER], {
+    'test-agent': priorAgentTask(1),
+  })
+
+  await resumeAgentBackground({
+    agentId: 'test-agent',
+    prompt: 'continue again',
+    toolUseContext: context,
+    canUseTool: async () => ({ behavior: 'allow' } as any),
+  })
+
+  expect(registeredTask(context, 'test-agent')?.resumeCount).toBe(2)
+})
+
+test('a third resume reaches 3', async () => {
+  const context = makeToolUseContext([CODE_REVIEWER], {
+    'test-agent': priorAgentTask(2),
+  })
+
+  await resumeAgentBackground({
+    agentId: 'test-agent',
+    prompt: 'once more',
+    toolUseContext: context,
+    canUseTool: async () => ({ behavior: 'allow' } as any),
+  })
+
+  expect(registeredTask(context, 'test-agent')?.resumeCount).toBe(3)
+})
+
+test('resuming with no prior task in AppState still counts as resume 1', async () => {
+  const context = makeToolUseContext([CODE_REVIEWER])
+
+  await resumeAgentBackground({
+    agentId: 'test-agent',
+    prompt: 'continue',
+    toolUseContext: context,
+    canUseTool: async () => ({ behavior: 'allow' } as any),
+  })
+
+  expect(registeredTask(context, 'test-agent')?.resumeCount).toBe(1)
+})
+
+test('re-registering the resumed run clears notified so it can notify again', async () => {
+  const context = makeToolUseContext([CODE_REVIEWER], {
+    'test-agent': priorAgentTask(),
+  })
+
+  await resumeAgentBackground({
+    agentId: 'test-agent',
+    prompt: 'continue',
+    toolUseContext: context,
+    canUseTool: async () => ({ behavior: 'allow' } as any),
+  })
+
+  expect(registeredTask(context, 'test-agent')?.notified).toBe(false)
+})
+
+// The resumed run must not claim the tool call that spawned the ORIGINAL run.
+// That call already has its own tool_result, and a user-initiated resume has no
+// originating tool call at all — see the comment at the registerAsyncAgent call
+// in resumeAgent.ts for the two readers this protects.
+test('a user-initiated resume does not inherit the original run tool_use_id', async () => {
+  const context = makeToolUseContext([CODE_REVIEWER], {
+    // The prior run was spawned by an Agent(...) call and still remembers it.
+    'test-agent': { ...priorAgentTask(), toolUseId: 'toolu_original_agent' },
+  })
+  // REPL.tsx builds this context via getToolUseContext, which sets no
+  // toolUseId — the resume request came from the user, not from a tool call.
+  expect(context.toolUseId).toBeUndefined()
+
+  await resumeAgentBackground({
+    agentId: 'test-agent',
+    prompt: 'continue',
+    toolUseContext: context,
+    canUseTool: async () => ({ behavior: 'allow' } as any),
+  })
+
+  expect(registeredTask(context, 'test-agent')?.toolUseId).toBeUndefined()
+})
+
+test('a tool-driven resume records the resuming call, not the original run', async () => {
+  // SendMessageTool passes its own execution context, and toolExecution.ts
+  // injects that call's id — so the resume is attributed to SendMessage.
+  const context = {
+    ...makeToolUseContext([CODE_REVIEWER], {
+      'test-agent': { ...priorAgentTask(1), toolUseId: 'toolu_original_agent' },
+    }),
+    toolUseId: 'toolu_send_message',
+  } as ToolUseContext
+
+  await resumeAgentBackground({
+    agentId: 'test-agent',
+    prompt: 'continue',
+    toolUseContext: context,
+    canUseTool: async () => ({ behavior: 'allow' } as any),
+  })
+
+  expect(registeredTask(context, 'test-agent')?.toolUseId).toBe(
+    'toolu_send_message',
+  )
 })

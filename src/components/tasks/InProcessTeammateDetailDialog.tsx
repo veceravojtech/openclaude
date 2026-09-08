@@ -31,6 +31,12 @@ export function InProcessTeammateDetailDialog(t0) {
     onBack,
     onForeground
   } = t0;
+  // Mirrors the /tasks list ruling and the sibling agent pane:
+  // when the live teammate view is reachable, Enter opens it — the auto-skipped
+  // single-task pane must not be the one place where Enter means "close". Under
+  // CLAUDE_CODE_DISABLE_AGENT_VIEW the parent withholds onForeground, so Enter
+  // falls back to closing exactly as before.
+  const confirmAction = onForeground ?? onDone;
   const [theme] = useTheme();
   let t1;
   if ($[0] === Symbol.for("react.memo_cache_sentinel")) {
@@ -42,11 +48,11 @@ export function InProcessTeammateDetailDialog(t0) {
   const tools = t1;
   const elapsedTime = useElapsedTime(teammate.startTime, teammate.status === "running", 1000, teammate.totalPausedMs ?? 0);
   let t2;
-  if ($[1] !== onDone) {
+  if ($[1] !== confirmAction) {
     t2 = {
-      "confirm:yes": onDone
+      "confirm:yes": confirmAction
     };
-    $[1] = onDone;
+    $[1] = confirmAction;
     $[2] = t2;
   } else {
     t2 = $[2];
@@ -76,7 +82,7 @@ export function InProcessTeammateDetailDialog(t0) {
             e.preventDefault();
             onKill();
           } else {
-            if (e.key === "f" && teammate.status === "running" && onForeground) {
+            if (e.key === "f" && onForeground) {
               e.preventDefault();
               onForeground();
             }
@@ -195,7 +201,7 @@ export function InProcessTeammateDetailDialog(t0) {
   const subtitle = t15;
   let t16;
   if ($[37] !== onBack || $[38] !== onForeground || $[39] !== onKill || $[40] !== teammate.status) {
-    t16 = exitState => exitState.pending ? <Text>Press {exitState.keyName} again to exit</Text> : <Byline>{onBack && <KeyboardShortcutHint shortcut={"\u2190"} action="go back" />}<KeyboardShortcutHint shortcut="Esc/Enter/Space" action="close" />{teammate.status === "running" && onKill && <KeyboardShortcutHint shortcut="x" action="stop" />}{teammate.status === "running" && onForeground && <KeyboardShortcutHint shortcut="f" action="foreground" />}</Byline>;
+    t16 = exitState => exitState.pending ? <Text>Press {exitState.keyName} again to exit</Text> : <Byline>{onBack && <KeyboardShortcutHint shortcut={"\u2190"} action="go back" />}{onForeground && <KeyboardShortcutHint shortcut="Enter/f" action="view teammate" />}<KeyboardShortcutHint shortcut={onForeground ? "Esc/Space" : "Esc/Enter/Space"} action="close" />{teammate.status === "running" && onKill && <KeyboardShortcutHint shortcut="x" action="stop" />}</Byline>;
     $[37] = onBack;
     $[38] = onForeground;
     $[39] = onKill;

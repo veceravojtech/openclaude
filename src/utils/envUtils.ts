@@ -188,6 +188,18 @@ export function shouldMaintainProjectWorkingDir(): boolean {
 }
 
 /**
+ * Upstream opt-out for the live agent transcript view. When set, `/tasks`
+ * Enter/f open the detail dialog instead of the view and the agent panel
+ * under the prompt is not mounted.
+ *
+ * Read at call time, never cached: the value is a per-process env gate that
+ * tests set and unset around individual cases.
+ */
+export function isAgentViewDisabled(): boolean {
+  return isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_AGENT_VIEW)
+}
+
+/**
  * Check if running on Homespace (ant-internal cloud environment)
  */
 export function isRunningOnHomespace(): boolean {
@@ -232,6 +244,7 @@ const VERTEX_REGION_OVERRIDES: ReadonlyArray<[string, string]> = [
   ['claude-3-5-haiku', 'VERTEX_REGION_CLAUDE_3_5_HAIKU'],
   ['claude-3-5-sonnet', 'VERTEX_REGION_CLAUDE_3_5_SONNET'],
   ['claude-3-7-sonnet', 'VERTEX_REGION_CLAUDE_3_7_SONNET'],
+  ['claude-opus-5', 'VERTEX_REGION_CLAUDE_5_0_OPUS'],
   ['claude-opus-4-1', 'VERTEX_REGION_CLAUDE_4_1_OPUS'],
   ['claude-opus-4', 'VERTEX_REGION_CLAUDE_4_0_OPUS'],
   ['claude-sonnet-4-6', 'VERTEX_REGION_CLAUDE_4_6_SONNET'],
@@ -244,7 +257,6 @@ const VERTEX_REGION_OVERRIDES: ReadonlyArray<[string, string]> = [
  * Different models may be available in different regions.
  */
 export function getVertexRegionForModel(
-  ['claude-opus-5', 'VERTEX_REGION_CLAUDE_5_0_OPUS'],
   model: string | undefined,
 ): string | undefined {
   if (model) {

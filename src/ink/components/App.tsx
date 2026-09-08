@@ -129,6 +129,15 @@ export default class App extends PureComponent<Props, State> {
   readonly NORMAL_TIMEOUT = 300;
   readonly PASTE_TIMEOUT = 1000; // Longer timeout for paste operations
 
+  // Set once a key batch has been dispatched and cleared once React has
+  // been committed. Lets processInput flush lazily — right before the next
+  // batch needs fresh state — instead of on every read. It also covers the
+  // batch boundary that sits BETWEEN two processInput calls: one readable
+  // event can hand us several chunks (a DOWN in one, the Enter in the
+  // next), and those need the same commit in between as keys split out of
+  // a single chunk.
+  keyBatchNeedsFlush = false;
+
   // Terminal query/response dispatch. Responses arrive on stdin (parsed
   // out by parse-keypress) and are routed to pending promise resolvers.
   querier = new TerminalQuerier(this.props.stdout);
@@ -321,11 +330,17 @@ export default class App extends PureComponent<Props, State> {
     // Fullscreen: if stdin has data waiting, it's almost certainly the
     // continuation of the buffered sequence (e.g. `[<64;74;16M` after a
     // lone ESC). Node's event loop runs the timers phase before the poll
-    // phase, so when a heavy render blocks the loop past 50ms, this timer
-    // fires before the queued readable event even though the bytes are
-    // already buffered. Re-arm instead of flushing: handleReadable will
-    // drain stdin next and clear this timer. Prevents both the spurious
-    // Escape key and the lost scroll event.
+    // phase, so when a heavy render blocks the loop past NORMAL_TIMEOUT
+    // (300ms), this timer fires before the queued readable event even
+    // though the bytes are already buffered. Re-arm instead of flushing:
+    // handleReadable will drain stdin next and clear this timer. Prevents
+    // both the spurious Escape key and the lost scroll event.
+    //
+    // This only helps when the tail is ALREADY buffered. Over a slow link
+    // readableLength is 0 at 300ms, the lone Escape is flushed for real,
+    // and the tail arrives as text on the next read — parse-keypress.ts
+    // re-synthesizes it there (the Escape is already dispatched by then and
+    // cannot be retracted).
     if (this.props.stdin.readableLength > 0) {
       this.incompleteEscapeTimer = setTimeout(this.flushIncomplete, this.NORMAL_TIMEOUT);
       return;
@@ -336,19 +351,46 @@ export default class App extends PureComponent<Props, State> {
     this.processInput(null);
   };
 
+  // Commit everything the previous key batch queued so the next batch's
+  // handlers read current state instead of a stale render-time closure.
+  // flushSyncWork renders + commits (layout effects included);
+  // flushPassiveEffects then runs the passive effects that commit
+  // scheduled — useInput registers its handler through usehooks-ts'
+  // useEventCallback, whose ref sync is a PASSIVE effect off the browser,
+  // so without this second call the next key would still reach the
+  // previous render's closure. Both calls are O(1) no-ops when React has
+  // nothing pending, which is the common one-key-per-read case.
+  flushKeyBatch = (): void => {
+    this.keyBatchNeedsFlush = false;
+    reconciler.flushSyncWork();
+    reconciler.flushPassiveEffects();
+  };
+
   // Process input through the parser and handle the results
   processInput = (input: string | Buffer | null): void => {
     // Parse input using our state machine
     const [keys, newState] = parseMultipleKeypresses(this.keyParseState, input);
     this.keyParseState = newState;
 
-    // Process ALL keys in a SINGLE discreteUpdates call to prevent
-    // "Maximum update depth exceeded" error when many keys arrive at once
-    // (e.g., from paste operations or holding keys rapidly).
-    // This batches all state updates from handleInput and all useInput
-    // listeners together within one high-priority update context.
-    if (keys.length > 0) {
-      reconciler.discreteUpdates(processKeysInBatch, this, keys, undefined, undefined);
+    // Keys that arrive in ONE stdin read — typeahead, key auto-repeat, or a
+    // busy event loop that let the pty buffer fill while we rendered — used
+    // to be dispatched as a SINGLE discreteUpdates call with no render
+    // between them. A handler that reads state out of its render-time
+    // closure then acts on the pre-batch value: BackgroundTasksDialog's
+    // 'confirm:yes' reads the selected row, so DOWN+Enter in one chunk
+    // entered the row the cursor was on BEFORE the DOWN.
+    //
+    // Split the read at every non-text key and commit React in between, so
+    // each arrow / Return / Escape / mouse event sees what its predecessor
+    // queued. Runs of literal text stay in ONE batch — that is what the
+    // single-batch design was protecting ("Maximum update depth exceeded"
+    // on a big paste), and it is preserved exactly.
+    for (const batch of splitIntoRenderBatches(keys)) {
+      if (this.keyBatchNeedsFlush) {
+        this.flushKeyBatch();
+      }
+      reconciler.discreteUpdates(processKeysInBatch, this, batch, undefined, undefined);
+      this.keyBatchNeedsFlush = true;
     }
 
     // If we have incomplete escape sequences, set a timer to flush them
@@ -489,6 +531,57 @@ export default class App extends PureComponent<Props, State> {
     process.on('SIGCONT', resumeHandler);
     process.kill(process.pid, 'SIGSTOP');
   };
+}
+
+// C0 controls and DEL. A key whose sequence carries one of these is a
+// control key (Return, Enter, Tab, Backspace, ctrl+letter) or an escape
+// sequence (arrows, F-keys, kitty CSI u) — never literal text.
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
+
+/** True when the item types characters into the UI rather than driving it.
+ *  Text keys are the ones that are safe to keep in one un-flushed batch:
+ *  a paste, and the plain-character runs the tokenizer already coalesces
+ *  into a single key. Everything else — arrows, Return, Escape, Tab,
+ *  ctrl/meta/fn combos, mouse events — is a key whose handler typically
+ *  reads React state, so it must start a new batch. */
+function isTextKey(item: ParsedInput): boolean {
+  if (item.kind !== 'key') return false;
+  // A bracketed paste is literal text even when it contains newlines/tabs.
+  if (item.isPasted) return true;
+  if (item.ctrl || item.meta || item.fn || item.super || item.option) return false;
+  return item.sequence !== undefined && item.sequence !== '' && !CONTROL_CHAR_RE.test(item.sequence);
+}
+
+/** Split one stdin read's parsed items into the batches React should see
+ *  separately. Consecutive text keys stay in ONE batch so a large paste
+ *  still commits once; every other key becomes its own batch so the state
+ *  its predecessor queued is committed before its handler reads it.
+ *
+ *  Terminal responses (DECRPM, DA1, OSC replies) ride along in whichever
+ *  batch they land in — they resolve querier promises and never touch
+ *  React state, so forcing a commit around them would only cost renders.
+ *
+ *  Exported for testing. */
+export function splitIntoRenderBatches(items: ParsedInput[]): ParsedInput[][] {
+  const batches: ParsedInput[][] = [];
+  // The batch text keys are currently accumulating into, or null when the
+  // previous item closed one (i.e. was a non-text key).
+  let textRun: ParsedInput[] | null = null;
+  for (const item of items) {
+    if (item.kind === 'response' || isTextKey(item)) {
+      if (textRun) {
+        textRun.push(item);
+      } else {
+        textRun = [item];
+        batches.push(textRun);
+      }
+      continue;
+    }
+    batches.push([item]);
+    textRun = null;
+  }
+  return batches;
 }
 
 // Helper to process all keys within a single discrete update context.

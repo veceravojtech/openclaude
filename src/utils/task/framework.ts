@@ -17,6 +17,7 @@ import type { TaskState } from '../../tasks/types.js'
 import { enqueuePendingNotification } from '../messageQueueManager.js'
 import { enqueueSdkEvent } from '../sdkEventQueue.js'
 import { getTaskOutputDelta, getTaskOutputPath } from './diskOutput.js'
+import { isRetainedOrWithinGrace } from './retention.js'
 
 // Standard polling interval for all tasks
 export const POLL_INTERVAL_MS = 1000
@@ -131,11 +132,13 @@ export function evictTerminalTask(
     if (!task) return prev
     if (!isTerminalTaskStatus(task.status)) return prev
     if (!task.notified) return prev
-    // Panel grace period — blocks eviction until deadline passes.
-    // 'retain' in task narrows to LocalAgentTaskState (the only type with
-    // that field); evictAfter is optional so 'evictAfter' in task would
-    // miss tasks that haven't had it set yet.
-    if ('retain' in task && (task.evictAfter ?? Infinity) > Date.now()) {
+    // Panel grace period — blocks eviction while the panel still shows a row.
+    // isRetainedOrWithinGrace (./retention) is the shared definition this GC
+    // path, the lazy safety net in applyTaskOffsetsAndEvictions below, and
+    // isPanelVisibleAgent all call, so the panel and the evictors cannot
+    // drift apart. Full rationale for the presence narrow and the retain
+    // value check lives on the predicate.
+    if (isRetainedOrWithinGrace(task)) {
       return prev
     }
     const { [taskId]: _, ...remainingTasks } = prev.tasks
@@ -238,7 +241,12 @@ export function applyTaskOffsetsAndEvictions(
       if (!fresh || !isTerminalTaskStatus(fresh.status) || !fresh.notified) {
         continue
       }
-      if ('retain' in fresh && (fresh.evictAfter ?? Infinity) > Date.now()) {
+      // Same panel-visibility guard as evictTerminalTask above — both GC paths
+      // (eager evict, and this lazy safety net) call the one shared predicate,
+      // which is also what isPanelVisibleAgent calls. See the full rationale on
+      // isRetainedOrWithinGrace (./retention); in short, a retained task must
+      // survive GC no matter how far past its deadline.
+      if (isRetainedOrWithinGrace(fresh)) {
         continue
       }
       delete newTasks[id]

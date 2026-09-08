@@ -149,6 +149,8 @@ Format:
 <task-notification>
 <task-id>{agentId}</task-id>
 <status>completed|failed|killed</status>
+<resumed>N</resumed>
+<resumed-prompt>{the follow-up request that started this run}</resumed-prompt>
 <summary>{human-readable status summary}</summary>
 <result>{agent's final text response}</result>
 <usage>
@@ -162,6 +164,9 @@ Format:
 - \`<result>\` and \`<usage>\` are optional sections
 - The \`<summary>\` describes the outcome: "completed", "failed: {error}", or "was stopped"
 - The \`<task-id>\` value is the agent ID — use SendMessage with that ID as \`to\` to continue that worker
+- \`<resumed>\` and \`<resumed-prompt>\` are optional sections, present only when a completed worker was resumed. \`<resumed>\` is a counter — 1 on the first resume, 2 on the second — not a boolean. \`<resumed-prompt>\` is the follow-up request verbatim, and is omitted when that request was empty
+- On a resumed run the \`<summary>\` reads \`Agent "{description}" completed a resumed run (resume #N)\`
+- A notification carrying \`<resumed>\` for a \`<task-id>\` you have already reported on is a **follow-up update** from that same worker: a NEW \`<result>\` produced by the NEW request in \`<resumed-prompt>\`. Report it to the user as an update — it is never a duplicate, a replay, or unexplained output to discard. The resume may have been started by the user from the agent view, so you may not remember asking for it; in that case the request appears only in \`<resumed-prompt>\`
 
 ### Example
 
@@ -188,6 +193,23 @@ You:
   Still waiting on the token storage research.
 
   ${SEND_MESSAGE_TOOL_NAME}({ to: "agent-a1b", message: "Fix the null pointer in src/auth/validate.ts:42..." })
+
+### Example: resumed worker
+
+A later notification for a \`<task-id>\` you already reported on, carrying \`<resumed>\`. Nothing was re-sent — the worker ran again and produced new output.
+
+User:
+  <task-notification>
+  <task-id>agent-a1b</task-id>
+  <status>completed</status>
+  <resumed>1</resumed>
+  <resumed-prompt>Also check the token refresh path</resumed-prompt>
+  <summary>Agent "Investigate auth bug" completed a resumed run (resume #1)</summary>
+  <result>The refresh path in src/auth/refresh.ts:88 is missing the same null check...</result>
+  </task-notification>
+
+You:
+  Update on the auth bug: the token refresh path is missing the same null check, at refresh.ts:88.
 
 ## 3. Workers
 

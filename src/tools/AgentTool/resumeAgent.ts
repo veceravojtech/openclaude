@@ -4,7 +4,10 @@ import { getSystemPrompt } from '../../constants/prompts.js'
 import { isCoordinatorMode } from '../../coordinator/coordinatorMode.js'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import type { ToolUseContext } from '../../Tool.js'
-import { registerAsyncAgent } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
+import {
+  isLocalAgentTask,
+  registerAsyncAgent,
+} from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import { assembleToolPool } from '../../tools.js'
 import { asAgentId } from '../../types/ids.js'
 import { runWithAgentContext } from '../../utils/agentContext.js'
@@ -219,7 +222,34 @@ export async function resumeAgentBackground({
     contentReplacementState: resumedReplacementState,
   }
 
+  // The resumed run re-registers under the SAME agentId, so its completion
+  // notification would otherwise be byte-identical to the original run's and
+  // read as a replay. Carry an incrementing counter forward from the prior
+  // task so the notification can name which run finished.
+  const priorTask = appState.tasks?.[agentId]
+  const priorResumeCount = isLocalAgentTask(priorTask)
+    ? (priorTask.resumeCount ?? 0)
+    : 0
+
   // Skip name-registry write — original entry persists from the initial spawn
+  //
+  // toolUseId is deliberately NOT back-filled from priorTask.toolUseId. A
+  // user-initiated resume (REPL.tsx onAgentSubmit) builds a fresh context with
+  // no toolUseId because there is no originating tool call at all, so the id
+  // stays undefined here and the notification omits the tag. Claiming the
+  // original Agent call's id instead would tell the leader that a call it
+  // already holds a tool_result for produced this second result. Both readers
+  // of that id would take it that way:
+  //   - utils/taskReport.ts:1031 keys notification statuses by tool_use_id,
+  //     last-write-wins. The lookup (taskReport.ts:235) is gated to
+  //     Bash/PowerShell, so a carried Agent id is inert today — but it would
+  //     restate the ORIGINAL call's reported status the moment that widens.
+  //   - cli/print.ts:2223 forwards it to the SDK task_notification, whose
+  //     opening task_started bookend is suppressed on a re-register
+  //     (utils/task/framework.ts:103) — a close with no matching re-open.
+  // Note this argument only populates task state; the notification's own
+  // <tool-use-id> comes from toolUseContext.toolUseId at
+  // AgentTool/agentToolUtils.ts:653, not from here.
   const agentBackgroundTask = registerAsyncAgent({
     agentId,
     description: uiDescription,
@@ -227,6 +257,7 @@ export async function resumeAgentBackground({
     selectedAgent,
     setAppState: rootSetAppState,
     toolUseId: toolUseContext.toolUseId,
+    resumeCount: priorResumeCount + 1,
   })
 
   const metadata = {

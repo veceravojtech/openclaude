@@ -12,7 +12,7 @@ import { DreamTask, type DreamTaskState } from 'src/tasks/DreamTask/DreamTask.js
 import { InProcessTeammateTask } from 'src/tasks/InProcessTeammateTask/InProcessTeammateTask.js';
 import type { InProcessTeammateTaskState } from 'src/tasks/InProcessTeammateTask/types.js';
 import type { LocalAgentTaskState } from 'src/tasks/LocalAgentTask/LocalAgentTask.js';
-import { LocalAgentTask } from 'src/tasks/LocalAgentTask/LocalAgentTask.js';
+import { isPanelVisibleAgent, LocalAgentTask } from 'src/tasks/LocalAgentTask/LocalAgentTask.js';
 import type { LocalShellTaskState } from 'src/tasks/LocalShellTask/guards.js';
 import { LocalShellTask } from 'src/tasks/LocalShellTask/LocalShellTask.js';
 // Type import is erased at build time — safe even though module is ant-gated.
@@ -22,6 +22,7 @@ import { RemoteAgentTask, type RemoteAgentTaskState } from 'src/tasks/RemoteAgen
 import { type BackgroundTaskState, isBackgroundTask, type TaskState } from 'src/tasks/types.js';
 import type { DeepImmutable } from 'src/types/utils.js';
 import { intersperse } from 'src/utils/array.js';
+import { isAgentViewDisabled } from 'src/utils/envUtils.js';
 import { TEAM_LEAD_NAME } from 'src/utils/swarm/constants.js';
 import { stopUltraplan } from '../../commands/ultraplan.js';
 import type { CommandResultDisplay } from '../../commands.js';
@@ -120,9 +121,39 @@ const killMonitorMcp = monitorMcpModule?.killMonitorMcp ?? null;
 const MonitorMcpDetailDialog = feature('MONITOR_TOOL') ? (require('./MonitorMcpDetailDialog.js') as typeof import('./MonitorMcpDetailDialog.js')).MonitorMcpDetailDialog : null;
 /* eslint-enable @typescript-eslint/no-require-imports */
 
+// Single choke point for "can this row open the live agent view?". Every
+// viewability decision in this file must route through here so the behaviour
+// stays togglable from one place.
+function isViewableAgent(item: ListItem | null | undefined): boolean {
+  if (isAgentViewDisabled()) return false;
+  return item?.type === 'local_agent' || item?.type === 'in_process_teammate';
+}
+
+// The system message the list emits when a row opens the live view. The
+// viewability choke point above is deliberately type-agnostic, so the wording
+// is picked here instead — a teammate row names a teammate, exactly like the
+// teammate detail pane does, so the same task never gets two different names
+// depending on which route opened it.
+function viewingMessageFor(item: ListItem | null | undefined): string {
+  return item?.type === 'in_process_teammate' ? 'Viewing teammate' : 'Viewing agent';
+}
+
+// Single choke point for "does this task get a row in this dialog?". Every
+// task type keeps the status-bar rule (isBackgroundTask: running/pending
+// only). A panel local_agent gets one extra allowance: it stays listed while
+// it is "completed but kept" — retained by the UI or still inside its
+// eviction grace window — so Enter/f can still open its transcript. Once it
+// is evicted (evictAfter === 0) the row disappears.
+function isListedTask(task: TaskState): task is BackgroundTaskState {
+  if (task.type === 'local_agent') {
+    return isBackgroundTask(task) || isPanelVisibleAgent(task);
+  }
+  return isBackgroundTask(task);
+}
+
 // Helper to get filtered background tasks (excludes foregrounded local_agent)
 function getSelectableBackgroundTasks(tasks: Record<string, TaskState> | undefined, foregroundedTaskId: string | undefined): TaskState[] {
-  const backgroundTasks = Object.values(tasks ?? {}).filter(isBackgroundTask);
+  const backgroundTasks = Object.values(tasks ?? {}).filter(isListedTask);
   return backgroundTasks.filter(task => !(task.type === 'local_agent' && task.id === foregroundedTaskId));
 }
 export function BackgroundTasksDialog({
@@ -179,8 +210,9 @@ export function BackgroundTasksDialog({
     dreamTasks: dreamTasks_0,
     allSelectableItems
   } = useMemo(() => {
-    // Filter to only show running/pending background tasks, matching the status bar count
-    const backgroundTasks = Object.values(typedTasks ?? {}).filter(isBackgroundTask);
+    // Filter to the rows this dialog lists: running/pending background tasks
+    // (the status bar count) plus completed-but-kept panel agents (isListedTask)
+    const backgroundTasks = Object.values(typedTasks ?? {}).filter(isListedTask);
     const allItems_0 = backgroundTasks.map(toListItem);
     const sorted = allItems_0.sort((a, b) => {
       const aStatus = a.status;
@@ -236,6 +268,11 @@ export function BackgroundTasksDialog({
           onDone('Viewing leader', {
             display: 'system'
           });
+        } else if (isViewableAgent(current)) {
+          enterTeammateView(current.id, setAppState);
+          onDone(viewingMessageFor(current), {
+            display: 'system'
+          });
         } else {
           setViewState({
             mode: 'detail',
@@ -289,10 +326,12 @@ export function BackgroundTasksDialog({
       }
     }
     if (e.key === 'f') {
-      if (currentSelection_0.type === 'in_process_teammate' && currentSelection_0.status === 'running') {
+      // Any viewable agent opens the live view — including a completed-but-kept
+      // one, which isListedTask keeps in the list for exactly this reason.
+      if (isViewableAgent(currentSelection_0)) {
         e.preventDefault();
         enterTeammateView(currentSelection_0.id, setAppState);
-        onDone('Viewing teammate', {
+        onDone(viewingMessageFor(currentSelection_0), {
           display: 'system'
         });
       } else if (currentSelection_0.type === 'leader') {
@@ -328,7 +367,7 @@ export function BackgroundTasksDialog({
       const task = (typedTasks ?? {})[viewState.itemId];
       // Workflow tasks get a grace: their detail view stays open through
       // completion so the user sees the final state before eviction.
-      if (!task || task.type !== 'local_workflow' && !isBackgroundTask(task)) {
+      if (!task || task.type !== 'local_workflow' && !isListedTask(task)) {
         // Task was removed or is no longer a background task (e.g. killed).
         // If we skipped the list on mount, close the dialog entirely.
         if (skippedListOnMount.current) {
@@ -377,11 +416,28 @@ export function BackgroundTasksDialog({
       case 'local_bash':
         return <ShellDetailDialog shell={task_0} onDone={onDone} onKillShell={() => void killShellTask(task_0.id)} onBack={goBackToList} key={`shell-${task_0.id}`} />;
       case 'local_agent':
-        return <AsyncAgentDetailDialog agent={task_0} onDone={onDone} onKillAgent={() => void killAgentTask(task_0.id)} onBack={goBackToList} key={`agent-${task_0.id}`} />;
+        // Withholding the callback (rather than gating inside it) also drops the
+        // detail dialog's Enter route, its `f` hint and its `f` handler — all
+        // three are keyed on onForeground — so the opt-out leaves no reachable
+        // route to the view and Enter keeps closing the dialog, as it always did.
+        return <AsyncAgentDetailDialog agent={task_0} onDone={onDone} onKillAgent={() => void killAgentTask(task_0.id)} onBack={goBackToList} onForeground={isAgentViewDisabled() ? undefined : () => {
+          enterTeammateView(task_0.id, setAppState);
+          onDone('Viewing agent', {
+            display: 'system'
+          });
+        }} key={`agent-${task_0.id}`} />;
       case 'remote_agent':
         return <RemoteSessionDetailDialog session={task_0} onDone={onDone} toolUseContext={toolUseContext} onBack={goBackToList} onKill={task_0.status !== 'running' ? undefined : task_0.isUltraplan ? () => void stopUltraplan(task_0.id, task_0.sessionId, setAppState) : () => void killRemoteAgentTask(task_0.id)} key={`session-${task_0.id}`} />;
       case 'in_process_teammate':
-        return <InProcessTeammateDetailDialog teammate={task_0} onDone={onDone} onKill={task_0.status === 'running' ? () => void killTeammateTask(task_0.id) : undefined} onBack={goBackToList} onForeground={task_0.status === 'running' ? () => {
+        // Same opt-out gate as local_agent above, and — like that case — the env
+        // var is the ONLY gate: the list opens a teammate view at any status
+        // (isViewableAgent and enterTeammateView have no status check, and
+        // useTeammateViewAutoExit keeps a pending or completed teammate viewable),
+        // so the auto-skipped detail pane must not be the one place that refuses.
+        // Withholding the callback drops the Enter route, the `f` hint and the
+        // `f` handler together — all three are keyed on onForeground — which is
+        // what the opt-out wants and what a status gate here would do by accident.
+        return <InProcessTeammateDetailDialog teammate={task_0} onDone={onDone} onKill={task_0.status === 'running' ? () => void killTeammateTask(task_0.id) : undefined} onBack={goBackToList} onForeground={!isAgentViewDisabled() ? () => {
           enterTeammateView(task_0.id, setAppState);
           onDone('Viewing teammate', {
             display: 'system'
@@ -412,7 +468,7 @@ export function BackgroundTasksDialog({
               {runningAgentCount}{' '}
               {runningAgentCount !== 1 ? 'active agents' : 'active agent'}
             </Text>] : [])], index => <Text key={`separator-${index}`}> · </Text>);
-  const actions = [<KeyboardShortcutHint key="upDown" shortcut="↑/↓" action="select" />, <KeyboardShortcutHint key="enter" shortcut="Enter" action="view" />, ...(currentSelection?.type === 'in_process_teammate' && currentSelection.status === 'running' ? [<KeyboardShortcutHint key="foreground" shortcut="f" action="foreground" />] : []), ...((currentSelection?.type === 'local_bash' || currentSelection?.type === 'local_agent' || currentSelection?.type === 'in_process_teammate' || currentSelection?.type === 'local_workflow' || currentSelection?.type === 'monitor_mcp' || currentSelection?.type === 'dream' || currentSelection?.type === 'remote_agent') && currentSelection.status === 'running' ? [<KeyboardShortcutHint key="kill" shortcut="x" action="stop" />] : []), ...(agentTasks.some(t => t.status === 'running') ? [<KeyboardShortcutHint key="kill-all" shortcut={killAgentsShortcut} action="stop all agents" />] : []), <KeyboardShortcutHint key="esc" shortcut="←/Esc" action="close" />];
+  const actions = [<KeyboardShortcutHint key="upDown" shortcut="↑/↓" action="select" />, <KeyboardShortcutHint key="enter" shortcut="Enter" action="view" />, ...(isViewableAgent(currentSelection) ? [<KeyboardShortcutHint key="foreground" shortcut="f" action="foreground" />] : []), ...((currentSelection?.type === 'local_bash' || currentSelection?.type === 'local_agent' || currentSelection?.type === 'in_process_teammate' || currentSelection?.type === 'local_workflow' || currentSelection?.type === 'monitor_mcp' || currentSelection?.type === 'dream' || currentSelection?.type === 'remote_agent') && currentSelection.status === 'running' ? [<KeyboardShortcutHint key="kill" shortcut="x" action="stop" />] : []), ...(agentTasks.some(t => t.status === 'running') ? [<KeyboardShortcutHint key="kill-all" shortcut={killAgentsShortcut} action="stop all agents" />] : []), <KeyboardShortcutHint key="esc" shortcut="←/Esc" action="close" />];
   const handleCancel = () => onDone('Background tasks dialog dismissed', {
     display: 'system'
   });

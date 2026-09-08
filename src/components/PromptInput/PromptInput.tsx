@@ -42,12 +42,11 @@ import type { MCPServerConnection } from '../../services/mcp/types.js';
 import { abortPromptSuggestion, logSuggestionSuppressed } from '../../services/PromptSuggestion/promptSuggestion.js';
 import { type ActiveSpeculationState, abortSpeculation } from '../../services/PromptSuggestion/speculation.js';
 import { getActiveAgentForInput, getViewedTeammateTask } from '../../state/selectors.js';
-import { enterTeammateView, exitTeammateView, stopOrDismissAgent } from '../../state/teammateViewHelpers.js';
+import { enterTeammateView, exitTeammateView, getRegisteredAgentName, stopOrDismissAgent } from '../../state/teammateViewHelpers.js';
 import type { ToolPermissionContext } from '../../Tool.js';
 import { getRunningTeammatesSorted } from '../../tasks/InProcessTeammateTask/InProcessTeammateTask.js';
 import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js';
 import { type LocalAgentTaskState } from '../../tasks/LocalAgentTask/LocalAgentTask.js';
-import { isBackgroundTask } from '../../tasks/types.js';
 import { AGENT_COLOR_TO_THEME_COLOR, AGENT_COLORS, type AgentColorName } from '../../tools/AgentTool/agentColorManager.js';
 import type { AgentDefinition } from '../../tools/AgentTool/loadAgentsDir.js';
 import type { Message } from '../../types/message.js';
@@ -98,7 +97,7 @@ import { findUltraplanTriggerPositions, findUltrareviewTriggerPositions } from '
 import { AutoModeOptInDialog } from '../AutoModeOptInDialog.js';
 import { BridgeDialog } from '../BridgeDialog.js';
 import { ConfigurableShortcutHint } from '../ConfigurableShortcutHint.js';
-import { getVisibleAgentTasks, useCoordinatorTaskCount } from '../CoordinatorAgentStatus.js';
+import { CoordinatorTaskPanel, getVisibleAgentTasks, useCoordinatorTaskCount } from '../CoordinatorAgentStatus.js';
 import { getFastIconString } from '../FastIcon.js';
 import { GlobalSearchDialog } from '../GlobalSearchDialog.js';
 import { HistorySearchDialog } from '../HistorySearchDialog.js';
@@ -108,7 +107,7 @@ import { QuickOpenDialog } from '../QuickOpenDialog.js';
 import TextInput from '../TextInput.js';
 import { ThinkingToggle } from '../ThinkingToggle.js';
 import { BackgroundTasksDialog } from '../tasks/BackgroundTasksDialog.js';
-import { countVisibleBackgroundTasks, shouldHideTasksFooter } from '../tasks/taskStatusUtils.js';
+import { countVisibleBackgroundTasks, isPillTask, shouldHideTasksFooter } from '../tasks/taskStatusUtils.js';
 import { TeamsDialog } from '../teams/TeamsDialog.js';
 import VimTextInput from '../VimTextInput.js';
 import { applyHistorySearchActiveState } from './footerVisibility.js';
@@ -347,6 +346,29 @@ function PromptInput({
   // teammate identity comes from file-based config. Validate before casting to
   // ensure we only use valid color names (falls back to cyan if invalid).
   const viewingAgentColor = viewedTeammate?.identity.color && AGENT_COLORS.includes(viewedTeammate.identity.color as AgentColorName) ? viewedTeammate.identity.color as AgentColorName : undefined;
+  // The prompt placeholder must also name a viewed *local agent* (a background
+  // subagent opened from /tasks or the agent panel). viewingAgentName misses
+  // those: getViewedTeammateTask matches in_process_teammate only. Kept as a
+  // separate const rather than widening viewingAgentName, which also feeds
+  // PromptInputModeIndicator and would silently repaint the prompt character.
+  const agentNameRegistry = useAppState(s => s.agentNameRegistry);
+  const placeholderAgentName = useMemo(() => {
+    if (viewedTeammate) {
+      return viewingAgentName;
+    }
+    if (!viewingAgentTaskId) {
+      return undefined;
+    }
+    const viewedAgent = tasks[viewingAgentTaskId];
+    if (viewedAgent?.type !== 'local_agent') {
+      return undefined;
+    }
+    // Unnamed agent (no /rename, no AgentTool `name`) falls back to its
+    // description, so this agrees with TeammateViewHeader and useSwarmBanner.
+    return getRegisteredAgentName({
+      agentNameRegistry
+    }, viewedAgent.id) ?? viewedAgent.description;
+  }, [viewedTeammate, viewingAgentName, viewingAgentTaskId, tasks, agentNameRegistry]);
   // In-process teammates sorted alphabetically for footer team selector
   const inProcessTeammates = useMemo(() => getRunningTeammatesSorted(tasks), [tasks]);
 
@@ -404,20 +426,26 @@ function PromptInput({
     };
   }), [setAppState]);
   const coordinatorTaskCount = useCoordinatorTaskCount();
-  // The pill (BackgroundTaskStatus) only renders when non-local_agent bg tasks
-  // exist. When only local_agent tasks are running (coordinator/fork mode), the
-  // pill is absent, so the -1 sentinel would leave nothing visually selected.
-  // In that case, skip -1 and treat 0 as the minimum selectable index.
-  const hasBgTaskPill = useMemo(() => Object.values(tasks).some(t => isBackgroundTask(t)), [tasks]);
+  // The -1 sentinel is the pill's own slot, so it exists iff a pill actually
+  // renders: isPillTask is the same predicate BackgroundTaskStatus filters
+  // with, and a local agent keeps its pill whenever the panel is unmounted
+  // (CLAUDE_CODE_DISABLE_AGENT_VIEW). Nothing matches => nothing would be
+  // visually selected at -1, so skip it and treat 0 as the minimum index.
+  const hasBgTaskPill = useMemo(() => Object.values(tasks).some(t => isPillTask(t)), [tasks]);
   const minCoordinatorIndex = hasBgTaskPill ? -1 : 0;
+  // Last selectable row. The panel lays out as -1 pill / 0 main / 1..N agent
+  // rows, so the final agent is index N — exactly what the [index - 1] lookups
+  // in footer:openSelected and footer:close assume. With no panel rows
+  // (count 0) nothing below the pill is selectable.
+  const maxCoordinatorIndex = coordinatorTaskCount > 0 ? coordinatorTaskCount : minCoordinatorIndex;
   // Clamp index when tasks complete and the list shrinks beneath the cursor
   useEffect(() => {
-    if (coordinatorTaskIndex >= coordinatorTaskCount) {
-      setCoordinatorTaskIndex(Math.max(minCoordinatorIndex, coordinatorTaskCount - 1));
+    if (coordinatorTaskIndex > maxCoordinatorIndex) {
+      setCoordinatorTaskIndex(maxCoordinatorIndex);
     } else if (coordinatorTaskIndex < minCoordinatorIndex) {
       setCoordinatorTaskIndex(minCoordinatorIndex);
     }
-  }, [coordinatorTaskCount, coordinatorTaskIndex, minCoordinatorIndex]);
+  }, [maxCoordinatorIndex, coordinatorTaskIndex, minCoordinatorIndex]);
   const [isPasting, setIsPasting] = useState(false);
   const [isExternalEditorActive, setIsExternalEditorActive] = useState(false);
   const [showModelPicker, setShowModelPicker] = useState(false);
@@ -868,7 +896,7 @@ function PromptInput({
   const defaultPlaceholder = usePromptInputPlaceholder({
     input,
     submitCount,
-    viewingAgentName
+    viewingAgentName: placeholderAgentName
   });
   const pendingCoalescedModeSubmitRef = React.useRef<ReturnType<typeof detectModeEntry>>(null);
   const suppressNextCoalescedSubmitRef = React.useRef(false);
@@ -1848,10 +1876,24 @@ function PromptInput({
   // selected — its useInput is inactive, so this is the only path.
   useKeybindings({
     'footer:up': () => {
+      // Walk back up the coordinator panel before leaving the tasks pill.
+      if (tasksSelected && !isTeammateMode && coordinatorTaskIndex > minCoordinatorIndex) {
+        setCoordinatorTaskIndex(i => Math.max(minCoordinatorIndex, i - 1));
+        return;
+      }
       navigateFooter(-1, true);
     },
     'footer:down': () => {
       if (tasksSelected && !isTeammateMode) {
+        // Panel rows exist: ↓ walks the pointer down them (-1 pill → 0 main →
+        // 1..N agent rows) and stops at the last row. Only the bash-only case,
+        // where the panel has no rows at all, keeps the open-dialog shortcut.
+        if (coordinatorTaskCount > 0) {
+          if (coordinatorTaskIndex < maxCoordinatorIndex) {
+            setCoordinatorTaskIndex(i => Math.min(maxCoordinatorIndex, i + 1));
+          }
+          return;
+        }
         setShowBashesDialog(true);
         selectFooterItem(null);
         return;
@@ -2346,6 +2388,7 @@ function PromptInput({
           </Box>
         </Box>}
       <PromptInputFooter apiKeyStatus={apiKeyStatus} debug={debug} exitMessage={exitMessage} vimMode={isVimModeEnabled() ? vimMode : undefined} mode={mode} autoUpdaterResult={autoUpdaterResult} isAutoUpdating={isAutoUpdating} verbose={verbose} onAutoUpdaterResult={onAutoUpdaterResult} onChangeIsUpdating={setIsAutoUpdating} suggestions={suggestions} selectedSuggestion={selectedSuggestion} maxColumnWidth={maxColumnWidth} toolPermissionContext={effectiveToolPermissionContext} helpOpen={helpOpen} suppressHint={input.length > 0} isLoading={isLoading} tasksSelected={tasksSelected} teamsSelected={teamsSelected} bridgeSelected={bridgeSelected} tmuxSelected={tmuxSelected} teammateFooterIndex={teammateFooterIndex} ideSelection={ideSelection} mcpClients={mcpClients} isPasting={isPasting} isInputWrapped={isInputWrapped} messages={messages} isSearching={isSearchingHistory} historyQuery={historyQuery} setHistoryQuery={setHistoryQuery} historyFailedMatch={historyFailedMatch} onOpenTasksDialog={isFullscreenEnvEnabled() ? handleOpenTasksDialog : undefined} />
+      {coordinatorTaskCount > 0 && !showSpinnerTree && <CoordinatorTaskPanel />}
       {isFullscreenEnvEnabled() ? null : autoModeOptInDialog}
       {isFullscreenEnvEnabled() ?
     // position=absolute takes zero layout height so the spinner

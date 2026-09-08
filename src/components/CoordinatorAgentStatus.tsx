@@ -15,21 +15,28 @@ import { stringWidth } from '../ink/stringWidth.js';
 import { Box, Text, wrapText } from '../ink.js';
 import { type AppState, useAppState, useSetAppState } from '../state/AppState.js';
 import { enterTeammateView, exitTeammateView } from '../state/teammateViewHelpers.js';
-import { isPanelAgentTask, type LocalAgentTaskState } from '../tasks/LocalAgentTask/LocalAgentTask.js';
+import { isPanelAgentTask, isPanelVisibleAgent, type LocalAgentTaskState } from '../tasks/LocalAgentTask/LocalAgentTask.js';
+import { isAgentViewDisabled } from '../utils/envUtils.js';
 import { formatDuration, formatNumber } from '../utils/format.js';
 import { evictTerminalTask } from '../utils/task/framework.js';
+import { isRetainedOrWithinGrace } from '../utils/task/retention.js';
 import { isTerminalStatus } from './tasks/taskStatusUtils.js';
 
 /**
  * Which panel-managed tasks currently have a visible row.
- * Presence in AppState.tasks IS visibility — the 1s tick in
- * CoordinatorTaskPanel evicts tasks past their evictAfter deadline. The
- * evictAfter !== 0 check handles immediate dismiss (x key) without making
- * the filter time-dependent. Shared by panel render, useCoordinatorTaskCount,
- * and index resolvers so the math can't drift.
+ * Visibility is `isPanelVisibleAgent` (LocalAgentTask.tsx): running/pending,
+ * or completed-but-kept (retained by the UI, or still inside its evictAfter
+ * grace window), and never a task dismissed with `x` (evictAfter === 0).
+ * Presence in AppState.tasks is no longer the whole story — the 1s tick in
+ * CoordinatorTaskPanel evicts past-deadline tasks eventually, but this filter
+ * hides them the moment the deadline passes. Shared by panel render,
+ * useCoordinatorTaskCount, the background-task pill filter, and index
+ * resolvers so the math can't drift.
+ * Local agents only: in_process_teammate tasks are rendered by the teammates
+ * view, not by this panel, so they stay out of the LocalAgentTaskState[].
  */
 export function getVisibleAgentTasks(tasks: AppState['tasks']): LocalAgentTaskState[] {
-  return Object.values(tasks).filter((t): t is LocalAgentTaskState => isPanelAgentTask(t) && t.evictAfter !== 0).sort((a, b) => a.startTime - b.startTime);
+  return Object.values(tasks).filter((t): t is LocalAgentTaskState => isPanelAgentTask(t) && isPanelVisibleAgent(t)).sort((a, b) => a.startTime - b.startTime);
 }
 export function CoordinatorTaskPanel(): React.ReactNode {
   const tasks = useAppState(s => s.tasks);
@@ -42,7 +49,11 @@ export function CoordinatorTaskPanel(): React.ReactNode {
   const visibleTasks = getVisibleAgentTasks(tasks);
   const hasTasks = Object.values(tasks).some(isPanelAgentTask);
 
-  // 1s tick: re-render for elapsed time + evict tasks past their deadline.
+  // 1s tick: re-render for elapsed time + evict tasks the shared retain/grace
+  // rule no longer keeps alive — isRetainedOrWithinGrace (../utils/task/retention)
+  // is the same predicate evictTerminalTask enforces, so nominating on it keeps
+  // this from firing a no-op eviction every second for every retained task whose
+  // deadline has passed.
   // The eviction deletes from prev.tasks, which makes useCoordinatorTaskCount
   // (and other consumers) see the updated count without their own tick.
   const tasksRef = React.useRef(tasks);
@@ -53,7 +64,7 @@ export function CoordinatorTaskPanel(): React.ReactNode {
     const interval = setInterval((tasksRef_0, setAppState_0, setTick_0) => {
       const now = Date.now();
       for (const t of Object.values(tasksRef_0.current)) {
-        if (isPanelAgentTask(t) && (t.evictAfter ?? Infinity) <= now) {
+        if (isPanelAgentTask(t) && !isRetainedOrWithinGrace(t, now)) {
           evictTerminalTask(t.id, setAppState_0);
         }
       }
@@ -79,12 +90,20 @@ export function CoordinatorTaskPanel(): React.ReactNode {
  * Returns the number of visible coordinator tasks (for selection bounds).
  * The panel's 1s tick evicts expired tasks from prev.tasks, so this count
  * stays accurate without needing its own tick.
+ *
+ * This is the agent panel's ROOT gate: CLAUDE_CODE_DISABLE_AGENT_VIEW forces
+ * the count to 0, which unmounts the panel and collapses every selection
+ * bound derived from it (PromptInput's maxCoordinatorIndex, the footer:down
+ * walk and the footer:openSelected / footer:close [index - 1] lookups), so the
+ * opt-out cannot be walked around with the keyboard. getVisibleAgentTasks
+ * stays pure — the panel render and the index resolvers still need it.
  */
 export function useCoordinatorTaskCount() {
   const tasks = useAppState(_temp);
-  let t0;
-  t0 = 0;
-  return t0;
+  // Read at render, not inside the memo: the env value is not a React input,
+  // so it has to be a dependency for the count to follow it.
+  const disabled = isAgentViewDisabled();
+  return React.useMemo(() => disabled ? 0 : getVisibleAgentTasks(tasks).length, [tasks, disabled]);
 }
 function _temp(s) {
   return s.tasks;
