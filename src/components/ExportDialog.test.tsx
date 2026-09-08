@@ -56,6 +56,24 @@ async function waitForCondition(
   throw new Error('Timed out waiting for ExportDialog test state')
 }
 
+/**
+ * A lone Escape is an *incomplete* escape sequence: App buffers it and only
+ * emits a standalone Escape key once its flush timer fires (`NORMAL_TIMEOUT =
+ * 300` ms, src/ink/components/App.tsx). Any byte written before that flush is
+ * appended to the buffered ESC and parsed as a single meta key (ESC + '1' ->
+ * alt-1), so the Escape never reaches the dialog and the digit is swallowed.
+ * Wait for the repaint that the handled Escape causes instead of guessing a
+ * sleep shorter than the flush window.
+ */
+async function pressEscape(
+  stdin: PassThrough,
+  getOutput: () => string,
+): Promise<void> {
+  const outputLengthBeforeEscape = getOutput().length
+  stdin.write('\u001B')
+  await waitForCondition(() => getOutput().length > outputLengthBeforeEscape)
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (error: unknown) => void
@@ -591,8 +609,7 @@ test('Escape goes back from filename to method before exporting', async () => {
     await waitForCondition(() => getOutput().includes('Save to file'))
     stdin.write('2')
     await waitForCondition(() => getOutput().includes('Enter filename:'))
-    stdin.write('\u001B')
-    await Bun.sleep(150)
+    await pressEscape(stdin, getOutput)
     stdin.write('1')
     await waitForCondition(() => doneMessages.length === 1)
 
@@ -639,8 +656,7 @@ test('Escape goes back from method to format before exporting', async () => {
     await waitForCondition(() => getOutput().includes('Plain Text (.txt)'))
     stdin.write('1')
     await waitForCondition(() => getOutput().includes('Copy to clipboard'))
-    stdin.write('\u001B')
-    await Bun.sleep(150)
+    await pressEscape(stdin, getOutput)
     stdin.write('3')
     await Bun.sleep(20)
     stdin.write('1')

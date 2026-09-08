@@ -4,9 +4,11 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { extractFactsIntoMemdir } from './autoExtractFacts.js'
 import { setGovernancePolicySettingsForSourceForTesting } from '../utils/governancePolicy.js'
+import { getIsInteractive, setIsInteractive } from '../bootstrap/state.js'
 
 describe('autoExtractFacts', () => {
   let memDir: string
+  let originalInteractive = false
 
   beforeEach(() => {
     memDir = mkdtempSync(join(tmpdir(), 'auto-extract-facts-test-'))
@@ -14,6 +16,12 @@ describe('autoExtractFacts', () => {
     // facts are actually persisted.
     delete process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY
     delete process.env.CLAUDE_CODE_SIMPLE
+    // Auto-memory defaults off for non-interactive (-p) sessions, and the test
+    // runner is non-interactive, so isAutoMemoryEnabled() would gate
+    // extractFactsIntoMemdir() out before any fact is written. These tests
+    // exercise the interactive default (same pattern as paths.test.ts).
+    originalInteractive = getIsInteractive()
+    setIsInteractive(true)
     setGovernancePolicySettingsForSourceForTesting(() => ({
       memory: { requireApprovalBeforeWrite: false },
     }))
@@ -21,6 +29,7 @@ describe('autoExtractFacts', () => {
 
   afterEach(() => {
     setGovernancePolicySettingsForSourceForTesting(null)
+    setIsInteractive(originalInteractive)
     rmSync(memDir, { recursive: true, force: true })
   })
 
@@ -264,15 +273,21 @@ describe('autoExtractFacts', () => {
 
 describe('autoExtractFacts governance gate (P1#1, P2#6)', () => {
   let memDir: string
+  let originalInteractive = false
 
   beforeEach(() => {
     memDir = mkdtempSync(join(tmpdir(), 'auto-extract-gate-test-'))
     setGovernancePolicySettingsForSourceForTesting(null)
     delete process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY
+    // Open the non-interactive auto-memory gate so each test exercises the
+    // gate it names rather than passing on the -p default (paths.ts).
+    originalInteractive = getIsInteractive()
+    setIsInteractive(true)
   })
 
   afterEach(() => {
     setGovernancePolicySettingsForSourceForTesting(null)
+    setIsInteractive(originalInteractive)
     rmSync(memDir, { recursive: true, force: true })
   })
 

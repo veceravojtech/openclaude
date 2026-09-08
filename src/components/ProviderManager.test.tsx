@@ -122,6 +122,10 @@ async function waitForCondition(
   throw new Error('Timed out waiting for ProviderManager test condition')
 }
 
+// Mirrors the shipped `custom` preset default (its manifest fallbackBaseUrl):
+// picking "Custom (OpenAI-compatible)" prefills Ollama's local endpoint.
+const CUSTOM_PRESET_DEFAULT_BASE_URL = 'http://localhost:11434/v1'
+
 // Provider list is sorted from generated preset metadata by description, with
 // Gitlawb Opengateway pinned first, aimlapi.com second, Anthropic third, Codex OAuth injected
 // after DeepSeek, and Custom always pinned last. Keep the target-by-label
@@ -238,7 +242,7 @@ function mockProviderProfilesModule(options?: {
         return {
           provider: 'custom',
           name: 'Custom OpenAI-compatible',
-          baseUrl: 'http://localhost:11434/v1',
+          baseUrl: CUSTOM_PRESET_DEFAULT_BASE_URL,
           model: 'custom-model',
           apiKey: '',
           requiresApiKey: true,
@@ -738,6 +742,28 @@ async function waitForFrameOutput(
   return output
 }
 
+// The preset picker is a scrolling list that renders one window at a time
+// (ProviderManager.renderPresetSelection: `visibleOptionCount={Math.min(13,
+// options.length)}`), and the OAuth entries are inserted after DeepSeek so they
+// "keep their established position in the picker regardless of how the preset
+// list grows" (ProviderManager.tsx). As the preset list grew, that position moved
+// below the first window, so a row like Codex OAuth is off-screen at first paint.
+// Wait for the picker, scroll to the target row, and confirm the row is actually
+// in view before selecting it — which is also what keeps the Enter below from
+// racing the scroll on a loaded runner.
+async function selectPresetFromFirstRun(
+  mounted: { stdin: { write: (data: string) => void }; getOutput: () => string },
+  label: (typeof PRESET_ORDER)[number],
+): Promise<void> {
+  await waitForFrameOutput(mounted.getOutput, frame =>
+    frame.includes('Set up provider'),
+  )
+
+  await navigateToPreset(mounted.stdin, label)
+  await waitForFrameOutput(mounted.getOutput, frame => frame.includes(label))
+  mounted.stdin.write('\r')
+}
+
 async function mountProviderManager(
   ProviderManager: React.ComponentType<{
     mode: 'first-run' | 'manage'
@@ -980,6 +1006,15 @@ test('ProviderManager shows API mode picker for custom OpenAI-compatible provide
     await waitForFrameOutput(mounted.getOutput, frame =>
       frame.includes('Base URL'),
     )
+    // The editor derives the capability route from the base URL rather than from
+    // the preset (resolveProfileCapabilityRouteId), and the custom preset prefills
+    // Ollama's local endpoint — which resolves to the `ollama` route and drops the
+    // API-mode step. Type the generic OpenAI-compatible endpoint this test is about;
+    // that is the `custom` route, whose descriptor declares
+    // `supportsApiFormatSelection: true` (src/integrations/gateways/custom.ts).
+    mounted.stdin.write('\x7f'.repeat(CUSTOM_PRESET_DEFAULT_BASE_URL.length))
+    mounted.stdin.write('https://api.example-openai-compatible.test/v1')
+    await Bun.sleep(25)
     mounted.stdin.write('\r')
     await waitForFrameOutput(mounted.getOutput, frame =>
       frame.includes('Default model'),
@@ -5155,13 +5190,7 @@ test('ProviderManager first-run Codex OAuth switches the current session after l
     onDone,
   })
 
-  await waitForFrameOutput(
-    mounted.getOutput,
-    frame => frame.includes('Set up provider') && frame.includes('Codex OAuth'),
-  )
-
-  await navigateToPreset(mounted.stdin, 'Codex OAuth')
-  mounted.stdin.write('\r')
+  await selectPresetFromFirstRun(mounted, 'Codex OAuth')
 
   await waitForCondition(() => onDone.mock.calls.length > 0)
 
@@ -5226,13 +5255,7 @@ test('ProviderManager Codex OAuth waiting state masks the paste field and delega
     onDone,
   })
 
-  await waitForFrameOutput(
-    mounted.getOutput,
-    frame => frame.includes('Set up provider') && frame.includes('Codex OAuth'),
-  )
-
-  await navigateToPreset(mounted.stdin, 'Codex OAuth')
-  mounted.stdin.write('\r')
+  await selectPresetFromFirstRun(mounted, 'Codex OAuth')
 
   // Non-SSH session shows the generic "paste the callback URL" hint and the input.
   await waitForFrameOutput(
@@ -5297,14 +5320,7 @@ test('ProviderManager Codex OAuth waiting state shows the SSH banner and surface
       onDone,
     })
 
-    await waitForFrameOutput(
-      mounted.getOutput,
-      frame =>
-        frame.includes('Set up provider') && frame.includes('Codex OAuth'),
-    )
-
-    await navigateToPreset(mounted.stdin, 'Codex OAuth')
-    mounted.stdin.write('\r')
+    await selectPresetFromFirstRun(mounted, 'Codex OAuth')
 
     // SSH session shows the dedicated banner instead of the generic hint.
     await waitForFrameOutput(
@@ -5396,13 +5412,7 @@ test('ProviderManager first-run Codex OAuth surfaces credential storage warnings
     onDone,
   })
 
-  await waitForFrameOutput(
-    mounted.getOutput,
-    frame => frame.includes('Set up provider') && frame.includes('Codex OAuth'),
-  )
-
-  await navigateToPreset(mounted.stdin, 'Codex OAuth')
-  mounted.stdin.write('\r')
+  await selectPresetFromFirstRun(mounted, 'Codex OAuth')
 
   await waitForCondition(() => onDone.mock.calls.length > 0)
 
@@ -5486,13 +5496,7 @@ test('ProviderManager first-run Codex OAuth reports next-startup fallback when s
     onDone,
   })
 
-  await waitForFrameOutput(
-    mounted.getOutput,
-    frame => frame.includes('Set up provider') && frame.includes('Codex OAuth'),
-  )
-
-  await navigateToPreset(mounted.stdin, 'Codex OAuth')
-  mounted.stdin.write('\r')
+  await selectPresetFromFirstRun(mounted, 'Codex OAuth')
 
   await waitForCondition(() => onDone.mock.calls.length > 0)
 
@@ -5592,13 +5596,7 @@ test('ProviderManager does not hijack a manual Codex profile when OAuth credenti
     onDone,
   })
 
-  await waitForFrameOutput(
-    mounted.getOutput,
-    frame => frame.includes('Set up provider') && frame.includes('Codex OAuth'),
-  )
-
-  await navigateToPreset(mounted.stdin, 'Codex OAuth')
-  mounted.stdin.write('\r')
+  await selectPresetFromFirstRun(mounted, 'Codex OAuth')
 
   await waitForCondition(() => onDone.mock.calls.length > 0)
 
