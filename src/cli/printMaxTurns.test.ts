@@ -8,6 +8,7 @@ import { type QueryParams } from '../query.js'
 import type { QueryDeps } from '../query/deps.js'
 import { getDefaultAppState, type AppState } from '../state/AppStateStore.js'
 import type { Tools } from '../Tool.js'
+import * as gracefulShutdownModule from '../utils/gracefulShutdown.js'
 import {
   createAssistantMessage,
   createUserMessage,
@@ -191,6 +192,17 @@ describe('headless --print max-turns', () => {
         yield createHeadlessSuccessResult()
       },
     )
+    // runHeadless's last statement is a fire-and-forget `gracefulShutdownSync(0)`
+    // (src/cli/print.ts). Left real, it resolves ~1s later into forceExit's genuine
+    // `process.exit(0)` (src/utils/gracefulShutdown.ts) - inside the bun test runner,
+    // which then dies mid-run: no summary, status 0, and every not-yet-reached test
+    // file silently skipped. This is the only test that calls the real runHeadless, so
+    // neutralise the shutdown here and restore it in the `finally` below; leaving the
+    // module patched would make this file a cross-file leaker instead.
+    const shutdownSpy = spyOn(
+      gracefulShutdownModule,
+      'gracefulShutdownSync',
+    ).mockImplementation(() => {})
 
     let state = getDefaultAppState()
     const getAppState = () => state
@@ -214,8 +226,12 @@ describe('headless --print max-turns', () => {
       await waitForAskCall(askSpy)
       expect(askSpy.mock.calls[0]?.[0]?.maxTurns).toBe(0)
       await runPromise
+      // Keeps the neutralisation load-bearing: if runHeadless ever stops shutting down,
+      // this fails loudly rather than leaving a dead mock behind.
+      expect(shutdownSpy).toHaveBeenCalledWith(0)
     } finally {
       await runPromise?.catch(() => {})
+      shutdownSpy.mockRestore()
       askSpy.mockRestore()
       stdoutSpy.mockRestore()
     }
