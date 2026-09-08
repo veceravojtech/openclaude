@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { useHermeticEnv } from '../test/hermeticEnv.js'
 import {
   applyLoadedEnvFileValues,
   clearRememberedEnvFileValuesForTests,
@@ -12,7 +13,13 @@ import {
   rememberLoadedEnvFileValues,
 } from './envFile.js'
 
-const TEST_ENV_KEYS = [
+// Keys these tests need ABSENT before they run, so an ambient shell value
+// cannot change an assertion (loadEnvFile never overwrites an existing value,
+// and several tests assert a key is undefined). Restoring them is not this
+// list's job — useHermeticEnv() below snapshots and restores the whole
+// environment, so a key a future test invents cannot escape the file the way
+// CONCENTRATE_* did when this list was also the restore list.
+const CLEARED_ENV_KEYS = [
   'NODE_OPTIONS',
   'AZURE_OPENAI_API_VERSION',
   'CLAUDE_CODE_USE_OPENAI',
@@ -22,6 +29,9 @@ const TEST_ENV_KEYS = [
   'CMD_API_KEY',
   'COMMANDCODE_API_KEY',
   'COMMAND_CODE_API_KEY',
+  'CONCENTRATE_API_KEY',
+  'CONCENTRATE_BASE_URL',
+  'CONCENTRATE_MODEL',
   'APISMART_API_KEY',
   'APISMART_MODEL',
   'OPENAI_API_KEYS',
@@ -51,13 +61,15 @@ const TEST_ENV_KEYS = [
   'WEB_URL_TEMPLATE',
 ]
 
-const originalEnv = new Map<string, string | undefined>()
 let tempDir: string
+
+// Registered first, so its beforeEach snapshots the environment before the
+// clearing below and its afterEach/afterAll put every key back.
+useHermeticEnv()
 
 beforeEach(() => {
   tempDir = mkdtempSync(join(tmpdir(), 'openclaude-env-file-test-'))
-  for (const key of TEST_ENV_KEYS) {
-    originalEnv.set(key, process.env[key])
+  for (const key of CLEARED_ENV_KEYS) {
     delete process.env[key]
   }
 })
@@ -65,15 +77,6 @@ beforeEach(() => {
 afterEach(() => {
   clearRememberedEnvFileValuesForTests()
   rmSync(tempDir, { recursive: true, force: true })
-  for (const key of TEST_ENV_KEYS) {
-    const originalValue = originalEnv.get(key)
-    if (originalValue === undefined) {
-      delete process.env[key]
-    } else {
-      process.env[key] = originalValue
-    }
-  }
-  originalEnv.clear()
 })
 
 function writeTempEnvFile(content: string, fileName = '.env'): string {

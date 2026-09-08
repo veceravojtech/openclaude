@@ -14,11 +14,14 @@ import { setSdkBetas } from '../bootstrap/state.js'
 // pin that gate: getMergedBetas() must return [] for non-Anthropic providers
 // and a non-empty list for Anthropic providers (plus GitHub Native Anthropic).
 
-// The list of provider/profile env vars these tests touch. We do NOT keep
-// an "original" snapshot of process.env (the snapshot would itself be
-// polluted by test files that run before this one in the smoke suite). Instead
-// we scrub every key before and after each test, and each test sets only the
-// vars it explicitly needs.
+// The list of provider/profile env vars these tests touch. Each test starts from
+// a scrubbed env (beforeEach) and sets only the vars it explicitly needs, so a
+// polluted entry state can never leak INTO a test here. Teardown is the mirror
+// image: afterEach RESTORES the values these keys held when this file was loaded
+// instead of deleting them. A delete-only teardown leaks OUT of this file — the
+// bun:test runner shares one process across files, so every later test file
+// would see ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN /
+// OPENAI_BASE_URL / USER_TYPE and the rest permanently unset.
 const PROVIDER_ENV_KEYS = [
   'CLAUDE_CODE_USE_OPENAI',
   'CLAUDE_CODE_USE_GEMINI',
@@ -63,9 +66,26 @@ const PROVIDER_ENV_KEYS = [
   'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID',
 ] as const
 
+// Snapshot taken at module load — before any test in this file has run — so the
+// teardown can hand the process back exactly the provider env it was given.
+const ORIGINAL_PROVIDER_ENV = new Map<string, string | undefined>(
+  PROVIDER_ENV_KEYS.map(key => [key, process.env[key]]),
+)
+
 function clearProviderEnv(): void {
   for (const key of PROVIDER_ENV_KEYS) {
     delete process.env[key]
+  }
+}
+
+function restoreProviderEnv(): void {
+  for (const key of PROVIDER_ENV_KEYS) {
+    const original = ORIGINAL_PROVIDER_ENV.get(key)
+    if (original === undefined) {
+      delete process.env[key]
+    } else {
+      process.env[key] = original
+    }
   }
 }
 
@@ -75,11 +95,12 @@ beforeEach(async () => {
 })
 
 afterEach(() => {
-  // Scrub provider env vars after each test so leaks from one test do not
-  // contaminate the next test in this file or any other test file that shares
-  // the same process.
+  // Restore the provider env vars to their module-load values after each test so
+  // that neither a leak from one test nor this file's own scrubbing contaminates
+  // the next test in this file or any other test file that shares the same
+  // process.
   try {
-    clearProviderEnv()
+    restoreProviderEnv()
     setSdkBetas(undefined)
   } finally {
     releaseSharedMutationLock()
@@ -94,13 +115,21 @@ afterEach(() => {
 // a cache-busting URL and re-register it under the bare specifier at MODULE
 // LEVEL (top-level await) so the override is in place before any test code runs.
 // The explicit function references are used instead of spreading the namespace
-// object to avoid potential issues with Bun's mock.module handling.
+// object to avoid potential issues with Bun's mock.module handling — which means
+// the list below MUST stay exhaustive. An export of providers.ts that is missing
+// here becomes `undefined` for every later test file in the same runner process:
+// isFirstPartyAnthropicProvider and isCustomAnthropicProvider used to be missing,
+// which silently defeated the provider-isolation guard in
+// src/test/providerModuleIsolation.ts (it compares all seven provider functions).
 const _realProvidersModule = await import(
   `./model/providers.js?real=${Date.now()}-${Math.random()}`
 )
 mock.module('./model/providers.js', () => ({
   getAPIProvider: _realProvidersModule.getAPIProvider,
   usesAnthropicAccountFlow: _realProvidersModule.usesAnthropicAccountFlow,
+  isFirstPartyAnthropicProvider:
+    _realProvidersModule.isFirstPartyAnthropicProvider,
+  isCustomAnthropicProvider: _realProvidersModule.isCustomAnthropicProvider,
   isGithubNativeAnthropicMode: _realProvidersModule.isGithubNativeAnthropicMode,
   getAPIProviderForStatsig: _realProvidersModule.getAPIProviderForStatsig,
   isFirstPartyAnthropicBaseUrl: _realProvidersModule.isFirstPartyAnthropicBaseUrl,

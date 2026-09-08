@@ -5,6 +5,16 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
+import * as realProviders from './model/providers.js'
+import * as realMtls from './mtls.js'
+
+// Pre-mock snapshots. `mock.module()` mutates the live module namespace object
+// in place and `mock.restore()` never unregisters a module mock, so the
+// afterEach restore has to hand back spread copies captured before any mock is
+// installed - restoring from the live namespace would re-install the stub and
+// leak it into every later test file in the run.
+const pristineProviders = { ...realProviders }
+const pristineMtls = { ...realMtls }
 
 const ORIGINAL_ENV = { ...process.env }
 
@@ -38,6 +48,7 @@ async function readPropertyValue(
 ): Promise<unknown> {
   mock.restore()
   mock.module('./model/providers.js', () => ({
+    ...pristineProviders,
     getAPIProvider: () => provider,
     getAPIProviderForStatsig: () => provider,
     isFirstPartyAnthropicBaseUrl: () => true,
@@ -61,6 +72,7 @@ async function readAPIProviderProperties(
 ) {
   mock.restore()
   mock.module('./model/providers.js', () => ({
+    ...pristineProviders,
     getAPIProvider: () => provider,
     getAPIProviderForStatsig: () => provider,
     isFirstPartyAnthropicBaseUrl: () => true,
@@ -81,6 +93,11 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    // mock.restore() does not unregister mock.module() overrides; re-register
+    // the pristine namespaces so ./model/providers.js and ./mtls.js are the
+    // real modules again for every test file that runs after this one.
+    mock.module('./model/providers.js', () => pristineProviders)
+    mock.module('./mtls.js', () => pristineMtls)
     restoreEnv()
   } finally {
     releaseSharedMutationLock()
@@ -297,6 +314,7 @@ test('buildAPIProviderProperties redacts proxy credentials and mTLS paths', asyn
 
   mock.restore()
   mock.module('./model/providers.js', () => ({
+    ...pristineProviders,
     getAPIProvider: () => 'openai',
     getAPIProviderForStatsig: () => 'openai',
     isFirstPartyAnthropicBaseUrl: () => true,
@@ -355,6 +373,7 @@ test('buildAPIProviderProperties redacts proxy credentials from lowercase https_
 
   mock.restore()
   mock.module('./model/providers.js', () => ({
+    ...pristineProviders,
     getAPIProvider: () => 'openai',
     getAPIProviderForStatsig: () => 'openai',
     isFirstPartyAnthropicBaseUrl: () => true,

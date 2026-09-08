@@ -7,7 +7,24 @@ import {
 import { TaskCreateTool } from '../tools/TaskCreateTool/TaskCreateTool.js'
 import { ToolSearchTool } from '../tools/ToolSearchTool/ToolSearchTool.js'
 
+// Capture the genuine growthbook module once, through a query-suffixed specifier
+// so the capture can never pick up an already-registered mock. A plain
+// `import * as … from '../services/analytics/growthbook.js'` binds the LIVE
+// namespace, which `mock.module()` mutates in place — restoring from it is a
+// no-op that re-installs the stub. Precedent: src/utils/auth.test.ts:8-10.
+const realGrowthbook = (await import(
+  `../services/analytics/growthbook.js?toolSearchTestRealGrowthbook=${Date.now()}-${Math.random()}`
+)) as typeof import('../services/analytics/growthbook.js')
+
+// Bun's `mock.restore()` restores spyOn/function mocks only — it does NOT
+// unregister a `mock.module()` registration, so the growthbook stub installed
+// below would otherwise outlive this file for the rest of the runner process and
+// poison every later test that reads a feature flag. Re-register the genuine
+// module first, then restore the function mocks.
 afterEach(() => {
+  mock.module('../services/analytics/growthbook.js', () => ({
+    ...realGrowthbook,
+  }))
   mock.restore()
 })
 
@@ -74,6 +91,7 @@ describe('modelSupportsToolReference', () => {
 
   test('keeps built-in HY3 compatibility when feature flags add exceptions', async () => {
     mock.module('../services/analytics/growthbook.js', () => ({
+      ...realGrowthbook,
       getFeatureValue_CACHED_MAY_BE_STALE: () => ['haiku'],
     }))
     const freshToolSearch = await import(

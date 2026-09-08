@@ -3,14 +3,19 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
-import * as actualGrowthbook from '../services/analytics/growthbook.js'
+
+// Capture the genuine growthbook module once, through a query-suffixed specifier
+// so the capture can never pick up an already-registered mock. A plain
+// `import * as … from '../services/analytics/growthbook.js'` binds the LIVE
+// namespace, which `mock.module()` mutates in place — restoring from it is a
+// no-op that re-installs the killswitch stub. Precedent: src/utils/auth.test.ts:8-10.
+const realGrowthbook = (await import(
+  `../services/analytics/growthbook.js?fileTestRealGrowthbook=${Date.now()}-${Math.random()}`
+)) as typeof import('../services/analytics/growthbook.js')
 
 async function importFileModuleWithKillswitchEnabled(
   killswitchEnabled: boolean,
 ) {
-  const realGrowthbook = await import(
-    `../services/analytics/growthbook.js?real=${Date.now()}-${Math.random()}`
-  )
   mock.module('../services/analytics/growthbook.js', () => ({
     ...realGrowthbook,
     getFeatureValue_CACHED_MAY_BE_STALE: () => killswitchEnabled,
@@ -25,8 +30,13 @@ beforeAll(async () => {
 
 afterAll(() => {
   try {
+    // Re-register the genuine module BEFORE mock.restore(): Bun's
+    // `mock.restore()` never unregisters a `mock.module()` registration, so the
+    // killswitch stub would otherwise outlive this file process-wide.
+    mock.module('../services/analytics/growthbook.js', () => ({
+      ...realGrowthbook,
+    }))
     mock.restore()
-    mock.module('../services/analytics/growthbook.js', () => actualGrowthbook)
   } finally {
     releaseSharedMutationLock()
   }

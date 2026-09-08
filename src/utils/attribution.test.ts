@@ -6,8 +6,8 @@ import {
   setClientType,
   setMainLoopModelOverride,
 } from '../bootstrap/state.js'
-import * as actualModel from './model/model.js'
-import * as actualProviders from './model/providers.js'
+import * as realModel from './model/model.js'
+import * as realProviders from './model/providers.js'
 import {
   resetSettingsCache,
   setSessionSettingsCache,
@@ -15,6 +15,12 @@ import {
 import * as realSettings from './settings/settings.js'
 import type { SettingsJson } from './settings/types.js'
 
+// Pre-mock snapshots. `mock.module()` mutates the live module namespace object
+// in place and `mock.restore()` never unregisters a module mock, so restoring
+// from `realModel`/`realProviders` directly would re-install the stub. Spread
+// copies captured before any mock runs stay pristine for the afterEach restore.
+const actualModel = { ...realModel }
+const actualProviders = { ...realProviders }
 const actualSettings = { ...realSettings }
 
 let getAttributionTexts: (typeof import('./attribution.js'))['getAttributionTexts']

@@ -1,13 +1,31 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import * as realAxios from 'axios'
-import * as realOauthConstants from 'src/constants/oauth.js'
-import * as realGrowthbook from 'src/services/analytics/growthbook.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
-import * as realAuth from './auth.js'
-import * as realModel from './model/model.js'
+
+// Capture the genuine modules once, through query-suffixed specifiers so the
+// capture can never pick up an already-registered mock. A plain
+// `import * as … from './auth.js'` binds the LIVE namespace object, which
+// `mock.module()` mutates in place — re-registering that namespace in afterEach
+// is a no-op that RE-INSTALLS the stub and leaves the module poisoned for every
+// later test file in the same runner process. Precedent: src/utils/auth.test.ts:8-10,
+// src/utils/file.test.ts:12-14, and the cache-busted providers capture in
+// importActualProviders() below.
+const realOauthConstants = (await import(
+  `../constants/oauth.js?fastModeReal=${Date.now()}-${Math.random()}`
+)) as typeof import('../constants/oauth.js')
+const realGrowthbook = (await import(
+  `../services/analytics/growthbook.js?fastModeReal=${Date.now()}-${Math.random()}`
+)) as typeof import('../services/analytics/growthbook.js')
+const realAuth = (await import(
+  `./auth.js?fastModeReal=${Date.now()}-${Math.random()}`
+)) as typeof import('./auth.js')
+const realModel = (await import(
+  `./model/model.js?fastModeReal=${Date.now()}-${Math.random()}`
+)) as typeof import('./model/model.js')
+
 type ProvidersModule = typeof import('./model/providers.js')
 type AxiosModule = typeof import('axios')
 
@@ -224,15 +242,23 @@ beforeEach(async () => {
 
 afterEach(async () => {
   try {
-    mock.restore()
+    // Re-register the genuine modules BEFORE mock.restore(): Bun's
+    // `mock.restore()` restores spyOn/function mocks only and never unregisters
+    // a `mock.module()` registration, so every stub installCommonMocks()
+    // installed would otherwise outlive this file for the rest of the runner
+    // process. Each re-registration must use the captured, cache-busted module
+    // (see the top of this file) — never the live namespace.
     if (originalProvidersModule) {
       mock.module('./model/providers.js', () => originalProvidersModule!)
     }
     mock.module('axios', () => originalAxiosModule ?? realAxios)
-    mock.module('src/constants/oauth.js', () => realOauthConstants)
-    mock.module('src/services/analytics/growthbook.js', () => realGrowthbook)
-    mock.module('./auth.js', () => realAuth)
-    mock.module('./model/model.js', () => realModel)
+    mock.module('src/constants/oauth.js', () => ({ ...realOauthConstants }))
+    mock.module('src/services/analytics/growthbook.js', () => ({
+      ...realGrowthbook,
+    }))
+    mock.module('./auth.js', () => ({ ...realAuth }))
+    mock.module('./model/model.js', () => ({ ...realModel }))
+    mock.restore()
     process.env = { ...originalEnv }
     const { resetStateForTests } = await import('../bootstrap/state.js')
     resetStateForTests()

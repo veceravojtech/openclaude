@@ -1,6 +1,19 @@
 import { afterEach, describe, expect, mock, test } from 'bun:test'
 
+// Capture the genuine settings module once, through a query-suffixed specifier so
+// the capture can never pick up an already-registered mock. A plain
+// `import * as … from '../settings/settings.js'` would bind the live namespace,
+// which `mock.module()` mutates in place, so restoring from it re-installs the stub.
+const realSettings = (await import(
+  `../settings/settings.js?dangerousModePromptRuntimeReal=${Date.now()}-${Math.random()}`
+)) as typeof import('../settings/settings.js')
+
+// Bun's `mock.restore()` restores spyOn/function mocks only — it does NOT
+// unregister a `mock.module()` registration, so the settings stub below would
+// otherwise outlive this file for the rest of the runner process. Re-register the
+// genuine module first, then restore the function mocks.
 afterEach(() => {
+  mock.module('../settings/settings.js', () => ({ ...realSettings }))
   mock.restore()
 })
 
@@ -14,6 +27,7 @@ describe('dangerousModePromptRuntime', () => {
     }> = []
 
     mock.module('../settings/settings.js', () => ({
+      ...realSettings,
       hasSkipDangerousModePermissionPrompt: () => hasBypassAcceptance,
       hasSkipFullAccessModePermissionPrompt: () => hasFullAccessAcceptance,
       updateSettingsForSource: (

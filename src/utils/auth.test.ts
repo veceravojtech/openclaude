@@ -1,5 +1,13 @@
 import { afterEach, expect, mock, test } from 'bun:test'
-import * as originalSettings from './settings/settings.js'
+
+// Capture the genuine settings module once, through a query-suffixed specifier so
+// the capture can never pick up an already-registered mock. A plain
+// `import * as … from './settings/settings.js'` binds the LIVE namespace, which
+// `mock.module()` mutates in place — restoring from it is a no-op that re-installs
+// the stub. Precedent: src/utils/gitSettings.test.ts:8-10.
+const realSettings = (await import(
+  `./settings/settings.js?authTestRealSettings=${Date.now()}-${Math.random()}`
+)) as typeof import('./settings/settings.js')
 
 type MockSource =
   | 'userSettings'
@@ -14,10 +22,14 @@ async function importAuthFresh() {
   return await import(`./auth.js?ts=${Date.now()}-${Math.random()}`)
 }
 
-// Restore Bun's module mocks after each test so leaked settings behavior
-// cannot influence later auth/settings tests in the same process.
+// Bun's `mock.restore()` restores spyOn/function mocks only — it does NOT
+// unregister a `mock.module()` registration, so the settings stub installed by
+// mockSettings() would otherwise outlive this file for the rest of the runner
+// process and poison every later test that reads settings. Re-register the genuine
+// module first, then restore the function mocks.
 // Addresses jatmn's P3 on #1731: test isolation for mock.module().
 afterEach(() => {
+  mock.module('./settings/settings.js', () => ({ ...realSettings }))
   mock.restore()
 })
 
@@ -30,7 +42,7 @@ function mockSettings(
   source: MockSource = 'userSettings',
 ) {
   mock.module('./settings/settings.js', () => ({
-    ...originalSettings,
+    ...realSettings,
     getSettings_DEPRECATED: () => (source === 'none' ? {} : { subscriptionType }),
     getSettingsForSource: (s: string) => {
       if (source === 'none') return null
