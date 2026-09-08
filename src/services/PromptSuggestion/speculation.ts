@@ -82,6 +82,7 @@ const SAFE_READ_ONLY_TOOLS = new Set([
   'LSP',
   'TaskGet',
   'TaskList',
+  'ListAgents',
 ])
 
 function safeRemoveOverlay(overlayPath: string): void {

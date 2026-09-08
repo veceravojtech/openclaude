@@ -18,6 +18,7 @@ import { FILE_WRITE_TOOL_NAME } from '../tools/FileWriteTool/prompt.js'
 import { NOTEBOOK_EDIT_TOOL_NAME } from '../tools/NotebookEditTool/constants.js'
 import { SKILL_TOOL_NAME } from '../tools/SkillTool/constants.js'
 import { SEND_MESSAGE_TOOL_NAME } from '../tools/SendMessageTool/constants.js'
+import { LIST_AGENTS_TOOL_NAME } from '../tools/ListAgentsTool/constants.js'
 import { TASK_CREATE_TOOL_NAME } from '../tools/TaskCreateTool/constants.js'
 import { TASK_GET_TOOL_NAME } from '../tools/TaskGetTool/constants.js'
 import { TASK_LIST_TOOL_NAME } from '../tools/TaskListTool/constants.js'
@@ -78,6 +79,7 @@ export const IN_PROCESS_TEAMMATE_ALLOWED_TOOLS = new Set([
   TASK_LIST_TOOL_NAME,
   TASK_UPDATE_TOOL_NAME,
   SEND_MESSAGE_TOOL_NAME,
+  LIST_AGENTS_TOOL_NAME,
   // Teammate-created crons are tagged with the creating agentId and routed to
   // that teammate's pendingUserMessages queue (see useScheduledTasks.ts).
   CRON_CREATE_TOOL_NAME,
@@ -106,5 +108,7 @@ export const COORDINATOR_MODE_ALLOWED_TOOLS = new Set([
   AGENT_TOOL_NAME,
   TASK_STOP_TOOL_NAME,
   SEND_MESSAGE_TOOL_NAME,
+  // Read-only peer discovery; SendMessage's description points at it.
+  LIST_AGENTS_TOOL_NAME,
   SYNTHETIC_OUTPUT_TOOL_NAME,
 ])

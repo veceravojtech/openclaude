@@ -71,8 +71,8 @@ const inputSchema = lazySchema(() =>
       .string()
       .describe(
         feature('UDS_INBOX')
-          ? 'Recipient: teammate name, "*" for broadcast, "uds:<socket-path>" for a local peer, or "bridge:<session-id>" for a Remote Control peer (use ListPeers to discover)'
-          : 'Recipient: teammate name, or "*" for broadcast to all teammates',
+          ? 'Recipient: teammate or background agent name (use ListAgents to discover), "*" for broadcast, "uds:<socket-path>" for a local peer, or "bridge:<session-id>" for a Remote Control peer (use ListPeers to discover)'
+          : 'Recipient: teammate or background agent name (use ListAgents to discover), or "*" for broadcast to all teammates',
       ),
     summary: z
       .string()
