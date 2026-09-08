@@ -10,7 +10,7 @@ import { useKeybindings } from '../../keybindings/useKeybinding.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../../services/analytics/index.js';
 import { type AppState, useAppState, useSetAppState } from '../../state/AppState.js';
 import type { LocalJSXCommandOnDone } from '../../types/command.js';
-import { clearFastModeCooldown, FAST_MODE_MODEL_DISPLAY, getFastModeModel, getFastModeRuntimeState, getFastModeUnavailableReason, isFastModeEnabled, isFastModeSupportedByModel, prefetchFastModeStatus } from '../../utils/fastMode.js';
+import { clearFastModeCooldown, getFastModeModelDisplay, getFastModeModel, getFastModeRuntimeState, getFastModeUnavailableReason, isFastModeEnabled, isFastModeSupportedByModel, prefetchFastModeStatus } from '../../utils/fastMode.js';
 import { formatDuration } from '../../utils/format.js';
 import { getDefaultOpusModel } from '../../utils/model/model.js';
 import { getModelPricingString } from '../../utils/modelCost.js';
@@ -79,7 +79,7 @@ export function FastModePicker(t0) {
       });
       if (enableFastMode) {
         const fastIcon = getFastIconString(enableFastMode);
-        const modelUpdated = !isFastModeSupportedByModel(model) ? ` · model set to ${FAST_MODE_MODEL_DISPLAY}` : "";
+        const modelUpdated = !isFastModeSupportedByModel(model) ? ` · model set to ${getFastModeModelDisplay()}` : "";
         const confirmationPricing = getModelPricingString(getDefaultOpusModel(), {
           speed: 'fast'
         }) ?? '';
@@ -195,7 +195,7 @@ export function FastModePicker(t0) {
   }
   let t12;
   if ($[26] !== handleCancel || $[27] !== t10 || $[28] !== t9) {
-    t12 = <Dialog title={title} subtitle={`High-speed mode for ${FAST_MODE_MODEL_DISPLAY}. Billed as extra usage at a premium rate. Separate rate limits apply.`} onCancel={handleCancel} color="fastMode" inputGuide={t9}>{t10}{t11}</Dialog>;
+    t12 = <Dialog title={title} subtitle={`High-speed mode for ${getFastModeModelDisplay()}. Billed as extra usage at a premium rate. Separate rate limits apply.`} onCancel={handleCancel} color="fastMode" inputGuide={t9}>{t10}{t11}</Dialog>;
     $[26] = handleCancel;
     $[27] = t10;
     $[28] = t9;
@@ -235,7 +235,7 @@ export async function handleFastModeShortcut(enable: boolean, getAppState: () =>
   });
   if (enable) {
     const fastIcon = getFastIconString(true);
-    const modelUpdated = !isFastModeSupportedByModel(mainLoopModel) ? ` · model set to ${FAST_MODE_MODEL_DISPLAY}` : '';
+    const modelUpdated = !isFastModeSupportedByModel(mainLoopModel) ? ` · model set to ${getFastModeModelDisplay()}` : '';
     const pricing = getModelPricingString(getDefaultOpusModel(), {
       speed: 'fast'
     }) ?? '';

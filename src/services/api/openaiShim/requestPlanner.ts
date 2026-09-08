@@ -1,3 +1,4 @@
+import { isOpusAtLeast } from '../../../utils/model/opusVersion.js'
 export function hydrateOpenAIShimCompatibilityEnv(
   processEnv: NodeJS.ProcessEnv,
   dependencies: {
@@ -243,12 +244,7 @@ export function createRequestBodyPlanner(context: RequestBodyPlannerContext) {
         request.reasoning.effort === 'xhigh' ? 'max' : request.reasoning.effort
       const modelLower = request.resolvedModel.toLowerCase()
       const isAdaptive =
-        modelLower.includes('opus-4-7') ||
-        modelLower.includes('opus-4-6') ||
-        modelLower.includes('opus-4-8') ||
-        modelLower.includes('opus-4.6') ||
-        modelLower.includes('opus-4.7') ||
-        modelLower.includes('opus-4.8') ||
+        isOpusAtLeast(modelLower, 4, 6) ||
         modelLower.includes('sonnet-4-6') ||
         modelLower.includes('sonnet-4.6')
       const isOpus45 =

@@ -1,3 +1,4 @@
+import { isOpusAtLeast } from './model/opusVersion.js'
 import { isClaudeAISubscriber } from './auth.js'
 import { has1mContext } from './context.js'
 
@@ -16,11 +17,7 @@ export function isBilledAsExtraUsage(
     .trim()
   // Keep this in sync with the Opus families modelSupports1M recognizes — the
   // first-party default is now claude-opus-4-8, and 4.7 is the 3P default.
-  const isOpus =
-    m === 'opus' ||
-    m.includes('opus-4-6') ||
-    m.includes('opus-4-7') ||
-    m.includes('opus-4-8')
+  const isOpus = m === 'opus' || isOpusAtLeast(m, 4, 6)
   const isSonnet46 = m === 'sonnet' || m.includes('sonnet-4-6')
 
   if (isOpus && isOpus1mMerged) return false

@@ -15,6 +15,7 @@ import {
   CLAUDE_OPUS_4_7_CONFIG,
   CLAUDE_OPUS_4_8_CONFIG,
   CLAUDE_OPUS_4_CONFIG,
+  CLAUDE_OPUS_5_CONFIG,
   CLAUDE_SONNET_4_5_CONFIG,
   CLAUDE_SONNET_4_6_CONFIG,
   CLAUDE_SONNET_4_CONFIG,
@@ -24,6 +25,7 @@ import {
   getCanonicalName,
   type ModelShortName,
 } from './model/model.js'
+import { isOpusAtLeast } from './model/opusVersion.js'
 
 // @see https://platform.claude.com/docs/en/about-claude/pricing
 export type ModelCosts = {
@@ -129,6 +131,8 @@ export const MODEL_COSTS: Record<ModelShortName, ModelCosts> = {
     COST_TIER_5_25,
   [firstPartyNameToCanonical(CLAUDE_OPUS_4_8_CONFIG.firstParty)]:
     COST_TIER_5_25,
+  [firstPartyNameToCanonical(CLAUDE_OPUS_5_CONFIG.firstParty)]:
+    COST_TIER_5_25,
 }
 
 /**
@@ -161,15 +165,11 @@ function getKnownModelCosts(
 
   const shortName = getCanonicalName(model)
 
-  // Check if this is a fast-mode-capable Opus model (4.8/4.7/4.6) with fast mode
-  // active. These share the elevated fast-mode pricing the picker advertises, so
-  // the tracked cost must match the displayed price for the current default
-  // (4.8). Non-fast usage stays COST_TIER_5_25, same as the MODEL_COSTS entry.
-  if (
-    shortName === firstPartyNameToCanonical(CLAUDE_OPUS_4_8_CONFIG.firstParty) ||
-    shortName === firstPartyNameToCanonical(CLAUDE_OPUS_4_7_CONFIG.firstParty) ||
-    shortName === firstPartyNameToCanonical(CLAUDE_OPUS_4_6_CONFIG.firstParty)
-  ) {
+  // Check if this is a fast-mode-capable Opus model (4.6 and newer) with fast
+  // mode active. These share the elevated fast-mode pricing the picker
+  // advertises, so the tracked cost must match the displayed price for the
+  // current default. Non-fast usage stays COST_TIER_5_25, same as MODEL_COSTS.
+  if (isOpusAtLeast(shortName, 4, 6)) {
     const isFastMode = usage.speed === 'fast'
     return getOpus46CostTier(isFastMode)
   }

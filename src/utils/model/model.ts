@@ -32,6 +32,13 @@ import {
 import { LIGHTNING_BOLT } from '../../constants/figures.js'
 import { isModelAllowed } from './modelAllowlist.js'
 import { type ModelAlias, isModelAlias } from './aliases.js'
+import { CLAUDE_OPUS_5_CONFIG } from './configs.js'
+import { getResolvedLatestOpusModel } from './latestOpusModel.js'
+import {
+  canonicalOpusId,
+  formatOpusMarketingName,
+  parseOpusVersion,
+} from './opusVersion.js'
 import { capitalize } from '../stringUtils.js'
 import { DEFAULT_GEMINI_MODEL } from '../providerProfile.js'
 import { getAntModelOverrideConfig, resolveAntModel } from './antModels.js'
@@ -123,7 +130,8 @@ export function isNonCustomOpusModel(model: ModelName): boolean {
     model === getModelStrings().opus45 ||
     model === getModelStrings().opus46 ||
     model === getModelStrings().opus47 ||
-    model === getModelStrings().opus48
+    model === getModelStrings().opus48 ||
+    model === getModelStrings().opus50
   )
 }
 
@@ -261,7 +269,11 @@ export function getDefaultOpusModel(): ModelName {
   if (!isFirstPartyAnthropicProvider()) {
     return getModelStrings().opus47
   }
-  return getModelStrings().opus48
+  // First-party: serve the newest Opus the Models API reported (cached from a
+  // previous startup, refreshed in the background — see latestOpusModel.ts),
+  // and fall back to the pinned default when nothing has been resolved yet or
+  // dynamic resolution is disabled.
+  return getResolvedLatestOpusModel() ?? getModelStrings().opus50
 }
 
 // @[MODEL LAUNCH]: Update the default Sonnet model (3P providers may lag so keep defaults unchanged).
@@ -499,6 +511,13 @@ export function getDefaultMainLoopModel(): ModelName {
  */
 export function firstPartyNameToCanonical(name: ModelName): ModelShortName {
   name = name.toLowerCase()
+  // Opus 5 and later: derive the canonical id from the parsed version so ids
+  // the dynamic "latest Opus" resolver returns (and future point releases)
+  // canonicalize without a launch-day edit. Opus 4.x keeps the explicit chain.
+  const opusVersion = parseOpusVersion(name)
+  if (opusVersion && opusVersion.major >= 5 && name.includes('claude-opus')) {
+    return canonicalOpusId(opusVersion)
+  }
   // Special cases for Claude 4+ models to differentiate versions
   // Order matters: check more specific versions first (4-8 before 4-7 before 4-6 before 4-5 before 4)
   if (name.includes('claude-opus-4-8')) {
@@ -576,10 +595,11 @@ export function getClaudeAiUserDefaultModelDescription(
   fastMode = false,
 ): string {
   if (isMaxSubscriber() || isTeamPremiumSubscriber()) {
+    const opusName = getDefaultOpusMarketingName()
     if (isOpus1mMergeEnabled()) {
-      return `Opus 4.8 with 1M context · Most capable for complex work${fastMode ? getOpus46PricingSuffix(true) : ''}`
+      return `${opusName} with 1M context · Most capable for complex work${fastMode ? getOpus46PricingSuffix(true) : ''}`
     }
-    return `Opus 4.8 · Most capable for complex work${fastMode ? getOpus46PricingSuffix(true) : ''}`
+    return `${opusName} · Most capable for complex work${fastMode ? getOpus46PricingSuffix(true) : ''}`
   }
   return 'Sonnet 4.6 · Best for everyday tasks'
 }
@@ -588,14 +608,14 @@ export function renderDefaultModelSetting(
   setting: ModelName | ModelAlias,
 ): string {
   if (setting === 'opusplan') {
-    return 'Opus 4.8 in plan mode, else Sonnet 4.6'
+    return `${getDefaultOpusMarketingName()} in plan mode, else Sonnet 4.6`
   }
   return renderModelName(parseUserSpecifiedModel(setting))
 }
 
 export function getOpus46PricingSuffix(
   fastMode: boolean,
-  model: string = getModelStrings().opus48,
+  model: string = getDefaultOpusModel(),
 ): string {
   if (!isFirstPartyAnthropicProvider()) return ''
   const pricing = getModelPricingString(model, {
@@ -697,6 +717,17 @@ export function getPublicModelDisplayName(model: ModelName): string | null {
       return copilotModelNames[model]
     }
     return null
+  }
+  // Opus 5 and later — including ids the dynamic "latest Opus" resolver may
+  // return that have no config entry yet (e.g. a future claude-opus-5-1).
+  const opusVersion = parseOpusVersion(model)
+  if (
+    opusVersion &&
+    opusVersion.major >= 5 &&
+    model.toLowerCase().includes('claude-opus')
+  ) {
+    const has1m = /\[1m]$/i.test(model)
+    return `${formatOpusMarketingName(opusVersion)}${has1m ? ' (1M context)' : ''}`
   }
   switch (model) {
     case 'gpt-5.6-sol':
@@ -1020,6 +1051,20 @@ export function modelDisplayString(model: ModelSetting): string {
   return model === resolvedModel ? resolvedModel : `${model} (${resolvedModel})`
 }
 
+/**
+ * Marketing name of the Opus the `opus` alias currently resolves to, e.g.
+ * "Opus 5". Derived from the parsed version so it works for provider-prefixed
+ * ids and for ids the dynamic resolver returns. When the active provider maps
+ * the alias to a non-Opus model (OpenAI-compatible routes), the pinned
+ * first-party Opus is named instead, so first-party fallbacks stay accurate.
+ */
+export function getDefaultOpusMarketingName(): string {
+  const version =
+    parseOpusVersion(getDefaultOpusModel()) ??
+    parseOpusVersion(CLAUDE_OPUS_5_CONFIG.firstParty)
+  return version ? formatOpusMarketingName(version) : 'Opus'
+}
+
 // @[MODEL LAUNCH]: Add a marketing name mapping for the new model below.
 export function getMarketingNameForModel(modelId: string): string | undefined {
   if (getAPIProvider() === 'foundry') {
@@ -1030,6 +1075,11 @@ export function getMarketingNameForModel(modelId: string): string | undefined {
   const has1m = modelId.toLowerCase().includes('[1m]')
   const canonical = getCanonicalName(modelId)
 
+  const opusVersion = parseOpusVersion(canonical)
+  if (opusVersion && opusVersion.major >= 5) {
+    const name = formatOpusMarketingName(opusVersion)
+    return has1m ? `${name} (with 1M context)` : name
+  }
   if (canonical.includes('claude-opus-4-8')) {
     return has1m ? 'Opus 4.8 (with 1M context)' : 'Opus 4.8'
   }

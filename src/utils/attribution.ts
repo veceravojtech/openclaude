@@ -29,6 +29,7 @@ import {
 } from './governancePolicy.js'
 import {
   getCanonicalName,
+  getDefaultOpusMarketingName,
   getMainLoopModel,
   getPublicModelDisplayName,
   getPublicModelName,
@@ -93,8 +94,8 @@ export function getDefaultCommitCoAuthorName({
   // historical public fallback. OpenAI-compatible providers should identify the
   // actual configured model instead of claiming Claude Opus.
   if (apiProvider === 'firstParty') {
-    // @[MODEL LAUNCH]: Update this fallback when the default public Claude model changes.
-    return 'Claude Opus 4.8'
+    // Follows the Opus the `opus` alias currently resolves to.
+    return `Claude ${getDefaultOpusMarketingName()}`
   }
 
   const sanitizedModel = sanitizeCoAuthorNamePart(model)

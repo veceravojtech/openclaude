@@ -42,7 +42,7 @@ mock.module('../../utils/auth.js', () => ({
 }))
 mock.module('../../utils/fastMode.js', () => ({
   clearFastModeCooldown: () => {},
-  FAST_MODE_MODEL_DISPLAY: 'Opus 4.8',
+  getFastModeModelDisplay: () => 'Opus 5',
   getFastModeModel: () => 'opus',
   getFastModeRuntimeState: () => ({ status: 'active' }),
   getFastModeUnavailableReason: () => null,
@@ -50,6 +50,12 @@ mock.module('../../utils/fastMode.js', () => ({
   isFastModeSupportedByModel: () => true,
   prefetchFastModeStatus: async () => {},
 }))
+
+// The Opus rows price the model the `opus` alias resolves to (the pinned
+// default under test), so key the custom pricing on that id rather than a
+// hardcoded version.
+const { getDefaultOpusModel } = await import('../../utils/model/model.js')
+const defaultOpusModel = getDefaultOpusModel()
 
 const originalSources = [...getAllowedSettingSources()]
 const originalFlagPath = getFlagSettingsPath()
@@ -67,7 +73,7 @@ function writePricing(opusInput: number, opusOutput: number): void {
           promptCacheWriteTokens: 0,
           webSearchRequests: 0,
         },
-        'claude-opus-4-8': {
+        [defaultOpusModel]: {
           inputTokens: opusInput,
           outputTokens: opusOutput,
           promptCacheReadTokens: 0,

@@ -848,3 +848,25 @@ teammate active-message compaction, malformed hard-cap overrides, and
 pruned-history tool-call/tool-result pairing. They are not a substitute for a
 multi-hour manual soak, but they pin the bounded-history and conversion
 invariants that previously let long sessions grow until Node/V8 OOM.
+
+## Default Opus model resolution
+
+On the first-party Anthropic API, the `opus` alias (and the Max / Team Premium
+default model) resolves to the newest Opus model your account can see, instead
+of a version pinned in the source. After startup OpenClaude queries
+`GET /v1/models` in the background, keeps the newest `claude-opus*` id (by
+`created_at`) in `~/.openclaude.json`, and serves that cached id on later
+startups. The lookup uses the session's own credential (API key or OAuth
+token), times out after 5 seconds, is repeated at most every 6 hours, and never
+blocks startup. Until the first successful lookup, or whenever the lookup
+fails, the pinned default (`claude-opus-5`) is used.
+
+- `ANTHROPIC_DEFAULT_OPUS_MODEL` still takes precedence over both.
+- Set `OPENCLAUDE_DISABLE_LATEST_OPUS_RESOLUTION=1` to always use the pinned
+  default and skip the lookup.
+- Custom Anthropic-compatible endpoints and third-party providers (Bedrock,
+  Vertex AI, Foundry) are not resolved dynamically; they keep their pinned
+  defaults.
+- The `/model` picker, `/fast`, commit attribution and plan-mode descriptions
+  all follow the resolved model, so they read "Opus 5" today and the next
+  release's name after it appears in the Models API.

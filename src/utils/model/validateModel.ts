@@ -1,3 +1,4 @@
+import { isOpusAtLeast } from './opusVersion.js'
 // biome-ignore-all assist/source/organizeImports: internal-only import markers must not be reordered
 import { MODEL_ALIASES } from './aliases.js'
 import { isModelAllowed } from './modelAllowlist.js'
@@ -222,6 +223,9 @@ function get3PFallbackSuggestion(model: string): string | undefined {
     return undefined
   }
   const lowerModel = model.toLowerCase()
+  if (isOpusAtLeast(lowerModel, 5)) {
+    return getModelStrings().opus48
+  }
   if (lowerModel.includes('opus-4-8') || lowerModel.includes('opus_4_8')) {
     return getModelStrings().opus47
   }

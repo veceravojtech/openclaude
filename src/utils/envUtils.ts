@@ -244,6 +244,7 @@ const VERTEX_REGION_OVERRIDES: ReadonlyArray<[string, string]> = [
  * Different models may be available in different regions.
  */
 export function getVertexRegionForModel(
+  ['claude-opus-5', 'VERTEX_REGION_CLAUDE_5_0_OPUS'],
   model: string | undefined,
 ): string | undefined {
   if (model) {

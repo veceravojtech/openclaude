@@ -1,3 +1,4 @@
+import { isOpusAtLeast } from './model/opusVersion.js'
 // biome-ignore-all assist/source/organizeImports: internal-only import markers must not be reordered
 import { isUltrathinkEnabled } from './thinking.js'
 import { getInitialSettings } from './settings/settings.js'
@@ -537,9 +538,7 @@ function legacyModelSupportsEffort(
   // variations (e.g. `claude-opus-4-7`, `opencode-claude-opus-4-8`).
   if (
     nativeTransport === 'anthropic' &&
-    (m.includes('opus-4-5') || m.includes('opus-4-6') ||
-      m.includes('opus-4-7') || m.includes('opus-4-8') ||
-      m.includes('sonnet-4-6'))
+    (isOpusAtLeast(m, 4, 5) || m.includes('sonnet-4-6'))
   ) {
     return true
   }
@@ -796,7 +795,7 @@ function legacyModelSupportsMaxEffort(
   if (supported3P !== undefined) {
     return supported3P
   }
-  if (model.toLowerCase().includes('opus-4-6') || model.toLowerCase().includes('opus-4-7') || model.toLowerCase().includes('opus-4-8')) {
+  if (isOpusAtLeast(model, 4, 6)) {
     return true
   }
   if (process.env.USER_TYPE === 'ant' && resolveAntModel(model)) {
@@ -826,7 +825,7 @@ function legacyModelSupportsXHighEffort(
   if (modelUsesOpenAIEffort(model, context)) {
     return true
   }
-  if (model.toLowerCase().includes('opus-4-7') || model.toLowerCase().includes('opus-4-8')) {
+  if (isOpusAtLeast(model, 4, 7)) {
     return true
   }
   return false
@@ -1332,11 +1331,7 @@ function getLegacyDefaultEffortForModel(
   // Max/Team also get medium when the tengu_grey_step2 config is enabled.
   // getDefaultOpusModel() now returns opus48 for first-party users.
   const lowerModel = model.toLowerCase()
-  if (
-    lowerModel.includes('opus-4-8') ||
-    lowerModel.includes('opus-4-7') ||
-    lowerModel.includes('opus-4-6')
-  ) {
+  if (isOpusAtLeast(lowerModel, 4, 6)) {
     if (isProSubscriber()) {
       return 'medium'
     }

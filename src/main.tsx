@@ -63,6 +63,7 @@ import {
   parseMaxTurnsCommanderArgument,
 } from './utils/replMaxTurns.js';
 import { getInitialFastModeSetting, isFastModeEnabled, prefetchFastModeStatus, resolveFastModeStatusFromCache } from './utils/fastMode.js';
+import { prefetchLatestOpusModel } from './utils/model/latestOpusModel.js';
 import { applyConfigEnvironmentVariables } from './utils/managedEnv.js';
 import { createSystemMessage, createUserMessage } from './utils/messages.js';
 import { isFirstPartyAnthropicBaseUrl } from './utils/model/providers.js';
@@ -2269,6 +2270,8 @@ async function run(): Promise<CommanderCommand> {
 
       // TODO: Consolidate other prefetches into a single bootstrap request.
       void prefetchPassesEligibility();
+      // Newest Opus for the `opus` alias — cached for the next startup.
+      void prefetchLatestOpusModel();
       if (!getFeatureValue_CACHED_MAY_BE_STALE('tengu_miraculo_the_bard', false)) {
         void prefetchFastModeStatus();
       } else {

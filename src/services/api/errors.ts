@@ -1,3 +1,4 @@
+import { isOpusAtLeast } from '../../utils/model/opusVersion.js'
 import {
   APIConnectionError,
   APIConnectionTimeoutError,
@@ -1370,6 +1371,9 @@ function get3PModelFallbackSuggestion(model: string): string | undefined {
   const m = model.toLowerCase()
   // Mirror the validation-time fallback chain in validateModel.ts so the error
   // path suggests the previous Opus for the recent models too.
+  if (isOpusAtLeast(m, 5)) {
+    return getModelStrings().opus48
+  }
   if (m.includes('opus-4-8') || m.includes('opus_4_8')) {
     return getModelStrings().opus47
   }

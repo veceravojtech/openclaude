@@ -633,6 +633,11 @@ export type GlobalConfig = {
   // Used to detect cross-session changes and notify users.
   penguinModeOrgEnabled?: boolean
 
+  // Newest first-party Opus id reported by GET /v1/models, and when it was last
+  // checked. Serves the `opus` alias on later startups (utils/model/latestOpusModel.ts).
+  latestOpusModelId?: string
+  latestOpusModelCheckedAt?: number
+
   // Epoch ms when background refreshes last ran (fast mode, quota, passes, client data).
   // Used with tengu_cicada_nap_ms to throttle API calls
   startupPrefetchedAt?: number
