@@ -15,7 +15,6 @@
   ],
   "project": ["src/**/*.{ts,tsx}", "scripts/**/*.ts"],
   "ignore": [
-    "src/integrations/generated/**",
     "src/context/repoMap/__fixtures__/**",
     "src/services/internalLogging.ts",
     "src/types/generated/**",
@@ -23,16 +22,6 @@
     "src/tools/REPLTool/**",
     "src/tools/TungstenTool/**",
     "src/tools/SuggestBackgroundPRTool/**",
-    "src/tools/VerifyPlanExecutionTool/**",
-    "src/commands/agents-platform/**",
-    "src/assistant/AssistantSessionChooser.tsx",
-    "src/commands/assistant/AssistantSessionChooser.ts",
-    "src/utils/protectedNamespace.ts",
-    "src/utils/providerAutoDetect.ts"
-  ],
-  "ignoreDependencies": [
-    "@types/bun",
-    "@anthropic-ai/foundry-sdk",
-    "google-auth-library"
+    "src/commands/assistant/AssistantSessionChooser.ts"
   ]
 }

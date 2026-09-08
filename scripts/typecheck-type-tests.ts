@@ -1,10 +1,10 @@
 import path from 'node:path'
 import ts from 'typescript'
 
-// Root `tsc --noEmit` has a known failing baseline. This focused check
-// enforces diagnostics in type assertion files and covered implementation
-// files while quarantining dependency diagnostics until the broader baseline
-// is fixed.
+// Focused type check over tsconfig.type-tests.json: the `*.types.test.ts`
+// assertion files plus the implementation files they cover. Only diagnostics
+// from those root files (or not tied to any file) block; diagnostics from
+// transitively imported dependencies are counted and ignored.
 function fail(message: string): never {
   console.error(message)
   process.exit(1)

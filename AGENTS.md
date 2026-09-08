@@ -67,7 +67,13 @@ Focused checks:
 bun test ./path/to/test-file.test.ts
 bun run test:provider
 bun run test:provider-recommendation
+bun run typecheck:e2e   # type-checks the opt-in tmux harness + its helper module and test; see docs/e2e-tui.md
+bun run typecheck:scripts   # type-checks scripts/check-docs-index.ts + its test; they sit outside tsconfig.json's src/**/* include
+bun run docs:check   # README <-> web/public/llms.txt docs-index consistency
+bun run build && OPENCLAUDE_E2E=1 bun run e2e:tui   # opt-in tmux TUI key-delivery harness (needs tmux); see docs/e2e-tui.md
 ```
+
+The `e2e:tui` harness is opt-in: it skips with exit code 0 when `OPENCLAUDE_E2E=1` is unset, `tmux` is not on `PATH`, or the installed tmux is too old, and it is not part of the required pre-push preflight.
 
 Web checks, when changes can affect the site:
 

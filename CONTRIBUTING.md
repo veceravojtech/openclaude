@@ -306,6 +306,14 @@ bun run web:typecheck
 bun run web:build
 ```
 
+If the change touches terminal key handling — `src/ink/**`, `src/components/PromptInput/**`, or the list dialogs — and `tmux` is available, you can additionally run the TUI key-delivery E2E harness ([docs/e2e-tui.md](docs/e2e-tui.md)):
+
+```bash
+bun run build && OPENCLAUDE_E2E=1 bun run e2e:tui
+```
+
+This harness is optional and opt-in. It is **not** part of the required preflight above and is not run by CI, and it skips with exit code 0 when `OPENCLAUDE_E2E=1` is unset, `tmux` is not on `PATH`, or the installed tmux is too old.
+
 Notes on the local preflight:
 
 - `bun run check` already builds the CLI and includes smoke, deadcode, and the full unit pass (`test:full`) — do not run those separately, or you execute work twice.

@@ -290,6 +290,7 @@ Beginner-friendly guides:
 
 - [Non-Technical Setup](docs/non-technical-setup.md)
 - [Windows Quick Start](docs/quick-start-windows.md)
+- [Windows Aliases and Launchers](docs/windows-aliases-and-launchers.md)
 - [macOS / Linux Quick Start](docs/quick-start-mac-linux.md)
 
 Advanced and source-build guides:
@@ -300,6 +301,8 @@ Advanced and source-build guides:
 - [Headless gRPC Server](docs/grpc-server.md)
 - [Repo Map (codebase intelligence)](docs/repo-map.md)
 - [Skills](docs/skills.md)
+- [TUI key-delivery E2E harness](docs/e2e-tui.md)
+- [Hook Chains (self-healing agent mesh)](docs/hook-chains.md)
 - [Android Install](ANDROID_INSTALL.md)
 
 ## Supported Providers
@@ -307,6 +310,7 @@ Advanced and source-build guides:
 | Provider | Setup Path | Notes |
 | --- | --- | --- |
 | OpenAI-compatible | `/provider` or env vars | Works with OpenAI, OpenRouter, DeepSeek, Groq, Mistral, LM Studio, and other compatible `/v1` servers |
+| LiteLLM | OpenAI-compatible env vars ([setup guide](docs/litellm-setup.md)) | Self-hosted LiteLLM Proxy: set `OPENAI_BASE_URL` to your proxy's `/v1` and `OPENAI_MODEL` to a configured model name; routes to 100+ providers behind LiteLLM's unified API |
 | Z.AI GLM Coding Plan | `/provider` or OpenAI-compatible env vars | Uses `OPENAI_API_KEY` at `https://api.z.ai/api/coding/paas/v4`, defaults to `glm-5.2`, and offers the vision-capable `glm-5.3-flash` option |
 | AI/ML API | `/provider` or `AIMLAPI_API_KEY` ([setup guide](docs/aimlapi-setup.md)) | Uses `https://api.aimlapi.com/v1`, auto-detects the OpenAI-compatible route from `AIMLAPI_API_KEY`, sends OpenClaude attribution headers, and discovers chat-capable models from the public `/models` catalog |
 | Concentrate | `/provider` or `CONCENTRATE_API_KEY` | Unified OpenAI-compatible gateway at `https://api.concentrate.ai/v1`; defaults to `deepseek-v4-flash` and auto-discovers the chat model catalog |

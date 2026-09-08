@@ -16,6 +16,7 @@ OpenClaude originated from the Claude Code codebase and has since been substanti
 
 - [Quick start (Mac/Linux)](https://github.com/Gitlawb/openclaude/blob/main/docs/quick-start-mac-linux.md)
 - [Quick start (Windows)](https://github.com/Gitlawb/openclaude/blob/main/docs/quick-start-windows.md)
+- [Windows aliases and launchers](https://github.com/Gitlawb/openclaude/blob/main/docs/windows-aliases-and-launchers.md)
 - [Non-technical setup](https://github.com/Gitlawb/openclaude/blob/main/docs/non-technical-setup.md)
 - [Android install](https://github.com/Gitlawb/openclaude/blob/main/ANDROID_INSTALL.md)
 - [npm install](https://www.npmjs.com/package/@gitlawb/openclaude): `npm install -g @gitlawb/openclaude@latest` (requires Node >= 22)
@@ -29,7 +30,15 @@ OpenClaude originated from the Claude Code codebase and has since been substanti
 - [Agent routing](https://github.com/Gitlawb/openclaude/blob/main/docs/agent-routing.md)
 - [Headless gRPC server](https://github.com/Gitlawb/openclaude/blob/main/docs/grpc-server.md)
 - [Repository map](https://github.com/Gitlawb/openclaude/blob/main/docs/repo-map.md)
+- [Skills](https://github.com/Gitlawb/openclaude/blob/main/docs/skills.md)
+- [TUI key-delivery E2E harness](https://github.com/Gitlawb/openclaude/blob/main/docs/e2e-tui.md)
+- [Hook chains](https://github.com/Gitlawb/openclaude/blob/main/docs/hook-chains.md)
 - [VS Code extension](https://github.com/Gitlawb/openclaude/blob/main/vscode-extension/openclaude-vscode/README.md)
+
+## Providers
+
+- [AI/ML API setup](https://github.com/Gitlawb/openclaude/blob/main/docs/aimlapi-setup.md)
+- [LiteLLM setup](https://github.com/Gitlawb/openclaude/blob/main/docs/litellm-setup.md)
 
 ## Community
 
