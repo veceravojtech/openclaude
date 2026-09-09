@@ -369,7 +369,11 @@ function PromptInput({
       agentNameRegistry
     }, viewedAgent.id) ?? viewedAgent.description;
   }, [viewedTeammate, viewingAgentName, viewingAgentTaskId, tasks, agentNameRegistry]);
-  // In-process teammates sorted alphabetically for footer team selector
+  // In-process teammates in the shared depth-first tree order
+  // (getRunningTeammatesSorted): each team's members by name, and a sub-team
+  // straight after the teammate leading it. teammateFooterIndex indexes this
+  // array (offset by one for the leader's slot), so the order has to stay the
+  // one TeammateSpinnerTree draws and the pill row shows.
   const inProcessTeammates = useMemo(() => getRunningTeammatesSorted(tasks), [tasks]);
 
   // Team mode: all background tasks are in-process teammates

@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import React from 'react'
 
+import { stringWidth } from '../../ink/stringWidth.js'
 import {
   type AppState,
   AppStateProvider,
@@ -20,6 +21,8 @@ import { TeammateSpinnerTree } from './TeammateSpinnerTree.js'
  */
 
 const COLUMNS = 120
+/** The narrow terminal the width budget has to survive at every depth. */
+const NARROW_COLUMNS = 80
 
 function teammate(
   name: string,
@@ -80,13 +83,37 @@ function stateWith(teammates: InProcessTeammateTaskState[]): AppState {
 async function renderTree(
   teammates: InProcessTeammateTaskState[],
   props: Record<string, unknown> = {},
+  columns: number = COLUMNS,
 ): Promise<string> {
   return await renderToString(
     <AppStateProvider initialState={stateWith(teammates)}>
       <TeammateSpinnerTree {...props} />
     </AppStateProvider>,
-    COLUMNS,
+    columns,
   )
+}
+
+/**
+ * An activity description far longer than any row can show, so every row has to
+ * truncate and therefore has to have budgeted its own width correctly.
+ */
+const LONG_ACTIVITY =
+  'Reading src/components/Spinner/TeammateSpinnerLine.tsx and cross-checking the width budget against every nested row of the tree'
+
+/** The same teammate, now reporting a long activity plus stats. */
+function busy(t: InProcessTeammateTaskState): InProcessTeammateTaskState {
+  return {
+    ...t,
+    progress: {
+      toolUseCount: 3,
+      tokenCount: 12_345,
+      lastActivity: {
+        toolName: 'Read',
+        input: {},
+        activityDescription: LONG_ACTIVITY,
+      },
+    },
+  }
 }
 
 /** One entry per teammate row: its @name and the column its tree char sits in. */
@@ -178,6 +205,51 @@ describe('TeammateSpinnerTree', () => {
       .split('\n')
       .find(line => line.includes('enter to view'))
     expect(selected).toContain('@worker-1')
+  })
+
+  test('keeps every row inside a narrow terminal: the sub-team indent is spent from the row\'s own width budget', async () => {
+    // The indent is real estate the row never gets back: at 80 columns a
+    // depth-3 row that still budgets from the full width overruns the terminal
+    // and yoga squeezes it — the pointer column collapses (the row starts at
+    // root + 3 instead of root + 4) and the "…" truncation marker is lost.
+    const frame = await renderTree(
+      [...TWO_LEVEL, teammate('deputy', 'email/supervisor/worker-1')].map(busy),
+      {},
+      NARROW_COLUMNS,
+    )
+    const rows = teammateRows(frame)
+    const rowLines = frame.split('\n').filter(line => /@[\w-]+/.test(line))
+
+    expect(rows.map(row => row.name)).toEqual([
+      'alice',
+      'supervisor',
+      'worker-1',
+      'deputy',
+      'worker-2',
+      'zoe',
+    ])
+
+    // (a) the depth-3 row still gets its full two columns per level
+    const root = rows.find(row => row.name === 'alice')!.indent
+    expect(rows.find(row => row.name === 'worker-1')!.indent).toBe(root + 2)
+    expect(rows.find(row => row.name === 'deputy')!.indent).toBe(root + 4)
+
+    // (b) nothing overruns the terminal
+    for (const line of rowLines) {
+      expect(stringWidth(line)).toBeLessThanOrEqual(NARROW_COLUMNS)
+    }
+
+    // (c) nested rows end where the root rows end — one right margin for the
+    // whole tree, which is exactly what a full-width budget cannot produce
+    const rootRight = stringWidth(rowLines.find(line => line.includes('@alice'))!)
+    for (const line of rowLines) {
+      expect(stringWidth(line)).toBe(rootRight)
+    }
+
+    // (d) the truncated activity still says it was truncated
+    for (const line of rowLines) {
+      expect(line).toContain('…')
+    }
   })
 
   test('renders nothing when no teammate is running', async () => {

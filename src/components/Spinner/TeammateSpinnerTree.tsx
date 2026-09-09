@@ -150,12 +150,15 @@ export function TeammateSpinnerTree(t0) {
         t3 = $[50];
       }
       t4 = teammateTasks.map((teammate, index) => {
-        const line = <TeammateSpinnerLine key={teammate.id} teammate={teammate} isLast={!isInSelectionMode && index === teammateTasks.length - 1} isSelected={isInSelectionMode && selectedIndex === index} isForegrounded={viewingAgentTaskId === teammate.id} allIdle={allIdle} showPreview={showTeammateMessagePreview} />;
         // Depth-first order (getRunningTeammatesSorted) already puts a sub-team
         // straight under the teammate that leads it; the indent is what makes
         // that visible. A root-team member renders exactly as before — no
-        // wrapper at all — so only nested rows change shape.
+        // wrapper at all, indent 0 — so only nested rows change shape.
         const indent = (getTeamDepth(teammate.identity.teamName) - 1) * SUB_TEAM_INDENT;
+        // The line is told its own indent as well as wrapped in it: those
+        // columns are spent before the row starts, so they have to come off the
+        // row's width budget or a deep row overruns the terminal.
+        const line = <TeammateSpinnerLine key={teammate.id} teammate={teammate} isLast={!isInSelectionMode && index === teammateTasks.length - 1} isSelected={isInSelectionMode && selectedIndex === index} isForegrounded={viewingAgentTaskId === teammate.id} allIdle={allIdle} showPreview={showTeammateMessagePreview} indent={indent} />;
         return indent > 0 ? <Box key={teammate.id} paddingLeft={indent}>{line}</Box> : line;
       });
     }

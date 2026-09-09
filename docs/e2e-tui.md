@@ -57,7 +57,7 @@ collected by the default `bun test`, and therefore by `bun run check` and CI.
 | 1 | `Down Down Enter` in **one** `send-keys` call | the row **two** below the preselected one is confirmed |
 | 2 | `select-window` away and back, then `Down Enter` | the row **one** below the preselected one is confirmed |
 | 3 | `send-keys -H 1b`, 350ms gap, `send-keys -H 5b 42` | picker dismissed by the residual Escape, **no** `[B` in the prompt |
-| 4 | a prompt answered by a **fake** Messages API with an `Agent` tool call, then `S-Down S-Down Enter`, then `Escape` | `Viewing @supervisor` opens, one Escape returns to the leader, the `@supervisor` pill survives |
+| 4 | a prompt answered by a **fake** Messages API with an `Agent` tool call, then `S-Down S-Down Enter`, then `Escape` | `Viewing team-lead › supervisor` opens, one Escape returns to the leader, the `@supervisor` pill survives |
 
 Scenario 1 reproduces the batched-stdin defect: every key of a single
 `send-keys` call reaches the CLI in one stdin read, so `Enter` can act on the
@@ -81,8 +81,11 @@ gate on that status alone: it aborted the current turn and returned without
 leaving the view, so for an idle teammate, which has no turn to abort, Escape
 did nothing and the header's `esc return` hint lied. The fix interrupts a busy
 teammate and returns from an idle one; the scenario asserts the return and that
-the teammate is still alive afterwards. Run against the pre-fix hook it fails
-with `still "Viewing @supervisor" 15000ms after Escape`.
+the teammate is still alive afterwards. Since `b231b071` the header names the
+teammate by its path down the team tree, so the string the harness greps for is
+`Viewing team-lead › supervisor` rather than the bare handle. Run against the
+pre-fix hook it fails with
+`still "Viewing team-lead › supervisor" 15000ms after Escape`.
 
 All four scenarios pass on the current tree, so `bun run e2e:tui` exits 0. It
 exits non-zero the moment any of them reproduces again, which is what makes it a

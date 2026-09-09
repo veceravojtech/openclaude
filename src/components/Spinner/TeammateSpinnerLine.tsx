@@ -20,6 +20,13 @@ type Props = {
   isForegrounded?: boolean;
   allIdle?: boolean;
   showPreview?: boolean;
+  /**
+   * Columns of sub-team indent this row is already wrapped in by
+   * TeammateSpinnerTree. They are consumed before the row starts, so the width
+   * math below budgets from `columns - indent`, not from the full terminal.
+   * A root-team row passes nothing and renders exactly as before.
+   */
+  indent?: number;
 };
 
 /**
@@ -75,7 +82,8 @@ export function TeammateSpinnerLine({
   isSelected,
   isForegrounded,
   allIdle,
-  showPreview
+  showPreview,
+  indent
 }: Props): React.ReactNode {
   const [randomVerb] = useState(() => teammate.spinnerVerb ?? sample(getSpinnerVerbs()));
   const [pastTenseVerb] = useState(() => teammate.pastTenseVerb ?? sample(TURN_COMPLETION_VERBS));
@@ -121,6 +129,11 @@ export function TeammateSpinnerLine({
   // Then optionally: @name + ": " OR just ": "
   // Then: activity text + optional extras (stats, hints)
   const basePrefix = 8;
+  // A nested sub-team row is wrapped in <Box paddingLeft={indent}>, so those
+  // columns are gone before this row starts. Everything below budgets from the
+  // row's own width, otherwise a deep row overruns the terminal and yoga
+  // squeezes it — the pointer column collapses and the "…" marker is lost.
+  const rowColumns = Math.max(0, columns - (indent ?? 0));
   const fullAgentName = `@${teammate.identity.agentName}`;
   const fullNameWidth = stringWidth(fullAgentName);
 
@@ -141,10 +154,10 @@ export function TeammateSpinnerLine({
   const minActivityWidth = 25;
 
   // Hide name on narrow terminals (< 60 cols) or if there's not enough room
-  const spaceWithFullName = columns - basePrefix - fullNameWidth - 2;
-  const showName = columns >= 60 && spaceWithFullName >= minActivityWidth;
+  const spaceWithFullName = rowColumns - basePrefix - fullNameWidth - 2;
+  const showName = rowColumns >= 60 && spaceWithFullName >= minActivityWidth;
   const nameWidth = showName ? fullNameWidth + 2 : 0; // +2 for ": " when name shown
-  const availableForActivity = columns - basePrefix - nameWidth;
+  const availableForActivity = rowColumns - basePrefix - nameWidth;
 
   // Progressive hiding: view hint → select hint → stats
   // Stats always visible (dimmed when not selected); hints only when highlighted/selected
