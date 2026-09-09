@@ -54,7 +54,8 @@ import { createAgentWorktree, hasWorktreeChanges, removeAgentWorktree } from '..
 import { BASH_TOOL_NAME } from '../BashTool/toolName.js';
 import { BackgroundHint } from '../BashTool/UI.js';
 import { FILE_READ_TOOL_NAME } from '../FileReadTool/prompt.js';
-import { spawnTeammate } from '../shared/spawnMultiAgent.js';
+import { spawnTeammate, generateUniqueTeammateName } from '../shared/spawnMultiAgent.js';
+import { getTeammateSpawnCapError } from './teammateReplicas.js';
 import { setAgentColor } from './agentColorManager.js';
 import { agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extractPartialResult, finalizeAgentTool, getLastToolUseName, runAsyncAgentLifecycle } from './agentToolUtils.js';
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
@@ -104,7 +105,8 @@ export const fullInputSchema = lazySchema(() => {
   const multiAgentInputSchema = z.object({
     name: z.string().optional().describe('Name for the spawned agent. Makes it addressable via SendMessage({to: name}) while running.'),
     team_name: z.string().optional().describe('Team name for spawning. Uses current team context if omitted.'),
-    mode: permissionModeSchema().optional().describe('Permission mode for spawned teammate (e.g., "plan" to require plan approval).')
+    mode: permissionModeSchema().optional().describe('Permission mode for spawned teammate (e.g., "plan" to require plan approval).'),
+    replicas: z.number().int().min(1).optional().describe('Number of teammates to spawn from this call (default 1). Requires `name`; they are named <name>-1 ... <name>-N and all share the same prompt (or all start idle when prompt is omitted). Capped per call and by the live teammate pool size.')
   });
   return baseInputSchema().merge(multiAgentInputSchema).extend({
     isolation: z.enum(['worktree']).optional().describe('Isolation mode. "worktree" creates a temporary git worktree so the agent works on an isolated copy of the repo. When the session is outside a git repository (for example a parent of multiple repos), pass cwd set to the target repository root so the worktree is created from that repo.'),
@@ -147,6 +149,7 @@ type AgentToolInput = z.infer<ReturnType<typeof baseInputSchema>> & {
   name?: string;
   team_name?: string;
   mode?: z.infer<ReturnType<typeof permissionModeSchema>>;
+  replicas?: number;
   isolation?: 'worktree';
   cwd?: string;
 };
@@ -296,6 +299,10 @@ type TeammateSpawnedOutput = {
   team_name?: string;
   is_splitpane?: boolean;
   plan_mode_required?: boolean;
+  /** Every teammate spawned by a multi-replica call (first one is also at top level). */
+  replicas?: Array<{ name: string; teammate_id: string; agent_id: string }>;
+  /** Set when a multi-replica call stopped early; the replicas above are running. */
+  failed?: { index: number; name: string; error: string };
 };
 
 // Combined output type including both public and internal types
@@ -357,6 +364,21 @@ export const AgentTool = buildTool({
         errorCode: 1
       };
     }
+    // Context-free replica checks (name present, per-call cap). The live
+    // teammate cap needs AppState and is applied again in call().
+    const capError = getTeammateSpawnCapError({
+      replicas: input.replicas,
+      name: input.name,
+      isTeammateSpawn: Boolean(input.name),
+      tasks: undefined
+    });
+    if (capError) {
+      return {
+        result: false,
+        message: capError,
+        errorCode: 1
+      };
+    }
     return {
       result: true
     };
@@ -370,6 +392,7 @@ export const AgentTool = buildTool({
     name,
     team_name,
     mode: spawnMode,
+    replicas,
     isolation,
     cwd
   }: AgentToolInput, toolUseContext, canUseTool, assistantMessage, onProgress?) {
@@ -410,6 +433,18 @@ export const AgentTool = buildTool({
     // can manage their own background agents.
     if (isInProcessTeammate() && teamName && run_in_background === true) {
       throw new Error('In-process teammates cannot spawn background agents. Use run_in_background=false for synchronous subagents.');
+    }
+
+    // Replica and live-pool caps. Applied to single teammate spawns too so the
+    // pool cannot grow past the cap one call at a time.
+    const capError = getTeammateSpawnCapError({
+      replicas,
+      name,
+      isTeammateSpawn: Boolean(teamName && name),
+      tasks: appState.tasks
+    });
+    if (capError) {
+      throw new Error(capError);
     }
 
     // Check if this is a multi-agent spawn request
@@ -473,8 +508,8 @@ export const AgentTool = buildTool({
       ) {
         throw new Error(`Model '${routedTeammateModelOnly}' is not available. Your organization restricts model selection.`);
       }
-      const result = await spawnTeammate({
-        name,
+      const spawnOne = (spawnName: string) => spawnTeammate({
+        name: spawnName,
         prompt,
         description,
         team_name: teamName,
@@ -485,6 +520,47 @@ export const AgentTool = buildTool({
         agent_type: subagent_type,
         invokingRequestId: assistantMessage?.requestId
       }, toolUseContext);
+
+      if (replicas !== undefined && replicas > 1) {
+        // Sequential: the team file is shared state. Names are <name>-i, made
+        // unique against the roster; all replicas share prompt and routing.
+        // A failure stops the loop but keeps what was already spawned.
+        const spawned: NonNullable<TeammateSpawnedOutput['replicas']> = [];
+        let failed: TeammateSpawnedOutput['failed'];
+        let first: Awaited<ReturnType<typeof spawnTeammate>>['data'] | undefined;
+        for (let i = 1; i <= replicas; i++) {
+          const replicaName = await generateUniqueTeammateName(`${name}-${i}`, teamName);
+          try {
+            const spawnedReplica = await spawnOne(replicaName);
+            first ??= spawnedReplica.data;
+            spawned.push({
+              name: spawnedReplica.data.name,
+              teammate_id: spawnedReplica.data.teammate_id,
+              agent_id: spawnedReplica.data.agent_id
+            });
+          } catch (error) {
+            failed = { index: i, name: replicaName, error: errorMessage(error) };
+            break;
+          }
+        }
+        if (!first) {
+          throw new Error(`Failed to spawn any of ${replicas} replicas of '${name}': ${failed?.error ?? 'unknown error'}`);
+        }
+        const replicaResult: TeammateSpawnedOutput = {
+          status: 'teammate_spawned' as const,
+          prompt,
+          ...first,
+          replicas: spawned,
+          ...(failed ? { failed } : {})
+        };
+        return {
+          data: replicaResult
+        } as unknown as {
+          data: Output;
+        };
+      }
+
+      const result = await spawnOne(name);
 
       // Type assertion uses TeammateSpawnedOutput (defined above) instead of any.
       // This type is excluded from the exported outputSchema for dead code elimination.
@@ -1546,6 +1622,24 @@ export const AgentTool = buildTool({
     const internalData = data as InternalOutput;
     if (typeof internalData === 'object' && internalData !== null && 'status' in internalData && internalData.status === 'teammate_spawned') {
       const spawnData = internalData as TeammateSpawnedOutput;
+      if (spawnData.replicas) {
+        const count = spawnData.replicas.length;
+        const lines = spawnData.replicas.map(r => `- ${r.name} (agent_id: ${r.agent_id})`).join('\n');
+        const failure = spawnData.failed
+          ? `\nReplica ${spawnData.failed.index} (${spawnData.failed.name}) failed to spawn: ${spawnData.failed.error}. The ${count} listed above are running.`
+          : '';
+        const idleNote = spawnData.prompt === undefined
+          ? '\nThey started idle and wait for work: SendMessage them, add tasks to the team task list, or type into their view.'
+          : '\nThey are running the shared prompt.';
+        return {
+          tool_use_id: toolUseID,
+          type: 'tool_result',
+          content: [{
+            type: 'text',
+            text: `Spawned ${count} teammate${count === 1 ? '' : 's'} in team ${spawnData.team_name}:\n${lines}${failure}${idleNote}\nAddress one with SendMessage(to=<name>); ListAgents shows them all.`
+          }]
+        };
+      }
       return {
         tool_use_id: toolUseID,
         type: 'tool_result',

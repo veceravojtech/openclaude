@@ -576,7 +576,10 @@ export function renderGroupedAgentToolUse(toolUses: Array<{
     let descriptionColor: keyof Theme | undefined;
     let taskDescription: string | undefined;
     if (isTeammateSpawn && parsedInput.success && parsedInput.data.name) {
-      agentType = `@${parsedInput.data.name}`;
+      const replicas = 'replicas' in parsedInput.data ? parsedInput.data.replicas : undefined;
+      agentType = replicas !== undefined && replicas > 1
+        ? `@${parsedInput.data.name}-1..${replicas}`
+        : `@${parsedInput.data.name}`;
       const subagentType = parsedInput.data.subagent_type;
       description = isCustomSubagentType(subagentType) ? subagentType : undefined;
       taskDescription = parsedInput.data.description;
