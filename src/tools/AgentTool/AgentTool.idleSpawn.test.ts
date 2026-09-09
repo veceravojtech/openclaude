@@ -23,13 +23,14 @@ let originalSpawnMultiAgentModule: SpawnMultiAgentModule | undefined
 const originalEnv = {
   CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:
     process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,
+  CLAUDE_CODE_DISABLE_AGENT_TEAMS: process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS,
   USER_TYPE: process.env.USER_TYPE,
 }
 
 beforeEach(async () => {
   await acquireSharedMutationLock('tools/AgentTool/AgentTool.idleSpawn.test.ts')
-  // Teams on by default; individual tests turn them off.
-  process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = '1'
+  // Teams are on by default; individual tests turn them off explicitly.
+  delete process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS
   delete process.env.USER_TYPE
 })
 
@@ -46,6 +47,7 @@ afterEach(() => {
       )
     }
     restoreEnv('CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS')
+    restoreEnv('CLAUDE_CODE_DISABLE_AGENT_TEAMS')
     restoreEnv('USER_TYPE')
   } finally {
     releaseSharedMutationLock()
@@ -62,7 +64,7 @@ function restoreEnv(key: keyof typeof originalEnv): void {
 }
 
 function disableTeams(): void {
-  delete process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS
+  process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS = '1'
   delete process.env.USER_TYPE
 }
 

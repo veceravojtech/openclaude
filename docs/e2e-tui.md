@@ -93,10 +93,11 @@ regression test rather than a one-shot reproducer.
 The teammate has to come from the model calling the Agent tool, and the harness
 runs offline, so scenario 4 starts a fake Anthropic Messages API on the loopback
 interface (`Bun.serve`, port 0) and points the CLI at it with
-`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` (a fake key, pre-approved in the
-seeded config's `customApiKeyResponses` so no dialog precedes the prompt) and
-`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, which is the gate the Agent tool's
-`name` parameter sits behind. The fake scripts exactly two main turns: the first
+`ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` (a fake key, pre-approved in the
+seeded config's `customApiKeyResponses` so no dialog precedes the prompt). No
+teams flag is passed: Agent Teams are on by default, so the scenario doubles as
+the check that the default path exposes the Agent tool's `name` parameter. The
+fake scripts exactly two main turns: the first
 request that declares the `Agent` tool is answered with a `tool_use` spawning
 `supervisor` in team `e2e-team` with **no prompt** (an idle spawn, always
 in-process), and the request carrying that tool's `tool_result` is answered with

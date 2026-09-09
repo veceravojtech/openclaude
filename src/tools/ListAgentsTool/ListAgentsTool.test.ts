@@ -23,6 +23,7 @@ import { ListAgentsTool, type Output } from './ListAgentsTool.js'
 const originalEnv = {
   CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:
     process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,
+  CLAUDE_CODE_DISABLE_AGENT_TEAMS: process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS,
   USER_TYPE: process.env.USER_TYPE,
 }
 
@@ -30,13 +31,15 @@ let configDir: string | undefined
 
 beforeEach(async () => {
   await acquireSharedMutationLock('tools/ListAgentsTool/ListAgentsTool.test.ts')
-  process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = '1'
+  // Teams are on by default; tests turn them off explicitly.
+  delete process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS
   delete process.env.USER_TYPE
 })
 
 afterEach(() => {
   try {
     restoreEnv('CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS')
+    restoreEnv('CLAUDE_CODE_DISABLE_AGENT_TEAMS')
     restoreEnv('USER_TYPE')
     setClaudeConfigHomeDirForTesting(undefined)
     if (configDir) {
@@ -71,7 +74,7 @@ function toText(output: Output): string {
 
 test('isEnabled follows the agent-teams gate', () => {
   expect(ListAgentsTool.isEnabled()).toBe(true)
-  delete process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS
+  process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS = '1'
   expect(ListAgentsTool.isEnabled()).toBe(false)
 })
 
@@ -92,7 +95,7 @@ test('registered next to SendMessage and gated the same way', () => {
   expect(getTools(permissionContext).map(tool => tool.name)).toContain(
     'ListAgents',
   )
-  delete process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS
+  process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS = '1'
   const gatedOff = getTools(permissionContext).map(tool => tool.name)
   expect(gatedOff).not.toContain('ListAgents')
   expect(gatedOff).not.toContain('SendMessage')

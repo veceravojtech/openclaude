@@ -1096,10 +1096,12 @@ async function scenarioTeammateViewEscape(): Promise<ScenarioResult> {
   })
   const api = startFakeAnthropicApi()
   await startCliSession({
+    // No teams flag: Agent Teams are on by default, and this scenario is
+    // also the check that the default path really exposes the Agent tool's
+    // `name` parameter.
     extraEnv: {
       ANTHROPIC_BASE_URL: api.baseUrl,
       ANTHROPIC_API_KEY: FAKE_API_KEY,
-      CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
     },
     // Pre-approve the env key so no "use this API key?" dialog precedes the
     // prompt. Both the raw key and its 20-char tail are listed so the check

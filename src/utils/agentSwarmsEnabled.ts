@@ -1,38 +1,31 @@
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js'
 import { isEnvTruthy } from './envUtils.js'
 
-/**
- * Check if --agent-teams flag is provided via CLI.
- * Checks process.argv directly to avoid import cycles with bootstrap/state.
- * Note: The flag is only shown in help for ant users, but if external users
- * pass it anyway, it will work (subject to the killswitch).
- */
-function isAgentTeamsFlagSet(): boolean {
-  return process.argv.includes('--agent-teams')
-}
+/** Set to a truthy value to turn Agent Teams off for a session. */
+export const DISABLE_AGENT_TEAMS_ENV = 'CLAUDE_CODE_DISABLE_AGENT_TEAMS'
 
 /**
  * Centralized runtime check for agent teams/teammate features.
  * This is the single gate that should be checked everywhere teammates
  * are referenced (prompts, code, tools isEnabled, UI, etc.).
  *
- * Ant builds: always enabled.
- * External builds require both:
- * 1. Opt-in via CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS env var OR --agent-teams flag
- * 2. GrowthBook gate 'tengu_amber_flint' enabled (killswitch)
+ * Agent Teams are ON by default. They can be turned off explicitly with
+ * CLAUDE_CODE_DISABLE_AGENT_TEAMS=1, and the GrowthBook killswitch
+ * 'tengu_amber_flint' is still respected for non-ant users.
+ *
+ * The former opt-ins - CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS and the
+ * --agent-teams flag - are accepted and ignored so existing launch scripts
+ * keep working (teammate processes are still spawned with the env var set).
  */
 export function isAgentSwarmsEnabled(): boolean {
+  // Explicit opt-out wins over everything, including ant builds.
+  if (isEnvTruthy(process.env[DISABLE_AGENT_TEAMS_ENV])) {
+    return false
+  }
+
   // Ant: always on
   if (process.env.USER_TYPE === 'ant') {
     return true
-  }
-
-  // External: require opt-in via env var or --agent-teams flag
-  if (
-    !isEnvTruthy(process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS) &&
-    !isAgentTeamsFlagSet()
-  ) {
-    return false
   }
 
   // Killswitch — always respected for external users
