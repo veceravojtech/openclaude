@@ -31,9 +31,20 @@ Send a message to another agent.
 | \`to\` | |
 |---|---|
 | \`"researcher"\` | Teammate by name |
+| \`"researcher@email/supervisor"\` | Agent in another team of the tree — \`<name>@<team>\` |
 | \`"*"\` | Broadcast to all teammates — expensive (linear in team size), use only when everyone genuinely needs it |${udsRow}
 
 Use \`ListAgents\` to see who is addressable right now (teammates, named background agents, and \`team-lead\` when you are a teammate) with the exact \`to\` for each.
+
+## Addressing across teams
+
+A teammate can lead a sub-team named \`<its team>/<its name>\`, so the same name can exist in more than one team. \`<name>@<team>\` always means that team's agent; a bare name is resolved against the rosters you can see, in order:
+
+1. your own team,
+2. the team above yours,
+3. the sub-team you lead.
+
+\`team-lead\` is the lead of YOUR team — from inside a sub-team that is your sub-lead, not the root lead. Address the root lead explicitly as \`team-lead@<root team>\`. Copy a \`to\` from \`ListAgents\` and it resolves to exactly the agent on that row.
 
 Your plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages from teammates are delivered automatically; you don't check an inbox. Refer to teammates by name, never by UUID. When relaying, don't quote the original — it's already rendered to the user.${udsSection}
 

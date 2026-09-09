@@ -133,8 +133,8 @@ test('in-process teammates map idle/busy, skip non-running tasks, and are addres
     teamName: TEAM,
   })
   expect(agents.map(a => [a.name, a.status, a.to])).toEqual([
-    ['idler', 'idle', 'idler'],
-    ['worker', 'busy', 'worker'],
+    ['idler', 'idle', `idler@${TEAM}`],
+    ['worker', 'busy', `worker@${TEAM}`],
   ])
   const idler = agents.find(a => a.name === 'idler')!
   expect(idler).toMatchObject({
@@ -196,7 +196,7 @@ test('team-file members add pane teammates and are deduped against in-process on
     model: 'opus',
     idleSince: '2026-09-08T10:00:00.000Z',
     description: `painter: ${'x'.repeat(50)}...`,
-    to: 'painter',
+    to: `painter@${TEAM}`,
   })
   expect(agents.find(a => a.name === 'runner')?.description).toBe(
     'runner: reviewer',
@@ -305,7 +305,7 @@ test('team-lead is listed only when the caller asks for it', () => {
     status: 'unknown',
     description: 'Team lead (main session)',
     team: TEAM,
-    to: 'team-lead',
+    to: `team-lead@${TEAM}`,
   })
 
   // Without a known lead id the name doubles as the id.
@@ -337,13 +337,132 @@ test('sorted: team lead, then teammates by name, then background agents by name'
   ])
 })
 
-test('a registry name shadows a same-named teammate, matching SendMessage resolution', () => {
+test('a same-named background agent and teammate are both listed, at their own addresses', () => {
+  // The bare name is the registry agent's, matching the order SendMessage
+  // resolves `to` in; the teammate keeps its qualified address, so a name
+  // collision no longer hides an agent that is genuinely reachable.
   const agents = collectAddressableAgents({
     ...state([teammate('twin'), backgroundAgent('a-twin')], { twin: 'a-twin' }),
     ...asLead,
+    teamName: TEAM,
   })
-  expect(agents).toHaveLength(1)
-  expect(agents[0]).toMatchObject({ kind: 'background_agent', agentId: 'a-twin' })
+  expect(agents.map(a => [a.kind, a.agentId, a.to])).toEqual([
+    ['teammate', `twin@${TEAM}`, `twin@${TEAM}`],
+    ['background_agent', 'a-twin', 'twin'],
+  ])
+})
+
+const SUB_TEAM = `${TEAM}/supervisor`
+
+/** The same in-process teammate task, but running in another team. */
+function inTeam(
+  task: InProcessTeammateTaskState,
+  team: string,
+): InProcessTeammateTaskState {
+  return {
+    ...task,
+    identity: {
+      ...task.identity,
+      agentId: `${task.identity.agentName}@${team}`,
+      teamName: team,
+    },
+  }
+}
+
+test('a member of a sub-team lists its sub-lead, the root lead and its siblings', () => {
+  const agents = collectAddressableAgents({
+    ...state([]),
+    teamMembers: [
+      member('sibling', { agentId: `sibling@${SUB_TEAM}`, status: 'idle' }),
+    ],
+    teamName: SUB_TEAM,
+    leadAgentId: `team-lead@${SUB_TEAM}`,
+    selfAgentId: `worker@${SUB_TEAM}`,
+    selfAgentName: 'worker',
+    includeTeamLead: true,
+    tree: {
+      root: { teamName: TEAM, leadAgentId: 'lead-id' },
+      parentAgentId: `supervisor@${TEAM}`,
+    },
+  })
+  // Both leads are called `team-lead`; the address is what tells them apart,
+  // and a bare `team-lead` from here means the sub-lead.
+  expect(agents.map(a => [a.name, a.kind, a.team, a.to])).toEqual([
+    ['team-lead', 'team_lead', TEAM, `team-lead@${TEAM}`],
+    ['team-lead', 'team_lead', SUB_TEAM, `team-lead@${SUB_TEAM}`],
+    ['sibling', 'teammate', SUB_TEAM, `sibling@${SUB_TEAM}`],
+  ])
+  expect(agents.map(a => [a.agentId, a.description])).toEqual([
+    ['lead-id', 'Team lead (main session)'],
+    [`team-lead@${SUB_TEAM}`, `Lead of ${SUB_TEAM} (supervisor@${TEAM})`],
+    [`sibling@${SUB_TEAM}`, 'sibling: teammate'],
+  ])
+})
+
+test('a teammate leading a sub-team lists its own team and its children', () => {
+  const agents = collectAddressableAgents({
+    ...state([teammate('sibling'), inTeam(teammate('child'), SUB_TEAM)]),
+    teamMembers: [member('sibling'), member('supervisor')],
+    teamName: TEAM,
+    leadAgentId: 'lead-id',
+    selfAgentId: `supervisor@${TEAM}`,
+    selfAgentName: 'supervisor',
+    includeTeamLead: true,
+    tree: {
+      subTeam: {
+        teamName: SUB_TEAM,
+        members: [
+          member('child', { agentId: `child@${SUB_TEAM}` }),
+          member('painter', { agentId: `painter@${SUB_TEAM}`, status: 'idle' }),
+        ],
+      },
+    },
+  })
+  // Its own row is gone, its lead is the root's, and both children are here —
+  // the in-process one from AppState, the pane one from the sub-team file.
+  expect(agents.map(a => [a.name, a.kind, a.team, a.to])).toEqual([
+    ['team-lead', 'team_lead', TEAM, `team-lead@${TEAM}`],
+    ['child', 'teammate', SUB_TEAM, `child@${SUB_TEAM}`],
+    ['painter', 'teammate', SUB_TEAM, `painter@${SUB_TEAM}`],
+    ['sibling', 'teammate', TEAM, `sibling@${TEAM}`],
+  ])
+  expect(agents.find(a => a.name === 'child')?.agentId).toBe(
+    `child@${SUB_TEAM}`,
+  )
+})
+
+test('teammates of another branch of the tree are not neighbours', () => {
+  // Every in-process teammate of the session sits in the lead's AppState,
+  // including the members of a sub-team the caller has nothing to do with.
+  const agents = collectAddressableAgents({
+    ...state([teammate('sibling'), inTeam(teammate('cousin'), `${TEAM}/other`)]),
+    teamMembers: [],
+    teamName: TEAM,
+    includeTeamLead: false,
+  })
+  expect(agents.map(a => [a.name, a.to])).toEqual([['sibling', `sibling@${TEAM}`]])
+})
+
+test('a same-named agent in another team of the tree is not the caller', () => {
+  // Name-only self-exclusion would drop a child that happens to share the
+  // caller's name: one team's roster is unique, the tree's is not.
+  const agents = collectAddressableAgents({
+    ...state([]),
+    teamMembers: [],
+    teamName: TEAM,
+    selfAgentId: `supervisor@${TEAM}`,
+    selfAgentName: 'supervisor',
+    includeTeamLead: false,
+    tree: {
+      subTeam: {
+        teamName: SUB_TEAM,
+        members: [
+          member('supervisor', { agentId: `supervisor@${SUB_TEAM}` }),
+        ],
+      },
+    },
+  })
+  expect(agents.map(a => a.to)).toEqual([`supervisor@${SUB_TEAM}`])
 })
 
 test('renderAddressableAgents prints one line per agent plus the SendMessage hint', () => {

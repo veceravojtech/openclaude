@@ -213,8 +213,9 @@ test('call() merges the team file, in-process teammates and named background age
   // The lead sees everyone but itself; it is not a teammate, so no lead row.
   const { data } = await ListAgentsTool.call({}, contextFor(appState))
   expect(data.agents.map(a => [a.name, a.kind, a.status, a.to])).toEqual([
-    ['coder', 'teammate', 'busy', 'coder'],
-    ['painter', 'teammate', 'idle', 'painter'],
+    ['coder', 'teammate', 'busy', `coder@${teamName}`],
+    ['painter', 'teammate', 'idle', `painter@${teamName}`],
+    // A background agent has no team, so its bare name is its address.
     ['scout', 'background_agent', 'completed', 'scout'],
   ])
   expect(data.agents.find(a => a.name === 'painter')).toMatchObject({
@@ -224,8 +225,8 @@ test('call() merges the team file, in-process teammates and named background age
     description: 'painter: paint the shed',
   })
   expect(toText(data).split('\n')).toEqual([
-    'coder  teammate  busy  to=coder  - coder: fix the tests',
-    'painter  teammate  idle  to=painter  - painter: paint the shed',
+    'coder  teammate  busy  to=coder@alpha  - coder: fix the tests',
+    'painter  teammate  idle  to=painter@alpha  - painter: paint the shed',
     'scout  background_agent  completed  to=scout  - scout the repo',
     '',
     SEND_MESSAGE_HINT,
@@ -400,8 +401,8 @@ test('a subagent inside a teammate sees its spawner and the lead, not itself', a
     ['supervisor', 'teammate', 'idle'],
   ])
   expect(fromSubagent.data.agents.map(a => a.to)).toEqual([
-    'team-lead',
-    'supervisor',
+    `team-lead@${teamName}`,
+    `supervisor@${teamName}`,
   ])
 
   // An unnamed subagent has no registry entry — same view, still no self row.

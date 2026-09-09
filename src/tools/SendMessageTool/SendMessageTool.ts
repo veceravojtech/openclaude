@@ -11,7 +11,7 @@ import {
 } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import { isMainSessionTask } from '../../tasks/LocalMainSessionTask.js'
 import { toAgentId } from '../../types/ids.js'
-import { generateRequestId } from '../../utils/agentId.js'
+import { generateRequestId, parseAgentId } from '../../utils/agentId.js'
 import { resolveCallerIdentity } from '../../utils/agentIdentity.js'
 import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js'
 import { logForDebugging } from '../../utils/debug.js'
@@ -39,6 +39,7 @@ import {
   writeToMailbox,
 } from '../../utils/teammateMailbox.js'
 import { resumeAgentBackground } from '../AgentTool/resumeAgent.js'
+import { formatRecipientAddress, resolveRecipient } from './addressing.js'
 import { SEND_MESSAGE_TOOL_NAME } from './constants.js'
 import { abortApprovedInProcessTeammate } from './shutdownInterruptionTrace.js'
 import { DESCRIPTION, getPrompt } from './prompt.js'
@@ -71,8 +72,8 @@ const inputSchema = lazySchema(() =>
       .string()
       .describe(
         feature('UDS_INBOX')
-          ? 'Recipient: teammate or background agent name (use ListAgents to discover), "*" for broadcast, "uds:<socket-path>" for a local peer, or "bridge:<session-id>" for a Remote Control peer (use ListPeers to discover)'
-          : 'Recipient: teammate or background agent name (use ListAgents to discover), or "*" for broadcast to all teammates',
+          ? 'Recipient: teammate or background agent name, "<name>@<team>" for an agent in another team of the tree (use ListAgents to discover), "*" for broadcast, "uds:<socket-path>" for a local peer, or "bridge:<session-id>" for a Remote Control peer (use ListPeers to discover)'
+          : 'Recipient: teammate or background agent name, "<name>@<team>" for an agent in another team of the tree (use ListAgents to discover), or "*" for broadcast to all teammates',
       ),
     summary: z
       .string()
@@ -168,15 +169,19 @@ function resolveSenderName(context: ToolUseContext): string {
 }
 
 async function handleMessage(
-  recipientName: string,
+  to: string,
   content: string,
   summary: string | undefined,
   context: ToolUseContext,
 ): Promise<{ data: MessageOutput }> {
   const appState = context.getAppState()
-  const teamName = getTeamName(appState.teamContext)
   const senderName = resolveSenderName(context)
   const senderColor = getTeammateColor()
+  const { recipientName, teamName } = await resolveRecipient(
+    to,
+    resolveCallerIdentity(context),
+    getTeamName(appState.teamContext),
+  )
 
   await writeToMailbox(
     recipientName,
@@ -195,7 +200,7 @@ async function handleMessage(
   return {
     data: {
       success: true,
-      message: `Message sent to ${recipientName}'s inbox`,
+      message: `Message sent to ${formatRecipientAddress(recipientName, teamName)}'s inbox`,
       routing: {
         sender: senderName,
         senderColor,
@@ -285,13 +290,17 @@ async function handleBroadcast(
 }
 
 async function handleShutdownRequest(
-  targetName: string,
+  to: string,
   reason: string | undefined,
   context: ToolUseContext,
 ): Promise<{ data: RequestOutput }> {
   const appState = context.getAppState()
-  const teamName = getTeamName(appState.teamContext)
-  const senderName = getAgentName() || TEAM_LEAD_NAME
+  const senderName = resolveSenderName(context)
+  const { recipientName: targetName, teamName } = await resolveRecipient(
+    to,
+    resolveCallerIdentity(context),
+    getTeamName(appState.teamContext),
+  )
   const requestId = generateRequestId('shutdown', targetName)
 
   const shutdownMessage = createShutdownRequestMessage({
@@ -328,6 +337,11 @@ async function handleShutdownApproval(
   const teamName = getTeamName()
   const agentId = getAgentId()
   const agentName = getAgentName() || 'teammate'
+  // Who SIGNS the response is the caller — a subagent spawned inside this
+  // teammate's turn must not answer in the teammate's name. Who EXITS is
+  // still the ambient teammate: `agentId` below finds its own roster row and
+  // its own abort controller.
+  const senderName = resolveSenderName(context)
 
   logForDebugging(
     `[SendMessageTool] handleShutdownApproval: teamName=${teamName}, agentId=${agentId}, agentName=${agentName}`,
@@ -348,7 +362,7 @@ async function handleShutdownApproval(
 
   const approvedMessage = createShutdownApprovedMessage({
     requestId,
-    from: agentName,
+    from: senderName,
     paneId: ownPaneId,
     backendType: ownBackendType,
   })
@@ -356,7 +370,7 @@ async function handleShutdownApproval(
   await writeToMailbox(
     TEAM_LEAD_NAME,
     {
-      from: agentName,
+      from: senderName,
       text: jsonStringify(approvedMessage),
       timestamp: new Date().toISOString(),
       color: getTeammateColor(),
@@ -424,20 +438,21 @@ async function handleShutdownApproval(
 async function handleShutdownRejection(
   requestId: string,
   reason: string,
+  context: ToolUseContext,
 ): Promise<{ data: ResponseOutput }> {
   const teamName = getTeamName()
-  const agentName = getAgentName() || 'teammate'
+  const senderName = resolveSenderName(context)
 
   const rejectedMessage = createShutdownRejectedMessage({
     requestId,
-    from: agentName,
+    from: senderName,
     reason,
   })
 
   await writeToMailbox(
     TEAM_LEAD_NAME,
     {
-      from: agentName,
+      from: senderName,
       text: jsonStringify(rejectedMessage),
       timestamp: new Date().toISOString(),
       color: getTeammateColor(),
@@ -455,12 +470,11 @@ async function handleShutdownRejection(
 }
 
 async function handlePlanApproval(
-  recipientName: string,
+  to: string,
   requestId: string,
   context: ToolUseContext,
 ): Promise<{ data: ResponseOutput }> {
   const appState = context.getAppState()
-  const teamName = appState.teamContext?.teamName
 
   if (!isTeamLead(appState.teamContext)) {
     throw new Error(
@@ -478,6 +492,12 @@ async function handlePlanApproval(
     timestamp: new Date().toISOString(),
     permissionMode: modeToInherit,
   }
+
+  const { recipientName, teamName } = await resolveRecipient(
+    to,
+    resolveCallerIdentity(context),
+    appState.teamContext?.teamName,
+  )
 
   await writeToMailbox(
     recipientName,
@@ -499,13 +519,12 @@ async function handlePlanApproval(
 }
 
 async function handlePlanRejection(
-  recipientName: string,
+  to: string,
   requestId: string,
   feedback: string,
   context: ToolUseContext,
 ): Promise<{ data: ResponseOutput }> {
   const appState = context.getAppState()
-  const teamName = appState.teamContext?.teamName
 
   if (!isTeamLead(appState.teamContext)) {
     throw new Error(
@@ -520,6 +539,12 @@ async function handlePlanRejection(
     feedback,
     timestamp: new Date().toISOString(),
   }
+
+  const { recipientName, teamName } = await resolveRecipient(
+    to,
+    resolveCallerIdentity(context),
+    appState.teamContext?.teamName,
+  )
 
   await writeToMailbox(
     recipientName,
@@ -643,12 +668,18 @@ export const SendMessageTool: Tool<InputSchema, SendMessageToolOutput> =
           errorCode: 9,
         }
       }
-      if (input.to.includes('@')) {
-        return {
-          result: false,
-          message:
-            'to must be a bare teammate name or "*" — there is only one team per session',
-          errorCode: 9,
+      // `name@team` addresses an agent in another team of the tree — a
+      // sub-team a teammate leads, or the root team seen from inside one.
+      // Both halves have to be there for it to name anybody.
+      if (addr.scheme === 'other') {
+        const qualified = parseAgentId(input.to)
+        if (qualified && (!qualified.agentName || !qualified.teamName)) {
+          return {
+            result: false,
+            message:
+              'to must be a bare agent name, "<name>@<team>" for an agent in another team, or "*"',
+            errorCode: 9,
+          }
         }
       }
       if (feature('UDS_INBOX') && parseAddress(input.to).scheme === 'bridge') {
@@ -935,6 +966,7 @@ export const SendMessageTool: Tool<InputSchema, SendMessageToolOutput> =
           return handleShutdownRejection(
             input.message.request_id,
             input.message.reason!,
+            context,
           )
         case 'plan_approval_response':
           if (input.message.approve) {
