@@ -1,17 +1,40 @@
-import { expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, test } from 'bun:test'
+import {
+  acquireSharedMutationLock,
+  releaseSharedMutationLock,
+} from '../test/sharedMutationLock.js'
+import { type AgentId, toAgentId } from '../types/ids.js'
 import {
   type CallerIdentity,
   type CallerIdentityContext,
   resolveCallerIdentity,
 } from './agentIdentity.js'
+import { getDynamicTeamContext, setDynamicTeamContext } from './teammate.js'
 import {
   createTeammateContext,
   runWithTeammateContext,
 } from './teammateContext.js'
+import { createAgentId } from './uuid.js'
 
 const TEAM = 'alpha'
 const SUPERVISOR_ID = `supervisor@${TEAM}`
 const SUBAGENT_ID = 'ageneral-purpose-0123456789abcdef'
+
+let originalDynamicTeamContext: ReturnType<typeof getDynamicTeamContext> = null
+
+beforeEach(async () => {
+  await acquireSharedMutationLock('utils/agentIdentity.test.ts')
+  originalDynamicTeamContext = getDynamicTeamContext()
+  setDynamicTeamContext(null)
+})
+
+afterEach(() => {
+  try {
+    setDynamicTeamContext(originalDynamicTeamContext)
+  } finally {
+    releaseSharedMutationLock()
+  }
+})
 
 function contextFor(
   agentId?: string,
@@ -29,16 +52,25 @@ function contextFor(
   }
 }
 
-function asSupervisor<T>(fn: () => T): T {
+/**
+ * Run `fn` inside an in-process teammate's ambient context. `turnAgentId` is
+ * the id the runner minted for the turn in progress, published on the context
+ * exactly as `runInProcessTeammate` publishes it; omit it for the shapes that
+ * carry none (a tmux teammate, a context built before U2b).
+ */
+function asSupervisor<T>(fn: () => T, turnAgentId?: AgentId): T {
   return runWithTeammateContext(
-    createTeammateContext({
-      agentId: SUPERVISOR_ID,
-      agentName: 'supervisor',
-      teamName: TEAM,
-      planModeRequired: false,
-      parentSessionId: 'lead-session',
-      abortController: new AbortController(),
-    }),
+    {
+      ...createTeammateContext({
+        agentId: SUPERVISOR_ID,
+        agentName: 'supervisor',
+        teamName: TEAM,
+        planModeRequired: false,
+        parentSessionId: 'lead-session',
+        abortController: new AbortController(),
+      }),
+      ...(turnAgentId !== undefined && { turnAgentId }),
+    },
     fn,
   )
 }
@@ -78,6 +110,89 @@ test('a real teammate resolves to its own ambient identity', () => {
     agentId: SUPERVISOR_ID,
     name: 'supervisor',
     isTeammate: true,
+  })
+})
+
+test('a teammate’s own turn resolves to the teammate, never to a subagent of itself', () => {
+  // The runtime shape, not a same-id fixture: a teammate's turn goes through
+  // runAgent, which stamps a freshly minted AgentId on every tool context it
+  // builds (runAgent.ts:389 → createSubagentContext at :746). That id can never
+  // equal the ambient `name@team`, so "the context id differs" cannot mean
+  // "a subagent" — the runner's published turn id is what settles it.
+  const turnAgentId = createAgentId()
+  expect(toAgentId(turnAgentId)).not.toBeNull()
+  expect(turnAgentId).not.toBe(SUPERVISOR_ID)
+
+  expect(
+    asSupervisor(
+      () => resolveCallerIdentity(contextFor(turnAgentId)),
+      turnAgentId,
+    ),
+  ).toEqual({
+    agentId: SUPERVISOR_ID,
+    name: 'supervisor',
+    isTeammate: true,
+  })
+})
+
+test('a subagent spawned inside that same turn is still a subagent of the teammate', () => {
+  // Both ids are runtime-shaped and distinct, and only one of them is the
+  // turn's: the other one is the subagent's own.
+  const turnAgentId = createAgentId()
+  const subagentId = createAgentId()
+  expect(subagentId).not.toBe(turnAgentId)
+
+  expect(
+    asSupervisor(
+      () =>
+        resolveCallerIdentity(
+          contextFor(subagentId, { registry: { scout: subagentId } }),
+        ),
+      turnAgentId,
+    ),
+  ).toEqual({
+    agentId: subagentId,
+    name: 'scout',
+    isTeammate: false,
+    spawnerAgentId: SUPERVISOR_ID,
+  })
+
+  // Unnamed, and the teammate's own turn id is still recognised alongside it.
+  expect(
+    asSupervisor(
+      () => resolveCallerIdentity(contextFor(subagentId)),
+      turnAgentId,
+    ),
+  ).toEqual({
+    agentId: subagentId,
+    name: undefined,
+    isTeammate: false,
+    spawnerAgentId: SUPERVISOR_ID,
+  })
+})
+
+test('a tmux teammate keeps the rule it had: no turn id, so a differing context id is a subagent', () => {
+  // Pane teammates are separate processes whose identity comes from
+  // dynamicTeamContext (main.tsx), not from the in-process AsyncLocalStorage
+  // context, so nothing ever publishes a turn id for them. The pre-U2b rule
+  // must keep applying there verbatim.
+  setDynamicTeamContext({
+    agentId: SUPERVISOR_ID,
+    agentName: 'supervisor',
+    teamName: TEAM,
+    planModeRequired: false,
+  })
+
+  expect(resolveCallerIdentity(contextFor())).toEqual({
+    agentId: SUPERVISOR_ID,
+    name: 'supervisor',
+    isTeammate: true,
+  })
+  expect(resolveCallerIdentity(contextFor(SUBAGENT_ID))).toEqual({
+    agentId: SUBAGENT_ID,
+    name: undefined,
+    isTeammate: false,
+    spawnerAgentId: SUPERVISOR_ID,
   })
 })
 

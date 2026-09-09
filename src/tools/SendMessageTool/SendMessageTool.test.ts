@@ -23,6 +23,7 @@ import {
   runWithTeammateContext,
 } from '../../utils/teammateContext.js'
 import { readMailbox } from '../../utils/teammateMailbox.js'
+import { createAgentId } from '../../utils/uuid.js'
 import {
   type BroadcastOutput,
   type MessageOutput,
@@ -177,16 +178,25 @@ async function send(
   return data as MessageOutput & BroadcastOutput
 }
 
-function asSupervisor<T>(fn: () => T): T {
+/**
+ * Run `fn` inside the supervisor teammate's ambient context. `turnAgentId` is
+ * the id the runner minted for the turn in progress and published on the
+ * context, which is what tells the teammate's own calls apart from those of a
+ * subagent spawned inside the turn.
+ */
+function asSupervisor<T>(fn: () => T, turnAgentId?: AgentId): T {
   return runWithTeammateContext(
-    createTeammateContext({
-      agentId: SUPERVISOR_ID,
-      agentName: 'supervisor',
-      teamName: TEAM,
-      planModeRequired: false,
-      parentSessionId: 'lead-session',
-      abortController: new AbortController(),
-    }),
+    {
+      ...createTeammateContext({
+        agentId: SUPERVISOR_ID,
+        agentName: 'supervisor',
+        teamName: TEAM,
+        planModeRequired: false,
+        parentSessionId: 'lead-session',
+        abortController: new AbortController(),
+      }),
+      ...(turnAgentId !== undefined && { turnAgentId }),
+    },
     fn,
   )
 }
@@ -265,6 +275,51 @@ test('a broadcast is signed the same way and still reaches the spawning teammate
   expect(fromUnnamed.routing?.sender).toBe(SUBAGENT_ID)
   expect(fromUnnamed.recipients).toContain('supervisor')
   expect(await lastSenderTo('supervisor')).toBe(SUBAGENT_ID)
+})
+
+test('a teammate signs its own runtime-shaped turn as itself, its subagent as itself', async () => {
+  // The shape a real turn has: runAgent puts the runner's minted turn id on the
+  // teammate's tool-use context, so it never matches the ambient `name@team`.
+  // Signing off "the context id differs from the ambient one" alone would make
+  // the supervisor sign with a raw per-turn id and broadcast to itself.
+  const turnAgentId = createAgentId()
+  expect(turnAgentId).not.toBe(SUPERVISOR_ID)
+
+  const direct = contextFor(appStateWith(), turnAgentId)
+  const fromTeammate = await asSupervisor(
+    () => send({ to: 'coder', message: 'status?', summary: 'status' }, direct.context),
+    turnAgentId,
+  )
+  expect(fromTeammate.routing?.sender).toBe('supervisor')
+  expect(await lastSenderTo('coder')).toBe('supervisor')
+
+  // Broadcast signs the same way, so the supervisor's own member row is the one
+  // suppressed — it does not message itself.
+  const broadcast = contextFor(appStateWith(), turnAgentId)
+  const fromBroadcast = await asSupervisor(
+    () => send({ to: '*', message: 'on it', summary: 'on it' }, broadcast.context),
+    turnAgentId,
+  )
+  expect(fromBroadcast.routing?.sender).toBe('supervisor')
+  expect(fromBroadcast.recipients).toEqual(['team-lead', 'coder'])
+
+  // A subagent spawned inside that same turn carries a different id and still
+  // signs as itself, named or raw.
+  const named = contextFor(appStateWith({ scout: SUBAGENT_ID }), SUBAGENT_ID)
+  const fromNamed = await asSupervisor(
+    () => send({ to: 'coder', message: 'found it', summary: 'found it' }, named.context),
+    turnAgentId,
+  )
+  expect(fromNamed.routing?.sender).toBe('scout')
+  expect(await lastSenderTo('coder')).toBe('scout')
+
+  const unnamed = contextFor(appStateWith(), SUBAGENT_ID)
+  const fromUnnamed = await asSupervisor(
+    () => send({ to: '*', message: 'me too', summary: 'me too' }, unnamed.context),
+    turnAgentId,
+  )
+  expect(fromUnnamed.routing?.sender).toBe(SUBAGENT_ID)
+  expect(fromUnnamed.recipients).toEqual(['team-lead', 'supervisor', 'coder'])
 })
 
 test('replying to the raw id an unnamed subagent signed with reaches its pending messages', async () => {

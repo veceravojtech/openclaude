@@ -133,6 +133,7 @@ import {
 } from '../teammateMailbox.js'
 import { unregisterAgent as unregisterPerfettoAgent } from '../telemetry/perfettoTracing.js'
 import { createContentReplacementState } from '../toolResultStorage.js'
+import { createAgentId } from '../uuid.js'
 import { TEAM_LEAD_NAME } from './constants.js'
 import {
   getLeaderSetToolPermissionContext,
@@ -1745,6 +1746,17 @@ export async function runInProcessTeammate(
         setAppState,
       )
 
+      // Mint this turn's tool-context agent id here instead of letting runAgent
+      // mint it internally, so the teammate's ambient context can publish it
+      // (see turnAgentId on TeammateContext). Everything a tool sees is then
+      // attributable: context.agentId === turnAgentId is the teammate's own
+      // call, anything else is a subagent spawned inside the turn. Minted per
+      // turn and label-free, exactly as runAgent's own createAgentId() — so the
+      // per-turn transcript, metadata and cleanup paths keyed on it are
+      // unchanged.
+      const turnAgentId = createAgentId()
+      const turnTeammateContext = { ...teammateContext, turnAgentId }
+
       // Prepare prompt messages for this iteration
       // For the first iteration, start fresh
       // For subsequent iterations, pass accumulated messages as context
@@ -1866,7 +1878,7 @@ export async function runInProcessTeammate(
       let workWasAborted = false
 
       // Run agent within contexts
-      await runWithTeammateContext(teammateContext, async () => {
+      await runWithTeammateContext(turnTeammateContext, async () => {
         return runWithAgentContext(agentContext, async () => {
           // Mark task as running (not idle)
           updateTaskState(
@@ -1903,7 +1915,10 @@ export async function runInProcessTeammate(
             canShowPermissionPrompts: allowPermissionPrompts ?? true,
             forkContextMessages,
             querySource: 'agent:custom',
-            override: { abortController: currentWorkAbortController },
+            override: {
+              abortController: currentWorkAbortController,
+              agentId: turnAgentId,
+            },
             model: modelWasToolSpecified
               ? (model as ModelAlias | undefined)
               : undefined,

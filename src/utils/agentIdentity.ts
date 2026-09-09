@@ -6,13 +6,29 @@
  * that teammate's AsyncLocalStorage context — permission routing and abort
  * linkage depend on the inheritance, so it must not be restructured. The
  * consequence is that `getAgentId()` / `getAgentName()` / `isTeammate()`
- * report the SPAWNING TEAMMATE even when the caller is the subagent. The
- * subagent's own id is the one on its tool-use context, so preferring
- * `context.agentId` whenever it differs from the ambient teammate id gives
- * every caller its own identity without touching the context plumbing.
+ * report the SPAWNING TEAMMATE even when the caller is the subagent.
+ *
+ * Telling the two apart takes the tool-use context's `agentId`, but NOT by
+ * comparing it with the ambient teammate id: those two ids are different kinds
+ * of thing. The ambient id is `formatAgentId(name, team)` = `name@team`, while
+ * a tool-use context only ever carries a branded `AgentId` (`a` + 16 hex,
+ * `src/types/ids.ts`) minted by runAgent — so an in-process teammate's OWN turn
+ * also carries an id that differs from the ambient one, and "differs" alone
+ * would classify a teammate as a subagent of itself.
+ *
+ * What the comparison needs is the id of the turn currently running, which the
+ * teammate runner mints up front, hands to runAgent as `override.agentId`, and
+ * publishes on its ambient context as `turnAgentId`
+ * (`src/utils/swarm/inProcessRunner.ts`). `context.agentId === turnAgentId` is
+ * therefore the teammate's own call; any other context id inside that turn is a
+ * subagent whose spawner is the teammate. With no ambient `turnAgentId` — a
+ * tmux teammate, whose identity comes from `dynamicTeamContext` and whose turns
+ * run on its own process's main thread — a differing context id is a subagent as
+ * before.
  */
 
 import { getAgentId, getAgentName, isTeammate } from './teammate.js'
+import { getTeammateContext } from './teammateContext.js'
 
 export type CallerIdentity = {
   /** The caller's own agent id, undefined for a lead outside any team. */
@@ -63,9 +79,10 @@ function findRegisteredName(
  * Resolve who is actually calling a tool.
  *
  * - lead / main session: no ambient teammate and no context agent id.
- * - teammate: the ambient AsyncLocalStorage (or tmux CLI-args) identity.
- * - subagent: a context agent id that differs from the ambient one; the
- *   ambient id, when there is one, is its spawning teammate.
+ * - teammate: the ambient AsyncLocalStorage (or tmux CLI-args) identity,
+ *   including when its own turn's `turnAgentId` is on the context.
+ * - subagent: any other context agent id that differs from the ambient one;
+ *   the ambient id, when there is one, is its spawning teammate.
  */
 export function resolveCallerIdentity(
   context: CallerIdentityContext,
@@ -73,7 +90,16 @@ export function resolveCallerIdentity(
   const ambientAgentId = getAgentId()
   const contextAgentId = context.agentId
 
-  if (contextAgentId !== undefined && contextAgentId !== ambientAgentId) {
+  // The in-process teammate's own turn: runAgent put the runner's turn id on
+  // this context, so the caller is the teammate, not something it spawned.
+  const turnAgentId = getTeammateContext()?.turnAgentId
+  const isOwnTurn = turnAgentId !== undefined && contextAgentId === turnAgentId
+
+  if (
+    !isOwnTurn &&
+    contextAgentId !== undefined &&
+    contextAgentId !== ambientAgentId
+  ) {
     return {
       agentId: contextAgentId,
       name: findRegisteredName(

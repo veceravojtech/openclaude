@@ -14,6 +14,7 @@
  */
 
 import { AsyncLocalStorage } from 'async_hooks'
+import type { AgentId } from '../types/ids.js'
 
 /**
  * Runtime context for in-process teammates.
@@ -36,6 +37,22 @@ export type TeammateContext = {
   isInProcess: true
   /** Abort controller for lifecycle management (linked to parent) */
   abortController: AbortController
+  /**
+   * The tool-use-context agent id of the turn currently running, when one is.
+   *
+   * `agentId` above is `name@team`, which is NOT an AgentId and never appears
+   * on a tool-use context. A teammate's turn goes through runAgent, which puts
+   * its own freshly minted AgentId on every tool context it creates, so a tool
+   * cannot tell "the teammate itself" from "a subagent spawned inside the
+   * teammate" by comparing against `agentId`. The runner mints that id up front
+   * per turn, passes it to runAgent as `override.agentId`, and republishes this
+   * context with it here, so `context.agentId === turnAgentId` identifies the
+   * teammate's own call (see resolveCallerIdentity in agentIdentity.ts).
+   *
+   * Absent outside a turn and for tmux teammates, whose identity comes from
+   * dynamicTeamContext rather than from this context.
+   */
+  turnAgentId?: AgentId
 }
 
 const teammateContextStorage = new AsyncLocalStorage<TeammateContext>()

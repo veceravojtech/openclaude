@@ -18,6 +18,7 @@ import {
   createTeammateContext,
   runWithTeammateContext,
 } from '../../utils/teammateContext.js'
+import { createAgentId } from '../../utils/uuid.js'
 import {
   NO_ADDRESSABLE_AGENTS_MESSAGE,
   SEND_MESSAGE_HINT,
@@ -359,6 +360,33 @@ test('a subagent inside a teammate sees its spawner and the lead, not itself', a
   expect(fromTeammate.data.agents.map(a => [a.name, a.kind])).toEqual([
     ['team-lead', 'team_lead'],
     ['scout', 'background_agent'],
+  ])
+
+  // The shape a real turn has: runAgent stamps the runner's minted turn id on
+  // the teammate's own tool-use context, so the context id never equals the
+  // ambient `name@team`. Published as turnAgentId it still resolves to the
+  // teammate — without it the supervisor would list itself as an idle teammate
+  // and miss the lead row.
+  const turnAgentId = createAgentId()
+  const fromOwnTurn = await runWithTeammateContext(
+    { ...teammateContext, turnAgentId },
+    () => ListAgentsTool.call({}, contextFor(appState, turnAgentId)),
+  )
+  expect(fromOwnTurn.data.agents.map(a => [a.name, a.kind])).toEqual([
+    ['team-lead', 'team_lead'],
+    ['scout', 'background_agent'],
+  ])
+
+  // A subagent spawned inside that same turn is still told apart from it.
+  const fromSubagentInTurn = await runWithTeammateContext(
+    { ...teammateContext, turnAgentId },
+    () => ListAgentsTool.call({}, contextFor(appState, subagentId)),
+  )
+  expect(
+    fromSubagentInTurn.data.agents.map(a => [a.name, a.kind, a.status]),
+  ).toEqual([
+    ['team-lead', 'team_lead', 'unknown'],
+    ['supervisor', 'teammate', 'idle'],
   ])
 
   // Its subagent runs inside the same AsyncLocalStorage context but is
