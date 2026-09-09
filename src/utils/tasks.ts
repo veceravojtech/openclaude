@@ -210,6 +210,27 @@ export function getTaskListId(): string {
 }
 
 /**
+ * The task list a sub-team's work lives in: the sub-team's own name.
+ *
+ * Keyed by NAME rather than by the sub-lead's agent id because
+ * `getTaskListId()` above already returns an in-process teammate's team name
+ * verbatim — so a member of `email/supervisor` resolves to exactly this id
+ * with no special case — and because one list per team is the convention a
+ * root team already follows. `getTasksDir()` sanitizes it, so `email/supervisor`
+ * lands flat in `tasks/email-supervisor/` with no new path math here.
+ *
+ * Trivial today on purpose: it is the one place the choice is written down,
+ * so the runner (which decides where a teammate CLAIMS) and TaskCreate (which
+ * decides where a sub-lead WRITES) cannot drift apart. TeamCreate's sub-team
+ * branch deliberately skips the lead-only `resetTaskList`/`ensureTasksDir`
+ * pair, so the directory does not exist until a writer calls `ensureTasksDir`
+ * on this id.
+ */
+export function getSubTeamTaskListId(subTeamName: string): string {
+  return subTeamName
+}
+
+/**
  * Sanitizes a string for safe use in file paths.
  * Removes path traversal characters and other potentially dangerous characters.
  * Only allows alphanumeric characters, hyphens, and underscores.

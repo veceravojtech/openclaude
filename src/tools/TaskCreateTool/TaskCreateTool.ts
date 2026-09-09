@@ -1,19 +1,55 @@
 import { z } from 'zod/v4'
 import { buildTool, type ToolDef } from '../../Tool.js'
 import {
+  type CallerIdentityContext,
+  resolveCallerIdentity,
+} from '../../utils/agentIdentity.js'
+import {
   executeTaskCreatedHooks,
   getTaskCreatedHookMessage,
 } from '../../utils/hooks.js'
 import { lazySchema } from '../../utils/lazySchema.js'
+import { readSubTeamLedBy } from '../../utils/swarm/teamHelpers.js'
 import {
   createTask,
   deleteTask,
+  ensureTasksDir,
+  getSubTeamTaskListId,
   getTaskListId,
   isTodoV2Enabled,
 } from '../../utils/tasks.js'
 import { getAgentName, getTeamName } from '../../utils/teammate.js'
 import { TASK_CREATE_TOOL_NAME } from './constants.js'
 import { DESCRIPTION, getPrompt } from './prompt.js'
+
+/**
+ * The task list this TaskCreate writes into.
+ *
+ * A teammate that leads a sub-team creates work FOR that sub-team, not for the
+ * team it is itself a member of. `getTaskListId()` returns an in-process
+ * teammate's own team — the PARENT team, where the sub-lead is an ordinary
+ * member — so without this the sub-lead's tasks would land in the list its own
+ * peers claim from and its children, which claim from the sub-team's list,
+ * would never see them.
+ *
+ * Resolved through `resolveCallerIdentity` so that a subagent running inside
+ * the sub-lead's turn keeps the ordinary list: the teammate leads the sub-team,
+ * the subagent does not.
+ *
+ * TeamCreate's sub-team branch deliberately skips the lead-only
+ * `ensureTasksDir`, so the sub-team's directory is created here, on first write.
+ */
+async function resolveTaskCreateListId(
+  context: CallerIdentityContext,
+): Promise<string> {
+  const subTeam = await readSubTeamLedBy(resolveCallerIdentity(context))
+  if (!subTeam) {
+    return getTaskListId()
+  }
+  const taskListId = getSubTeamTaskListId(subTeam.name)
+  await ensureTasksDir(taskListId)
+  return taskListId
+}
 
 const inputSchema = lazySchema(() =>
   z.strictObject({
@@ -78,7 +114,8 @@ export const TaskCreateTool = buildTool({
     return null
   },
   async call({ subject, description, activeForm, metadata }, context) {
-    const taskId = await createTask(getTaskListId(), {
+    const taskListId = await resolveTaskCreateListId(context)
+    const taskId = await createTask(taskListId, {
       subject,
       description,
       activeForm,
@@ -108,7 +145,7 @@ export const TaskCreateTool = buildTool({
     }
 
     if (blockingErrors.length > 0) {
-      await deleteTask(getTaskListId(), taskId)
+      await deleteTask(taskListId, taskId)
       throw new Error(blockingErrors.join('\n'))
     }
 

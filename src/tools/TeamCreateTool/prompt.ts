@@ -42,6 +42,10 @@ This creates:
 6. **Teammates go idle between turns** - after each turn, teammates automatically go idle and send a notification. IMPORTANT: Be patient with idle teammates! Don't comment on their idleness until it actually impacts your work.
 7. **Shutdown your team** - when the task is completed, gracefully shut down your teammates via SendMessage with \`message: {type: "shutdown_request"}\`.
 
+## Sub-teams
+
+If you are a teammate rather than the team lead, TeamCreate gives you the one sub-team you may lead, named \`<your team>/<your name>\` — teammate \`supervisor\` of team \`email\` calls it with \`team_name: "email/supervisor"\` and nothing else. Members you then spawn with the Agent tool join THAT team, report their idle notifications and messages to you rather than to your own lead, and claim work from the sub-team's own task list, which is where your TaskCreate writes once you lead one. You stay a member of your parent team throughout. One sub-team per teammate, and only teammates running in the lead's process can lead one.
+
 ## Task Ownership
 
 Tasks are assigned using TaskUpdate with the \`owner\` parameter. Any agent can set or change task ownership via TaskUpdate.

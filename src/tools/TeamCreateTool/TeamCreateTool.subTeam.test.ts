@@ -18,6 +18,10 @@ import type { ToolUseContext } from '../../Tool.js'
 import { asAgentId } from '../../types/ids.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
 import { readTeamFileAsync } from '../../utils/swarm/teamHelpers.js'
+import {
+  clearDynamicTeamContext,
+  setDynamicTeamContext,
+} from '../../utils/teammate.js'
 import { runWithTeammateContext } from '../../utils/teammateContext.js'
 import {
   clearLeaderTeamName,
@@ -55,8 +59,9 @@ afterEach(() => {
       process.env[MAX_DEPTH_ENV] = savedMaxDepth
     }
     // The lead path sets a process-wide leader team name; keep it out of the
-    // next test.
+    // next test, and so is the pane-teammate identity one case installs.
     clearLeaderTeamName()
+    clearDynamicTeamContext()
     setClaudeConfigHomeDirForTesting(undefined)
     if (configDir) rmSync(configDir, { recursive: true, force: true })
     configDir = undefined
@@ -293,4 +298,44 @@ test('a teammate creating its sub-team leaves the task list alone', async () => 
     createTeam(makeContext({ teamName: 'email' }).context, 'email/ops'),
   )
   expect(existsSync(getTasksDir('email/ops'))).toBe(false)
+})
+
+test('a pane teammate is refused a sub-team, and leaves no team file behind', async () => {
+  // A pane/tmux teammate gets its identity from dynamicTeamContext rather than
+  // from AsyncLocalStorage, and its own turns run on its process's main thread
+  // — so the tool context carries no agent id. resolveCallerIdentity therefore
+  // calls it a teammate and it reaches the sub-team branch, but there is no
+  // in-process runner behind it to poll the sub-team's inbox or hand out its
+  // task list.
+  setDynamicTeamContext({
+    agentId: 'supervisor@email',
+    agentName: 'supervisor',
+    teamName: 'email',
+    planModeRequired: false,
+  })
+  const appState = {
+    agentNameRegistry: new Map<string, string>(),
+    mainLoopModel: 'test-model',
+    teamContext: { teamName: 'email' },
+  } as unknown as AppState
+  const paneContext = {
+    agentId: undefined,
+    getAppState: () => appState,
+    setAppState: mock(() => {}),
+    abortController: new AbortController(),
+    messages: [],
+    options: { mainLoopModel: 'test-model' },
+  } as unknown as ToolUseContext
+
+  await expect(createTeam(paneContext, 'email/supervisor')).rejects.toThrow(
+    'Only an in-process teammate can lead a sub-team',
+  )
+  expect(await readTeamFileAsync('email/supervisor')).toBeNull()
+
+  // The same teammate running in-process is still allowed.
+  clearDynamicTeamContext()
+  const inProcess = await asTeammate('supervisor', 'email', () =>
+    createTeam(makeContext({ teamName: 'email' }).context, 'email/supervisor'),
+  )
+  expect(inProcess.data.team_name).toBe('email/supervisor')
 })

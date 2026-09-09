@@ -32,6 +32,7 @@ import {
   writeTeamFileAsync,
 } from '../../utils/swarm/teamHelpers.js'
 import { assignTeammateColor } from '../../utils/swarm/teammateLayoutManager.js'
+import { isInProcessTeammate } from '../../utils/teammateContext.js'
 import {
   ensureTasksDir,
   resetTaskList,
@@ -125,6 +126,19 @@ async function createSubTeam(
   leadAgentType: string,
   leadModel: string,
 ): Promise<{ data: Output }> {
+  // A pane/tmux teammate reaches this branch too — it is a teammate by every
+  // identity check — but it runs in its own process and has no in-process
+  // runner, and the in-process runner is what polls a sub-team's `team-lead`
+  // inbox and hands its task list out to the sub-team's members. A pane
+  // sub-lead would leave its children reporting into an inbox nothing reads
+  // and claiming from a list nothing offers, so the team is refused rather
+  // than created unleadable.
+  if (!isInProcessTeammate()) {
+    throw new Error(
+      'Only an in-process teammate can lead a sub-team. This teammate runs in its own pane, where nothing would deliver its sub-team\'s messages or hand out its task list. Ask the team lead to create the team and spawn the members instead.',
+    )
+  }
+
   const subTeamName = getSubTeamNameFor(caller.agentId, caller.name)
   const parentTeam = subTeamName ? getParentTeamName(subTeamName) : undefined
   if (!subTeamName || !parentTeam || !caller.agentId) {

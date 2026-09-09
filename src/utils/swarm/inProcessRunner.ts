@@ -34,6 +34,7 @@ import {
 } from '../../services/compact/compact.js'
 import { resetMicrocompactState } from '../../services/compact/microCompact.js'
 import type { AppState } from '../../state/AppState.js'
+import { isTerminalTaskStatus } from '../../Task.js'
 import type { Tool, ToolUseContext } from '../../Tool.js'
 import { appendTeammateMessage } from '../../tasks/InProcessTeammateTask/InProcessTeammateTask.js'
 import type {
@@ -115,6 +116,7 @@ import { jsonStringify } from '../slowOperations.js'
 import { asSystemPrompt } from '../systemPromptType.js'
 import {
   claimTask,
+  getSubTeamTaskListId,
   listTasks,
   type Task,
   unassignTeammateTasks,
@@ -143,7 +145,12 @@ import {
   createPermissionRequest,
   sendPermissionRequestViaMailbox,
 } from './permissionSync.js'
-import { removeMemberByAgentId } from './teamHelpers.js'
+import {
+  getParentTeamName,
+  getSubTeamNameFor,
+  readSubTeamLedBy,
+  removeMemberByAgentId,
+} from './teamHelpers.js'
 import { TEAMMATE_SYSTEM_PROMPT_ADDENDUM } from './teammatePromptAddendum.js'
 import { createInProcessPermissionAbortCompleter } from './inProcessPermissionAbort.js'
 
@@ -757,6 +764,80 @@ async function tryClaimNextTask(
 }
 
 /**
+ * The task list this teammate claims work from.
+ *
+ * A member of a SUB-team claims from the sub-team's own list, keyed by the
+ * sub-team name (`getSubTeamTaskListId`); every other teammate keeps the
+ * leader's session-keyed list unchanged, because the lead creates tasks under
+ * its session id rather than under the team name.
+ *
+ * A sub-LEAD is itself a member of the parent team — `identity.teamName` is
+ * the parent — so it keeps claiming from the parent's list and never claims
+ * the work it just delegated into its own sub-team: it hands work downward,
+ * it does not take it back.
+ */
+function resolveTeammateTaskListId(identity: TeammateIdentity): string {
+  return getParentTeamName(identity.teamName) !== undefined
+    ? getSubTeamTaskListId(identity.teamName)
+    : identity.parentSessionId
+}
+
+/**
+ * How long a resolved answer to "do I lead a sub-team?" is trusted before the
+ * team file is read again.
+ */
+const SUB_TEAM_RECHECK_INTERVAL_MS = 5_000
+
+/**
+ * Resolves, and caches, the sub-team this teammate leads so the poll loop can
+ * read that team's `team-lead` inbox as well as its own.
+ *
+ * The NAME is pure (`getSubTeamNameFor`) and settled once: a teammate that
+ * cannot have a sub-team never touches the disk. Leadership itself has to be
+ * re-read, because the sub-team may be created AFTER the teammate started —
+ * but not on every 500ms round, which would be a team-file read per poll for
+ * the whole idle life of every teammate. A short TTL is enough: the only
+ * writer of this teammate's sub-team file is this teammate's own TeamCreate
+ * call, which runs inside a turn and therefore cannot run while the poll loop
+ * is waiting, so the answer is already settled by the time the loop next asks
+ * and the TTL only bounds how stale a concurrently-deleted team may look.
+ */
+function createSubTeamInboxResolver(identity: TeammateIdentity): {
+  resolve(): Promise<string | undefined>
+} {
+  const subTeamName = getSubTeamNameFor(identity.agentId, identity.agentName)
+  let checkedAtMs: number | undefined
+  let leads = false
+
+  return {
+    async resolve(): Promise<string | undefined> {
+      if (!subTeamName) return undefined
+      const now = Date.now()
+      if (
+        checkedAtMs === undefined ||
+        now - checkedAtMs >= SUB_TEAM_RECHECK_INTERVAL_MS
+      ) {
+        checkedAtMs = now
+        try {
+          leads =
+            (await readSubTeamLedBy({
+              agentId: identity.agentId,
+              name: identity.agentName,
+              isTeammate: true,
+            })) !== null
+        } catch (err) {
+          logForDebugging(
+            `[inProcessRunner] ${identity.agentName} could not read its sub-team file: ${err}`,
+          )
+          leads = false
+        }
+      }
+      return leads ? subTeamName : undefined
+    },
+  }
+}
+
+/**
  * Result of waiting for messages.
  */
 type WaitResult =
@@ -1029,6 +1110,7 @@ async function pollForNextPromptOrShutdown(
   idlePolicy: IdlePolicy,
 ): Promise<WaitResult> {
   const POLL_INTERVAL_MS = 500
+  const subTeamInbox = createSubTeamInboxResolver(identity)
 
   logForDebugging(
     `[inProcessRunner] ${identity.agentName} starting poll loop (abort=${abortController.signal.aborted})`,
@@ -1211,6 +1293,53 @@ async function pollForNextPromptOrShutdown(
           }
         }
       }
+
+      // A sub-lead's SECOND inbox: `team-lead` of the sub-team this teammate
+      // leads, where its children write their idle notifications, shutdown
+      // replies and DMs. Nothing else polls that inbox — `team-lead@<sub-team>`
+      // is a roster entry with no process behind it.
+      //
+      // ORDERING (graded, and tested): this read sits deliberately LAST of the
+      // message sources — after task.pendingUserMessages, after the own-inbox
+      // shutdown scan, after background-agent task notifications and after the
+      // own-inbox team-lead-then-FIFO pick, and still before the task-list
+      // claim and the idle policy. A sub-lead's obligations UPWARD outrank its
+      // coordination duties DOWNWARD: its own lead speaks for user intent, and
+      // a shutdown addressed to this teammate must never wait behind a child's
+      // report. Inside the sub-team inbox the order is plain FIFO: every child
+      // is a peer there and none of them is this teammate's lead.
+      //
+      // There is deliberately NO isShutdownRequest scan over this inbox, and
+      // that is a correctness rule rather than an omission. A child asking for
+      // permission to stop writes a shutdown REQUEST into exactly this inbox
+      // (sendShutdownRequestToMailbox). The scan on the own inbox means
+      // "someone is telling ME to shut down"; running it here would turn a
+      // child's request for approval into an order that shuts the sub-lead
+      // itself down. It arrives as an ordinary message so the model can
+      // approve or reject it.
+      const subTeamName = await subTeamInbox.resolve()
+      if (subTeamName) {
+        const subTeamMessages = await readMailbox(TEAM_LEAD_NAME, subTeamName)
+        const unreadIndex = subTeamMessages.findIndex(m => !m.read)
+        const subTeamMessage = subTeamMessages[unreadIndex]
+        if (subTeamMessage) {
+          logForDebugging(
+            `[inProcessRunner] ${identity.agentName} received sub-team message from ${subTeamMessage.from} in ${subTeamName} (index ${unreadIndex})`,
+          )
+          await markMessageAsReadByIndex(
+            TEAM_LEAD_NAME,
+            subTeamName,
+            unreadIndex,
+          )
+          return {
+            type: 'new_message',
+            message: subTeamMessage.text,
+            from: subTeamMessage.from,
+            color: subTeamMessage.color,
+            summary: subTeamMessage.summary,
+          }
+        }
+      }
     } catch (err) {
       logForDebugging(
         `[inProcessRunner] ${identity.agentName} poll error: ${err}`,
@@ -1250,12 +1379,67 @@ async function pollForNextPromptOrShutdown(
  * runner's completion tail then marks the task completed, evicts it and emits
  * the SDK terminated event exactly as for a normal exit.
  */
+/**
+ * The children of `subTeamName` that are still working: an in-process teammate
+ * task whose identity names that team and which is neither parked idle nor in
+ * a terminal state. Names, not ids, because the list goes into a log line a
+ * human reads.
+ */
+function findBusySubTeamChildren(
+  appState: AppState,
+  subTeamName: string,
+): string[] {
+  const busy: string[] = []
+  for (const task of Object.values(appState.tasks)) {
+    if (task.type !== 'in_process_teammate') continue
+    if (task.identity.teamName !== subTeamName) continue
+    if (task.isIdle || isTerminalTaskStatus(task.status)) continue
+    busy.push(task.identity.agentName)
+  }
+  return busy
+}
+
 async function finalizeIdleShutdown(
   identity: TeammateIdentity,
+  getAppState: () => AppState,
   setAppState: SetAppStateFn,
   taskListId: string,
   result: Extract<WaitResult, { type: 'idle_shutdown' }>,
-): Promise<void> {
+): Promise<boolean> {
+  // A sub-lead does not get to go idle out from under its own team. Its
+  // children report INTO its sub-team inbox and claim from its task list, so
+  // tearing it down while any of them is still working orphans them: their
+  // idle notifications and shutdown requests would land in an inbox nobody
+  // polls again. Refuse while any child is busy; allow once they are all
+  // parked idle or terminal. Stopping the children is U7's cascade — this is
+  // the gate alone, and a refusal returns the teammate to waiting rather than
+  // ending its runner.
+  const subTeamName = getSubTeamNameFor(identity.agentId, identity.agentName)
+  if (subTeamName) {
+    let leadsSubTeam = false
+    try {
+      leadsSubTeam =
+        (await readSubTeamLedBy({
+          agentId: identity.agentId,
+          name: identity.agentName,
+          isTeammate: true,
+        })) !== null
+    } catch (err) {
+      logForDebugging(
+        `[inProcessRunner] ${identity.agentId} could not read its sub-team file before idle shutdown: ${err}`,
+      )
+    }
+    if (leadsSubTeam) {
+      const busy = findBusySubTeamChildren(getAppState(), subTeamName)
+      if (busy.length > 0) {
+        logForDebugging(
+          `[inProcessRunner] ${identity.agentId} refusing idle shutdown: ${busy.length} member(s) of ${subTeamName} still working (${busy.join(', ')})`,
+        )
+        return false
+      }
+    }
+  }
+
   const idleSeconds = Math.round(result.idleMs / 1000)
   const cause =
     result.reason === 'hook'
@@ -1304,6 +1488,7 @@ async function finalizeIdleShutdown(
     identity.color,
     identity.teamName,
   )
+  return true
 }
 
 /**
@@ -1465,21 +1650,40 @@ async function idleUntilNextPrompt(params: {
     `[inProcessRunner] ${identity.agentId} finished prompt, waiting for next`,
   )
 
-  // Wait for next message or shutdown
-  const waitResult = await waitForNextPromptOrShutdown(
+  // Wait for next message or shutdown.
+  //
+  // A REFUSED idle shutdown is not an exit: finalizeIdleShutdown turns a
+  // sub-lead down while its children are still working, and the teammate goes
+  // back to waiting instead of ending its runner. Re-entering the wait is what
+  // re-arms the idle clock — each call builds a fresh idle policy anchored at a
+  // fresh Date.now() — so the policy cannot fire again until another full idle
+  // period has passed, rather than spinning on the refusal. An abort ends the
+  // wait with `aborted` and leaves the loop as before.
+  const taskListId = resolveTeammateTaskListId(identity)
+  let waitResult = await waitForNextPromptOrShutdown(
     identity,
     abortController,
     taskId,
     toolUseContext.getAppState,
     setAppState,
-    identity.parentSessionId,
+    taskListId,
   )
-  if (waitResult.type === 'idle_shutdown') {
-    await finalizeIdleShutdown(
+  while (waitResult.type === 'idle_shutdown') {
+    const shutDown = await finalizeIdleShutdown(
       identity,
+      toolUseContext.getAppState,
       setAppState,
-      identity.parentSessionId,
+      taskListId,
       waitResult,
+    )
+    if (shutDown) break
+    waitResult = await waitForNextPromptOrShutdown(
+      identity,
+      abortController,
+      taskId,
+      toolUseContext.getAppState,
+      setAppState,
+      taskListId,
     )
   }
 
@@ -1637,13 +1841,14 @@ export async function runInProcessTeammate(
 
   // Try to claim an available task immediately so the UI can show activity
   // from the very start. The idle loop handles claiming for subsequent tasks.
-  // Use parentSessionId as the task list ID since the leader creates tasks
-  // under its session ID, not the team name.
+  // The list is the leader's session id for a root-team teammate (the leader
+  // creates tasks under its session id, not the team name) and the sub-team's
+  // own list for a member of a sub-team — see resolveTeammateTaskListId.
   // A prompted spawn is driven by the lead's prompt, so the claimed task's
   // text is not used here; an idle spawn has no other prompt, so the claimed
   // task becomes its first turn (see below).
   const claimedTaskPrompt = await tryClaimNextTask(
-    identity.parentSessionId,
+    resolveTeammateTaskListId(identity),
     identity.agentName,
   )
 
