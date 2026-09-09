@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { z } from 'zod/v4'
 import { getSessionCreatedTeams } from '../../bootstrap/state.js'
+import { parseAgentId } from '../agentId.js'
 import { logForDebugging } from '../debug.js'
 import { getTeamsDir } from '../envUtils.js'
 import { errorMessage, getErrnoCode } from '../errors.js'
@@ -67,6 +68,14 @@ export type TeamFile = {
   createdAt: number
   leadAgentId: string
   leadSessionId?: string // Actual session UUID of the leader (for discovery)
+  /**
+   * The team this one hangs off when it is a sub-team — a team a teammate
+   * leads, named `<parentTeam>/<teammate name>`. Root teams have neither
+   * parent field.
+   */
+  parentTeam?: string
+  /** Agent id (`name@team`) of the teammate leading this sub-team. */
+  parentAgentId?: string
   hiddenPaneIds?: string[] // Pane IDs that are currently hidden from the UI
   teamAllowedPaths?: TeamAllowedPath[] // Paths all teammates can edit without asking
   members: Array<{
@@ -107,6 +116,48 @@ export function sanitizeName(name: string): string {
  */
 export function sanitizeAgentName(name: string): string {
   return name.replace(/@/g, '-')
+}
+
+/**
+ * Separates a parent team from the teammate that leads its sub-team.
+ * Team names are a path in the team tree: `email`, then `email/supervisor`.
+ */
+const SUB_TEAM_SEPARATOR = '/'
+
+/**
+ * How deep a team sits in the team tree: a root team is 1, `email/supervisor`
+ * is 2. Used for the CLAUDE_CODE_MAX_TEAM_DEPTH cap.
+ */
+export function getTeamDepth(teamName: string): number {
+  return teamName.split(SUB_TEAM_SEPARATOR).length
+}
+
+/**
+ * The team a sub-team hangs off, or undefined when the name is a root team.
+ * Derived from the name alone — the recorded `parentTeam` says the same thing
+ * for a team file that was written by TeamCreate.
+ */
+export function getParentTeamName(teamName: string): string | undefined {
+  const index = teamName.lastIndexOf(SUB_TEAM_SEPARATOR)
+  return index === -1 ? undefined : teamName.slice(0, index)
+}
+
+/**
+ * The single sub-team name a teammate may lead: `<its team>/<its name>`.
+ *
+ * Both arguments come from `resolveCallerIdentity()` — never from an ambient
+ * identity read. Undefined when the caller has no `name@team` identity, or
+ * when its name would itself add a level to the tree.
+ */
+export function getSubTeamNameFor(
+  callerAgentId: string | undefined,
+  callerName: string | undefined,
+): string | undefined {
+  if (!callerAgentId || !callerName) return undefined
+  if (callerName.includes(SUB_TEAM_SEPARATOR)) return undefined
+  const parsed = parseAgentId(callerAgentId)
+  if (!parsed?.teamName) return undefined
+  return `${parsed.teamName}${SUB_TEAM_SEPARATOR}${callerName}`
 }
 
 /**
@@ -157,6 +208,38 @@ export async function readTeamFileAsync(
     )
     return null
   }
+}
+
+/**
+ * The sub-team a teammate leads, or null when it leads none.
+ *
+ * A team file only counts as that teammate's sub-team when it carries the
+ * derived name AND records the caller as its parent: `email/supervisor` and a
+ * root team literally named `email-supervisor` share one directory
+ * (`getTeamDir` sanitizes `/` to `-`), so the recorded name and parent are
+ * what tell them apart.
+ *
+ * `caller` is a `CallerIdentity` from `resolveCallerIdentity()`; a caller that
+ * is not a teammate — a lead, or a subagent running inside a teammate's turn —
+ * leads no sub-team.
+ */
+export async function readSubTeamLedBy(caller: {
+  agentId: string | undefined
+  name: string | undefined
+  isTeammate: boolean
+}): Promise<TeamFile | null> {
+  if (!caller.isTeammate) return null
+  const subTeamName = getSubTeamNameFor(caller.agentId, caller.name)
+  if (!subTeamName) return null
+  const teamFile = await readTeamFileAsync(subTeamName)
+  if (
+    !teamFile ||
+    teamFile.name !== subTeamName ||
+    teamFile.parentAgentId !== caller.agentId
+  ) {
+    return null
+  }
+  return teamFile
 }
 
 /**

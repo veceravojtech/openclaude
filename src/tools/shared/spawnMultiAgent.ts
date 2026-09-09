@@ -49,6 +49,7 @@ import {
 } from '../../utils/swarm/spawnInProcess.js'
 import { buildInheritedEnvVars } from '../../utils/swarm/spawnUtils.js'
 import {
+  getParentTeamName,
   getTeamFilePath,
   readTeamFileAsync,
   registerTeamForSessionCleanup,
@@ -68,6 +69,7 @@ import { registerTask } from '../../utils/task/framework.js'
 import { writeToMailbox } from '../../utils/teammateMailbox.js'
 import type { CustomAgentDefinition } from '../AgentTool/loadAgentsDir.js'
 import { isCustomAgent } from '../AgentTool/loadAgentsDir.js'
+import { TEAM_CREATE_TOOL_NAME } from '../TeamCreateTool/constants.js'
 
 function getDefaultTeammateModel(leaderModel: string | null): string {
   const configured = getGlobalConfig().teammateDefaultModel
@@ -317,6 +319,17 @@ async function ensureTeamFileExists(
 ): Promise<import('../../utils/swarm/teamHelpers.js').TeamFile> {
   const existing = await readTeamFileAsync(teamName)
   if (existing) return existing
+
+  // A sub-team (`<parentTeam>/<leader>`) only ever comes from TeamCreate, which
+  // records parentTeam/parentAgentId. Auto-creating one here would mint a team
+  // that looks like a root team with a slash in its name: no parent, no leader
+  // that anything can resolve, and invisible to the team it claims to hang off.
+  const parentTeam = getParentTeamName(teamName)
+  if (parentTeam !== undefined) {
+    throw new Error(
+      `Team "${teamName}" does not exist. A sub-team of "${parentTeam}" has to be created by its leader with ${TEAM_CREATE_TOOL_NAME} before anyone can be spawned into it.`,
+    )
+  }
 
   // Auto-create the team
   const leadAgentId = formatAgentId(TEAM_LEAD_NAME, teamName)

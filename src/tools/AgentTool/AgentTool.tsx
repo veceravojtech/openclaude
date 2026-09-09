@@ -19,6 +19,7 @@ import { assembleToolPool } from '../../tools.js';
 import { isBuiltInAgentType } from './builtInAgents.js';
 import { asAgentId } from '../../types/ids.js';
 import { runWithAgentContext } from '../../utils/agentContext.js';
+import { resolveCallerIdentity } from '../../utils/agentIdentity.js';
 import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js';
 import { getCwd, runWithCwdOverride } from '../../utils/cwd.js';
 import { logForDebugging } from '../../utils/debug.js';
@@ -45,6 +46,7 @@ import { writeAgentMetadata } from '../../utils/sessionStorage.js';
 import { sleep } from '../../utils/sleep.js';
 import { buildEffectiveSystemPrompt } from '../../utils/systemPrompt.js';
 import { asSystemPrompt } from '../../utils/systemPromptType.js';
+import { readSubTeamLedBy } from '../../utils/swarm/teamHelpers.js';
 import { getTaskOutputPath } from '../../utils/task/diskOutput.js';
 import { getAgentId, getParentSessionId, isTeammate } from '../../utils/teammate.js';
 import { isInProcessTeammate } from '../../utils/teammateContext.js';
@@ -422,11 +424,26 @@ export const AgentTool = buildTool({
     // Teammates (in-process or tmux) passing `name` would trigger spawnTeammate()
     // below, but TeamFile.members is a flat array with one leadAgentId — nested
     // teammates land in the roster with no provenance and confuse the lead.
-    const teamName = resolveTeamName({
+    //
+    // The one exception is a teammate that leads its own sub-team: its members
+    // go into THAT team's roster, which is flat in the same way. `isTeammate()`
+    // is ambient and also true for a subagent running inside a teammate's turn,
+    // so the exception is gated on resolveCallerIdentity() — the subagent (and
+    // every other caller blocked today) still gets the flat-roster error.
+    let teamName = resolveTeamName({
       team_name
     }, appState);
     if (isTeammate() && teamName && name) {
-      throw new Error('Teammates cannot spawn other teammates — the team roster is flat. To spawn a subagent instead, omit the `name` parameter.');
+      const subTeam = await readSubTeamLedBy(resolveCallerIdentity(toolUseContext));
+      if (!subTeam) {
+        throw new Error('Teammates cannot spawn other teammates — the team roster is flat. To spawn a subagent instead, omit the `name` parameter.');
+      }
+      if (team_name !== undefined && team_name !== subTeam.name) {
+        throw new Error(`Teammates can only spawn into their own sub-team "${subTeam.name}", not "${team_name}". Omit team_name to use it.`);
+      }
+      // resolveTeamName defaults to the caller's own (parent) team, so the
+      // sub-team has to be substituted here rather than relied on from context.
+      teamName = subTeam.name;
     }
     // In-process teammates cannot spawn background agents (their lifecycle is
     // tied to the leader's process). Tmux teammates are separate processes and

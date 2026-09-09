@@ -5,6 +5,10 @@ import type { AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS } from 
 import type { Tool } from '../../Tool.js'
 import { buildTool, type ToolDef } from '../../Tool.js'
 import { formatAgentId } from '../../utils/agentId.js'
+import {
+  type CallerIdentity,
+  resolveCallerIdentity,
+} from '../../utils/agentIdentity.js'
 import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js'
 import { getCwd } from '../../utils/cwd.js'
 import { lazySchema } from '../../utils/lazySchema.js'
@@ -17,8 +21,12 @@ import { getResolvedTeammateMode } from '../../utils/swarm/backends/registry.js'
 import { TEAM_LEAD_NAME } from '../../utils/swarm/constants.js'
 import type { TeamFile } from '../../utils/swarm/teamHelpers.js'
 import {
+  getParentTeamName,
+  getSubTeamNameFor,
+  getTeamDepth,
   getTeamFilePath,
   readTeamFile,
+  readTeamFileAsync,
   registerTeamForSessionCleanup,
   sanitizeName,
   writeTeamFileAsync,
@@ -30,6 +38,7 @@ import {
   setLeaderTeamName,
 } from '../../utils/tasks.js'
 import { generateWordSlug } from '../../utils/words.js'
+import { parsePositiveIntEnv } from '../AgentTool/teammateReplicas.js'
 import { TEAM_CREATE_TOOL_NAME } from './constants.js'
 import { getPrompt } from './prompt.js'
 import { renderToolUseMessage } from './UI.js'
@@ -69,6 +78,134 @@ function generateUniqueTeamName(providedName: string): string {
 
   // Team exists, generate a new unique name
   return generateWordSlug()
+}
+
+/** Env knob for the deepest the team tree may go. */
+const MAX_TEAM_DEPTH_ENV_VAR = 'CLAUDE_CODE_MAX_TEAM_DEPTH'
+/** A root team is depth 1, so the default allows `a/b/c`. */
+const DEFAULT_MAX_TEAM_DEPTH = 3
+
+function getMaxTeamDepth(): number {
+  return parsePositiveIntEnv(
+    process.env[MAX_TEAM_DEPTH_ENV_VAR],
+    DEFAULT_MAX_TEAM_DEPTH,
+  )
+}
+
+/**
+ * TeamCreate called by a teammate: it creates the ONE sub-team it may lead,
+ * named `<its team>/<its name>` — so teammate `supervisor` of team `email`
+ * gets `email/supervisor`, led by `team-lead@email/supervisor`. The roster of
+ * each team stays flat; the hierarchy is a tree of teams.
+ *
+ * One team per agent cannot be keyed the way the lead path keys it: an
+ * in-process teammate shares the lead's AppState, so `teamContext.teamName`
+ * there is the teammate's PARENT team and would reject every teammate with
+ * "Already leading team email". It is keyed on the caller instead — the
+ * derived name is a pure function of the caller, and only this function ever
+ * writes a team file recorded under a name containing `/` (the lead path
+ * refuses such names), so a file already recorded under that exact name IS
+ * this caller's earlier create. One recorded under a DIFFERENT name is a
+ * directory collision, checked right after. For the same reason the teammate
+ * branch does not go through `generateUniqueTeamName`, which silently renames
+ * on collision.
+ *
+ * The lead-only side effects that follow the lead path's write are skipped on
+ * purpose: `setAppState` (a no-op inside an in-process teammate, but the real
+ * store of a pane teammate's own process), `setLeaderTeamName` and
+ * `resetTaskList`/`ensureTasksDir` all repoint process-global state — the
+ * task list the lead and its teammates share, and the team context a pane
+ * teammate polls its mailbox from — at the sub-team. The teammate stays a
+ * member of its parent team; its sub-leadership lives in the team file
+ * (`parentTeam`/`parentAgentId`), which is what the Agent tool reads back.
+ */
+async function createSubTeam(
+  input: Input,
+  caller: CallerIdentity,
+  leadAgentType: string,
+  leadModel: string,
+): Promise<{ data: Output }> {
+  const subTeamName = getSubTeamNameFor(caller.agentId, caller.name)
+  const parentTeam = subTeamName ? getParentTeamName(subTeamName) : undefined
+  if (!subTeamName || !parentTeam || !caller.agentId) {
+    throw new Error(
+      'Cannot create a sub-team: the calling agent has no "name@team" identity. Only a teammate of an existing team can lead one.',
+    )
+  }
+
+  const requestedName = input.team_name.trim()
+  if (requestedName !== subTeamName) {
+    throw new Error(
+      `A teammate can only create its own sub-team "${subTeamName}", not "${requestedName}". Retry with team_name: "${subTeamName}".`,
+    )
+  }
+
+  const maxDepth = getMaxTeamDepth()
+  const depth = getTeamDepth(subTeamName)
+  if (depth > maxDepth) {
+    throw new Error(
+      `Team "${subTeamName}" would be ${depth} levels deep, past the limit of ${maxDepth} (${MAX_TEAM_DEPTH_ENV_VAR}). Delegate inside "${parentTeam}" instead, or raise ${MAX_TEAM_DEPTH_ENV_VAR}.`,
+    )
+  }
+
+  const existing = await readTeamFileAsync(subTeamName)
+  if (existing?.name === subTeamName) {
+    throw new Error(
+      `Already leading team "${subTeamName}". A teammate leads at most one sub-team — spawn members into it with the Agent tool instead of creating another.`,
+    )
+  }
+  if (existing) {
+    // Team directories are one sanitized segment, so `email/supervisor` and a
+    // root team named `email-supervisor` would share a config.json.
+    throw new Error(
+      `Cannot create team "${subTeamName}": team "${existing.name}" already occupies its directory ("${sanitizeName(subTeamName)}"). Rename that team, or the calling agent.`,
+    )
+  }
+
+  const leadAgentId = formatAgentId(TEAM_LEAD_NAME, subTeamName)
+  const teamFilePath = getTeamFilePath(subTeamName)
+  const teamFile: TeamFile = {
+    name: subTeamName,
+    description: input.description,
+    createdAt: Date.now(),
+    leadAgentId,
+    leadSessionId: getSessionId(),
+    parentTeam,
+    parentAgentId: caller.agentId,
+    members: [
+      {
+        agentId: leadAgentId,
+        name: TEAM_LEAD_NAME,
+        agentType: leadAgentType,
+        model: leadModel,
+        joinedAt: Date.now(),
+        tmuxPaneId: '',
+        cwd: getCwd(),
+        subscriptions: [],
+      },
+    ],
+  }
+
+  await writeTeamFileAsync(subTeamName, teamFile)
+  registerTeamForSessionCleanup(subTeamName)
+
+  logEvent('tengu_team_created', {
+    team_name:
+      subTeamName as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+    teammate_count: 1,
+    lead_agent_type:
+      leadAgentType as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+    teammate_mode:
+      getResolvedTeammateMode() as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
+  })
+
+  return {
+    data: {
+      team_name: subTeamName,
+      team_file_path: teamFilePath,
+      lead_agent_id: leadAgentId,
+    },
+  }
 }
 
 export const TeamCreateTool: Tool<InputSchema, Output> = buildTool({
@@ -129,8 +266,25 @@ export const TeamCreateTool: Tool<InputSchema, Output> = buildTool({
     const { setAppState, getAppState } = context
     const { team_name, description: _description, agent_type } = input
 
-    // Check if already in a team - restrict to one team per leader
     const appState = getAppState()
+    const leadAgentType = agent_type || TEAM_LEAD_NAME
+    // Get the team lead's current model from AppState (handles session model, settings, CLI override)
+    const leadModel = parseUserSpecifiedModel(
+      appState.mainLoopModelForSession ??
+        appState.mainLoopModel ??
+        getDefaultMainLoopModel(),
+    )
+
+    // Who is calling decides which team may be created: a lead creates a root
+    // team, a teammate the one sub-team it leads. Identity comes from
+    // resolveCallerIdentity so a subagent running inside a teammate's turn is
+    // not mistaken for the teammate itself.
+    const caller = resolveCallerIdentity(context)
+    if (caller.isTeammate) {
+      return createSubTeam(input, caller, leadAgentType, leadModel)
+    }
+
+    // Check if already in a team - restrict to one team per leader
     const existingTeam = appState.teamContext?.teamName
 
     if (existingTeam) {
@@ -139,18 +293,24 @@ export const TeamCreateTool: Tool<InputSchema, Output> = buildTool({
       )
     }
 
+    // The caller is not a teammate, so the name it asks for is a ROOT team
+    // name — and a `/` in it names a sub-team. Writing one here would record a
+    // team under a sub-team's name with no parentTeam/parentAgentId: the
+    // teammate that legitimately leads it is then told it is "Already leading"
+    // a team it does not lead, and the depth cap (which only createSubTeam
+    // applies) never sees the name. This check belongs on the lead branch
+    // alone — the teammate path passes `email/supervisor` on purpose.
+    if (getParentTeamName(team_name) !== undefined) {
+      throw new Error(
+        `Cannot create team "${team_name}": a "/" in a team name marks a sub-team, and a sub-team is created by the teammate that leads it — with ${TEAM_CREATE_TOOL_NAME} from that teammate's own turn, under the name "<its team>/<its name>". Choose a name without "/".`,
+      )
+    }
+
     // If team already exists, generate a unique name instead of failing
     const finalTeamName = generateUniqueTeamName(team_name)
 
     // Generate a deterministic agent ID for the team lead
     const leadAgentId = formatAgentId(TEAM_LEAD_NAME, finalTeamName)
-    const leadAgentType = agent_type || TEAM_LEAD_NAME
-    // Get the team lead's current model from AppState (handles session model, settings, CLI override)
-    const leadModel = parseUserSpecifiedModel(
-      appState.mainLoopModelForSession ??
-        appState.mainLoopModel ??
-        getDefaultMainLoopModel(),
-    )
 
     const teamFilePath = getTeamFilePath(finalTeamName)
 
