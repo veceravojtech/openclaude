@@ -29,6 +29,7 @@ import { buildEffectiveSystemPrompt } from '../../utils/systemPrompt.js'
 import type { SystemPrompt } from '../../utils/systemPromptType.js'
 import { getTaskOutputPath } from '../../utils/task/diskOutput.js'
 import { getAgentId, getParentSessionId } from '../../utils/teammate.js'
+import { isInProcessTeammate } from '../../utils/teammateContext.js'
 import { reconstructForSubagentResume } from '../../utils/toolResultStorage.js'
 import { runAsyncAgentLifecycle } from './agentToolUtils.js'
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js'
@@ -251,11 +252,13 @@ export async function resumeAgentBackground({
   // <tool-use-id> comes from toolUseContext.toolUseId at
   // AgentTool/agentToolUtils.ts:653, not from here.
   //
-  // Same spawner rule as the fresh-spawn path in AgentTool: a teammate's
-  // stable identity outlives the turn, toolUseContext.agentId does not, and
-  // both a user-initiated resume (REPL.tsx) and a coordinator-side resume
-  // leave this undefined so the notification still reaches the coordinator.
-  const spawnerAgentId = getAgentId()
+  // Same spawner rule as the fresh-spawn path in AgentTool, including its
+  // AsyncLocalStorage-only gate: a teammate's stable identity outlives the
+  // turn, toolUseContext.agentId does not, and a user-initiated resume
+  // (REPL.tsx), a coordinator-side resume and a pane/tmux teammate's main
+  // thread all leave this undefined so the notification still reaches the
+  // context that actually drains it.
+  const spawnerAgentId = isInProcessTeammate() ? getAgentId() : undefined
   const agentBackgroundTask = registerAsyncAgent({
     agentId,
     description: uiDescription,

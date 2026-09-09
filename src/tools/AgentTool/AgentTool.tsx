@@ -1001,15 +1001,24 @@ export const AgentTool = buildTool({
     };
     if (shouldRunAsync) {
       const asyncAgentId = earlyAgentId;
-      // Who should hear about this agent finishing. Inside a teammate's turn
-      // toolUseContext.agentId is a fresh per-turn id (runAgent.ts creates one
-      // per call and createSubagentContext stamps it), so a notification
-      // addressed to it is orphaned the moment the turn ends — nothing drains
-      // it. The teammate's stable identity is what its own poll loop watches,
-      // so prefer that; a plain subagent falls back to its turn id, and the
-      // main thread stays undefined (today's behaviour, notification goes to
-      // the coordinator).
-      const spawnerAgentId = getAgentId();
+      // Who should hear about this agent finishing. Inside an in-process
+      // teammate's turn toolUseContext.agentId is a fresh per-turn id
+      // (runAgent.ts creates one per call and createSubagentContext stamps it),
+      // so a notification addressed to it is orphaned the moment the turn ends
+      // — nothing drains it. The teammate's stable identity is what its own
+      // poll loop watches, so prefer that; a plain subagent falls back to its
+      // turn id, and the main thread stays undefined (today's behaviour,
+      // notification goes to the coordinator).
+      //
+      // The gate is isInProcessTeammate() — AsyncLocalStorage only — and not
+      // "getAgentId() returned something". A pane/tmux teammate is a separate
+      // claude process that sets dynamicTeamContext from its --agent-id flag
+      // (main.tsx), so there getAgentId() answers name@team on the MAIN
+      // thread, where every drain requires agentId === undefined and no poll
+      // loop exists to take an addressed one. Stamping it would silently
+      // orphan that teammate's own background agents; only the in-process ALS
+      // context has a reader for the id it hands out.
+      const spawnerAgentId = isInProcessTeammate() ? getAgentId() : undefined;
       const agentBackgroundTask = registerAsyncAgent({
         agentId: asyncAgentId,
         description,
