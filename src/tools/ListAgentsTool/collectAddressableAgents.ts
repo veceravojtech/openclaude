@@ -6,7 +6,7 @@
  *   (b) team-file members not already covered by (a) — pane/tmux teammates
  *   (c) named background subagents — `local_agent` tasks whose name is in
  *       AppState.agentNameRegistry, including terminal ones still in state
- *   (d) the team lead, when the caller is itself a teammate
+ *   (d) the team lead, for any caller inside a team that is not the lead
  *
  * The caller is excluded. No I/O: the team-file members are passed in so the
  * function is unit-testable with plain state.
@@ -58,7 +58,11 @@ export type CollectAddressableAgentsInput = {
   leadAgentId?: string
   selfAgentId?: string
   selfAgentName?: string
-  callerIsTeammate: boolean
+  /**
+   * Whether to add the lead row: true for every caller inside a team except
+   * the lead itself — teammates and the subagents they spawn alike.
+   */
+  includeTeamLead: boolean
 }
 
 const KIND_ORDER: Record<AddressableAgentKind, number> = {
@@ -115,7 +119,7 @@ export function collectAddressableAgents(
     leadAgentId,
     selfAgentId,
     selfAgentName,
-    callerIsTeammate,
+    includeTeamLead,
   } = input
 
   const agents: AddressableAgent[] = []
@@ -200,7 +204,7 @@ export function collectAddressableAgents(
   }
 
   // (d) the team lead, addressable only from inside a team
-  if (callerIsTeammate) {
+  if (includeTeamLead) {
     add({
       name: TEAM_LEAD_NAME,
       agentId: leadAgentId ?? TEAM_LEAD_NAME,

@@ -15,6 +15,10 @@ import type { AgentId } from '../../types/ids.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
 import { getTeamFilePath, type TeamFile } from '../../utils/swarm/teamHelpers.js'
 import {
+  createTeammateContext,
+  runWithTeammateContext,
+} from '../../utils/teammateContext.js'
+import {
   NO_ADDRESSABLE_AGENTS_MESSAGE,
   SEND_MESSAGE_HINT,
 } from './collectAddressableAgents.js'
@@ -226,9 +230,14 @@ test('call() merges the team file, in-process teammates and named background age
     SEND_MESSAGE_HINT,
   ])
 
-  // A background subagent is identified by toolUseContext.agentId.
+  // A background subagent is identified by toolUseContext.agentId. It is
+  // inside the team without being its lead, so it gets a team-lead row too.
   const fromScout = await ListAgentsTool.call({}, contextFor(appState, 'a-scout'))
-  expect(fromScout.data.agents.map(a => a.name)).toEqual(['coder', 'painter'])
+  expect(fromScout.data.agents.map(a => a.name)).toEqual([
+    'team-lead',
+    'coder',
+    'painter',
+  ])
 })
 
 test('call() outside a team reports that nothing is addressable', async () => {
@@ -239,4 +248,142 @@ test('call() outside a team reports that nothing is addressable', async () => {
   const { data } = await ListAgentsTool.call({}, contextFor(appState))
   expect(data.agents).toEqual([])
   expect(toText(data)).toBe(NO_ADDRESSABLE_AGENTS_MESSAGE)
+})
+
+test('a subagent inside a teammate sees its spawner and the lead, not itself', async () => {
+  configDir = mkdtempSync(join(tmpdir(), 'openclaude-list-agents-sub-'))
+  setClaudeConfigHomeDirForTesting(configDir)
+
+  const teamName = 'alpha'
+  const teamFile: TeamFile = {
+    name: teamName,
+    createdAt: 0,
+    leadAgentId: 'lead-id',
+    members: [
+      {
+        agentId: 'lead-id',
+        name: 'team-lead',
+        joinedAt: 0,
+        tmuxPaneId: '%0',
+        cwd: '/work',
+        subscriptions: [],
+      },
+      {
+        agentId: `supervisor@${teamName}`,
+        name: 'supervisor',
+        joinedAt: 0,
+        tmuxPaneId: '',
+        cwd: '/work',
+        subscriptions: [],
+        backendType: 'in-process',
+      },
+    ],
+  }
+  const teamFilePath = getTeamFilePath(teamName)
+  mkdirSync(dirname(teamFilePath), { recursive: true })
+  writeFileSync(teamFilePath, JSON.stringify(teamFile))
+
+  const supervisor: InProcessTeammateTaskState = {
+    id: `supervisor@${teamName}`,
+    type: 'in_process_teammate',
+    status: 'running',
+    description: 'supervisor: run the wave',
+    startTime: 0,
+    outputFile: '',
+    outputOffset: 0,
+    notified: false,
+    identity: {
+      agentId: `supervisor@${teamName}`,
+      agentName: 'supervisor',
+      teamName,
+      planModeRequired: false,
+      parentSessionId: 'lead-session',
+    },
+    prompt: 'run the wave',
+    awaitingPlanApproval: false,
+    permissionMode: 'default',
+    pendingUserMessages: [],
+    isIdle: true,
+    shutdownRequested: false,
+    lastReportedToolCount: 0,
+    lastReportedTokenCount: 0,
+  }
+  const subagentId = 'ageneral-purpose-0123456789abcdef'
+  const subagent: LocalAgentTaskState = {
+    id: subagentId,
+    type: 'local_agent',
+    status: 'running',
+    description: 'read the roadmap',
+    startTime: 0,
+    outputFile: '',
+    outputOffset: 0,
+    notified: false,
+    agentId: subagentId,
+    prompt: 'read the roadmap',
+    agentType: 'general-purpose',
+    retrieved: false,
+    lastReportedToolCount: 0,
+    lastReportedTokenCount: 0,
+    isBackgrounded: true,
+    pendingMessages: [],
+    retain: false,
+    diskLoaded: false,
+  }
+  const appState = {
+    tasks: { [supervisor.id]: supervisor, [subagent.id]: subagent },
+    agentNameRegistry: new Map([['scout', subagentId as AgentId]]),
+    teamContext: {
+      teamName,
+      teamFilePath,
+      leadAgentId: 'lead-id',
+      selfAgentId: 'lead-id',
+      selfAgentName: 'team-lead',
+      isLeader: true,
+      teammates: {},
+    },
+  } as unknown as AppState
+
+  const teammateContext = createTeammateContext({
+    agentId: `supervisor@${teamName}`,
+    agentName: 'supervisor',
+    teamName,
+    planModeRequired: false,
+    parentSessionId: 'lead-session',
+    abortController: new AbortController(),
+  })
+
+  // The teammate itself: excluded from its own list, lead included.
+  const fromTeammate = await runWithTeammateContext(teammateContext, () =>
+    ListAgentsTool.call({}, contextFor(appState)),
+  )
+  expect(fromTeammate.data.agents.map(a => [a.name, a.kind])).toEqual([
+    ['team-lead', 'team_lead'],
+    ['scout', 'background_agent'],
+  ])
+
+  // Its subagent runs inside the same AsyncLocalStorage context but is
+  // identified by toolUseContext.agentId: it sees the spawning teammate as an
+  // idle teammate row, sees the lead, and does not see itself.
+  const fromSubagent = await runWithTeammateContext(teammateContext, () =>
+    ListAgentsTool.call({}, contextFor(appState, subagentId)),
+  )
+  expect(fromSubagent.data.agents.map(a => [a.name, a.kind, a.status])).toEqual([
+    ['team-lead', 'team_lead', 'unknown'],
+    ['supervisor', 'teammate', 'idle'],
+  ])
+  expect(fromSubagent.data.agents.map(a => a.to)).toEqual([
+    'team-lead',
+    'supervisor',
+  ])
+
+  // An unnamed subagent has no registry entry — same view, still no self row.
+  const unnamedId = 'ageneral-purpose-fedcba9876543210'
+  const fromUnnamed = await runWithTeammateContext(teammateContext, () =>
+    ListAgentsTool.call({}, contextFor(appState, unnamedId)),
+  )
+  expect(fromUnnamed.data.agents.map(a => a.name)).toEqual([
+    'team-lead',
+    'supervisor',
+    'scout',
+  ])
 })

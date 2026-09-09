@@ -12,6 +12,7 @@ import {
 import { isMainSessionTask } from '../../tasks/LocalMainSessionTask.js'
 import { toAgentId } from '../../types/ids.js'
 import { generateRequestId } from '../../utils/agentId.js'
+import { resolveCallerIdentity } from '../../utils/agentIdentity.js'
 import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { errorMessage } from '../../utils/errors.js'
@@ -30,7 +31,6 @@ import {
   getTeammateColor,
   getTeamName,
   isTeamLead,
-  isTeammate,
 } from '../../utils/teammate.js'
 import {
   createShutdownApprovedMessage,
@@ -147,6 +147,26 @@ function findTeammateColor(
   return undefined
 }
 
+/**
+ * The name a message is signed with, and the `to` a reply comes back on.
+ *
+ * A subagent spawned inside a teammate's turn runs in that teammate's ambient
+ * context, so signing from the ambient identity would make it impersonate its
+ * own spawner. It signs as itself instead: its registered name when the Agent
+ * tool gave it one, else its raw agent id — which `call()` resolves as a `to`
+ * target for as long as the agent is running, so the recipient can reply.
+ */
+function resolveSenderName(context: ToolUseContext): string {
+  const identity = resolveCallerIdentity(context)
+  if (identity.isTeammate) {
+    return identity.name ?? 'teammate'
+  }
+  if (context.agentId !== undefined && context.agentId === identity.agentId) {
+    return identity.name ?? identity.agentId
+  }
+  return TEAM_LEAD_NAME
+}
+
 async function handleMessage(
   recipientName: string,
   content: string,
@@ -155,8 +175,7 @@ async function handleMessage(
 ): Promise<{ data: MessageOutput }> {
   const appState = context.getAppState()
   const teamName = getTeamName(appState.teamContext)
-  const senderName =
-    getAgentName() || (isTeammate() ? 'teammate' : TEAM_LEAD_NAME)
+  const senderName = resolveSenderName(context)
   const senderColor = getTeammateColor()
 
   await writeToMailbox(
@@ -208,8 +227,7 @@ async function handleBroadcast(
     throw new Error(`Team "${teamName}" does not exist`)
   }
 
-  const senderName =
-    getAgentName() || (isTeammate() ? 'teammate' : TEAM_LEAD_NAME)
+  const senderName = resolveSenderName(context)
   if (!senderName) {
     throw new Error(
       'Cannot broadcast: sender name is required. Set CLAUDE_CODE_AGENT_NAME.',

@@ -111,7 +111,7 @@ function state(
 }
 
 /** A lead calling from outside any team context. */
-const asLead = { teamMembers: [], callerIsTeammate: false } as const
+const asLead = { teamMembers: [], includeTeamLead: false } as const
 
 test('empty state lists nothing', () => {
   const agents = collectAddressableAgents({ ...state([]), ...asLead })
@@ -182,7 +182,7 @@ test('team-file members add pane teammates and are deduped against in-process on
       member('mystery', { status: 'unknown' }),
     ],
     teamName: TEAM,
-    callerIsTeammate: false,
+    includeTeamLead: false,
   })
   expect(agents.map(a => [a.name, a.kind, a.status])).toEqual([
     ['coder', 'teammate', 'busy'],
@@ -258,13 +258,34 @@ test('the caller is excluded by agentId and by name', () => {
       ...s,
       teamMembers: [],
       selfAgentName: 'ME',
-      callerIsTeammate: true,
+      includeTeamLead: true,
       leadAgentId: 'lead-id',
     }).map(a => a.name),
   ).toEqual(['team-lead', 'peer', 'other', 'selfagent'])
 })
 
-test('team-lead is listed only for teammate callers', () => {
+test('a subagent inside a teammate keeps its spawner listed and itself out', () => {
+  // The observed defect was the mirror image of this: the subagent inherited
+  // its spawner's name as `selfAgentName`, so `supervisor` was excluded and
+  // the subagent's own row stayed.
+  const agents = collectAddressableAgents({
+    ...state([teammate('supervisor'), backgroundAgent('a-sub')], {
+      scout: 'a-sub',
+    }),
+    teamMembers: [],
+    teamName: TEAM,
+    leadAgentId: 'lead-id',
+    selfAgentId: 'a-sub',
+    selfAgentName: 'scout',
+    includeTeamLead: true,
+  })
+  expect(agents.map(a => [a.name, a.kind])).toEqual([
+    ['team-lead', 'team_lead'],
+    ['supervisor', 'teammate'],
+  ])
+})
+
+test('team-lead is listed only when the caller asks for it', () => {
   const s = state([teammate('peer')])
   expect(
     collectAddressableAgents({ ...s, ...asLead }).map(a => a.kind),
@@ -275,7 +296,7 @@ test('team-lead is listed only for teammate callers', () => {
     teamMembers: [],
     teamName: TEAM,
     leadAgentId: 'lead-id',
-    callerIsTeammate: true,
+    includeTeamLead: true,
   })
   expect(lead).toEqual({
     name: 'team-lead',
@@ -291,7 +312,7 @@ test('team-lead is listed only for teammate callers', () => {
   const [fallback] = collectAddressableAgents({
     ...s,
     teamMembers: [],
-    callerIsTeammate: true,
+    includeTeamLead: true,
   })
   expect(fallback?.agentId).toBe('team-lead')
 })
@@ -304,7 +325,7 @@ test('sorted: team lead, then teammates by name, then background agents by name'
     }),
     teamMembers: [member('mid')],
     teamName: TEAM,
-    callerIsTeammate: true,
+    includeTeamLead: true,
   })
   expect(agents.map(a => `${a.kind}:${a.name}`)).toEqual([
     'team_lead:team-lead',

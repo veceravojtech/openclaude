@@ -1,15 +1,10 @@
 import { z } from 'zod/v4'
-import type { AppState } from '../../state/AppState.js'
 import { buildTool, type ToolDef } from '../../Tool.js'
+import { resolveCallerIdentity } from '../../utils/agentIdentity.js'
 import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { getTeammateStatuses } from '../../utils/teamDiscovery.js'
-import {
-  getAgentId,
-  getAgentName,
-  getTeamName,
-  isTeammate,
-} from '../../utils/teammate.js'
+import { getTeamName } from '../../utils/teammate.js'
 import {
   ADDRESSABLE_AGENT_KINDS,
   ADDRESSABLE_AGENT_STATUSES,
@@ -42,16 +37,6 @@ const outputSchema = lazySchema(() =>
 type OutputSchema = ReturnType<typeof outputSchema>
 
 export type Output = z.infer<OutputSchema>
-
-function findRegisteredName(
-  registry: AppState['agentNameRegistry'],
-  agentId: string,
-): string | undefined {
-  for (const [name, id] of registry) {
-    if (id === agentId) return name
-  }
-  return undefined
-}
 
 export const ListAgentsTool = buildTool({
   name: LIST_AGENTS_TOOL_NAME,
@@ -90,16 +75,18 @@ export const ListAgentsTool = buildTool({
     const teamContext = appState.teamContext
     const teamName = getTeamName(teamContext)
 
-    // Caller identity: in-process/tmux teammate (AsyncLocalStorage or CLI
-    // args) > background subagent (toolUseContext.agentId) > swarm lead.
-    const selfAgentId =
-      getAgentId() ?? context.agentId ?? teamContext?.selfAgentId
-    const selfAgentName =
-      getAgentName() ??
-      (context.agentId
-        ? findRegisteredName(appState.agentNameRegistry, context.agentId)
-        : undefined) ??
-      teamContext?.selfAgentName
+    // A subagent spawned inside a teammate inherits that teammate's ambient
+    // identity, so resolving the caller from the tool-use context is what
+    // keeps the spawning teammate in the list instead of excluding it as
+    // "self" — and excludes the subagent itself instead.
+    const identity = resolveCallerIdentity(context)
+
+    // The lead already sees its team from the outside; everyone else inside a
+    // team needs a row to answer upwards on.
+    const inTeam = Boolean(teamName || teamContext?.leadAgentId)
+    const callerIsLead =
+      identity.agentId === undefined ||
+      identity.agentId === teamContext?.leadAgentId
 
     const agents = collectAddressableAgents({
       tasks: appState.tasks,
@@ -107,9 +94,9 @@ export const ListAgentsTool = buildTool({
       teamMembers: teamName ? getTeammateStatuses(teamName) : [],
       teamName,
       leadAgentId: teamContext?.leadAgentId,
-      selfAgentId,
-      selfAgentName,
-      callerIsTeammate: isTeammate(),
+      selfAgentId: identity.agentId,
+      selfAgentName: identity.name,
+      includeTeamLead: inTeam && !callerIsLead,
     })
 
     return { data: { agents } }
