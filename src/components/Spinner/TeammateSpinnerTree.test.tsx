@@ -73,6 +73,24 @@ const TWO_LEVEL = [
   teammate('supervisor', 'email'),
 ]
 
+/**
+ * The same teammate with `agentId` and `teamName` stripped off its identity.
+ * `TeammateIdentity` types both as `string` and every spawn path sets them, so
+ * the cast is a deliberate type violation — it is the shape a hand-built or
+ * stale AppState can still hold, and a row without one must be drawn at the
+ * root indent instead of throwing the whole spinner tree out of the render.
+ */
+function withoutTeam(
+  t: InProcessTeammateTaskState,
+): InProcessTeammateTaskState {
+  const identity = { ...t.identity } as Partial<
+    InProcessTeammateTaskState['identity']
+  >
+  delete identity.teamName
+  delete identity.agentId
+  return { ...t, identity } as unknown as InProcessTeammateTaskState
+}
+
 function stateWith(teammates: InProcessTeammateTaskState[]): AppState {
   return {
     ...getDefaultAppState(),
@@ -250,6 +268,28 @@ describe('TeammateSpinnerTree', () => {
     for (const line of rowLines) {
       expect(line).toContain('…')
     }
+  })
+
+  test('draws a teammate whose identity has no team name at the root indent', async () => {
+    // getTeamDepth is never asked about an absent team name: the row degrades
+    // to a root-team row (`@nomad`, indent 0) and the tree still renders.
+    const frame = await renderTree([
+      ...TWO_LEVEL,
+      withoutTeam(teammate('nomad', 'email')),
+    ])
+    const rows = teammateRows(frame)
+
+    expect(rows.map(row => row.name)).toEqual([
+      'nomad',
+      'alice',
+      'supervisor',
+      'worker-1',
+      'worker-2',
+      'zoe',
+    ])
+    const root = rows.find(row => row.name === 'alice')!.indent
+    expect(rows.find(row => row.name === 'nomad')!.indent).toBe(root)
+    expect(rows.find(row => row.name === 'worker-1')!.indent).toBe(root + 2)
   })
 
   test('renders nothing when no teammate is running', async () => {

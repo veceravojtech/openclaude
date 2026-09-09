@@ -128,8 +128,15 @@ export function getAllInProcessTeammateTasks(tasks: Record<string, TaskStateBase
  * Walks up with getParentTeamName rather than splitting the name, so the
  * separator stays teamHelpers' business: the parent is always the prefix before
  * one separator character, so the segment is the remainder after it.
+ *
+ * An absent team name is a root team, like the empty one. The type says
+ * `string`, but a hand-built or stale AppState can omit it, and a label has to
+ * degrade to the bare `@name` rather than take the whole footer render down.
  */
-export function getSubLeadPath(teamName: string): string[] {
+export function getSubLeadPath(teamName: string | undefined): string[] {
+  if (!teamName) {
+    return [];
+  }
   const path: string[] = [];
   let team = teamName;
   let parent = getParentTeamName(team);
@@ -161,11 +168,16 @@ function compareNames(a: string, b: string): number {
 export function orderTeammatesDepthFirst(teammates: InProcessTeammateTaskState[]): InProcessTeammateTaskState[] {
   const byTeam = new Map<string, InProcessTeammateTaskState[]>();
   for (const teammate of teammates) {
-    const members = byTeam.get(teammate.identity.teamName);
+    // Same tolerance as getSubLeadPath: an identity without a team name joins
+    // the root team, keyed on '' rather than on undefined — an undefined key
+    // would make the team-name sort below inconsistent and could reorder the
+    // complete identities around it.
+    const teamName = teammate.identity.teamName ?? '';
+    const members = byTeam.get(teamName);
     if (members) {
       members.push(teammate);
     } else {
-      byTeam.set(teammate.identity.teamName, [teammate]);
+      byTeam.set(teamName, [teammate]);
     }
   }
   for (const members of byTeam.values()) {

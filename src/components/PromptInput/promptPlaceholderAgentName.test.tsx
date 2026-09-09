@@ -26,6 +26,7 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import type { AgentId } from '../../types/ids.js'
+import { formatAgentId } from '../../utils/agentId.js'
 import { useCoordinatorTaskCount } from '../CoordinatorAgentStatus.js'
 import { renderToString } from '../../utils/staticRender.js'
 import PromptInput from './PromptInput.js'
@@ -148,14 +149,27 @@ function localAgent(
   } as unknown as AppState['tasks'][string]
 }
 
-function teammate(id: string, agentName: string) {
+/**
+ * A complete teammate identity, as the type demands: the footer renders this
+ * task through the pill row, which reads `teamName` (and, for a sub-team
+ * member, `agentId`) to label and place the pill. A root team keeps the label
+ * the bare `@name` these cases assert on.
+ */
+function teammate(id: string, agentName: string, teamName = 'crew') {
   return {
     id,
     type: 'in_process_teammate',
     status: 'running',
     description: 'teammate task',
     startTime: Date.now(),
-    identity: { agentName, color: 'cyan' },
+    identity: {
+      agentId: formatAgentId(agentName, teamName),
+      agentName,
+      teamName,
+      color: 'cyan',
+      planModeRequired: false,
+      parentSessionId: 'session-1',
+    },
   } as unknown as AppState['tasks'][string]
 }
 

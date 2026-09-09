@@ -73,6 +73,24 @@ const TWO_LEVEL = [
   teammate('supervisor', 'email'),
 ]
 
+/**
+ * The same teammate with `agentId` and `teamName` stripped off its identity.
+ * `TeammateIdentity` types both as `string` and every spawn path sets them, so
+ * the cast is a deliberate type violation — it is the shape a hand-built or
+ * stale AppState can still hold, and a pill without one must keep the bare
+ * `@name` label instead of throwing the whole footer out of the render.
+ */
+function withoutTeam(
+  t: InProcessTeammateTaskState,
+): InProcessTeammateTaskState {
+  const identity = { ...t.identity } as Partial<
+    InProcessTeammateTaskState['identity']
+  >
+  delete identity.teamName
+  delete identity.agentId
+  return { ...t, identity } as unknown as InProcessTeammateTaskState
+}
+
 function stateWith(
   teammates: InProcessTeammateTaskState[],
   overrides: Partial<AppState> = {},
@@ -169,6 +187,23 @@ describe('BackgroundTaskStatus teammate pills', () => {
       'ghost/stray',
     ])
     expect(pills.filter(label => label === 'ghost/stray')).toHaveLength(1)
+  })
+
+  test('labels a teammate whose identity has no team name with the bare name', async () => {
+    // No team name means no sub-lead path: the pill is `@nomad`, at the root,
+    // and the complete identities keep the labels and order they already had.
+    const pills = await renderPills(
+      stateWith([...TWO_LEVEL, withoutTeam(teammate('nomad', 'email'))]),
+    )
+    expect(pills).toEqual([
+      'main',
+      'nomad',
+      'alice',
+      'supervisor',
+      'supervisor/worker-1',
+      'supervisor/worker-2',
+      'zoe',
+    ])
   })
 
   test('keeps the order while a teammate is being viewed', async () => {

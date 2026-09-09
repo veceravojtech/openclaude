@@ -154,7 +154,12 @@ export function TeammateSpinnerTree(t0) {
         // straight under the teammate that leads it; the indent is what makes
         // that visible. A root-team member renders exactly as before — no
         // wrapper at all, indent 0 — so only nested rows change shape.
-        const indent = (getTeamDepth(teammate.identity.teamName) - 1) * SUB_TEAM_INDENT;
+        // An identity carrying no team name counts as a root-team member too:
+        // getTeamDepth is never asked about it, so an indent can never take the
+        // spinner render down. Computed inside this map callback, which the
+        // compiler does not memoize, so no cache slot moves.
+        const teamName = teammate.identity.teamName;
+        const indent = teamName ? (getTeamDepth(teamName) - 1) * SUB_TEAM_INDENT : 0;
         // The line is told its own indent as well as wrapped in it: those
         // columns are spent before the row starts, so they have to come off the
         // row's width budget or a deep row overruns the terminal.

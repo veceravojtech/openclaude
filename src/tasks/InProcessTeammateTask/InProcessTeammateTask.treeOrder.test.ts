@@ -62,6 +62,25 @@ const TWO_LEVEL = [
   teammate('supervisor', 'email'),
 ]
 
+/**
+ * The same teammate with `agentId` and `teamName` stripped off its identity.
+ * `TeammateIdentity` types both as `string` and every spawn path sets them, so
+ * the cast is a deliberate type violation — it is exactly the shape a
+ * hand-built or stale AppState can still hold (promptPlaceholderAgentName's
+ * fixture held it until this change), and a missing team name must degrade the
+ * teammate to a root-team member instead of throwing out of the whole render.
+ */
+function withoutTeam(
+  teammate_0: InProcessTeammateTaskState,
+): InProcessTeammateTaskState {
+  const identity = {
+    ...teammate_0.identity,
+  } as Partial<InProcessTeammateTaskState['identity']>
+  delete identity.teamName
+  delete identity.agentId
+  return { ...teammate_0, identity } as unknown as InProcessTeammateTaskState
+}
+
 function names(teammates: InProcessTeammateTaskState[]): string[] {
   return teammates.map(t => t.identity.agentName)
 }
@@ -90,6 +109,13 @@ describe('getSubLeadPath', () => {
 
   test('an empty team name is treated as a root team, not as a segment', () => {
     expect(getSubLeadPath('')).toEqual([])
+  })
+
+  test('an absent team name is a root team rather than a throw', () => {
+    // The pill label and the teammate view header path both start here, so an
+    // identity without a team name has to come back as a bare name, not as an
+    // uncaught TypeError out of getParentTeamName.
+    expect(getSubLeadPath(undefined)).toEqual([])
   })
 })
 
@@ -166,6 +192,22 @@ describe('orderTeammatesDepthFirst', () => {
 
   test('returns an empty list for no teammates', () => {
     expect(orderTeammatesDepthFirst([])).toEqual([])
+  })
+
+  test('keeps a teammate whose identity has no team name, at the root', () => {
+    const withTeamless = [...TWO_LEVEL, withoutTeam(teammate('nomad', 'email'))]
+    const ordered = names(orderTeammatesDepthFirst(withTeamless))
+    // The unnamed team is the root team '', which sorts before every named
+    // team; the complete identities keep exactly the order they had without it.
+    expect(ordered).toEqual([
+      'nomad',
+      'alice',
+      'supervisor',
+      'worker-1',
+      'worker-2',
+      'zoe',
+    ])
+    expect(ordered).toHaveLength(withTeamless.length)
   })
 
   test('never loops when a sub-team name points back at an ancestor', () => {
