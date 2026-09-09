@@ -5,6 +5,7 @@ import { Box, Text, type TextProps } from '../../ink.js';
 import { useAppState } from '../../state/AppState.js';
 import { getRunningTeammatesSorted } from '../../tasks/InProcessTeammateTask/InProcessTeammateTask.js';
 import { formatNumber } from '../../utils/format.js';
+import { getTeamDepth } from '../../utils/swarm/teamHelpers.js';
 import { TeammateSpinnerLine } from './TeammateSpinnerLine.js';
 import { TEAMMATE_SELECT_HINT } from './teammateSelectHint.js';
 type Props = {
@@ -18,6 +19,8 @@ type Props = {
   /** Leader's idle status text (when leader is idle, e.g. "✻ Idle for 3s") */
   leaderIdleText?: string;
 };
+/** Columns of indent per level of sub-team below the root team. */
+const SUB_TEAM_INDENT = 2;
 export function TeammateSpinnerTree(t0) {
   const $ = _c(61);
   const {
@@ -146,7 +149,15 @@ export function TeammateSpinnerTree(t0) {
       } else {
         t3 = $[50];
       }
-      t4 = teammateTasks.map((teammate, index) => <TeammateSpinnerLine key={teammate.id} teammate={teammate} isLast={!isInSelectionMode && index === teammateTasks.length - 1} isSelected={isInSelectionMode && selectedIndex === index} isForegrounded={viewingAgentTaskId === teammate.id} allIdle={allIdle} showPreview={showTeammateMessagePreview} />);
+      t4 = teammateTasks.map((teammate, index) => {
+        const line = <TeammateSpinnerLine key={teammate.id} teammate={teammate} isLast={!isInSelectionMode && index === teammateTasks.length - 1} isSelected={isInSelectionMode && selectedIndex === index} isForegrounded={viewingAgentTaskId === teammate.id} allIdle={allIdle} showPreview={showTeammateMessagePreview} />;
+        // Depth-first order (getRunningTeammatesSorted) already puts a sub-team
+        // straight under the teammate that leads it; the indent is what makes
+        // that visible. A root-team member renders exactly as before — no
+        // wrapper at all — so only nested rows change shape.
+        const indent = (getTeamDepth(teammate.identity.teamName) - 1) * SUB_TEAM_INDENT;
+        return indent > 0 ? <Box key={teammate.id} paddingLeft={indent}>{line}</Box> : line;
+      });
     }
     $[0] = allIdle;
     $[1] = isInSelectionMode;

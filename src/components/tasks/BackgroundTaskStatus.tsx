@@ -6,6 +6,8 @@ import { useTerminalSize } from 'src/hooks/useTerminalSize.js';
 import { stringWidth } from 'src/ink/stringWidth.js';
 import { useAppState, useSetAppState } from 'src/state/AppState.js';
 import { enterTeammateView, exitTeammateView } from 'src/state/teammateViewHelpers.js';
+import { getSubLeadPath, orderTeammatesDepthFirst } from 'src/tasks/InProcessTeammateTask/InProcessTeammateTask.js';
+import { isInProcessTeammateTask } from 'src/tasks/InProcessTeammateTask/types.js';
 import { getPillLabel, pillNeedsCta } from 'src/tasks/pillLabel.js';
 import { type BackgroundTaskState, type TaskState } from 'src/tasks/types.js';
 import { calculateHorizontalScrollWindow } from 'src/utils/horizontalScroll.js';
@@ -52,7 +54,7 @@ export function BackgroundTaskStatus(t0) {
   const allTeammates = !showSpinnerTree && runningTasks.length > 0 && runningTasks.every(_temp5);
   let t4;
   if ($[2] !== runningTasks) {
-    t4 = runningTasks.filter(_temp6).sort(_temp7);
+    t4 = orderTeammatesDepthFirst(runningTasks.filter(isInProcessTeammateTask));
     $[2] = runningTasks;
     $[3] = t4;
   } else {
@@ -74,19 +76,18 @@ export function BackgroundTaskStatus(t0) {
   }
   const mainPill = t5;
   let t6;
-  if ($[6] !== mainPill || $[7] !== tasksSelected || $[8] !== teammateEntries) {
+  // The pill order no longer depends on tasksSelected, so this block has one
+  // dependency fewer than the slots were numbered for; slot 9 is left unused
+  // rather than renumbering every slot below it.
+  if ($[6] !== mainPill || $[7] !== teammateEntries) {
     const teammatePills = teammateEntries.map(_temp8);
-    if (!tasksSelected) {
-      teammatePills.sort(_temp9);
-    }
     const pills = [mainPill, ...teammatePills];
     t6 = pills.map(_temp0);
     $[6] = mainPill;
-    $[7] = tasksSelected;
-    $[8] = teammateEntries;
-    $[9] = t6;
+    $[7] = teammateEntries;
+    $[8] = t6;
   } else {
-    t6 = $[9];
+    t6 = $[8];
   }
   const allPills = t6;
   let t7;
@@ -241,25 +242,16 @@ function _temp0(pill, i) {
     idx: i
   };
 }
-function _temp9(a_0, b_0) {
-  if (a_0.isIdle !== b_0.isIdle) {
-    return a_0.isIdle ? 1 : -1;
-  }
-  return 0;
-}
 function _temp8(t_2) {
   return {
-    name: t_2.identity.agentName,
+    // A sub-team member is prefixed by the sub-leads above it, so
+    // `@supervisor/worker-1` says whose worker it is; a root-team member keeps
+    // its bare `@name`. The width math below measures this same label.
+    name: [...getSubLeadPath(t_2.identity.teamName), t_2.identity.agentName].join("/"),
     color: getAgentThemeColor(t_2.identity.color),
     isIdle: t_2.isIdle,
     taskId: t_2.id
   };
-}
-function _temp7(a, b) {
-  return a.identity.agentName.localeCompare(b.identity.agentName);
-}
-function _temp6(t_1) {
-  return t_1.type === "in_process_teammate";
 }
 function _temp5(t_0) {
   return t_0.type === "in_process_teammate";

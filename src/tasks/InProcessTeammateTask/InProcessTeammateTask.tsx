@@ -14,6 +14,7 @@ import type { Message } from '../../types/message.js';
 import { logForDebugging } from '../../utils/debug.js';
 import { createUserMessage } from '../../utils/messages.js';
 import { killInProcessTeammateAndCascade } from '../../utils/swarm/spawnInProcess.js';
+import { getParentTeamName, getSubTeamNameFor } from '../../utils/swarm/teamHelpers.js';
 import { updateTaskState } from '../../utils/task/framework.js';
 import type { InProcessTeammateTaskState } from './types.js';
 import { appendCappedMessage, isInProcessTeammateTask } from './types.js';
@@ -118,11 +119,87 @@ export function getAllInProcessTeammateTasks(tasks: Record<string, TaskStateBase
 }
 
 /**
- * Get running in-process teammates sorted alphabetically by agentName.
+ * The sub-leads a teammate's team hangs off, outermost first: `[]` for a member
+ * of a root team, `['supervisor']` for `email/supervisor`, and
+ * `['supervisor', 'worker-1']` for `email/supervisor/worker-1`. Each segment
+ * after the root is the name of the teammate that leads that sub-team, which is
+ * what the teammate view header's path and the pill labels are made of.
+ *
+ * Walks up with getParentTeamName rather than splitting the name, so the
+ * separator stays teamHelpers' business: the parent is always the prefix before
+ * one separator character, so the segment is the remainder after it.
+ */
+export function getSubLeadPath(teamName: string): string[] {
+  const path: string[] = [];
+  let team = teamName;
+  let parent = getParentTeamName(team);
+  while (parent !== undefined) {
+    path.unshift(team.slice(parent.length + 1));
+    team = parent;
+    parent = getParentTeamName(team);
+  }
+  return path;
+}
+
+/** Plain string order on the exact names — never locale-dependent. */
+function compareNames(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Depth-first tree order: a team's members sorted by name, and a sub-lead
+ * immediately followed by its own sub-team, recursively, before the next
+ * sibling. Teams are visited in name order, which puts a sub-team right after
+ * the team it hangs off (`email` sorts before `email/supervisor`).
+ *
+ * A sub-team whose sub-lead is not running is orphaned rather than dropped: its
+ * team is never reached by the descent, so the outer loop emits it in team-name
+ * order — once, at the depth its team name implies. Each team is removed from
+ * the map as it is emitted, so no teammate can appear twice however the recorded
+ * names relate to each other.
+ */
+export function orderTeammatesDepthFirst(teammates: InProcessTeammateTaskState[]): InProcessTeammateTaskState[] {
+  const byTeam = new Map<string, InProcessTeammateTaskState[]>();
+  for (const teammate of teammates) {
+    const members = byTeam.get(teammate.identity.teamName);
+    if (members) {
+      members.push(teammate);
+    } else {
+      byTeam.set(teammate.identity.teamName, [teammate]);
+    }
+  }
+  for (const members of byTeam.values()) {
+    members.sort((a, b) => compareNames(a.identity.agentName, b.identity.agentName));
+  }
+  const ordered: InProcessTeammateTaskState[] = [];
+  const emitTeam = (teamName: string): void => {
+    const members = byTeam.get(teamName);
+    if (!members) {
+      return;
+    }
+    byTeam.delete(teamName);
+    for (const member of members) {
+      ordered.push(member);
+      const subTeam = getSubTeamNameFor(member.identity.agentId, member.identity.agentName);
+      if (subTeam !== undefined) {
+        emitTeam(subTeam);
+      }
+    }
+  };
+  for (const teamName of [...byTeam.keys()].sort(compareNames)) {
+    emitTeam(teamName);
+  }
+  return ordered;
+}
+
+/**
+ * Get running in-process teammates in depth-first tree order (each team's
+ * members by name, a sub-lead immediately followed by its sub-team).
  * Shared between TeammateSpinnerTree display, PromptInput footer selector,
- * and useBackgroundTaskNavigation — selectedIPAgentIndex maps into this
- * array, so all three must agree on sort order.
+ * useBackgroundTaskNavigation and — through orderTeammatesDepthFirst — the
+ * BackgroundTaskStatus pill row; selectedIPAgentIndex maps into this array, so
+ * all of them must agree on sort order.
  */
 export function getRunningTeammatesSorted(tasks: Record<string, TaskStateBase>): InProcessTeammateTaskState[] {
-  return getAllInProcessTeammateTasks(tasks).filter(t => t.status === 'running').sort((a, b) => a.identity.agentName.localeCompare(b.identity.agentName));
+  return orderTeammatesDepthFirst(getAllInProcessTeammateTasks(tasks).filter(t => t.status === 'running'));
 }

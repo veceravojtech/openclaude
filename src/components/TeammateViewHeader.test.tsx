@@ -9,6 +9,7 @@ import {
   type AppState,
   AppStateProvider,
   getDefaultAppState,
+  useSetAppState,
 } from '../state/AppState.js'
 import { getRegisteredAgentName } from '../state/teammateViewHelpers.js'
 import type { InProcessTeammateTaskState } from '../tasks/InProcessTeammateTask/types.js'
@@ -60,14 +61,17 @@ function agentTask(
   }
 }
 
-function teammateTask(id: string): InProcessTeammateTaskState {
+function teammateTask(
+  id: string,
+  teamName = 'team',
+): InProcessTeammateTaskState {
   return {
     ...taskBase(id),
     type: 'in_process_teammate',
     identity: {
-      agentId: `${id}@team`,
+      agentId: `${id}@${teamName}`,
       agentName: id,
-      teamName: 'team',
+      teamName,
       planModeRequired: false,
       parentSessionId: 'session-1',
     },
@@ -115,6 +119,18 @@ function extractLastFrame(output: string): string {
   return stripAnsi(lastFrame ?? output)
 }
 
+type SetAppState = (updater: (prev: AppState) => AppState) => void
+
+function StateBridge({
+  onReady,
+}: {
+  onReady: (set: SetAppState) => void
+}): React.ReactNode {
+  const setAppState = useSetAppState()
+  React.useEffect(() => onReady(setAppState), [setAppState, onReady])
+  return null
+}
+
 async function mountHeader(state: AppState) {
   let output = ''
   const stdout = new PassThrough()
@@ -139,11 +155,17 @@ async function mountHeader(state: AppState) {
     patchConsole: false,
   })
 
+  let setAppState: SetAppState | undefined
   root.render(
     <AppStateProvider initialState={state}>
       <Box flexDirection="column">
         <TeammateViewHeader />
         <Text>{SENTINEL}</Text>
+        <StateBridge
+          onReady={value => {
+            setAppState = value
+          }}
+        />
       </Box>
     </AppStateProvider>,
   )
@@ -163,6 +185,12 @@ async function mountHeader(state: AppState) {
 
   return {
     waitForFrame,
+    async setState(updater: (prev: AppState) => AppState) {
+      for (let attempts = 0; attempts < 100 && !setAppState; attempts++) {
+        await Bun.sleep(10)
+      }
+      setAppState!(updater)
+    },
     async cleanup() {
       root.unmount()
       stdin.end()
@@ -181,9 +209,9 @@ afterEach(() => {
 })
 
 describe('TeammateViewHeader rendering', () => {
-  // Regression guard for the local-agent branch added alongside it: the
-  // in-process teammate path must render exactly as it did before.
-  test('renders the viewed in-process teammate name and prompt', async () => {
+  // A member of the root team is one step down the tree, so its path is the
+  // root lead and its own name.
+  test('renders the viewed in-process teammate as a path from the root lead', async () => {
     const teammate = teammateTask('scout')
     const harness = await mountHeader(
       stateWith([teammate], {
@@ -193,9 +221,70 @@ describe('TeammateViewHeader rendering', () => {
     )
     try {
       const frame = await harness.waitForFrame(f => f.includes(SENTINEL))
-      expect(frame).toContain('Viewing @scout')
+      expect(frame).toContain('Viewing team-lead \u203A scout')
       expect(frame).toContain('esc')
       expect(frame).toContain('prompt of scout')
+    } finally {
+      await harness.cleanup()
+    }
+  })
+
+  test('names every sub-lead between the root lead and a sub-team member', async () => {
+    const teammate = teammateTask('worker-1', 'email/supervisor')
+    const harness = await mountHeader(
+      stateWith([teammate], {
+        viewingAgentTaskId: teammate.id,
+        viewSelectionMode: 'viewing-agent',
+      }),
+    )
+    try {
+      const frame = await harness.waitForFrame(f => f.includes(SENTINEL))
+      expect(frame).toContain('Viewing team-lead \u203A supervisor \u203A worker-1')
+    } finally {
+      await harness.cleanup()
+    }
+  })
+
+  test('keeps going one segment per level for a three-level sub-team', async () => {
+    const teammate = teammateTask('deputy', 'email/supervisor/worker-1')
+    const harness = await mountHeader(
+      stateWith([teammate], {
+        viewingAgentTaskId: teammate.id,
+        viewSelectionMode: 'viewing-agent',
+      }),
+    )
+    try {
+      const frame = await harness.waitForFrame(f => f.includes(SENTINEL))
+      expect(frame).toContain(
+        'Viewing team-lead \u203A supervisor \u203A worker-1 \u203A deputy',
+      )
+    } finally {
+      await harness.cleanup()
+    }
+  })
+
+  // The path is memoized in a hand-maintained react-compiler cache slot: a
+  // mis-paired slot would keep serving the first teammate's path, which only a
+  // second render of the same mounted header can catch.
+  test('re-renders the path when the viewed teammate changes', async () => {
+    const scout = teammateTask('scout')
+    const worker = teammateTask('worker-1', 'email/supervisor')
+    const harness = await mountHeader(
+      stateWith([scout, worker], {
+        viewingAgentTaskId: scout.id,
+        viewSelectionMode: 'viewing-agent',
+      }),
+    )
+    try {
+      await harness.waitForFrame(f => f.includes('Viewing team-lead \u203A scout'))
+      await harness.setState(prev => ({
+        ...prev,
+        viewingAgentTaskId: worker.id,
+      }))
+      const frame = await harness.waitForFrame(f =>
+        f.includes('Viewing team-lead \u203A supervisor \u203A worker-1'),
+      )
+      expect(frame).not.toContain('scout')
     } finally {
       await harness.cleanup()
     }

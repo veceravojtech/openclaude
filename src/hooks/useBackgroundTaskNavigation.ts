@@ -75,7 +75,9 @@ export function useBackgroundTaskNavigation(options?: {
   const selectedIPAgentIndex = useAppState(s => s.selectedIPAgentIndex)
   const setAppState = useSetAppState()
 
-  // Filter to running teammates and sort alphabetically to match TeammateSpinnerTree display
+  // Running teammates in the one shared depth-first tree order, so Shift+Up/Down
+  // walks a sub-lead straight into its own sub-team and selectedIPAgentIndex
+  // keeps addressing the row TeammateSpinnerTree draws at that position.
   const teammateTasks = getRunningTeammatesSorted(tasks)
   const teammateCount = teammateTasks.length
 

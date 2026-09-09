@@ -4,6 +4,7 @@ import { Box, Text } from '../ink.js';
 import { type AppState, useAppState } from '../state/AppState.js';
 import { getViewedTeammateTask } from '../state/selectors.js';
 import { getRegisteredAgentName } from '../state/teammateViewHelpers.js';
+import { getSubLeadPath } from '../tasks/InProcessTeammateTask/InProcessTeammateTask.js';
 import type { LocalAgentTaskState } from '../tasks/LocalAgentTask/LocalAgentTask.js';
 import { getAgentColor } from '../tools/AgentTool/agentColorManager.js';
 import { toInkColor } from '../utils/ink.js';
@@ -21,12 +22,18 @@ import { OffscreenFreeze } from './OffscreenFreeze.js';
  * description stands in for the handle — unprefixed, because a description is
  * not a handle — and is not repeated on the detail line.
  *
- * Hand-maintained react-compiler output: slots 0-13 are the teammate branch
- * (untouched), 14-25 the local-agent branch. Renumber and re-audit if you
- * add a memoized value.
+ * A viewed teammate is named by its path down the team tree —
+ * `team-lead › supervisor › worker-1`: the root lead, then one segment per
+ * sub-lead above it (getSubLeadPath), then its own name. A member of the root
+ * team is therefore `team-lead › supervisor`, which is what makes the sub-team
+ * a teammate belongs to readable from the header alone.
+ *
+ * Hand-maintained react-compiler output: slots 0-13 plus 26-27 (both appended
+ * later, at the end of the array) are the teammate branch, 14-25 the local-agent
+ * branch. Renumber and re-audit if you add a memoized value.
  */
 export function TeammateViewHeader() {
-  const $ = _c(27);
+  const $ = _c(28);
   const viewedTeammate = useAppState(_temp);
   const viewedAgent = useAppState(_temp2);
   const agentNameRegistry = useAppState(_temp3);
@@ -47,11 +54,15 @@ export function TeammateViewHeader() {
     } else {
       t1 = $[2];
     }
+    // Ancestors dimmed, the teammate's own name in its colour: the whole line
+    // reads as one path, and the agent still stands out in it.
+    const ancestors = [ROOT_LEAD_LABEL, ...getSubLeadPath(viewedTeammate.identity.teamName)].map(_temp4).join("");
     let t2;
-    if ($[3] !== nameColor || $[4] !== viewedTeammate.identity.agentName) {
-      t2 = <Text color={nameColor} bold={true}>@{viewedTeammate.identity.agentName}</Text>;
+    if ($[3] !== nameColor || $[4] !== viewedTeammate.identity.agentName || $[27] !== ancestors) {
+      t2 = <><Text dimColor={true}>{ancestors}</Text><Text color={nameColor} bold={true}>{viewedTeammate.identity.agentName}</Text></>;
       $[3] = nameColor;
       $[4] = viewedTeammate.identity.agentName;
+      $[27] = ancestors;
       $[5] = t2;
     } else {
       t2 = $[5];
@@ -155,6 +166,12 @@ export function TeammateViewHeader() {
     return t12;
   }
   return null;
+}
+/** The lead of the root team, as the spinner tree also labels it. */
+const ROOT_LEAD_LABEL = 'team-lead';
+const PATH_SEPARATOR = ' \u203A ';
+function _temp4(segment: string) {
+  return `${segment}${PATH_SEPARATOR}`;
 }
 function _temp(s: AppState) {
   return getViewedTeammateTask(s);

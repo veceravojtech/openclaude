@@ -933,6 +933,13 @@ async function scenarioSplitEscape(): Promise<ScenarioResult> {
 const FAKE_API_KEY = 'sk-ant-api03-e2e-fake-key-0123456789abcdef'
 const E2E_TEAMMATE = 'supervisor'
 const E2E_TEAM = 'e2e-team'
+/**
+ * The teammate view header names a teammate by its path down the team tree
+ * (`team-lead › supervisor` for a member of the root team), so the line to grep
+ * for is the path, not the bare handle. The pill row still shows `@supervisor`,
+ * which is what the "teammate survived Escape" check below looks for.
+ */
+const E2E_TEAMMATE_HEADER = `Viewing team-lead \u203A ${E2E_TEAMMATE}`
 
 type FakeAnthropicApi = {
   baseUrl: string
@@ -1085,7 +1092,7 @@ function startFakeAnthropicApi(): FakeAnthropicApi {
 async function scenarioTeammateViewEscape(): Promise<ScenarioResult> {
   const name =
     'Scenario 4 (teammate view): Escape returns from an idle @supervisor view without killing the teammate'
-  const expected = `"Viewing @${E2E_TEAMMATE}" gone and the prompt back after one Escape, with the @${E2E_TEAMMATE} pill still shown`
+  const expected = `"${E2E_TEAMMATE_HEADER}" gone and the prompt back after one Escape, with the @${E2E_TEAMMATE} pill still shown`
   const fail = (actual: string, pane: string): ScenarioResult => ({
     name,
     passed: false,
@@ -1136,8 +1143,8 @@ async function scenarioTeammateViewEscape(): Promise<ScenarioResult> {
     await sleep(200)
     tmux('send-keys', '-t', CLI_WINDOW, 'Enter')
     const viewing = await waitForPane(
-      `scenario 4: "Viewing @${E2E_TEAMMATE}" after Shift+Down, Shift+Down, Enter`,
-      pane => pane.includes(`Viewing @${E2E_TEAMMATE}`),
+      `scenario 4: "${E2E_TEAMMATE_HEADER}" after Shift+Down, Shift+Down, Enter`,
+      pane => pane.includes(E2E_TEAMMATE_HEADER),
       UI_TIMEOUT_MS,
     )
     if (!viewing.ok) return fail('the teammate view never opened', viewing.pane)
@@ -1145,12 +1152,12 @@ async function scenarioTeammateViewEscape(): Promise<ScenarioResult> {
     tmux('send-keys', '-t', CLI_WINDOW, 'Escape')
     const returned = await waitForPane(
       'scenario 4: the leader view back after one Escape',
-      pane => !pane.includes(`Viewing @${E2E_TEAMMATE}`),
+      pane => !pane.includes(E2E_TEAMMATE_HEADER),
       UI_TIMEOUT_MS,
     )
     const stillAlive = returned.pane.includes(`@${E2E_TEAMMATE}`)
     const actual = !returned.ok
-      ? `still "Viewing @${E2E_TEAMMATE}" ${UI_TIMEOUT_MS}ms after Escape (the pre-fix behaviour)`
+      ? `still "${E2E_TEAMMATE_HEADER}" ${UI_TIMEOUT_MS}ms after Escape (the pre-fix behaviour)`
       : stillAlive
         ? 'returned to the leader view; the teammate pill is still shown'
         : 'returned to the leader view, but the teammate pill is gone (Escape killed it)'
