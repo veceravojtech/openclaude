@@ -145,6 +145,7 @@ import {
   createPermissionRequest,
   sendPermissionRequestViaMailbox,
 } from './permissionSync.js'
+import { cascadeSubTeamTeardown } from './spawnInProcess.js'
 import {
   getParentTeamName,
   getSubTeamNameFor,
@@ -1372,14 +1373,6 @@ async function pollForNextPromptOrShutdown(
 }
 
 /**
- * Cleans up after an idle self-shutdown so the teammate leaves no trace a
- * kill or an approved shutdown would have removed: the team-file member (as
- * killInProcessTeammate does), the teamContext entry, and its unfinished
- * tasks (as the lead does on an approved shutdown), then tells the lead. The
- * runner's completion tail then marks the task completed, evicts it and emits
- * the SDK terminated event exactly as for a normal exit.
- */
-/**
  * The children of `subTeamName` that are still working: an in-process teammate
  * task whose identity names that team and which is neither parked idle nor in
  * a terminal state. Names, not ids, because the list goes into a log line a
@@ -1399,6 +1392,14 @@ function findBusySubTeamChildren(
   return busy
 }
 
+/**
+ * Cleans up after an idle self-shutdown so the teammate leaves no trace a
+ * kill or an approved shutdown would have removed: the team-file member (as
+ * killInProcessTeammate does), the teamContext entry, and its unfinished
+ * tasks (as the lead does on an approved shutdown), then tells the lead. The
+ * runner's completion tail then marks the task completed, evicts it and emits
+ * the SDK terminated event exactly as for a normal exit.
+ */
 async function finalizeIdleShutdown(
   identity: TeammateIdentity,
   getAppState: () => AppState,
@@ -1411,9 +1412,8 @@ async function finalizeIdleShutdown(
   // tearing it down while any of them is still working orphans them: their
   // idle notifications and shutdown requests would land in an inbox nobody
   // polls again. Refuse while any child is busy; allow once they are all
-  // parked idle or terminal. Stopping the children is U7's cascade — this is
-  // the gate alone, and a refusal returns the teammate to waiting rather than
-  // ending its runner.
+  // parked idle or terminal, and then take the sub-team with it — a refusal
+  // returns the teammate to waiting rather than ending its runner.
   const subTeamName = getSubTeamNameFor(identity.agentId, identity.agentName)
   if (subTeamName) {
     let leadsSubTeam = false
@@ -1437,6 +1437,15 @@ async function finalizeIdleShutdown(
         )
         return false
       }
+      // Allowed to go, so the sub-team goes too. Its members are all parked
+      // idle or terminal, and this runner is the only thing that polls their
+      // inbox and hands out their task list, so leaving them behind would be
+      // the orphan the gate above exists to prevent. Same teardown a kill
+      // performs, and it runs BEFORE this teammate leaves its own team file
+      // so a failure cannot half-retire it.
+      await cascadeSubTeamTeardown(subTeamName, getAppState(), setAppState, {
+        source: 'idle_shutdown',
+      })
     }
   }
 
@@ -1659,6 +1668,13 @@ async function idleUntilNextPrompt(params: {
   // fresh Date.now() — so the policy cannot fire again until another full idle
   // period has passed, rather than spinning on the refusal. An abort ends the
   // wait with `aborted` and leaves the loop as before.
+  //
+  // The fresh policy also restarts the TeammateIdleTimeout occurrence counter
+  // at 1, and that is deliberate: `occurrence` numbers the hook firings within
+  // ONE idle period, and the period a refusal starts is a new one by the same
+  // clock the hook's `idleMs` is measured against. Carrying the count across
+  // refusals while resetting the clock would hand hooks an occurrence that no
+  // longer matches the idleMs beside it.
   const taskListId = resolveTeammateTaskListId(identity)
   let waitResult = await waitForNextPromptOrShutdown(
     identity,

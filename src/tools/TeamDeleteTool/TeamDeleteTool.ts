@@ -7,10 +7,11 @@ import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
 import { TEAM_LEAD_NAME } from '../../utils/swarm/constants.js'
+import { stopTeamTreeMembers } from '../../utils/swarm/spawnInProcess.js'
 import {
-  cleanupTeamDirectories,
+  cleanupTeamTree,
+  collectDescendantTeamNames,
   readTeamFile,
-  unregisterTeamForSessionCleanup,
 } from '../../utils/swarm/teamHelpers.js'
 import { clearTeammateColors } from '../../utils/swarm/teammateLayoutManager.js'
 import { clearLeaderTeamName } from '../../utils/tasks.js'
@@ -98,9 +99,18 @@ export const TeamDeleteTool: Tool<InputSchema, Output> = buildTool({
         }
       }
 
-      await cleanupTeamDirectories(teamName)
-      // Already cleaned — don't try again on gracefulShutdown.
-      unregisterTeamForSessionCleanup(teamName)
+      // Sub-teams go with their parent. They are teams a teammate created and
+      // leads, so none of their members appears in the roster the active-member
+      // guard above checked, and nothing else would ever remove them: their
+      // lead is a member of THIS team and disbanding it leaves them reporting
+      // into an inbox that no longer exists. Their members are stopped first,
+      // then the whole tree's directories go deepest first.
+      for (const subTeam of await collectDescendantTeamNames(teamName)) {
+        stopTeamTreeMembers(subTeam, getAppState(), setAppState, {
+          source: 'team_delete',
+        })
+      }
+      await cleanupTeamTree(teamName)
 
       // Clear color assignments so new teams start fresh
       clearTeammateColors()

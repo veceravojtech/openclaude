@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'fs'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 import {
@@ -17,14 +23,19 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import { setClaudeConfigHomeDirForTesting } from '../envUtils.js'
-import { createTask, listTasks } from '../tasks.js'
+import { createTask, getTasksDir, listTasks } from '../tasks.js'
 import {
   createIdleNotification,
   createShutdownRequestMessage,
   type TeammateMessage,
 } from '../teammateMailbox.js'
 import { spawnInProcessTeammate } from './spawnInProcess.js'
-import { getTeamFilePath, readTeamFile, type TeamFile } from './teamHelpers.js'
+import {
+  getTeamDir,
+  getTeamFilePath,
+  readTeamFile,
+  type TeamFile,
+} from './teamHelpers.js'
 
 // U5: a teammate that leads a sub-team polls TWO inboxes — its own, in the
 // parent team, and `team-lead` of the sub-team, where its children report.
@@ -669,4 +680,52 @@ test('a teammate that leads no sub-team is unaffected by the gate', async () => 
   await helper.done
 
   expect(memberNames(PARENT_TEAM)).not.toContain('helper')
+})
+
+test('the idle self-shutdown tears the sub-team down, and tears nothing down while a child is busy', async () => {
+  process.env.CLAUDE_CODE_TEAMMATE_IDLE_SHUTDOWN_MS = '1000'
+  const harness = await importRunnerWithMocks()
+  const world = createWorld()
+  writeSubTeamWorld([{ agentId: `worker@${SUB_TEAM}`, name: 'worker' }])
+  await createTask(SUB_TEAM, {
+    subject: 'sub-team work',
+    description: 'seeded',
+    status: 'pending',
+    owner: undefined,
+    blocks: [],
+    blockedBy: [],
+  })
+
+  // A child mid-turn: spawned with a prompt, so it is registered not-idle.
+  const worker = await registerTeammate(world, 'worker', SUB_TEAM, 'do the work')
+
+  const subLead = await startIdleTeammate(harness, world, SUB_LEAD, PARENT_TEAM)
+
+  await waitFor(
+    () => virtualNow >= 1_700_000_005_000,
+    'the idle policy to pass the shutdown threshold several times over',
+  )
+
+  // Refused, so NOTHING is torn down: the gate returns before the teardown.
+  expect(world.getState().tasks[worker.taskId]?.status).toBe('running')
+  expect(existsSync(getTeamDir(SUB_TEAM))).toBe(true)
+  expect(existsSync(getTasksDir(SUB_TEAM))).toBe(true)
+
+  // The child parks idle; the next idle period may now end the sub-lead, and
+  // the sub-team goes with it.
+  world.setAppState(prev => {
+    const task = prev.tasks[worker.taskId]
+    if (!task || task.type !== 'in_process_teammate') return prev
+    return {
+      ...prev,
+      tasks: { ...prev.tasks, [worker.taskId]: { ...task, isIdle: true } },
+    }
+  })
+
+  await subLead.done
+
+  expect(world.getState().tasks[worker.taskId]?.status).toBe('killed')
+  expect(existsSync(getTeamDir(SUB_TEAM))).toBe(false)
+  expect(existsSync(getTasksDir(SUB_TEAM))).toBe(false)
+  expect(memberNames(PARENT_TEAM)).not.toContain(SUB_LEAD)
 })

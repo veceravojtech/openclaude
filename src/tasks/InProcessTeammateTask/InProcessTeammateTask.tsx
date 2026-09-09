@@ -13,7 +13,7 @@ import { isTerminalTaskStatus, type SetAppState, type Task, type TaskStateBase }
 import type { Message } from '../../types/message.js';
 import { logForDebugging } from '../../utils/debug.js';
 import { createUserMessage } from '../../utils/messages.js';
-import { killInProcessTeammate } from '../../utils/swarm/spawnInProcess.js';
+import { killInProcessTeammateAndCascade } from '../../utils/swarm/spawnInProcess.js';
 import { updateTaskState } from '../../utils/task/framework.js';
 import type { InProcessTeammateTaskState } from './types.js';
 import { appendCappedMessage, isInProcessTeammateTask } from './types.js';
@@ -25,7 +25,10 @@ export const InProcessTeammateTask: Task = {
   name: 'InProcessTeammateTask',
   type: 'in_process_teammate',
   async kill(taskId, setAppState) {
-    killInProcessTeammate(taskId, setAppState);
+    // Awaited, not fire-and-forget: TaskStop resolves through here, and a
+    // teammate that leads a sub-team is only really stopped once that
+    // sub-team's members are stopped and its directories are gone.
+    await killInProcessTeammateAndCascade(taskId, setAppState);
   }
 };
 

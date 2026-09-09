@@ -18,7 +18,11 @@ import { getSessionId } from '../../bootstrap/state.js'
 import { getSpinnerVerbs } from '../../constants/spinnerVerbs.js'
 import { TURN_COMPLETION_VERBS } from '../../constants/turnCompletionVerbs.js'
 import type { AppState } from '../../state/AppState.js'
-import { createTaskStateBase, generateTaskId } from '../../Task.js'
+import {
+  createTaskStateBase,
+  generateTaskId,
+  isTerminalTaskStatus,
+} from '../../Task.js'
 import type {
   InProcessTeammateTaskState,
   TeammateIdentity,
@@ -27,6 +31,7 @@ import { createAbortController } from '../abortController.js'
 import { formatAgentId } from '../agentId.js'
 import { registerCleanup } from '../cleanupRegistry.js'
 import { logForDebugging } from '../debug.js'
+import { errorMessage } from '../errors.js'
 import {
   registerInterruptionController,
   requestAbort,
@@ -44,7 +49,12 @@ import {
   registerAgent as registerPerfettoAgent,
   unregisterAgent as unregisterPerfettoAgent,
 } from '../telemetry/perfettoTracing.js'
-import { removeMemberByAgentId } from './teamHelpers.js'
+import {
+  cleanupTeamTree,
+  collectDescendantTeamNames,
+  readSubTeamLedBySync,
+  removeMemberByAgentId,
+} from './teamHelpers.js'
 
 type SetAppStateFn = (updater: (prev: AppState) => AppState) => void
 
@@ -242,10 +252,23 @@ export async function spawnInProcessTeammate(
   }
 }
 
+/** Trace source for a teammate stopped because the team above it went away. */
+const SUB_TEAM_CASCADE_SOURCE = 'sub_team_cascade'
+
 /**
- * Kills an in-process teammate by aborting its controller.
+ * Kills an in-process teammate by aborting its controller, and with it the
+ * sub-team that teammate leads.
  *
  * Note: This is the implementation called by InProcessBackend.kill().
+ *
+ * The sub-team cascade has two halves. Stopping the processes is synchronous
+ * and finishes before this returns, so the three callers that only take the
+ * boolean — InProcessBackend.kill, the teammate-view kill key, and the task
+ * impl below — never leave a sub-team's members running past the tick that
+ * killed their lead. Removing the directories is inherently asynchronous
+ * (worktrees, `rm -rf`) and is left running; use
+ * {@link killInProcessTeammateAndCascade} when the caller must observe the
+ * directories gone, as TaskStop does.
  *
  * @param taskId - Task ID of the teammate to kill
  * @param setAppState - AppState setter
@@ -256,9 +279,180 @@ export function killInProcessTeammate(
   setAppState: SetAppStateFn,
   trace: InProcessTeammateKillTrace = { source: 'task_stop' },
 ): boolean {
+  const { killed, teardown } = killTeammateAndSubTeam(
+    taskId,
+    setAppState,
+    trace,
+  )
+  // Never rejects: cascadeSubTeamTeardown logs its own failures.
+  void teardown
+  return killed
+}
+
+/**
+ * {@link killInProcessTeammate}, awaiting the sub-team teardown.
+ *
+ * TaskStop resolves through here, so "the sub-lead is stopped" and "its
+ * sub-team is gone" become one observable event instead of a race a caller
+ * would have to sleep on.
+ */
+export async function killInProcessTeammateAndCascade(
+  taskId: string,
+  setAppState: SetAppStateFn,
+  trace: InProcessTeammateKillTrace = { source: 'task_stop' },
+): Promise<boolean> {
+  const { killed, teardown } = killTeammateAndSubTeam(
+    taskId,
+    setAppState,
+    trace,
+  )
+  await teardown
+  return killed
+}
+
+/**
+ * Kills one teammate and, when it leads a sub-team, hands back the promise
+ * that tears that sub-team down. The kill itself is complete on return.
+ */
+function killTeammateAndSubTeam(
+  taskId: string,
+  setAppState: SetAppStateFn,
+  trace: InProcessTeammateKillTrace,
+): { killed: boolean; teardown: Promise<void> } {
+  const { killed, identity, appStateBefore } = killOneInProcessTeammate(
+    taskId,
+    setAppState,
+    trace,
+  )
+  if (!killed || !identity || !appStateBefore) {
+    return { killed, teardown: Promise.resolve() }
+  }
+  // The derived name alone is not enough: `email/supervisor` and a root team
+  // literally named `email-supervisor` share a directory, so the team file's
+  // own name and recorded parent are what say this teammate really leads it.
+  const subTeam = readSubTeamLedBySync({
+    agentId: identity.agentId,
+    name: identity.agentName,
+    isTeammate: true,
+  })
+  if (!subTeam) {
+    return { killed, teardown: Promise.resolve() }
+  }
+  return {
+    killed,
+    teardown: cascadeSubTeamTeardown(
+      subTeam.name,
+      appStateBefore,
+      setAppState,
+      trace,
+    ),
+  }
+}
+
+/**
+ * Stops every in-process teammate of `teamName` and of every sub-team led by
+ * one of them, then removes the whole sub-tree's directories.
+ *
+ * `teamName` must already be confirmed as a real sub-team of the caller (the
+ * `readSubTeamLedBy` contract) — this function trusts the name it is given.
+ *
+ * Everything up to the first `await` runs in the caller's tick, so a
+ * synchronous caller still stops the live sub-tree before it returns.
+ */
+export async function cascadeSubTeamTeardown(
+  teamName: string,
+  appState: AppState,
+  setAppState: SetAppStateFn,
+  trace: InProcessTeammateKillTrace = { source: SUB_TEAM_CASCADE_SOURCE },
+): Promise<void> {
+  try {
+    stopTeamTreeMembers(teamName, appState, setAppState, trace)
+    // Disk is the authority for which teams exist: a sub-sub-team whose own
+    // lead is already dead has no live task to recurse through, but its
+    // members are still running and its directory is still there.
+    for (const descendant of await collectDescendantTeamNames(teamName)) {
+      stopTeamTreeMembers(descendant, appState, setAppState, trace)
+    }
+    await cleanupTeamTree(teamName)
+  } catch (err) {
+    logForDebugging(
+      `[killInProcessTeammate] Failed to tear down sub-team ${teamName}: ${errorMessage(err)}`,
+    )
+  }
+}
+
+/**
+ * Stops the in-process members of `teamName` and, recursively, of any
+ * sub-team one of those members leads. Returns the agent ids stopped.
+ *
+ * Members are found in `appState.tasks` by `identity.teamName` rather than in
+ * the roster, because that is what a running teammate actually carries; a
+ * roster-only member has no process to stop, and its worktree goes with the
+ * team directory. Each member is aborted BEFORE its own sub-team is walked,
+ * so nothing below it can be spawned while the cascade descends. `visited`
+ * guards against a parent link that points back up the tree.
+ */
+export function stopTeamTreeMembers(
+  teamName: string,
+  appState: AppState,
+  setAppState: SetAppStateFn,
+  trace: InProcessTeammateKillTrace = { source: SUB_TEAM_CASCADE_SOURCE },
+  visited: Set<string> = new Set([teamName]),
+): string[] {
+  const stopped: string[] = []
+  const cascadeTrace: InProcessTeammateKillTrace = {
+    source: SUB_TEAM_CASCADE_SOURCE,
+    causalEventId: trace.causalEventId,
+  }
+  for (const task of Object.values(appState.tasks)) {
+    if (task.type !== 'in_process_teammate') continue
+    if (task.identity.teamName !== teamName) continue
+    if (isTerminalTaskStatus(task.status)) continue
+
+    const { killed } = killOneInProcessTeammate(
+      task.id,
+      setAppState,
+      cascadeTrace,
+    )
+    if (killed) stopped.push(task.identity.agentId)
+
+    const subTeam = readSubTeamLedBySync({
+      agentId: task.identity.agentId,
+      name: task.identity.agentName,
+      isTeammate: true,
+    })
+    if (!subTeam || visited.has(subTeam.name)) continue
+    visited.add(subTeam.name)
+    stopped.push(
+      ...stopTeamTreeMembers(
+        subTeam.name,
+        appState,
+        setAppState,
+        trace,
+        visited,
+      ),
+    )
+  }
+  return stopped
+}
+
+/**
+ * Kills one in-process teammate, with no sub-team cascade. Also hands back
+ * the identity it killed and the AppState as it was before the kill, which is
+ * how the cascade enumerates the sub-tree without a second read.
+ */
+function killOneInProcessTeammate(
+  taskId: string,
+  setAppState: SetAppStateFn,
+  trace: InProcessTeammateKillTrace,
+): {
+  killed: boolean
+  identity: TeammateIdentity | undefined
+  appStateBefore: AppState | undefined
+} {
   let killed = false
-  let teamName: string | null = null
-  let agentId: string | null = null
+  let identity: TeammateIdentity | undefined
+  let appStateBefore: AppState | undefined
   let toolUseId: string | undefined
   let description: string | undefined
 
@@ -275,8 +469,8 @@ export function killInProcessTeammate(
     }
 
     // Capture identity for cleanup after state update
-    teamName = teammateTask.identity.teamName
-    agentId = teammateTask.identity.agentId
+    identity = teammateTask.identity
+    appStateBefore = prev
     toolUseId = teammateTask.toolUseId
     description = teammateTask.description
 
@@ -301,9 +495,11 @@ export function killInProcessTeammate(
     teammateTask.onIdleCallbacks?.forEach(cb => cb())
 
     // Remove from teamContext.teammates using the agentId
+    const killedAgentId = teammateTask.identity.agentId
     let updatedTeamContext = prev.teamContext
-    if (prev.teamContext && prev.teamContext.teammates && agentId) {
-      const { [agentId]: _, ...remainingTeammates } = prev.teamContext.teammates
+    if (prev.teamContext?.teammates) {
+      const { [killedAgentId]: _, ...remainingTeammates } =
+        prev.teamContext.teammates
       updatedTeamContext = {
         ...prev.teamContext,
         teammates: remainingTeammates,
@@ -335,8 +531,8 @@ export function killInProcessTeammate(
   })
 
   // Remove from team file (outside state updater to avoid file I/O in callback)
-  if (teamName && agentId) {
-    removeMemberByAgentId(teamName, agentId)
+  if (identity) {
+    removeMemberByAgentId(identity.teamName, identity.agentId)
   }
 
   if (killed) {
@@ -356,9 +552,9 @@ export function killInProcessTeammate(
   }
 
   // Release perfetto agent registry entry
-  if (agentId) {
-    unregisterPerfettoAgent(agentId)
+  if (identity) {
+    unregisterPerfettoAgent(identity.agentId)
   }
 
-  return killed
+  return { killed, identity, appStateBefore }
 }

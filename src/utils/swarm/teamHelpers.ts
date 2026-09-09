@@ -1,5 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'fs'
-import { mkdir, readFile, rm, writeFile } from 'fs/promises'
+import { mkdir, readdir, readFile, rm, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { z } from 'zod/v4'
 import { getSessionCreatedTeams } from '../../bootstrap/state.js'
@@ -228,18 +228,59 @@ export async function readSubTeamLedBy(caller: {
   name: string | undefined
   isTeammate: boolean
 }): Promise<TeamFile | null> {
-  if (!caller.isTeammate) return null
-  const subTeamName = getSubTeamNameFor(caller.agentId, caller.name)
+  const subTeamName = subTeamNameLedBy(caller)
   if (!subTeamName) return null
   const teamFile = await readTeamFileAsync(subTeamName)
-  if (
-    !teamFile ||
-    teamFile.name !== subTeamName ||
-    teamFile.parentAgentId !== caller.agentId
-  ) {
-    return null
-  }
-  return teamFile
+  return isSubTeamLedBy(teamFile, subTeamName, caller.agentId) ? teamFile : null
+}
+
+/**
+ * The sub-team a teammate leads, read synchronously — the same contract as
+ * {@link readSubTeamLedBy}.
+ *
+ * The kill path needs it: `killInProcessTeammate` returns a boolean its
+ * callers do not await, so whether the teammate leads a sub-team has to be
+ * settled before anything asynchronous can be started, or the members of that
+ * sub-team would outlive the tick that killed their lead.
+ */
+// sync IO: called from sync context
+export function readSubTeamLedBySync(caller: {
+  agentId: string | undefined
+  name: string | undefined
+  isTeammate: boolean
+}): TeamFile | null {
+  const subTeamName = subTeamNameLedBy(caller)
+  if (!subTeamName) return null
+  const teamFile = readTeamFile(subTeamName)
+  return isSubTeamLedBy(teamFile, subTeamName, caller.agentId) ? teamFile : null
+}
+
+/**
+ * The sub-team name a caller could lead, or undefined when it could lead none.
+ */
+function subTeamNameLedBy(caller: {
+  agentId: string | undefined
+  name: string | undefined
+  isTeammate: boolean
+}): string | undefined {
+  if (!caller.isTeammate) return undefined
+  return getSubTeamNameFor(caller.agentId, caller.name)
+}
+
+/**
+ * Whether a team file really is the sub-team `subTeamName` led by
+ * `callerAgentId`, rather than a root team squatting the same directory.
+ */
+function isSubTeamLedBy(
+  teamFile: TeamFile | null,
+  subTeamName: string,
+  callerAgentId: string | undefined,
+): teamFile is TeamFile {
+  return (
+    teamFile !== null &&
+    teamFile.name === subTeamName &&
+    teamFile.parentAgentId === callerAgentId
+  )
 }
 
 /**
@@ -717,6 +758,91 @@ async function killOrphanedTeammatePanes(teamName: string): Promise<void> {
 }
 
 /**
+ * Every team below `teamName` in the team tree, deepest first.
+ *
+ * Read off disk — one `readdir` of the teams directory, then the recorded
+ * `parentTeam` links — rather than walked over the parent's roster, because a
+ * sub-lead is dropped from that roster the moment it is killed or shuts down
+ * idle (`removeMemberByAgentId`), so a roster walk would miss exactly the
+ * sub-team an orphan check is looking for. Team directories are one flat
+ * sanitized segment, so a single listing sees the whole forest. Deepest first
+ * so a caller can tear a tree down bottom-up, and cycle-guarded because the
+ * parent links are just strings in files someone may have edited.
+ */
+export async function collectDescendantTeamNames(
+  teamName: string,
+): Promise<string[]> {
+  const childrenByParent = new Map<string, string[]>()
+  let dirNames: string[]
+  try {
+    dirNames = await readdir(getTeamsDir())
+  } catch (e) {
+    if (getErrnoCode(e) !== 'ENOENT') {
+      logForDebugging(
+        `[TeammateTool] Failed to list teams directory: ${errorMessage(e)}`,
+      )
+    }
+    return []
+  }
+
+  for (const dirName of dirNames) {
+    let teamFile: TeamFile | null = null
+    try {
+      const content = await readFile(
+        join(getTeamsDir(), dirName, 'config.json'),
+        'utf-8',
+      )
+      teamFile = jsonParse(content) as TeamFile
+    } catch {
+      // Not a team directory, or a team file being written right now.
+      continue
+    }
+    if (!teamFile?.name || !teamFile.parentTeam) continue
+    const siblings = childrenByParent.get(teamFile.parentTeam)
+    if (siblings) {
+      siblings.push(teamFile.name)
+    } else {
+      childrenByParent.set(teamFile.parentTeam, [teamFile.name])
+    }
+  }
+
+  const levels: string[][] = []
+  const seen = new Set<string>([teamName])
+  let frontier = [teamName]
+  while (frontier.length > 0) {
+    const next: string[] = []
+    for (const parent of frontier) {
+      for (const child of childrenByParent.get(parent) ?? []) {
+        if (seen.has(child)) continue
+        seen.add(child)
+        next.push(child)
+      }
+    }
+    if (next.length > 0) levels.push(next)
+    frontier = next
+  }
+  return levels.reverse().flat()
+}
+
+/**
+ * Tears down a team and every sub-team below it: worktrees, team directory
+ * and task-list directory of each, deepest first, and each dropped from
+ * session cleanup so shutdown does not try again.
+ *
+ * This is the teardown TeamDelete performs, widened to the sub-tree — the
+ * single path a kill cascade, a TaskStop cascade and an idle self-shutdown
+ * all reuse, so a sub-team is never removed by a second, hand-rolled `rm`.
+ */
+export async function cleanupTeamTree(teamName: string): Promise<void> {
+  const teams = [...(await collectDescendantTeamNames(teamName)), teamName]
+  for (const name of teams) {
+    await cleanupTeamDirectories(name)
+    // Already cleaned — don't try again on gracefulShutdown.
+    unregisterTeamForSessionCleanup(name)
+  }
+}
+
+/**
  * Cleans up team and task directories for a given team name.
  * Also cleans up git worktrees created for teammates.
  * Called when a swarm session is terminated.
@@ -753,6 +879,10 @@ export async function cleanupTeamDirectories(teamName: string): Promise<void> {
 
   // Clean up tasks directory (~/.claude/tasks/{taskListId}/)
   // The leader and teammates all store tasks under the sanitized team name.
+  // A sub-team's list is keyed by its raw name (`getSubTeamTaskListId`), and
+  // `getTasksDir` sanitizes the separator the same way, so `email/supervisor`
+  // and `sanitizeName('email/supervisor')` land on the one `email-supervisor`
+  // directory removed here.
   const tasksDir = getTasksDir(sanitizedName)
   try {
     await rm(tasksDir, { recursive: true, force: true })

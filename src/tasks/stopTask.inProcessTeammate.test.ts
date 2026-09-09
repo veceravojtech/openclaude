@@ -1,14 +1,23 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import type { AppState } from '../state/AppState.js'
+import { getDefaultAppState } from '../state/AppStateStore.js'
 import { getTaskByType } from '../tasks.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
 import { setClaudeConfigHomeDirForTesting } from '../utils/envUtils.js'
+import { spawnInProcessTeammate } from '../utils/swarm/spawnInProcess.js'
+import {
+  getTeamDir,
+  getTeamFilePath,
+  readTeamFile,
+  type TeamFile,
+} from '../utils/swarm/teamHelpers.js'
+import { createTask, getTasksDir } from '../utils/tasks.js'
 import type { InProcessTeammateTaskState } from './InProcessTeammateTask/types.js'
 import { stopTask, StopTaskError } from './stopTask.js'
 
@@ -103,4 +112,94 @@ test('stopTask kills an idle in-process teammate', async () => {
 
   // Already stopped: the shared guard rejects a second stop.
   await expect(stopTask(task.id, context)).rejects.toBeInstanceOf(StopTaskError)
+})
+
+// U7: TaskStop on a teammate that leads a sub-team takes the sub-team with
+// it, and stopTask does not resolve until it has — no sleeping in the test.
+
+const PARENT_TEAM = 'email'
+const SUB_LEAD = 'supervisor'
+const SUB_TEAM = `${PARENT_TEAM}/${SUB_LEAD}`
+const SUB_LEAD_AGENT_ID = `${SUB_LEAD}@${PARENT_TEAM}`
+const TEAM_LEAD = 'team-lead'
+
+/** Writes the team file a real TeamCreate would leave behind. */
+function writeTeam(
+  teamName: string,
+  members: Array<{ agentId: string; name: string }>,
+  parent?: { parentTeam: string; parentAgentId: string },
+): void {
+  const teamFile: TeamFile = {
+    name: teamName,
+    createdAt: 0,
+    leadAgentId: members[0]?.agentId ?? 'lead-id',
+    ...parent,
+    members: members.map(m => ({
+      agentId: m.agentId,
+      name: m.name,
+      joinedAt: 0,
+      tmuxPaneId: 'in-process',
+      cwd: '/repo',
+      subscriptions: [],
+    })),
+  }
+  const path = getTeamFilePath(teamName)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, JSON.stringify(teamFile))
+}
+
+test('stopTask on a sub-lead stops its sub-team and removes it before resolving', async () => {
+  writeTeam(PARENT_TEAM, [
+    { agentId: 'lead-id', name: TEAM_LEAD },
+    { agentId: SUB_LEAD_AGENT_ID, name: SUB_LEAD },
+  ])
+  writeTeam(
+    SUB_TEAM,
+    [
+      { agentId: `${TEAM_LEAD}@${SUB_TEAM}`, name: TEAM_LEAD },
+      { agentId: `worker@${SUB_TEAM}`, name: 'worker' },
+    ],
+    { parentTeam: PARENT_TEAM, parentAgentId: SUB_LEAD_AGENT_ID },
+  )
+  await createTask(SUB_TEAM, {
+    subject: 'sub-team work',
+    description: 'seeded',
+    status: 'pending',
+    owner: undefined,
+    blocks: [],
+    blockedBy: [],
+  })
+
+  let state: AppState = getDefaultAppState()
+  const context = {
+    getAppState: () => state,
+    setAppState: (f: (prev: AppState) => AppState) => {
+      state = f(state)
+    },
+  }
+  const spawn = async (name: string, teamName: string): Promise<string> => {
+    const result = await spawnInProcessTeammate(
+      { name, teamName, planModeRequired: false, prompt: 'work' },
+      { setAppState: context.setAppState },
+    )
+    if (!result.success || !result.taskId) {
+      throw new Error(`spawn failed: ${result.error}`)
+    }
+    return result.taskId
+  }
+
+  const subLeadTask = await spawn(SUB_LEAD, PARENT_TEAM)
+  const workerTask = await spawn('worker', SUB_TEAM)
+
+  const result = await stopTask(subLeadTask, context)
+  expect(result.taskType).toBe('in_process_teammate')
+
+  // Observable the moment stopTask resolves: no polling, no sleeping.
+  expect(state.tasks[subLeadTask]?.status).toBe('killed')
+  expect(state.tasks[workerTask]?.status).toBe('killed')
+  expect(existsSync(getTeamDir(SUB_TEAM))).toBe(false)
+  expect(existsSync(getTasksDir(SUB_TEAM))).toBe(false)
+  expect(readTeamFile(PARENT_TEAM)?.members.map(m => m.name)).toEqual([
+    TEAM_LEAD,
+  ])
 })
