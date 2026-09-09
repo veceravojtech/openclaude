@@ -458,6 +458,7 @@ export const AgentTool = buildTool({
       replicas,
       name,
       isTeammateSpawn: Boolean(teamName && name),
+      teamName,
       tasks: appState.tasks
     });
     if (capError) {

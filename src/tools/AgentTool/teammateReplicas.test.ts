@@ -8,19 +8,27 @@ import {
 } from '../../test/sharedMutationLock.js'
 import {
   countLiveInProcessTeammates,
+  countLiveTeammatesInTeam,
   DEFAULT_MAX_LIVE_TEAMMATES,
+  DEFAULT_MAX_TEAM_TOTAL,
   DEFAULT_MAX_TEAMMATE_REPLICAS,
   getMaxLiveTeammates,
   getMaxTeammateReplicas,
+  getMaxTeamTotal,
   getTeammateSpawnCapError,
   MAX_LIVE_TEAMMATES_ENV,
+  MAX_TEAM_TOTAL_ENV,
   MAX_TEAMMATE_REPLICAS_ENV,
   parsePositiveIntEnv,
   REPLICAS_REQUIRE_NAME_ERROR,
   REPLICAS_REQUIRE_TEAM_ERROR,
 } from './teammateReplicas.js'
 
-const ENV_KEYS = [MAX_TEAMMATE_REPLICAS_ENV, MAX_LIVE_TEAMMATES_ENV] as const
+const ENV_KEYS = [
+  MAX_TEAMMATE_REPLICAS_ENV,
+  MAX_LIVE_TEAMMATES_ENV,
+  MAX_TEAM_TOTAL_ENV,
+] as const
 const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string>> = {}
 
 beforeEach(async () => {
@@ -48,8 +56,13 @@ afterEach(() => {
 
 function teammateTask(
   name: string,
-  opts: { status?: InProcessTeammateTaskState['status']; isIdle?: boolean } = {},
+  opts: {
+    status?: InProcessTeammateTaskState['status']
+    isIdle?: boolean
+    team?: string
+  } = {},
 ): InProcessTeammateTaskState {
+  const team = opts.team ?? 'team'
   return {
     id: `task-${name}`,
     type: 'in_process_teammate',
@@ -60,9 +73,9 @@ function teammateTask(
     outputOffset: 0,
     notified: false,
     identity: {
-      agentId: `${name}@team`,
+      agentId: `${name}@${team}`,
       agentName: name,
-      teamName: 'team',
+      teamName: team,
       planModeRequired: false,
       parentSessionId: 'lead-session',
     },
@@ -98,6 +111,28 @@ function runningTeammates(count: number): AppState['tasks'] {
   return tasksOf(
     ...Array.from({ length: count }, (_, i) => teammateTask(`w-${i + 1}`)),
   )
+}
+
+/** `count` running teammates in `team`, named so teams never share a task id. */
+function teamMembers(
+  team: string,
+  count: number,
+): InProcessTeammateTaskState[] {
+  const prefix = team.replaceAll('/', '-')
+  return Array.from({ length: count }, (_, i) =>
+    teammateTask(`${prefix}-${i + 1}`, { team }),
+  )
+}
+
+/**
+ * A running teammate whose task carries no identity at all — the shape
+ * AgentTool.replicas.test.ts builds, and the one the per-team cap has to
+ * charge to every team.
+ */
+function teammateTaskWithoutIdentity(name: string): InProcessTeammateTaskState {
+  const task: Partial<InProcessTeammateTaskState> = teammateTask(name)
+  delete task.identity
+  return task as InProcessTeammateTaskState
 }
 
 test('parsePositiveIntEnv accepts positive integers and falls back otherwise', () => {
@@ -291,4 +326,208 @@ test('CLAUDE_CODE_MAX_TEAMMATES overrides the live cap', () => {
       tasks: runningTeammates(2),
     }),
   ).toBeUndefined()
+})
+
+test('the live cap counts per team and matches sub-team names exactly', () => {
+  const tasks = tasksOf(
+    ...teamMembers('email', 14),
+    ...teamMembers('email/supervisor', 3),
+    teammateTaskWithoutIdentity('stray-1'),
+    teammateTaskWithoutIdentity('stray-2'),
+  )
+  expect(countLiveInProcessTeammates(tasks)).toBe(19)
+  expect(countLiveTeammatesInTeam(tasks, 'email')).toBe(16)
+  expect(countLiveTeammatesInTeam(tasks, 'email/supervisor')).toBe(5)
+  expect(countLiveTeammatesInTeam(tasks, 'research')).toBe(2)
+
+  const refused = getTeammateSpawnCapError({
+    replicas: 2,
+    name: 'worker',
+    isTeammateSpawn: true,
+    teamName: 'email',
+    tasks,
+  })
+  expect(refused).toContain(
+    'Spawning 2 teammates with 16 already running in team "email"',
+  )
+  expect(refused).toContain('live teammate cap of 16 per team')
+
+  // The sub-team is its own pool: the parent team's 14 members do not count
+  // against it, and its own 3 do not count against the parent.
+  expect(
+    getTeammateSpawnCapError({
+      replicas: 2,
+      name: 'worker',
+      isTeammateSpawn: true,
+      teamName: 'email/supervisor',
+      tasks,
+    }),
+  ).toBeUndefined()
+})
+
+test('a running teammate with no readable team counts against every team', () => {
+  const tasks = tasksOf(
+    ...teamMembers('review', 14),
+    teammateTaskWithoutIdentity('stray'),
+    teammateTask('blank', { team: '   ' }),
+    ...teamMembers('docs', 2),
+  )
+  expect(countLiveTeammatesInTeam(tasks, 'review')).toBe(16)
+  expect(countLiveTeammatesInTeam(tasks, 'docs')).toBe(4)
+  expect(countLiveTeammatesInTeam(tasks, 'brand-new-team')).toBe(2)
+
+  expect(
+    getTeammateSpawnCapError({
+      name: 'worker',
+      isTeammateSpawn: true,
+      teamName: 'review',
+      tasks,
+    }),
+  ).toContain('with 16 already running in team "review"')
+  expect(
+    getTeammateSpawnCapError({
+      name: 'worker',
+      isTeammateSpawn: true,
+      teamName: 'docs',
+      tasks,
+    }),
+  ).toBeUndefined()
+})
+
+test('an omitted teamName keeps the legacy global live count', () => {
+  const tasks = tasksOf(...teamMembers('alpha', 8), ...teamMembers('beta', 8))
+  expect(countLiveTeammatesInTeam(tasks, undefined)).toBe(16)
+  const refused = getTeammateSpawnCapError({
+    name: 'worker',
+    isTeammateSpawn: true,
+    tasks,
+  })
+  expect(refused).toContain(
+    'Spawning 1 teammate with 16 already running would exceed',
+  )
+  expect(refused).not.toContain('in team')
+  expect(
+    getTeammateSpawnCapError({
+      name: 'worker',
+      isTeammateSpawn: true,
+      teamName: 'alpha',
+      tasks,
+    }),
+  ).toBeUndefined()
+})
+
+test('the total cap fires across teams whose own pools are far from full', () => {
+  const nearTotal = tasksOf(
+    ...teamMembers('alpha', 8),
+    ...teamMembers('beta', 8),
+    ...teamMembers('gamma', 7),
+  )
+  // 23 running, every per-team pool well under 16: filling the total exactly
+  // is allowed.
+  expect(
+    getTeammateSpawnCapError({
+      name: 'worker',
+      isTeammateSpawn: true,
+      teamName: 'delta',
+      tasks: nearTotal,
+    }),
+  ).toBeUndefined()
+
+  const full = tasksOf(
+    ...teamMembers('alpha', 8),
+    ...teamMembers('beta', 8),
+    ...teamMembers('gamma', 8),
+  )
+  const refused = getTeammateSpawnCapError({
+    name: 'worker',
+    isTeammateSpawn: true,
+    teamName: 'delta',
+    tasks: full,
+  })
+  expect(countLiveTeammatesInTeam(full, 'delta')).toBe(0)
+  expect(refused).toContain(
+    'Spawning 1 teammate with 24 already running across all teams',
+  )
+  expect(refused).toContain('total teammate cap of 24')
+})
+
+test('CLAUDE_CODE_MAX_TEAM_TOTAL overrides the total cap and falls back to 24', () => {
+  expect(MAX_TEAM_TOTAL_ENV).toBe('CLAUDE_CODE_MAX_TEAM_TOTAL')
+  expect(DEFAULT_MAX_TEAM_TOTAL).toBe(24)
+  expect(getMaxTeamTotal()).toBe(24)
+
+  const tasks = tasksOf(...teamMembers('alpha', 3), ...teamMembers('beta', 3))
+  const spawn = {
+    name: 'worker',
+    isTeammateSpawn: true,
+    teamName: 'gamma',
+    tasks,
+  }
+
+  process.env[MAX_TEAM_TOTAL_ENV] = '6'
+  expect(getMaxTeamTotal()).toBe(6)
+  expect(getTeammateSpawnCapError(spawn)).toContain('total teammate cap of 6')
+
+  process.env[MAX_TEAM_TOTAL_ENV] = '0'
+  expect(getMaxTeamTotal()).toBe(24)
+  expect(getTeammateSpawnCapError(spawn)).toBeUndefined()
+
+  process.env[MAX_TEAM_TOTAL_ENV] = 'plenty'
+  expect(getMaxTeamTotal()).toBe(24)
+  expect(getTeammateSpawnCapError(spawn)).toBeUndefined()
+})
+
+test('both caps and both env vars are named whichever cap refuses', () => {
+  const perTeam = getTeammateSpawnCapError({
+    replicas: 2,
+    name: 'worker',
+    isTeammateSpawn: true,
+    teamName: 'email',
+    tasks: tasksOf(...teamMembers('email', 16)),
+  })
+  expect(perTeam).toContain('live teammate cap of 16 per team')
+  expect(perTeam).toContain('across all teams is 24')
+  expect(perTeam).toContain(MAX_LIVE_TEAMMATES_ENV)
+  expect(perTeam).toContain(MAX_TEAM_TOTAL_ENV)
+
+  const total = getTeammateSpawnCapError({
+    replicas: 2,
+    name: 'worker',
+    isTeammateSpawn: true,
+    teamName: 'delta',
+    tasks: tasksOf(
+      ...teamMembers('alpha', 8),
+      ...teamMembers('beta', 8),
+      ...teamMembers('gamma', 8),
+    ),
+  })
+  expect(total).toContain('total teammate cap of 24')
+  expect(total).toContain('per-team cap is 16')
+  expect(total).toContain(MAX_TEAM_TOTAL_ENV)
+  expect(total).toContain(MAX_LIVE_TEAMMATES_ENV)
+})
+
+test('a replica batch that fits its own team is still refused by the total cap', () => {
+  const tasks = tasksOf(
+    ...teamMembers('alpha', 7),
+    ...teamMembers('beta', 7),
+    ...teamMembers('gamma', 7),
+  )
+  const batch = {
+    replicas: 4,
+    name: 'worker',
+    isTeammateSpawn: true,
+    teamName: 'delta',
+    tasks,
+  }
+  expect(countLiveTeammatesInTeam(tasks, 'delta')).toBe(0)
+
+  const refused = getTeammateSpawnCapError(batch)
+  expect(refused).toContain(
+    'Spawning 4 teammates with 21 already running across all teams',
+  )
+  expect(refused).toContain('total teammate cap of 24')
+
+  process.env[MAX_TEAM_TOTAL_ENV] = '30'
+  expect(getTeammateSpawnCapError(batch)).toBeUndefined()
 })

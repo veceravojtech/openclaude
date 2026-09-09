@@ -5,9 +5,14 @@
  * - `replicas` per call is capped by MAX_TEAMMATE_REPLICAS
  *   (env CLAUDE_CODE_MAX_TEAMMATE_REPLICAS, default 8).
  * - Live in-process teammates (`in_process_teammate` tasks still `running`,
- *   idle or busy) are capped by MAX_LIVE_TEAMMATES
- *   (env CLAUDE_CODE_MAX_TEAMMATES, default 16). Single spawns count as one
- *   so the pool cannot grow past the cap one call at a time.
+ *   idle or busy) are capped twice: PER TEAM by MAX_LIVE_TEAMMATES
+ *   (env CLAUDE_CODE_MAX_TEAMMATES, default 16), counting only teammates in
+ *   the team being spawned into, and across ALL teams of the session by
+ *   MAX_TEAM_TOTAL (env CLAUDE_CODE_MAX_TEAM_TOTAL, default 24). Single
+ *   spawns count as one so neither pool can grow past its cap one call at a
+ *   time. Sub-teams have their own per-team pool (their names contain `/`
+ *   and are compared as exact strings), but every member of every team
+ *   counts against the one total.
  *
  * Env values are parsed like parseIdleMsEnv in utils/swarm/inProcessRunner:
  * a positive integer wins, anything else falls back to the default. They are
@@ -17,8 +22,10 @@ import type { AppState } from '../../state/AppStateStore.js'
 
 export const MAX_TEAMMATE_REPLICAS_ENV = 'CLAUDE_CODE_MAX_TEAMMATE_REPLICAS'
 export const MAX_LIVE_TEAMMATES_ENV = 'CLAUDE_CODE_MAX_TEAMMATES'
+export const MAX_TEAM_TOTAL_ENV = 'CLAUDE_CODE_MAX_TEAM_TOTAL'
 export const DEFAULT_MAX_TEAMMATE_REPLICAS = 8
 export const DEFAULT_MAX_LIVE_TEAMMATES = 16
+export const DEFAULT_MAX_TEAM_TOTAL = 24
 
 export const REPLICAS_REQUIRE_NAME_ERROR = 'replicas requires name'
 export const REPLICAS_REQUIRE_TEAM_ERROR =
@@ -49,6 +56,13 @@ export function getMaxLiveTeammates(): number {
   )
 }
 
+export function getMaxTeamTotal(): number {
+  return parsePositiveIntEnv(
+    process.env[MAX_TEAM_TOTAL_ENV],
+    DEFAULT_MAX_TEAM_TOTAL,
+  )
+}
+
 /**
  * Live in-process teammates: `in_process_teammate` tasks still `running`.
  * Idle teammates count (they hold a slot); terminal ones do not. Same filter
@@ -66,11 +80,45 @@ export function countLiveInProcessTeammates(
   return count
 }
 
+/**
+ * Live in-process teammates in one team. Team names are compared as exact
+ * strings — a sub-team is named `parent/child` and is its own pool, not a
+ * path to split or a prefix to match.
+ *
+ * A running teammate whose team cannot be read off its task (identity or
+ * teamName missing) counts against EVERY team: an unattributable teammate
+ * still holds a real slot, and the conservative reading keeps a cap a cap.
+ * Without a team to spawn into, this is the whole running pool — the global
+ * count this cap used to be.
+ */
+export function countLiveTeammatesInTeam(
+  tasks: AppState['tasks'] | undefined,
+  teamName: string | undefined,
+): number {
+  if (!teamName) return countLiveInProcessTeammates(tasks)
+  let count = 0
+  for (const task of Object.values(tasks ?? {})) {
+    if (task.type !== 'in_process_teammate' || task.status !== 'running') {
+      continue
+    }
+    const identity: { teamName?: string } | undefined = task.identity
+    const taskTeam = identity?.teamName?.trim()
+    if (!taskTeam || taskTeam === teamName) count++
+  }
+  return count
+}
+
 export type TeammateSpawnCapInput = {
   replicas?: number
   name?: string
   /** True when the call will spawn teammates: `name` given and a team resolved. */
   isTeammateSpawn: boolean
+  /**
+   * The team the spawn lands in, already substituted to the sub-team by the
+   * caller when a teammate leads one. Undefined where no team is resolved
+   * yet (validateInput): the per-team cap then counts the whole pool.
+   */
+  teamName?: string
   tasks: AppState['tasks'] | undefined
 }
 
@@ -82,7 +130,7 @@ export type TeammateSpawnCapInput = {
 export function getTeammateSpawnCapError(
   input: TeammateSpawnCapInput,
 ): string | undefined {
-  const { replicas, name, isTeammateSpawn, tasks } = input
+  const { replicas, name, isTeammateSpawn, teamName, tasks } = input
   if (replicas !== undefined && !name) {
     return REPLICAS_REQUIRE_NAME_ERROR
   }
@@ -98,10 +146,17 @@ export function getTeammateSpawnCapError(
       : undefined
   }
   const requested = replicas ?? 1
-  const live = countLiveInProcessTeammates(tasks)
+  const plural = requested === 1 ? '' : 's'
   const maxLive = getMaxLiveTeammates()
-  if (live + requested > maxLive) {
-    return `Spawning ${requested} teammate${requested === 1 ? '' : 's'} with ${live} already running would exceed the live teammate cap of ${maxLive} (set ${MAX_LIVE_TEAMMATES_ENV} to change it). Shut down or wait for running teammates first.`
+  const maxTotal = getMaxTeamTotal()
+  const liveInTeam = countLiveTeammatesInTeam(tasks, teamName)
+  if (liveInTeam + requested > maxLive) {
+    const where = teamName ? ` in team "${teamName}"` : ''
+    return `Spawning ${requested} teammate${plural} with ${liveInTeam} already running${where} would exceed the live teammate cap of ${maxLive} per team (set ${MAX_LIVE_TEAMMATES_ENV} to change it; the cap across all teams is ${maxTotal}, set ${MAX_TEAM_TOTAL_ENV}). Shut down or wait for running teammates first.`
+  }
+  const liveTotal = countLiveInProcessTeammates(tasks)
+  if (liveTotal + requested > maxTotal) {
+    return `Spawning ${requested} teammate${plural} with ${liveTotal} already running across all teams would exceed the total teammate cap of ${maxTotal} (set ${MAX_TEAM_TOTAL_ENV} to change it; the per-team cap is ${maxLive}, set ${MAX_LIVE_TEAMMATES_ENV}). Shut down or wait for running teammates first.`
   }
   return undefined
 }
