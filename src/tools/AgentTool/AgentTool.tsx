@@ -46,7 +46,7 @@ import { sleep } from '../../utils/sleep.js';
 import { buildEffectiveSystemPrompt } from '../../utils/systemPrompt.js';
 import { asSystemPrompt } from '../../utils/systemPromptType.js';
 import { getTaskOutputPath } from '../../utils/task/diskOutput.js';
-import { getParentSessionId, isTeammate } from '../../utils/teammate.js';
+import { getAgentId, getParentSessionId, isTeammate } from '../../utils/teammate.js';
 import { isInProcessTeammate } from '../../utils/teammateContext.js';
 import { getAssistantMessageContentLength } from '../../utils/tokens.js';
 import { createAgentId } from '../../utils/uuid.js';
@@ -1001,6 +1001,15 @@ export const AgentTool = buildTool({
     };
     if (shouldRunAsync) {
       const asyncAgentId = earlyAgentId;
+      // Who should hear about this agent finishing. Inside a teammate's turn
+      // toolUseContext.agentId is a fresh per-turn id (runAgent.ts creates one
+      // per call and createSubagentContext stamps it), so a notification
+      // addressed to it is orphaned the moment the turn ends — nothing drains
+      // it. The teammate's stable identity is what its own poll loop watches,
+      // so prefer that; a plain subagent falls back to its turn id, and the
+      // main thread stays undefined (today's behaviour, notification goes to
+      // the coordinator).
+      const spawnerAgentId = getAgentId();
       const agentBackgroundTask = registerAsyncAgent({
         agentId: asyncAgentId,
         description,
@@ -1010,7 +1019,8 @@ export const AgentTool = buildTool({
         // Don't link to parent's abort controller -- background agents should
         // survive when the user presses ESC to cancel the main thread.
         // They are killed explicitly via chat:killAgents.
-        toolUseId: toolUseContext.toolUseId
+        toolUseId: toolUseContext.toolUseId,
+        parentAgentId: spawnerAgentId ? asAgentId(spawnerAgentId) : toolUseContext.agentId
       });
 
       // Register name → agentId for SendMessage routing. Post-registerAsyncAgent

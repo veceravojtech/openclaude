@@ -91,6 +91,10 @@ import {
   normalizeMaxMessagesCompactionThreshold,
 } from '../config.js'
 import {
+  dequeueAllMatching,
+  extractTextFromValue,
+} from '../messageQueueManager.js'
+import {
   SUBAGENT_REJECT_MESSAGE,
   SUBAGENT_REJECT_MESSAGE_WITH_REASON_PREFIX,
 } from '../messages.js'
@@ -781,6 +785,8 @@ type WaitResult =
 const DEFAULT_TEAMMATE_IDLE_TIMEOUT_MS = 300_000
 /** Pseudo-sender for prompts a TeammateIdleTimeout hook hands to the teammate. */
 const IDLE_TIMEOUT_HOOK_SENDER = 'idle-timeout-hook'
+/** Pseudo-sender for a background agent's completion drained off the queue. */
+const TASK_NOTIFICATION_SENDER = 'task-notification'
 
 /**
  * Parses a millisecond env var for the idle policy. Unset or blank yields the
@@ -1131,6 +1137,39 @@ async function pollForNextPromptOrShutdown(
         }
       }
 
+      // A background agent this teammate spawned has finished. LocalAgentTask
+      // stamps the spawner's agent id on the notification, and nothing else
+      // will ever drain it: the coordinator's REPL/print drains take only
+      // unaddressed commands, and query.ts's mid-turn gate runs only while a
+      // turn is in flight — this teammate is between turns.
+      //
+      // Priority: after task.pendingUserMessages (checked at the top of the
+      // loop) and after the mailbox shutdown scan above, before team-lead and
+      // FIFO peer messages. A result this teammate itself asked for outranks
+      // unrelated peer chatter, but must never pre-empt a shutdown request or
+      // something typed into its own view. Sitting inside the mailbox read
+      // also means a round whose readMailbox threw retries in 500ms rather
+      // than delivering a notification ahead of a shutdown it failed to see.
+      const notifications = dequeueAllMatching(
+        cmd =>
+          cmd.mode === 'task-notification' && cmd.agentId === identity.agentId,
+      )
+      if (notifications.length > 0) {
+        logForDebugging(
+          `[inProcessRunner] ${identity.agentName} drained ${notifications.length} task notification(s) addressed to it`,
+        )
+        return {
+          type: 'new_message',
+          // Concatenated, never dropped: dequeueAllMatching has already taken
+          // every one of these off the queue, so a notification left out here
+          // would be lost outright.
+          message: notifications
+            .map(cmd => extractTextFromValue(cmd.value))
+            .join('\n\n'),
+          from: TASK_NOTIFICATION_SENDER,
+        }
+      }
+
       // No shutdown request found. Prioritize team-lead messages over peer
       // messages — the leader represents user intent and coordination, so
       // their messages should not be starved behind peer-to-peer chatter.
@@ -1306,6 +1345,19 @@ function resolveNextPrompt(
       // Messages from the user should be plain text (not wrapped in XML)
       // Messages from other teammates get XML wrapper for identification
       if (waitResult.from === 'user') {
+        return waitResult.message
+      }
+      // A drained task notification is a system message, not peer chatter: it
+      // goes to the model verbatim, so the <task-notification> envelope reads
+      // exactly as it does on the coordinator. Unlike 'user' messages — which
+      // injectUserMessageToTeammate has already mirrored — it still has to be
+      // added to the transcript here.
+      if (waitResult.from === TASK_NOTIFICATION_SENDER) {
+        appendTeammateMessage(
+          taskId,
+          createUserMessage({ content: waitResult.message }),
+          setAppState,
+        )
         return waitResult.message
       }
       const nextPrompt = formatAsTeammateMessage(

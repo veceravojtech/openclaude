@@ -401,7 +401,9 @@ export function isQueuedCommandVisible(cmd: QueuedCommand): boolean {
  * For strings, returns the string.
  * For ContentBlockParam[], extracts text from text blocks.
  */
-function extractTextFromValue(value: string | ContentBlockParam[]): string {
+export function extractTextFromValue(
+  value: string | ContentBlockParam[],
+): string {
   return typeof value === 'string' ? value : extractTextContent(value, '\n')
 }
 

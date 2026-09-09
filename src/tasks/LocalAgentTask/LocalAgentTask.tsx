@@ -9,7 +9,7 @@ import { findToolByName } from '../../Tool.js';
 import type { AgentToolResult } from '../../tools/AgentTool/agentToolUtils.js';
 import type { AgentDefinition } from '../../tools/AgentTool/loadAgentsDir.js';
 import { SYNTHETIC_OUTPUT_TOOL_NAME } from '../../tools/SyntheticOutputTool/SyntheticOutputTool.js';
-import { asAgentId } from '../../types/ids.js';
+import { asAgentId, type AgentId } from '../../types/ids.js';
 import type { Message } from '../../types/message.js';
 import { createAbortController, createChildAbortController } from '../../utils/abortController.js';
 import { registerCleanup } from '../../utils/cleanupRegistry.js';
@@ -151,6 +151,10 @@ export type LocalAgentTaskState = TaskStateBase & {
   // A resume re-registers under the SAME task id, so this is what tells the
   // resumed run's completion notification apart from the original's.
   resumeCount?: number;
+  // The subagent/teammate whose context asked for this agent and should
+  // therefore receive its completion notification. undefined for main-thread
+  // spawns, which keep addressing the coordinator exactly as before.
+  parentAgentId?: AgentId;
 };
 export function isLocalAgentTask(task: unknown): task is LocalAgentTaskState {
   return typeof task === 'object' && task !== null && 'type' in task && task.type === 'local_agent';
@@ -274,6 +278,10 @@ export function enqueueAgentNotification({
   // its request in the leader's context, so without this the leader sees a
   // result it never asked for and discards it as unexplained output.
   let resumedPrompt = '';
+  // …and who asked for this agent. The queue is a process-global singleton, so
+  // the stamp below is the only thing that keeps a teammate's background result
+  // out of the coordinator's context and in its spawner's.
+  let parentAgentId: AgentId | undefined;
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
     if (task.notified) {
       return task;
@@ -281,6 +289,7 @@ export function enqueueAgentNotification({
     shouldEnqueue = true;
     resumeCount = task.resumeCount ?? 0;
     resumedPrompt = task.prompt ?? '';
+    parentAgentId = task.parentAgentId;
     return {
       ...task,
       notified: true
@@ -316,7 +325,10 @@ export function enqueueAgentNotification({
 </${TASK_NOTIFICATION_TAG}>`;
   enqueuePendingNotification({
     value: message,
-    mode: 'task-notification'
+    mode: 'task-notification',
+    // undefined for a main-thread spawn: the coordinator's drain takes only
+    // unaddressed commands, so that path is byte-identical to before.
+    agentId: parentAgentId
   });
 }
 
@@ -543,7 +555,8 @@ export function registerAsyncAgent({
   setAppState,
   parentAbortController,
   toolUseId,
-  resumeCount = 0
+  resumeCount = 0,
+  parentAgentId
 }: {
   agentId: string;
   description: string;
@@ -555,6 +568,9 @@ export function registerAsyncAgent({
   /** How many times this agent has been resumed; resumeAgentBackground passes
    *  the prior task's count + 1. Omit (0) for an original run. */
   resumeCount?: number;
+  /** The spawner whose context should receive the completion notification.
+   *  Omit for a main-thread spawn — the coordinator keeps receiving it. */
+  parentAgentId?: AgentId;
 }): LocalAgentTaskState {
   void initTaskOutputAsSymlink(agentId, getAgentTranscriptPath(asAgentId(agentId)));
 
@@ -583,7 +599,8 @@ export function registerAsyncAgent({
     pendingMessages: [],
     retain: false,
     diskLoaded: false,
-    resumeCount
+    resumeCount,
+    parentAgentId
   };
 
   // Register cleanup handler
