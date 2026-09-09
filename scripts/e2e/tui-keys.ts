@@ -565,7 +565,9 @@ function sweepStaleRunRoots(): void {
  * `hasTrustDialogAccepted`, `getRequiredSetupScreens` would show the
  * onboarding and trust screens instead of the prompt.
  */
-function seedConfigDir(): { configDir: string; homeDir: string; root: string } {
+function seedConfigDir(
+  extraGlobalConfig: Record<string, unknown> = {},
+): { configDir: string; homeDir: string; root: string } {
   const root = mkdtempSync(join(tmpdir(), 'openclaude-e2e-'))
   const configDir = join(root, 'config')
   const homeDir = join(root, 'home')
@@ -585,6 +587,7 @@ function seedConfigDir(): { configDir: string; homeDir: string; root: string } {
             history: [],
           },
         },
+        ...extraGlobalConfig,
       },
       null,
       2,
@@ -600,10 +603,20 @@ function seedConfigDir(): { configDir: string; homeDir: string; root: string } {
  * preselects the CURRENT model, so reusing a session would make the expected
  * row depend on whatever the previous scenario selected.
  */
-async function startCliSession(): Promise<void> {
-  const { configDir, homeDir, root } = seedConfigDir()
+async function startCliSession(
+  options: {
+    /** Extra `-e KEY=VALUE` pairs for the CLI's environment (scenario 4). */
+    extraEnv?: Record<string, string>
+    /** Extra top-level fields merged into the seeded global config. */
+    extraGlobalConfig?: Record<string, unknown>
+  } = {},
+): Promise<void> {
+  const { configDir, homeDir, root } = seedConfigDir(options.extraGlobalConfig)
   tempRoots.push(root)
 
+  const extraEnvArgs = Object.entries(options.extraEnv ?? {}).flatMap(
+    ([key, value]) => ['-e', `${key}=${value}`],
+  )
   tmux(
     'new-session',
     '-d',
@@ -621,6 +634,7 @@ async function startCliSession(): Promise<void> {
     `HOME=${homeDir}`,
     '-e',
     `XDG_CONFIG_HOME=${join(root, 'xdg')}`,
+    ...extraEnvArgs,
     `node ${CLI_BUNDLE}`,
   )
   tmux('new-window', '-d', '-t', `${SESSION}:`, '-n', 'scratch', 'sh -c "while :; do sleep 3600; done"')
@@ -897,6 +911,254 @@ async function scenarioSplitEscape(): Promise<ScenarioResult> {
   }
 }
 
+/**
+ * Scenario 4 - Escape must leave an idle teammate's transcript view.
+ *
+ * Reproduces the "stuck on Viewing @supervisor" report: a live in-process
+ * teammate keeps `status: 'running'` for its whole life (idle is a separate
+ * flag), and the Escape handler used to gate on that status alone - it aborted
+ * the current turn and returned WITHOUT leaving the view. An idle teammate has
+ * no turn to abort, so Escape did nothing and the header's "esc return" hint
+ * lied. The fix (src/hooks/useBackgroundTaskNavigation.ts) interrupts a busy
+ * teammate and returns from an idle one.
+ *
+ * The teammate has to come from the model calling the Agent tool, and the
+ * harness runs offline, so the CLI is pointed (ANTHROPIC_BASE_URL) at a fake
+ * Messages API on the loopback interface that scripts exactly two main turns:
+ * the first answers with an `Agent` tool_use spawning `supervisor` with no
+ * prompt (an idle spawn, always in-process), the second - the tool_result turn
+ * - ends with a short text. Every other request (side calls without the Agent
+ * tool: titles, suggestions) gets a one-word text, so nothing else can spawn.
+ */
+const FAKE_API_KEY = 'sk-ant-api03-e2e-fake-key-0123456789abcdef'
+const E2E_TEAMMATE = 'supervisor'
+const E2E_TEAM = 'e2e-team'
+
+type FakeAnthropicApi = {
+  baseUrl: string
+  /** Main-loop turns served (the tool_use turn and the tool_result turn). */
+  mainTurns: () => number
+  stop: () => void
+}
+
+type FakeContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+
+function sseEvent(type: string, data: Record<string, unknown>): string {
+  return `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`
+}
+
+/** One complete SSE stream for a single-block assistant message. */
+function fakeMessageStream(
+  id: string,
+  model: string,
+  block: FakeContentBlock,
+  stopReason: 'tool_use' | 'end_turn',
+): string {
+  const usage = { input_tokens: 10, output_tokens: 20 }
+  const start = sseEvent('message_start', {
+    message: {
+      id,
+      type: 'message',
+      role: 'assistant',
+      model,
+      content: [],
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { ...usage, output_tokens: 1 },
+    },
+  })
+  const blockEvents =
+    block.type === 'text'
+      ? sseEvent('content_block_start', {
+          index: 0,
+          content_block: { type: 'text', text: '' },
+        }) +
+        sseEvent('content_block_delta', {
+          index: 0,
+          delta: { type: 'text_delta', text: block.text },
+        })
+      : sseEvent('content_block_start', {
+          index: 0,
+          content_block: { type: 'tool_use', id: block.id, name: block.name, input: {} },
+        }) +
+        sseEvent('content_block_delta', {
+          index: 0,
+          delta: { type: 'input_json_delta', partial_json: JSON.stringify(block.input) },
+        })
+  return (
+    start +
+    blockEvents +
+    sseEvent('content_block_stop', { index: 0 }) +
+    sseEvent('message_delta', {
+      delta: { stop_reason: stopReason, stop_sequence: null },
+      usage: { output_tokens: usage.output_tokens },
+    }) +
+    sseEvent('message_stop', {})
+  )
+}
+
+function startFakeAnthropicApi(): FakeAnthropicApi {
+  let mainTurns = 0
+  let spawnIssued = false
+  let nextId = 1
+  const server = Bun.serve({
+    hostname: '127.0.0.1',
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url)
+      if (request.method === 'POST' && url.pathname.endsWith('/v1/messages/count_tokens')) {
+        return Response.json({ input_tokens: 10 })
+      }
+      if (request.method === 'POST' && url.pathname.endsWith('/v1/messages')) {
+        const body = (await request.json()) as {
+          model?: string
+          stream?: boolean
+          messages?: Array<{ role: string; content: unknown }>
+          tools?: Array<{ name: string }>
+        }
+        const last = body.messages?.at(-1)
+        const lastHasToolResult =
+          Array.isArray(last?.content) &&
+          (last!.content as Array<{ type?: string }>).some(b => b?.type === 'tool_result')
+        const agentTool = body.tools?.find(tool => tool.name === 'Agent')
+        let block: FakeContentBlock
+        let stopReason: 'tool_use' | 'end_turn' = 'end_turn'
+        if (lastHasToolResult) {
+          mainTurns++
+          block = { type: 'text', text: `Spawned ${E2E_TEAMMATE}; it is idle and waiting for work.` }
+        } else if (agentTool && !spawnIssued) {
+          spawnIssued = true
+          mainTurns++
+          stopReason = 'tool_use'
+          block = {
+            type: 'tool_use',
+            id: 'toolu_e2e_spawn',
+            name: agentTool.name,
+            // No `prompt`: an idle spawn, routed in-process by the Agent tool.
+            input: { description: 'idle supervisor', name: E2E_TEAMMATE, team_name: E2E_TEAM },
+          }
+        } else {
+          block = { type: 'text', text: 'ok' }
+        }
+        const id = `msg_e2e_${nextId++}`
+        const model = body.model ?? 'e2e-model'
+        const headers = { 'request-id': `req_e2e_${id}` }
+        if (body.stream) {
+          return new Response(fakeMessageStream(id, model, block, stopReason), {
+            headers: { ...headers, 'content-type': 'text/event-stream', 'cache-control': 'no-cache' },
+          })
+        }
+        return Response.json(
+          {
+            id,
+            type: 'message',
+            role: 'assistant',
+            model,
+            content: [block],
+            stop_reason: stopReason,
+            stop_sequence: null,
+            usage: { input_tokens: 10, output_tokens: 20 },
+          },
+          { headers },
+        )
+      }
+      return Response.json(
+        {
+          type: 'error',
+          error: { type: 'not_found_error', message: `fake API: no route for ${request.method} ${url.pathname}` },
+        },
+        { status: 404 },
+      )
+    },
+  })
+  return {
+    baseUrl: `http://127.0.0.1:${server.port}`,
+    mainTurns: () => mainTurns,
+    stop: () => {
+      server.stop(true)
+    },
+  }
+}
+
+async function scenarioTeammateViewEscape(): Promise<ScenarioResult> {
+  const name =
+    'Scenario 4 (teammate view): Escape returns from an idle @supervisor view without killing the teammate'
+  const expected = `"Viewing @${E2E_TEAMMATE}" gone and the prompt back after one Escape, with the @${E2E_TEAMMATE} pill still shown`
+  const fail = (actual: string, pane: string): ScenarioResult => ({
+    name,
+    passed: false,
+    expected,
+    actual,
+    rows: [],
+    pane,
+  })
+  const api = startFakeAnthropicApi()
+  await startCliSession({
+    extraEnv: {
+      ANTHROPIC_BASE_URL: api.baseUrl,
+      ANTHROPIC_API_KEY: FAKE_API_KEY,
+      CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+    },
+    // Pre-approve the env key so no "use this API key?" dialog precedes the
+    // prompt. Both the raw key and its 20-char tail are listed so the check
+    // passes whichever normalisation the config layer applies.
+    extraGlobalConfig: {
+      customApiKeyResponses: { approved: [FAKE_API_KEY, FAKE_API_KEY.slice(-20)], rejected: [] },
+    },
+  })
+  try {
+    tmux('send-keys', '-t', CLI_WINDOW, 'spawn an idle supervisor teammate', 'Enter')
+    // With a teammate alive the footer hint changes from "? for shortcuts" to
+    // "shift + ↓ to expand", so the turn's end is read from the scripted final
+    // text instead, plus the spinner's "esc to interrupt" being gone.
+    const spawned = await waitForPane(
+      `scenario 4: the @${E2E_TEAMMATE} pill and the scripted "Spawned ${E2E_TEAMMATE}" text, with the turn over`,
+      pane =>
+        pane.includes(`@${E2E_TEAMMATE}`) &&
+        pane.includes(`Spawned ${E2E_TEAMMATE}`) &&
+        api.mainTurns() >= 2 &&
+        !pane.includes('esc to interrupt'),
+      UI_TIMEOUT_MS,
+    )
+    if (!spawned.ok) {
+      return fail(`the idle teammate was not spawned (fake API served ${api.mainTurns()} main turn(s))`, spawned.pane)
+    }
+
+    // Shift+Down opens the teammate selection on the leader row, a second one
+    // moves to the first teammate, Enter opens its transcript view.
+    tmux('send-keys', '-t', CLI_WINDOW, 'S-Down')
+    await sleep(200)
+    tmux('send-keys', '-t', CLI_WINDOW, 'S-Down')
+    await sleep(200)
+    tmux('send-keys', '-t', CLI_WINDOW, 'Enter')
+    const viewing = await waitForPane(
+      `scenario 4: "Viewing @${E2E_TEAMMATE}" after Shift+Down, Shift+Down, Enter`,
+      pane => pane.includes(`Viewing @${E2E_TEAMMATE}`),
+      UI_TIMEOUT_MS,
+    )
+    if (!viewing.ok) return fail('the teammate view never opened', viewing.pane)
+
+    tmux('send-keys', '-t', CLI_WINDOW, 'Escape')
+    const returned = await waitForPane(
+      'scenario 4: the leader view back after one Escape',
+      pane => !pane.includes(`Viewing @${E2E_TEAMMATE}`),
+      UI_TIMEOUT_MS,
+    )
+    const stillAlive = returned.pane.includes(`@${E2E_TEAMMATE}`)
+    const actual = !returned.ok
+      ? `still "Viewing @${E2E_TEAMMATE}" ${UI_TIMEOUT_MS}ms after Escape (the pre-fix behaviour)`
+      : stillAlive
+        ? 'returned to the leader view; the teammate pill is still shown'
+        : 'returned to the leader view, but the teammate pill is gone (Escape killed it)'
+    return { name, passed: returned.ok && stillAlive, expected, actual, rows: [], pane: returned.pane }
+  } finally {
+    await stopCliSession()
+    api.stop()
+  }
+}
+
 function report(results: ScenarioResult[]): void {
   for (const result of results) {
     console.log(`\n${'='.repeat(78)}`)
@@ -1004,12 +1266,13 @@ async function main(): Promise<number> {
     // scenario, and killing an absent server costs nothing.
     tmux('kill-server')
 
-    // Awaited one at a time, deliberately: all three drive the same session
+    // Awaited one at a time, deliberately: all four drive the same session
     // name on the same server, so they must not overlap.
     const results = [
       await scenarioBatchedKeys(),
       await scenarioWindowSwitch(),
       await scenarioSplitEscape(),
+      await scenarioTeammateViewEscape(),
     ]
     report(results)
     return results.every(result => result.passed) ? 0 : 1

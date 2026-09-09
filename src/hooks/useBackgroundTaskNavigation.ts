@@ -148,14 +148,24 @@ export function useBackgroundTaskNavigation(options?: {
 
   const handleKeyDown = (e: KeyboardEvent): void => {
     // Escape in viewing mode:
-    // - If teammate is running: abort current work only (stops current turn, teammate stays alive)
-    // - If teammate is not running (completed/killed/failed): exit the view back to leader
+    // - If the teammate is busy on a turn: abort current work only (stops the
+    //   turn, teammate stays alive). Press Escape again to return.
+    // - Otherwise (idle, between turns, completed/killed/failed, or not a
+    //   teammate): exit the view back to the leader.
+    // A live in-process teammate keeps status 'running' for its whole life
+    // (idle is a separate flag), so gating on status alone made Escape a
+    // no-op for an idle teammate and the view impossible to leave by key.
     if (e.key === 'escape' && viewSelectionMode === 'viewing-agent') {
       e.preventDefault()
       const taskId = viewingAgentTaskId
       if (taskId) {
         const task = tasks[taskId]
-        if (isInProcessTeammateTask(task) && task.status === 'running') {
+        if (
+          isInProcessTeammateTask(task) &&
+          task.status === 'running' &&
+          !task.isIdle &&
+          task.currentWorkAbortController
+        ) {
           // Abort currentWorkAbortController (stops current turn) NOT abortController (kills teammate)
           const causalEventId = traceInterruptionEvent(
             'input.teammate_escape',
@@ -165,19 +175,17 @@ export function useBackgroundTaskNavigation(options?: {
               subagentId: task.identity.agentId,
             },
           )
-          if (task.currentWorkAbortController) {
-            requestAbort(task.currentWorkAbortController, undefined, {
-              source: 'teammate_escape',
-              subsystem: 'in_process_teammate',
-              controllerRole: 'subagent-turn',
-              subagentId: task.identity.agentId,
-              causalEventId,
-            })
-          }
+          requestAbort(task.currentWorkAbortController, undefined, {
+            source: 'teammate_escape',
+            subsystem: 'in_process_teammate',
+            controllerRole: 'subagent-turn',
+            subagentId: task.identity.agentId,
+            causalEventId,
+          })
           return
         }
       }
-      // Teammate is not running or task doesn't exist — exit the view
+      // Nothing to interrupt — exit the view
       exitTeammateView(setAppState)
       return
     }

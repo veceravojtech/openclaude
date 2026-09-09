@@ -26,7 +26,7 @@ import { OffscreenFreeze } from './OffscreenFreeze.js';
  * add a memoized value.
  */
 export function TeammateViewHeader() {
-  const $ = _c(26);
+  const $ = _c(27);
   const viewedTeammate = useAppState(_temp);
   const viewedAgent = useAppState(_temp2);
   const agentNameRegistry = useAppState(_temp3);
@@ -57,11 +57,14 @@ export function TeammateViewHeader() {
       t2 = $[5];
     }
     let t3;
-    if ($[6] === Symbol.for("react.memo_cache_sentinel")) {
-      t3 = <Text dimColor={true}>{" \xB7 "}<KeyboardShortcutHint shortcut="esc" action="return" /></Text>;
-      $[6] = t3;
+    // Escape interrupts a busy teammate's turn and returns from an idle one
+    // (useBackgroundTaskNavigation), so the hint follows the idle flag.
+    if ($[6] !== viewedTeammate.isIdle) {
+      t3 = <Text dimColor={true}>{" \xB7 "}<KeyboardShortcutHint shortcut="esc" action={viewedTeammate.isIdle ? "return" : "interrupt, esc again to return"} /></Text>;
+      $[6] = viewedTeammate.isIdle;
+      $[26] = t3;
     } else {
-      t3 = $[6];
+      t3 = $[26];
     }
     let t4;
     if ($[7] !== t2) {

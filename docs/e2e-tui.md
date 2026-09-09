@@ -57,6 +57,7 @@ collected by the default `bun test`, and therefore by `bun run check` and CI.
 | 1 | `Down Down Enter` in **one** `send-keys` call | the row **two** below the preselected one is confirmed |
 | 2 | `select-window` away and back, then `Down Enter` | the row **one** below the preselected one is confirmed |
 | 3 | `send-keys -H 1b`, 350ms gap, `send-keys -H 5b 42` | picker dismissed by the residual Escape, **no** `[B` in the prompt |
+| 4 | a prompt answered by a **fake** Messages API with an `Agent` tool call, then `S-Down S-Down Enter`, then `Escape` | `Viewing @supervisor` opens, one Escape returns to the leader, the `@supervisor` pill survives |
 
 Scenario 1 reproduces the batched-stdin defect: every key of a single
 `send-keys` call reaches the CLI in one stdin read, so `Enter` can act on the
@@ -73,9 +74,40 @@ residual is accepted and asserted rather than chased: the scenario passes on
 `Kept model as …` (never `Set model to …`) plus no literal `[B` anywhere in the
 captured pane.
 
-All three scenarios pass on the current tree, so `bun run e2e:tui` exits 0. It
+Scenario 4 reproduces the "stuck on `Viewing @supervisor`" report. A live
+in-process teammate keeps `status: 'running'` for its whole life (idle is a
+separate flag), and the Escape handler in `useBackgroundTaskNavigation` used to
+gate on that status alone: it aborted the current turn and returned without
+leaving the view, so for an idle teammate, which has no turn to abort, Escape
+did nothing and the header's `esc return` hint lied. The fix interrupts a busy
+teammate and returns from an idle one; the scenario asserts the return and that
+the teammate is still alive afterwards. Run against the pre-fix hook it fails
+with `still "Viewing @supervisor" 15000ms after Escape`.
+
+All four scenarios pass on the current tree, so `bun run e2e:tui` exits 0. It
 exits non-zero the moment any of them reproduces again, which is what makes it a
 regression test rather than a one-shot reproducer.
+
+## Scenario 4's fake Messages API
+
+The teammate has to come from the model calling the Agent tool, and the harness
+runs offline, so scenario 4 starts a fake Anthropic Messages API on the loopback
+interface (`Bun.serve`, port 0) and points the CLI at it with
+`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` (a fake key, pre-approved in the
+seeded config's `customApiKeyResponses` so no dialog precedes the prompt) and
+`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, which is the gate the Agent tool's
+`name` parameter sits behind. The fake scripts exactly two main turns: the first
+request that declares the `Agent` tool is answered with a `tool_use` spawning
+`supervisor` in team `e2e-team` with **no prompt** (an idle spawn, always
+in-process), and the request carrying that tool's `tool_result` is answered with
+a short text. Every other request, such as side calls that declare no `Agent`
+tool, gets a one-word text, so nothing else can spawn. Responses are streamed as
+SSE when the client asks for a stream and returned as JSON otherwise;
+`/v1/messages/count_tokens` answers a constant, and any other route is a 404.
+
+With a teammate alive the footer hint changes from `? for shortcuts` to
+`shift + ↓ to expand`, so the scenario reads the turn's end from the scripted
+final text plus the spinner's `esc to interrupt` being gone, not from the hint.
 
 ## Expectations come from the pane, not from a table
 
