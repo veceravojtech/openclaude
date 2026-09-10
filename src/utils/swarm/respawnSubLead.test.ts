@@ -26,7 +26,10 @@ import {
   killInProcessTeammateAndCascade,
   spawnInProcessTeammate,
 } from './spawnInProcess.js'
-import { noteSubLeadFailure } from './subTeamRecovery.js'
+import {
+  adoptOrphanedSubTeam,
+  noteSubLeadFailure,
+} from './subTeamRecovery.js'
 import {
   getTeamDir,
   getTeamFilePath,
@@ -405,6 +408,74 @@ test('respawnSubLead resumes the sub-lead from its transcript, re-attaches the s
   expect(readTeamFile(PARENT_TEAM)?.members.map(m => m.name)).toEqual([
     TEAM_LEAD_NAME,
   ])
+})
+
+test('respawnSubLead takes an ADOPTED sub-team back from its caretaker', async () => {
+  const world = createWorld()
+  const { workerWorktree } = await writeCrashedSubLeadWorld(world)
+  // The lead adopted the orphan first, so parentAgentId names the CARETAKER
+  // rather than the sub-lead: this is the only state in which the respawn's
+  // re-point does real work, and DESIGN §6 claims it comes back from here.
+  expect(await adoptOrphanedSubTeam(SUB_TEAM)).toMatchObject({
+    ok: true,
+    newLeadAgentId: ROOT_LEAD_AGENT_ID,
+    isNaturalLead: false,
+    clearedOrphanRecord: false,
+  })
+  expect(readTeamFile(SUB_TEAM)?.parentAgentId).toBe(ROOT_LEAD_AGENT_ID)
+  // The record is retained through an adoption, which is what keeps the dead
+  // lead's transcript findable for exactly this respawn.
+  expect(readTeamFile(SUB_TEAM)?.orphanedLead?.turnAgentId).toBe(TURN_AGENT_ID)
+
+  const harness = await importRespawnWithMocks(
+    new Map([
+      [TURN_AGENT_ID, [createUserMessage({ content: 'what it was doing' })]],
+    ]),
+  )
+  const result = await harness.respawn.respawnSubLead({
+    subTeamName: SUB_TEAM,
+    toolUseContext: world.toolUseContext,
+  })
+  expect(result).toMatchObject({
+    ok: true,
+    leadAgentId: SUB_LEAD_AGENT_ID,
+    resumedFromTranscript: true,
+    resumedMessageCount: 1,
+  })
+
+  // The re-point is the assertion this case exists for: parentAgentId moves
+  // OFF the caretaker and back onto the natural lead, and the record goes.
+  expect(result.ok && result.reattach).toMatchObject({
+    ok: true,
+    previousLeadAgentId: ROOT_LEAD_AGENT_ID,
+    newLeadAgentId: SUB_LEAD_AGENT_ID,
+    isNaturalLead: true,
+    clearedOrphanRecord: true,
+  })
+  const teamFile = readTeamFile(SUB_TEAM)
+  expect(teamFile?.parentAgentId).toBe(SUB_LEAD_AGENT_ID)
+  expect(teamFile?.orphanedLead).toBeUndefined()
+  expect(teamFile?.parentTeam).toBe(PARENT_TEAM)
+  // Leadership is real again, not just recorded: the caretaker no longer holds
+  // the sub-team, so the members' reports stop being redirected...
+  expect(
+    readSubTeamLedBySync({
+      agentId: SUB_LEAD_AGENT_ID,
+      name: SUB_LEAD,
+      isTeammate: true,
+    })?.name,
+  ).toBe(SUB_TEAM)
+
+  // ...and the U7 cascade owns the sub-team again, so nothing is left behind.
+  const respawnedTaskId = result.ok ? result.taskId : ''
+  expect(
+    await killInProcessTeammateAndCascade(respawnedTaskId, world.setAppState),
+  ).toBe(true)
+  expect(existsSync(getTeamDir(SUB_TEAM))).toBe(false)
+  expect(existsSync(getTasksDir(SUB_TEAM))).toBe(false)
+  expect(readdirSync(getTeamsDir())).toEqual(['email'])
+  // Same pre-existing U7 worktree behaviour the sibling case records.
+  expect(existsSync(workerWorktree)).toBe(true)
 })
 
 test('respawnSubLead starts the sub-lead cold when no transcript survives', async () => {
