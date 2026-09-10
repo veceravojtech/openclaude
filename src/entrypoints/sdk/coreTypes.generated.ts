@@ -1274,10 +1274,10 @@ export type WorktreeCreateHookSpecificOutput = {
   worktreePath: string
 }
 
-/** Hook-specific output for the TeammateIdleTimeout event. action 'shutdown' asks the idle teammate to shut down cleanly; omit it to keep waiting. */
+/** Hook-specific output for the TeammateIdleTimeout event. action 'shutdown' asks the idle teammate to shut down cleanly; action 'handoff' retires a teammate that leads a sub-team and starts a fresh successor with the same identity on a handoff file, keeping the sub-team and its members intact; omit it to keep waiting. */
 export type TeammateIdleTimeoutHookSpecificOutput = {
   hookEventName: "TeammateIdleTimeout"
-  action?: "shutdown"
+  action?: "shutdown" | "handoff"
   reason?: string
 }
 
@@ -1387,7 +1387,7 @@ export type SyncHookJSONOutput = {
     worktreePath: string
   }) | ({
     hookEventName: "TeammateIdleTimeout"
-    action?: "shutdown"
+    action?: "shutdown" | "handoff"
     reason?: string
   })
 }
@@ -1501,7 +1501,7 @@ export type HookJSONOutput = ({
     worktreePath: string
   }) | ({
     hookEventName: "TeammateIdleTimeout"
-    action?: "shutdown"
+    action?: "shutdown" | "handoff"
     reason?: string
   })
 })

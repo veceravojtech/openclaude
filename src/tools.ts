@@ -60,6 +60,9 @@ const getTeamDeleteTool = () =>
 const getRecoverTeamTool = () =>
   require('./tools/RecoverTeamTool/RecoverTeamTool.js')
     .RecoverTeamTool as typeof import('./tools/RecoverTeamTool/RecoverTeamTool.js').RecoverTeamTool
+const getHandoffTeamTool = () =>
+  require('./tools/HandoffTeamTool/HandoffTeamTool.js')
+    .HandoffTeamTool as typeof import('./tools/HandoffTeamTool/HandoffTeamTool.js').HandoffTeamTool
 const getSendMessageTool = () =>
   require('./tools/SendMessageTool/SendMessageTool.js')
     .SendMessageTool as typeof import('./tools/SendMessageTool/SendMessageTool.js').SendMessageTool
@@ -222,7 +225,7 @@ export function getAllBaseTools(): Tools {
     ListAgentsTool,
     ...(ListPeersTool ? [ListPeersTool] : []),
     ...(isAgentSwarmsEnabled()
-      ? (() => { const tct = getTeamCreateTool(); const tdt = getTeamDeleteTool(); const rtt = getRecoverTeamTool(); return [tct, tdt, rtt].filter(Boolean) })()
+      ? (() => { const tct = getTeamCreateTool(); const tdt = getTeamDeleteTool(); const rtt = getRecoverTeamTool(); const htt = getHandoffTeamTool(); return [tct, tdt, rtt, htt].filter(Boolean) })()
       : []),
     ...(VerifyPlanExecutionTool ? [VerifyPlanExecutionTool] : []),
     ...(process.env.USER_TYPE === 'ant' && REPLTool ? [REPLTool] : []),

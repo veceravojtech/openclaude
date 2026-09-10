@@ -550,7 +550,13 @@ export interface HookResult {
 
 /** Action requested by a TeammateIdleTimeout hook's JSON hookSpecificOutput. */
 export type TeammateIdleTimeoutAction = {
-  action: 'shutdown'
+  /**
+   * `shutdown` retires the idle teammate. `handoff` retires a teammate that
+   * leads a SUB-TEAM and puts a fresh one in the same seat: the sub-team is
+   * kept intact and handed to a successor with the same identity, which opens
+   * on a handoff file instead of the retired lead's context.
+   */
+  action: 'shutdown' | 'handoff'
   reason?: string
 }
 
@@ -904,9 +910,12 @@ function processHookJSONOutput({
         }
         break
       case 'TeammateIdleTimeout':
-        if (json.hookSpecificOutput.action === 'shutdown') {
+        if (
+          json.hookSpecificOutput.action === 'shutdown' ||
+          json.hookSpecificOutput.action === 'handoff'
+        ) {
           result.teammateIdleTimeoutAction = {
-            action: 'shutdown',
+            action: json.hookSpecificOutput.action,
             reason: json.hookSpecificOutput.reason ?? json.reason,
           }
         }

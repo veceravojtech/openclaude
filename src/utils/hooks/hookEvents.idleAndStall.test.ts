@@ -73,7 +73,7 @@ describe('StreamStalled and TeammateIdleTimeout hook events', () => {
     ).toBe(false)
   })
 
-  test('TeammateIdleTimeout hook JSON output accepts the shutdown action only', () => {
+  test('TeammateIdleTimeout hook JSON output accepts the shutdown and handoff actions only', () => {
     const shutdown = {
       hookSpecificOutput: {
         hookEventName: 'TeammateIdleTimeout',
@@ -82,6 +82,15 @@ describe('StreamStalled and TeammateIdleTimeout hook events', () => {
       },
     }
     expect(SyncHookJSONOutputSchema().safeParse(shutdown).success).toBe(true)
+    // U10: a sub-lead can be retired in favour of a fresh successor instead.
+    const handoff = {
+      hookSpecificOutput: {
+        hookEventName: 'TeammateIdleTimeout',
+        action: 'handoff',
+        reason: 'context nearly full',
+      },
+    }
+    expect(SyncHookJSONOutputSchema().safeParse(handoff).success).toBe(true)
     expect(
       SyncHookJSONOutputSchema().safeParse({
         hookSpecificOutput: {
@@ -108,6 +117,9 @@ describe('StreamStalled and TeammateIdleTimeout hook events', () => {
     expect(metadata.TeammateIdleTimeout.description).toContain('Exit code 2')
     expect(metadata.TeammateIdleTimeout.description).toContain(
       '"action":"shutdown"',
+    )
+    expect(metadata.TeammateIdleTimeout.description).toContain(
+      '"action":"handoff"',
     )
   })
 

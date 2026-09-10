@@ -217,6 +217,44 @@ test('a blocking TeammateIdleTimeout hook hands its text to the teammate', async
   expect(results.some(r => r.teammateIdleTimeoutAction)).toBe(false)
 })
 
+test('a TeammateIdleTimeout hook can request a handoff via hookSpecificOutput', async () => {
+  registerCallback('TeammateIdleTimeout', async () => ({
+    hookSpecificOutput: {
+      hookEventName: 'TeammateIdleTimeout',
+      action: 'handoff',
+      reason: 'context nearly full',
+    },
+  }))
+
+  const results = await collect(executeTeammateIdleTimeoutHooks(idleParams))
+
+  // The action travels through unchanged: the runner tells a handoff from a
+  // shutdown by this literal, and a handoff retires a sub-lead in favour of a
+  // successor rather than ending the sub-team.
+  expect(
+    results.find(r => r.teammateIdleTimeoutAction)?.teammateIdleTimeoutAction,
+  ).toEqual({
+    action: 'handoff',
+    reason: 'context nearly full',
+  })
+  expect(results.some(r => r.blockingError)).toBe(false)
+})
+
+test('an unknown TeammateIdleTimeout action is ignored rather than guessed at', async () => {
+  registerCallback('TeammateIdleTimeout', async () => ({
+    hookSpecificOutput: {
+      hookEventName: 'TeammateIdleTimeout',
+      // Not a member of the action union; the schema rejects it and the parse
+      // site ignores it, so the teammate keeps waiting.
+      action: 'restart',
+    },
+  }) as never)
+
+  const results = await collect(executeTeammateIdleTimeoutHooks(idleParams))
+
+  expect(results.some(r => r.teammateIdleTimeoutAction)).toBe(false)
+})
+
 test('a TeammateIdleTimeout hook can request a clean shutdown via hookSpecificOutput', async () => {
   registerCallback('TeammateIdleTimeout', async () => ({
     hookSpecificOutput: {

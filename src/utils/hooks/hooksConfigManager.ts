@@ -196,7 +196,7 @@ export const getHookEventMetadata = memoize(
         summary:
           'When an in-process teammate has been idle for CLAUDE_CODE_TEAMMATE_IDLE_TIMEOUT_MS',
         description:
-          'Fires after a teammate has been continuously idle for CLAUDE_CODE_TEAMMATE_IDLE_TIMEOUT_MS (default 5 minutes) and again every further interval. Input to command is JSON with teammate_name, team_name, agent_id, idle_ms, and occurrence.\nExit code 0 - keep waiting; JSON {"hookSpecificOutput":{"hookEventName":"TeammateIdleTimeout","action":"shutdown","reason":"..."}} shuts the teammate down cleanly\nExit code 2 - stderr becomes the teammate\'s next prompt (teammate wakes and works on it)\nOther exit codes - show stderr to user only',
+          'Fires after a teammate has been continuously idle for CLAUDE_CODE_TEAMMATE_IDLE_TIMEOUT_MS (default 5 minutes) and again every further interval. Input to command is JSON with teammate_name, team_name, agent_id, idle_ms, and occurrence.\nExit code 0 - keep waiting; JSON {"hookSpecificOutput":{"hookEventName":"TeammateIdleTimeout","action":"shutdown","reason":"..."}} shuts the teammate down cleanly, and {"hookSpecificOutput":{"hookEventName":"TeammateIdleTimeout","action":"handoff","reason":"..."}} retires a teammate that leads a sub-team and starts a fresh successor with the same identity on a handoff file (the sub-team, its members and its task list are kept; ignored by a teammate that leads no sub-team)\nExit code 2 - stderr becomes the teammate\'s next prompt (teammate wakes and works on it)\nOther exit codes - show stderr to user only',
       },
       TaskCreated: {
         summary: 'When a task is being created',

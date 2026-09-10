@@ -50,11 +50,13 @@ import {
 } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import type { CustomAgentDefinition } from '../../tools/AgentTool/loadAgentsDir.js'
 import { runAgent } from '../../tools/AgentTool/runAgent.js'
+import { getTeammateSpawnCapError } from '../../tools/AgentTool/teammateReplicas.js'
 import {
   registerInterruptionController,
 } from '../interruptionTrace.js'
 import { awaitClassifierAutoApproval } from '../../tools/BashTool/bashPermissions.js'
 import { BASH_TOOL_NAME } from '../../tools/BashTool/toolName.js'
+import { HANDOFF_TEAM_TOOL_NAME } from '../../tools/HandoffTeamTool/constants.js'
 import { RECOVER_TEAM_TOOL_NAME } from '../../tools/RecoverTeamTool/constants.js'
 import { SEND_MESSAGE_TOOL_NAME } from '../../tools/SendMessageTool/constants.js'
 import { TASK_CREATE_TOOL_NAME } from '../../tools/TaskCreateTool/constants.js'
@@ -146,7 +148,19 @@ import {
   createPermissionRequest,
   sendPermissionRequestViaMailbox,
 } from './permissionSync.js'
-import { cascadeSubTeamTeardown } from './spawnInProcess.js'
+import {
+  cascadeSubTeamTeardown,
+  spawnInProcessTeammate,
+} from './spawnInProcess.js'
+import {
+  armSubLeadHandoff,
+  formatSuccessorHandoffMessage,
+  liveSubTeamMemberNames,
+  type PendingSubLeadHandoff,
+  SUB_LEAD_HANDOFF_SENDER,
+  takeSubLeadHandoff,
+  writeSubLeadHandoffFile,
+} from './subLeadHandoff.js'
 import {
   noteSubLeadFailure,
   resolveUpwardInboxTeam,
@@ -155,6 +169,8 @@ import {
   getParentTeamName,
   getSubTeamNameFor,
   readSubTeamLedBy,
+  readTeamFileAsync,
+  reattachSubTeamToLead,
   removeMemberByAgentId,
 } from './teamHelpers.js'
 import { TEAMMATE_SYSTEM_PROMPT_ADDENDUM } from './teammatePromptAddendum.js'
@@ -881,6 +897,13 @@ type WaitResult =
       reason: 'idle_timeout' | 'hook'
       idleMs: number
       detail?: string
+      /**
+       * Set by the TeammateIdleTimeout hook's `handoff` action: the run ends
+       * to be REPLACED, so the sub-team is handed to a successor instead of
+       * being torn down. Absent for every ordinary idle shutdown, which is
+       * why this stays the same wait result rather than a new one.
+       */
+      intent?: 'handoff'
     }
 
 const DEFAULT_TEAMMATE_IDLE_TIMEOUT_MS = 300_000
@@ -907,6 +930,7 @@ function parseIdleMsEnv(
 type IdleTimeoutHookOutcome =
   | { kind: 'wake'; message: string }
   | { kind: 'shutdown'; reason?: string }
+  | { kind: 'handoff'; reason?: string }
 
 type IdlePolicy = {
   /** Returns a WaitResult when the policy ends the wait, else undefined. */
@@ -985,7 +1009,7 @@ function createIdlePolicy(
 
   async function runHook(idleMs: number): Promise<void> {
     let wakeMessage: string | undefined
-    let shutdown: { reason?: string } | undefined
+    let ending: { kind: 'shutdown' | 'handoff'; reason?: string } | undefined
     try {
       for await (const result of executeTeammateIdleTimeoutHooks({
         teammateName: identity.agentName,
@@ -999,8 +1023,9 @@ function createIdlePolicy(
         if (result.blockingError) {
           wakeMessage = getTeammateIdleTimeoutHookMessage(result.blockingError)
         }
-        if (result.teammateIdleTimeoutAction?.action === 'shutdown') {
-          shutdown = { reason: result.teammateIdleTimeoutAction.reason }
+        const action = result.teammateIdleTimeoutAction
+        if (action?.action === 'shutdown' || action?.action === 'handoff') {
+          ending = { kind: action.action, reason: action.reason }
         }
       }
     } catch (err) {
@@ -1019,12 +1044,12 @@ function createIdlePolicy(
       if (wakeMessage !== undefined) persistWake(wakeMessage)
       return
     }
-    // Work handed over by one hook beats a shutdown asked by another: the
-    // shutdown is only meant for a teammate nobody has work for.
+    // Work handed over by one hook beats a shutdown OR a handoff asked by
+    // another: both endings are only meant for a teammate nobody has work for.
     if (wakeMessage !== undefined) {
       pendingOutcome = { kind: 'wake', message: wakeMessage }
-    } else if (shutdown) {
-      pendingOutcome = { kind: 'shutdown', reason: shutdown.reason }
+    } else if (ending) {
+      pendingOutcome = { kind: ending.kind, reason: ending.reason }
     }
   }
 
@@ -1041,12 +1066,13 @@ function createIdlePolicy(
           from: IDLE_TIMEOUT_HOOK_SENDER,
         }
       }
-      if (outcome?.kind === 'shutdown') {
+      if (outcome?.kind === 'shutdown' || outcome?.kind === 'handoff') {
         return {
           type: 'idle_shutdown',
           reason: 'hook',
           idleMs,
           detail: outcome.reason,
+          ...(outcome.kind === 'handoff' ? { intent: 'handoff' as const } : {}),
         }
       }
       // 2. Idle shutdown, evaluated BEFORE launching another occurrence so a
@@ -1519,6 +1545,222 @@ async function finalizeIdleShutdown(
 }
 
 /**
+ * Ends a sub-lead's run so a SUCCESSOR can take its seat — the `handoff`
+ * action's half of the retirement.
+ *
+ * Deliberately not `finalizeIdleShutdown`: a handoff keeps everything that
+ * function removes. No `cascadeSubTeamTeardown` (the sub-team is the thing
+ * being handed over), no busy-children gate (handing over while children work
+ * is the normal case), no `removeMemberByAgentId` and no teamContext eviction
+ * (the successor is the same `name@team` and inherits the roster seat, with
+ * its model, colour and mode), no `unassignTeammateTasks` (work assigned to
+ * this id stays assigned to it). What it does is write the handoff document
+ * and arm the request the completion tail reads.
+ *
+ * Returns false — "keep waiting", exactly like a refused idle shutdown — when
+ * the teammate leads no sub-team or the document cannot be written: there is
+ * then nothing to hand over, and ending the run instead would be a shutdown
+ * the hook never asked for.
+ */
+async function finalizeSubLeadHandoff(
+  identity: TeammateIdentity,
+  getAppState: () => AppState,
+  result: Extract<WaitResult, { type: 'idle_shutdown' }>,
+): Promise<boolean> {
+  const subTeamName = getSubTeamNameFor(identity.agentId, identity.agentName)
+  let leadsSubTeam = false
+  if (subTeamName) {
+    try {
+      leadsSubTeam =
+        (await readSubTeamLedBy({
+          agentId: identity.agentId,
+          name: identity.agentName,
+          isTeammate: true,
+        })) !== null
+    } catch (err) {
+      logForDebugging(
+        `[inProcessRunner] ${identity.agentId} could not read its sub-team file before a handoff: ${err}`,
+      )
+    }
+  }
+  if (!subTeamName || !leadsSubTeam) {
+    logForDebugging(
+      `[inProcessRunner] ${identity.agentId} ignoring a TeammateIdleTimeout handoff action: it leads no sub-team`,
+    )
+    return false
+  }
+
+  try {
+    const handoffPath = await writeSubLeadHandoffFile({
+      subTeamName,
+      leadAgentId: identity.agentId,
+      source: 'idle-timeout-hook',
+      reason: result.detail,
+      members: liveSubTeamMemberNames(getAppState().tasks, subTeamName),
+    })
+    armSubLeadHandoff({
+      subTeamName,
+      leadAgentId: identity.agentId,
+      handoffPath,
+      source: 'idle-timeout-hook',
+      ...(result.detail ? { reason: result.detail } : {}),
+    })
+    logForDebugging(
+      `[inProcessRunner] ${identity.agentId} retiring to hand ${subTeamName} over; notes at ${handoffPath}`,
+    )
+    return true
+  } catch (err) {
+    logForDebugging(
+      `[inProcessRunner] ${identity.agentId} could not write the handoff notes for ${subTeamName}, staying: ${err}`,
+    )
+    return false
+  }
+}
+
+/**
+ * Puts the successor in the seat the run just left — the other half of a
+ * handoff, run from the completion tail.
+ *
+ * This is the ONLY point at which the seat is provably free: the tail has
+ * already written `status: 'completed'` for the outgoing task, and every
+ * liveness check in the system filters terminal tasks out
+ * (`hasLiveTaskFor`/`findBusySubTeamChildren` on `isTerminalTaskStatus`, the
+ * spawn caps on `status === 'running'`). Spawning any earlier would race the
+ * outgoing task's own eviction.
+ *
+ * Mirrors `respawnSubLead` — identity derived from the sub-team's name, the
+ * parent roster read for model/colour/mode, the spawn cap honoured, re-attach
+ * LAST — with one deliberate difference: no transcript is resumed. A fresh
+ * context is the point of a handoff, and the document is the whole
+ * inheritance. Best-effort throughout: a handoff that cannot be completed
+ * leaves the sub-team unled and SAYS so, because silence is the one outcome a
+ * lead cannot act on.
+ */
+async function completeSubLeadHandoff(
+  identity: TeammateIdentity,
+  toolUseContext: ToolUseContext,
+): Promise<void> {
+  const pending: PendingSubLeadHandoff | undefined = takeSubLeadHandoff(
+    identity.agentId,
+  )
+  if (!pending) return
+
+  const { setAppState } = toolUseContext
+  const warn = async (reason: string): Promise<void> => {
+    logForDebugging(
+      `[inProcessRunner] Handoff of ${pending.subTeamName} could not be completed: ${reason}`,
+    )
+    await sendMessageToLeader(
+      identity.agentName,
+      `${identity.agentName} retired to hand sub-team "${pending.subTeamName}" over, but no successor could be started (${reason}). Its members are still running and their reports are reaching nobody: recover it with RecoverTeam (action "respawn" to start a lead, "adopt" to take the members yourself). The handoff notes are at ${pending.handoffPath}.`,
+      identity.color,
+      identity.teamName,
+    )
+  }
+
+  try {
+    const capError = getTeammateSpawnCapError({
+      isTeammateSpawn: true,
+      teamName: identity.teamName,
+      tasks: toolUseContext.getAppState().tasks,
+    })
+    if (capError) {
+      await warn(capError)
+      return
+    }
+
+    // The roster entry survives the handoff (nothing removed it), so it is
+    // still the durable record of how this seat was spawned.
+    const spawnRecord = (
+      await readTeamFileAsync(identity.teamName)
+    )?.members.find(m => m.agentId === identity.agentId)
+    const color = identity.color ?? spawnRecord?.color
+    const planModeRequired =
+      identity.planModeRequired ?? spawnRecord?.planModeRequired ?? false
+    const model = spawnRecord?.model
+
+    const spawn = await spawnInProcessTeammate(
+      {
+        name: identity.agentName,
+        teamName: identity.teamName,
+        color,
+        planModeRequired,
+        model,
+      },
+      { setAppState },
+    )
+    if (
+      !spawn.success ||
+      !spawn.taskId ||
+      !spawn.teammateContext ||
+      !spawn.abortController
+    ) {
+      await warn(spawn.error ?? `could not spawn ${identity.agentId}`)
+      return
+    }
+
+    // Written BEFORE the successor's runner starts, so its very first poll
+    // round already carries it. It lands in the same inbox the retired lead
+    // read — the successor inherits it, unread messages included.
+    await writeToMailbox(
+      identity.agentName,
+      {
+        from: SUB_LEAD_HANDOFF_SENDER,
+        text: formatSuccessorHandoffMessage(pending),
+        timestamp: new Date().toISOString(),
+        color,
+      },
+      identity.teamName,
+    )
+
+    // Idle: no prompt, so the successor registers as waiting for work and
+    // takes its first turn on the handoff message above.
+    startInProcessTeammate({
+      identity: {
+        agentId: spawn.agentId,
+        agentName: identity.agentName,
+        teamName: identity.teamName,
+        color,
+        planModeRequired,
+        parentSessionId: spawn.teammateContext.parentSessionId,
+      },
+      taskId: spawn.taskId,
+      description: `successor sub-lead of ${pending.subTeamName}`,
+      model,
+      teammateContext: spawn.teammateContext,
+      // Same reason the ordinary spawn path strips them: the teammate builds
+      // its own history, and the parent's conversation would otherwise be
+      // pinned for its whole lifetime.
+      toolUseContext: { ...toolUseContext, messages: [] },
+      abortController: spawn.abortController,
+    })
+
+    // LAST, and U9's primitive rather than a second writer of the field: it
+    // clears any orphan record, takes the sub-team back if it was adopted
+    // during the unled window, and refuses on a directory collision.
+    const reattach = await reattachSubTeamToLead(
+      pending.subTeamName,
+      identity.agentId,
+    )
+    logForDebugging(
+      `[inProcessRunner] Handed ${pending.subTeamName} from ${identity.agentId} to a successor; re-attach ok=${reattach.ok}`,
+    )
+    await sendMessageToLeader(
+      identity.agentName,
+      `${identity.agentName} handed sub-team "${pending.subTeamName}" to a fresh successor with the same identity (${identity.agentId}) and retired. Its members, task list and inboxes were left untouched. Handoff notes: ${pending.handoffPath}.` +
+        (pending.reason?.trim() ? ` Reason: ${pending.reason.trim()}.` : '') +
+        (reattach.ok
+          ? ''
+          : ` WARNING: the sub-team could not be re-attached (${reattach.reason}) — check its team file.`),
+      color,
+      identity.teamName,
+    )
+  } catch (err) {
+    await warn(`${err}`)
+  }
+}
+
+/**
  * Turns a wait result into the teammate's next prompt, mirroring it into
  * task.messages for transcript display where needed. Returns undefined when
  * the runner should exit.
@@ -1703,14 +1945,24 @@ async function idleUntilNextPrompt(params: {
     taskListId,
   )
   while (waitResult.type === 'idle_shutdown') {
-    const shutDown = await finalizeIdleShutdown(
-      identity,
-      toolUseContext.getAppState,
-      setAppState,
-      taskListId,
-      waitResult,
-    )
-    if (shutDown) break
+    // A handoff is a retirement WITH a successor, so it takes the additive
+    // path beside the idle shutdown rather than through it: same end of the
+    // run, none of the teardown.
+    const ended =
+      waitResult.intent === 'handoff'
+        ? await finalizeSubLeadHandoff(
+            identity,
+            toolUseContext.getAppState,
+            waitResult,
+          )
+        : await finalizeIdleShutdown(
+            identity,
+            toolUseContext.getAppState,
+            setAppState,
+            taskListId,
+            waitResult,
+          )
+    if (ended) break
     waitResult = await waitForNextPromptOrShutdown(
       identity,
       abortController,
@@ -1850,6 +2102,8 @@ export async function runInProcessTeammate(
             // A sub-lead is the recovery authority for its OWN sub-teams, so
             // it needs this for the same reason it needs TeamCreate.
             RECOVER_TEAM_TOOL_NAME,
+            // Only the sub-lead itself can hand its own sub-team over.
+            HANDOFF_TEAM_TOOL_NAME,
             TASK_CREATE_TOOL_NAME,
             TASK_GET_TOOL_NAME,
             TASK_LIST_TOOL_NAME,
@@ -2366,6 +2620,16 @@ export async function runInProcessTeammate(
     }
 
     unregisterPerfettoAgent(identity.agentId)
+
+    // A handoff ends here rather than where it was decided: the task is
+    // terminal now, so the successor can take this seat without racing this
+    // run's own eviction. A no-op for every ordinary run — nothing is armed.
+    // `alreadyTerminal` means something else (a kill) took the task, and that
+    // path has already cascaded the sub-team away.
+    if (!alreadyTerminal) {
+      await completeSubLeadHandoff(identity, toolUseContext)
+    }
+
     return { success: true, messages: allMessages }
   } catch (error) {
     const errorMessage =
@@ -2436,6 +2700,11 @@ export async function runInProcessTeammate(
     // inbox nobody will read again. Record the orphan and say so, so the lead
     // can adopt or respawn (RecoverTeam) rather than discover it by silence.
     // A teammate that led nothing does nothing here.
+    // A run that crashed mid-handoff is an orphan, not a handoff: drop the
+    // armed request so no successor is started behind the failure, and let
+    // the detection below record the sub-team as recoverable instead.
+    takeSubLeadHandoff(identity.agentId)
+
     await noteSubLeadFailure({
       identity,
       turnAgentId: lastTurnAgentId,

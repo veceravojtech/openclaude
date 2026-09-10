@@ -162,7 +162,7 @@ export const syncHookResponseSchema = lazySchema(() =>
         }),
         z.object({
           hookEventName: z.literal('TeammateIdleTimeout'),
-          action: z.enum(['shutdown']).optional(),
+          action: z.enum(['shutdown', 'handoff']).optional(),
           reason: z.string().optional(),
         }),
       ])

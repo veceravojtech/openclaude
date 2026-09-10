@@ -982,12 +982,15 @@ export const TeammateIdleTimeoutHookSpecificOutputSchema = lazySchema(() =>
   z
     .object({
       hookEventName: z.literal('TeammateIdleTimeout'),
-      action: z.enum(['shutdown']).optional(),
+      action: z.enum(['shutdown', 'handoff']).optional(),
       reason: z.string().optional(),
     })
     .describe(
       "Hook-specific output for the TeammateIdleTimeout event. action 'shutdown' " +
-        'asks the idle teammate to shut down cleanly; omit it to keep waiting.',
+        "asks the idle teammate to shut down cleanly; action 'handoff' retires a " +
+        'teammate that leads a sub-team and starts a fresh successor with the same ' +
+        'identity on a handoff file, keeping the sub-team and its members intact; ' +
+        'omit it to keep waiting.',
     ),
 )
 
