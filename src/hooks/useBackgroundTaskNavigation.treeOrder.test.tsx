@@ -12,6 +12,7 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
+import { TEAMMATE_GRACE_MS } from '../utils/task/framework.js'
 import { useBackgroundTaskNavigation } from './useBackgroundTaskNavigation.js'
 
 /**
@@ -59,6 +60,21 @@ function teammate(
     shutdownRequested: false,
     lastReportedToolCount: 0,
     lastReportedTokenCount: 0,
+  }
+}
+
+/**
+ * The same teammate after its run ended, while its row is still inside the
+ * retention grace window: a terminal status, `retain: false` and an evictAfter
+ * TEAMMATE_GRACE_MS out. getRunningTeammatesSorted keeps such a row in the
+ * order, so selection must be able to walk onto it.
+ */
+function graced(name: string, teamName: string): InProcessTeammateTaskState {
+  return {
+    ...teammate(name, teamName),
+    status: 'completed',
+    retain: false,
+    evictAfter: Date.now() + TEAMMATE_GRACE_MS,
   }
 }
 
@@ -301,6 +317,37 @@ test('a three-level tree steps into the grandchild before the next sibling', asy
     }
     expect(rendered.state().selectedIPAgentIndex).toBe(3)
     expect(ordered[3]!.identity.agentName).toBe('deputy')
+  } finally {
+    await rendered.cleanup()
+  }
+})
+
+test('Shift+Down steps onto a teammate still inside its grace window', async () => {
+  const withGrace = [
+    ...TWO_LEVEL.filter(t => t.identity.agentName !== 'worker-1'),
+    graced('worker-1', 'email/supervisor'),
+  ]
+  const ordered = getRunningTeammatesSorted(stateWith(withGrace).tasks)
+  expect(ordered.map(t => t.identity.agentName)).toEqual(DEPTH_FIRST)
+  expect(ordered[2]!.status).toBe('completed')
+
+  const rendered = await renderNavigation(stateWith(withGrace))
+  try {
+    // Expand, then three steps: leader -> alice -> supervisor -> worker-1, the
+    // finished row sitting in the middle of the order. An order narrowed back
+    // to `status === 'running'` would put worker-2 under this index instead.
+    for (let step = 0; step < 4; step++) {
+      await rendered.press(arrow('down', true))
+    }
+    expect(rendered.state().selectedIPAgentIndex).toBe(2)
+    expect(ordered[2]!.identity.agentName).toBe('worker-1')
+
+    // And the grace row is counted like any other: the hide row is still one
+    // past the last teammate of the depth-first order.
+    for (let step = 0; step < DEPTH_FIRST.length - 2; step++) {
+      await rendered.press(arrow('down', true))
+    }
+    expect(rendered.state().selectedIPAgentIndex).toBe(DEPTH_FIRST.length)
   } finally {
     await rendered.cleanup()
   }

@@ -12,6 +12,7 @@ import {
 } from '../../tasks/InProcessTeammateTask/InProcessTeammateTask.js'
 import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js'
 import { renderToString } from '../../utils/staticRender.js'
+import { TEAMMATE_GRACE_MS } from '../../utils/task/framework.js'
 import { BackgroundTaskStatus } from './BackgroundTaskStatus.js'
 
 /**
@@ -198,6 +199,31 @@ describe('BackgroundTaskStatus teammate pills', () => {
     expect(pills).toEqual([
       'main',
       'nomad',
+      'alice',
+      'supervisor',
+      'supervisor/worker-1',
+      'supervisor/worker-2',
+      'zoe',
+    ])
+  })
+
+  test('keeps a teammate inside its grace window at its depth-first position', async () => {
+    // A finished teammate keeps its row for TEAMMATE_GRACE_MS — `retain: false`
+    // plus an evictAfter that has not passed — and getRunningTeammatesSorted is
+    // what holds it there. The pill row reads that same array, so the grace row
+    // stays under its sub-lead with the usual `@sub-lead/name` label; a row
+    // filtered on `status === 'running'` of its own would drop it and shift
+    // every pill after it off the index selection addresses.
+    const gracedWorker = [
+      ...TWO_LEVEL.filter(t => t.identity.agentName !== 'worker-1'),
+      teammate('worker-1', 'email/supervisor', {
+        status: 'completed',
+        retain: false,
+        evictAfter: Date.now() + TEAMMATE_GRACE_MS,
+      }),
+    ]
+    expect(await renderPills(stateWith(gracedWorker))).toEqual([
+      'main',
       'alice',
       'supervisor',
       'supervisor/worker-1',
