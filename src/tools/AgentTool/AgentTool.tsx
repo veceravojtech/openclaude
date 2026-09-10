@@ -46,7 +46,8 @@ import { writeAgentMetadata } from '../../utils/sessionStorage.js';
 import { sleep } from '../../utils/sleep.js';
 import { buildEffectiveSystemPrompt } from '../../utils/systemPrompt.js';
 import { asSystemPrompt } from '../../utils/systemPromptType.js';
-import { readSubTeamLedBy } from '../../utils/swarm/teamHelpers.js';
+import { getSubTeamNameFor, readSubTeamLedBy } from '../../utils/swarm/teamHelpers.js';
+import { TEAM_CREATE_TOOL_NAME } from '../TeamCreateTool/constants.js';
 import { getTaskOutputPath } from '../../utils/task/diskOutput.js';
 import { getAgentId, getParentSessionId, isTeammate } from '../../utils/teammate.js';
 import { isInProcessTeammate } from '../../utils/teammateContext.js';
@@ -434,9 +435,19 @@ export const AgentTool = buildTool({
       team_name
     }, appState);
     if (isTeammate() && teamName && name) {
-      const subTeam = await readSubTeamLedBy(resolveCallerIdentity(toolUseContext));
+      const caller = resolveCallerIdentity(toolUseContext);
+      const subTeam = await readSubTeamLedBy(caller);
       if (!subTeam) {
-        throw new Error('Teammates cannot spawn other teammates — the team roster is flat. To spawn a subagent instead, omit the `name` parameter.');
+        // A teammate (not a subagent inside its turn) CAN lead a sub-team; it
+        // just has not created it yet. Say so, with the exact name to use —
+        // the bare flat-roster message sends the model hunting for a
+        // `team_name` workaround that the guard below refuses anyway.
+        const ownSubTeam = caller.isTeammate ? getSubTeamNameFor(caller.agentId, caller.name) : undefined;
+        throw new Error(
+          ownSubTeam
+            ? `Teammates cannot spawn other teammates — the team roster is flat. To lead your own sub-team, create it first with ${TEAM_CREATE_TOOL_NAME}(team_name: "${ownSubTeam}") and then spawn into it (omit team_name). To spawn a subagent instead, omit the \`name\` parameter.`
+            : 'Teammates cannot spawn other teammates — the team roster is flat. To spawn a subagent instead, omit the `name` parameter.'
+        );
       }
       if (team_name !== undefined && team_name !== subTeam.name) {
         throw new Error(`Teammates can only spawn into their own sub-team "${subTeam.name}", not "${team_name}". Omit team_name to use it.`);

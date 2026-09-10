@@ -33,6 +33,9 @@ import {
   CRON_DELETE_TOOL_NAME,
   CRON_LIST_TOOL_NAME,
 } from '../tools/ScheduleCronTool/prompt.js'
+import { TEAM_CREATE_TOOL_NAME } from '../tools/TeamCreateTool/constants.js'
+import { RECOVER_TEAM_TOOL_NAME } from '../tools/RecoverTeamTool/constants.js'
+import { HANDOFF_TEAM_TOOL_NAME } from '../tools/HandoffTeamTool/constants.js'
 
 export const ALL_AGENT_DISALLOWED_TOOLS = new Set([
   TASK_OUTPUT_TOOL_NAME,
@@ -85,6 +88,18 @@ export const IN_PROCESS_TEAMMATE_ALLOWED_TOOLS = new Set([
   CRON_CREATE_TOOL_NAME,
   CRON_DELETE_TOOL_NAME,
   CRON_LIST_TOOL_NAME,
+  // Sub-team tools. A teammate leads at most one sub-team, and each of these
+  // resolves the team from the CALLER (resolveCallerIdentity), never from an
+  // argument: TeamCreate only creates the caller's own `<team>/<name>`,
+  // RecoverTeam only recovers sub-teams the caller leads, and HandoffTeam only
+  // hands the caller's own sub-team over. Without them here a teammate's turn
+  // (which runs as an async agent) never sees the tools, so the Agent tool's
+  // sub-team spawn path is unreachable. TeamDelete stays out on purpose: it
+  // has no caller-scoped branch and would act on the shared AppState's team —
+  // the PARENT team for an in-process teammate.
+  TEAM_CREATE_TOOL_NAME,
+  RECOVER_TEAM_TOOL_NAME,
+  HANDOFF_TEAM_TOOL_NAME,
 ])
 
 /*

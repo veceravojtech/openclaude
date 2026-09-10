@@ -236,18 +236,24 @@ test('an explicit team_name is accepted only for the caller sub-team', async () 
   expect(spawnTeammate).toHaveBeenCalledTimes(1)
 })
 
-test('a teammate without a sub-team still gets the flat-roster error', async () => {
+test('a teammate without a sub-team still gets the flat-roster error, now naming the sub-team to create', async () => {
   const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
 
-  await expect(
-    asTeammate('supervisor', 'email', () =>
-      spawn(
-        AgentTool,
-        { description: 'worker', name: 'worker' },
-        makeToolUseContext({ teamName: 'email' }),
-      ),
+  const err = await asTeammate('supervisor', 'email', () =>
+    spawn(
+      AgentTool,
+      { description: 'worker', name: 'worker' },
+      makeToolUseContext({ teamName: 'email' }),
     ),
-  ).rejects.toThrow('the team roster is flat')
+  ).then(
+    () => undefined,
+    (e: unknown) => e,
+  )
+  expect(String(err)).toContain('the team roster is flat')
+  // The teammate CAN lead a sub-team; the error must say how, with the exact
+  // name TeamCreate accepts from this caller, instead of leaving the model to
+  // guess a team_name that the guard below refuses anyway.
+  expect(String(err)).toContain('TeamCreate(team_name: "email/supervisor")')
   expect(spawnTeammate).not.toHaveBeenCalled()
 })
 
@@ -257,15 +263,19 @@ test('a subagent inside a teammate turn still gets the flat-roster error', async
 
   // Ambient isTeammate() is true for this caller; resolveCallerIdentity() is
   // what tells it apart from the teammate whose turn it runs in.
-  await expect(
-    asTeammate('supervisor', 'email', () =>
-      spawn(
-        AgentTool,
-        { description: 'worker', name: 'worker' },
-        makeToolUseContext({ teamName: 'email', agentId: SUBAGENT_ID }),
-      ),
+  const err = await asTeammate('supervisor', 'email', () =>
+    spawn(
+      AgentTool,
+      { description: 'worker', name: 'worker' },
+      makeToolUseContext({ teamName: 'email', agentId: SUBAGENT_ID }),
     ),
-  ).rejects.toThrow('the team roster is flat')
+  ).then(
+    () => undefined,
+    (e: unknown) => e,
+  )
+  expect(String(err)).toContain('the team roster is flat')
+  // A subagent cannot lead a sub-team, so it gets no TeamCreate guidance.
+  expect(String(err)).not.toContain('TeamCreate(')
   expect(spawnTeammate).not.toHaveBeenCalled()
 })
 
