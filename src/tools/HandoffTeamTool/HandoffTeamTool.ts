@@ -13,7 +13,12 @@ import {
   liveSubTeamMemberNames,
   writeSubLeadHandoffFile,
 } from '../../utils/swarm/subLeadHandoff.js'
-import { readSubTeamLedBy } from '../../utils/swarm/teamHelpers.js'
+import {
+  getParentTeamName,
+  readSubTeamLedBy,
+} from '../../utils/swarm/teamHelpers.js'
+import { getSubTeamTaskListId } from '../../utils/tasks.js'
+import { getTeammateContext } from '../../utils/teammateContext.js'
 import { HANDOFF_TEAM_TOOL_NAME } from './constants.js'
 import { getPrompt } from './prompt.js'
 import { renderToolResultMessage, renderToolUseMessage } from './UI.js'
@@ -62,6 +67,21 @@ export type Output = {
 export type Input = z.infer<InputSchema>
 
 type CallContext = Parameters<NonNullable<Tool<InputSchema, Output>['call']>>[1]
+
+/**
+ * The task list the CALLING teammate claims its own work from, mirroring
+ * `resolveTeammateTaskListId` in the runner: the sub-team's own list for a
+ * member of a sub-team, the lead's session-keyed list for everyone else.
+ * Undefined outside an in-process teammate, where there is no such list to
+ * read — only an in-process teammate reaches this tool at all.
+ */
+function ownTaskListId(): string | undefined {
+  const teammate = getTeammateContext()
+  if (!teammate) return undefined
+  return getParentTeamName(teammate.teamName) !== undefined
+    ? getSubTeamTaskListId(teammate.teamName)
+    : teammate.parentSessionId
+}
 
 /**
  * Hands the caller's own sub-team to a fresh successor — the explicit half of
@@ -156,6 +176,11 @@ export const HandoffTeamTool: Tool<InputSchema, Output> = buildTool({
       context.getAppState().tasks,
       subTeam.name,
     )
+    // The caller's OWN task list, resolved the way the runner's poll loop
+    // resolves it: a sub-team member claims from the sub-team's list, everyone
+    // else from the lead's session-keyed one. A sub-lead's work on that list
+    // survives the handoff under the inherited name, so the notes name it.
+    const taskListId = ownTaskListId()
     const handoffPath = await writeSubLeadHandoffFile({
       subTeamName: subTeam.name,
       leadAgentId: caller.agentId,
@@ -164,6 +189,9 @@ export const HandoffTeamTool: Tool<InputSchema, Output> = buildTool({
       synthesis: input.synthesis,
       ...(input.open_items ? { openItems: input.open_items } : {}),
       ...(input.reason ? { reason: input.reason } : {}),
+      ...(taskListId
+        ? { ownAssignments: { taskListId, owner: caller.name } }
+        : {}),
     })
     armSubLeadHandoff({
       subTeamName: subTeam.name,

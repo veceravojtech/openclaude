@@ -3147,7 +3147,9 @@ async function* executeHooks({
         elicitationResultResponse: result.elicitationResultResponse,
       }
     }
-    // Yield the shutdown request if provided (from TeammateIdleTimeout hooks)
+    // Yield the requested idle-timeout action if provided (from
+    // TeammateIdleTimeout hooks): 'shutdown' ends the teammate, 'handoff'
+    // retires a sub-lead in favour of a same-identity successor.
     if (result.teammateIdleTimeoutAction) {
       yield {
         teammateIdleTimeoutAction: result.teammateIdleTimeoutAction,
@@ -4061,8 +4063,11 @@ export async function* executeTeammateIdleHooks(
  * continuously idle for CLAUDE_CODE_TEAMMATE_IDLE_TIMEOUT_MS (and again every
  * further interval). Mirrors TeammateIdle: a blocking error (exit code 2)
  * carries text the teammate should work on next; a JSON hookSpecificOutput
- * with action 'shutdown' asks the teammate to shut down cleanly. Yields
- * nothing when no such hook is configured.
+ * with action 'shutdown' asks the teammate to shut down cleanly, and one with
+ * action 'handoff' retires a teammate that leads a sub-team in favour of a
+ * fresh successor with the same identity, started on a handoff file (the
+ * sub-team, its members and its task list are kept; a teammate that leads no
+ * sub-team ignores it). Yields nothing when no such hook is configured.
  */
 export async function* executeTeammateIdleTimeoutHooks(params: {
   teammateName: string

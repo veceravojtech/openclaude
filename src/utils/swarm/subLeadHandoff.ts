@@ -172,6 +172,13 @@ export function formatHandoffDocument(params: {
   openItems?: string[]
   tasks: Task[]
   members: string[]
+  /**
+   * The retiring lead's OWN tasks on its parent list. They keep their owner
+   * across a handoff — nothing unassigns them, and the successor inherits the
+   * name they are owned under — so the document names them rather than
+   * leaving the successor to discover its own backlog by accident.
+   */
+  ownAssignments?: Task[]
 }): string {
   const {
     subTeamName,
@@ -183,6 +190,7 @@ export function formatHandoffDocument(params: {
     openItems,
     tasks,
     members,
+    ownAssignments,
   } = params
   const sourceLabel =
     source === 'tool'
@@ -212,6 +220,13 @@ export function formatHandoffDocument(params: {
     '',
     formatList(tasks.map(formatTaskLine), 'The task list was empty.'),
     '',
+    '## Your own assignments on the parent list',
+    '',
+    formatList(
+      (ownAssignments ?? []).map(formatTaskLine),
+      'Nothing on the parent list is assigned to you.',
+    ),
+    '',
     '## Members at handoff',
     '',
     formatList(
@@ -224,9 +239,10 @@ export function formatHandoffDocument(params: {
 
 /**
  * Writes the handoff document for `subTeamName` and returns its absolute
- * path. The sub-team's task list is snapshotted here so both routes record it
- * the same way; a task list that cannot be read yields an empty snapshot
- * rather than failing the handoff.
+ * path. The sub-team's task list, and the retiring lead's own assignments on
+ * its parent list, are snapshotted here so both routes record them the same
+ * way; a task list that cannot be read yields an empty snapshot rather than
+ * failing the handoff.
  */
 export async function writeSubLeadHandoffFile(params: {
   subTeamName: string
@@ -236,6 +252,13 @@ export async function writeSubLeadHandoffFile(params: {
   synthesis?: string
   openItems?: string[]
   members: string[]
+  /**
+   * Where the retiring lead's OWN assignments live: its parent task list, and
+   * the name they are owned under. Read HERE rather than by each caller so
+   * both routes record them the same way and an unreadable list costs the
+   * handoff nothing, exactly as the sub-team snapshot above.
+   */
+  ownAssignments?: { taskListId: string; owner: string }
 }): Promise<string> {
   let tasks: Task[] = []
   try {
@@ -245,11 +268,29 @@ export async function writeSubLeadHandoffFile(params: {
       `[subLeadHandoff] Could not read the task list of ${params.subTeamName}: ${errorMessage(err)}`,
     )
   }
+  const ownList = params.ownAssignments
+  let ownTasks: Task[] = []
+  if (ownList) {
+    try {
+      ownTasks = (await listTasks(ownList.taskListId)).filter(
+        task => task.owner === ownList.owner,
+      )
+    } catch (err) {
+      logForDebugging(
+        `[subLeadHandoff] Could not read ${ownList.owner}'s own task list ${ownList.taskListId}: ${errorMessage(err)}`,
+      )
+    }
+  }
   const path = getHandoffFilePath(params.subTeamName)
   await mkdir(getHandoffDir(params.subTeamName), { recursive: true })
   await writeFile(
     path,
-    formatHandoffDocument({ ...params, writtenAt: Date.now(), tasks }),
+    formatHandoffDocument({
+      ...params,
+      writtenAt: Date.now(),
+      tasks,
+      ownAssignments: ownTasks,
+    }),
     'utf-8',
   )
   return path
@@ -277,7 +318,7 @@ export function formatSuccessorHandoffMessage(
     lines.push(`Your predecessor asks you to start with: ${handoff.firstInstruction.trim()}`)
   }
   lines.push(
-    "Then take stock before starting anything new: read the sub-team's task list and your inbox, work out where each member got to, and carry on coordinating from there.",
+    "Then take stock before starting anything new: read the sub-team's task list, your inbox, and your own assignments on the parent list — the notes list them, and they stayed assigned to your name — work out where each member got to, and carry on coordinating from there.",
   )
   return lines.join('\n')
 }

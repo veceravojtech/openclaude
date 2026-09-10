@@ -28,6 +28,8 @@ import { getTeamDir } from './teamHelpers.js'
 const PARENT_TEAM = 'email'
 const SUB_TEAM = `${PARENT_TEAM}/supervisor`
 const SUB_LEAD_AGENT_ID = `supervisor@${PARENT_TEAM}`
+/** The retiring lead's OWN list: the parent lead's session-keyed one. */
+const PARENT_LIST = 'parent-session'
 
 let configDir: string | undefined
 let nowSpy: ReturnType<typeof spyOn> | undefined
@@ -100,6 +102,24 @@ test('the notes live under the sub-team own directory and carry every section', 
     blocks: [],
     blockedBy: [],
   })
+  // The retiring lead's own work on the PARENT list: a handoff unassigns
+  // nothing, and the successor inherits the name it is owned under.
+  await createTask(PARENT_LIST, {
+    subject: 'review the quarterly digest',
+    description: 'the lead asked for it',
+    status: 'in_progress',
+    owner: 'supervisor',
+    blocks: [],
+    blockedBy: [],
+  })
+  await createTask(PARENT_LIST, {
+    subject: 'someone else work',
+    description: 'not the sub-lead',
+    status: 'pending',
+    owner: 'helper',
+    blocks: [],
+    blockedBy: [],
+  })
 
   const path = await writeSubLeadHandoffFile({
     subTeamName: SUB_TEAM,
@@ -109,6 +129,7 @@ test('the notes live under the sub-team own directory and carry every section', 
     synthesis: 'the digest ships on Fridays',
     openItems: ['confirm the send window'],
     members: ['worker'],
+    ownAssignments: { taskListId: PARENT_LIST, owner: 'supervisor' },
   })
 
   // Under the team directory, never beside it, and never in a second tree.
@@ -127,6 +148,28 @@ test('the notes live under the sub-team own directory and carry every section', 
   // The task list is snapshotted from disk, not asserted by the outgoing lead.
   expect(document).toContain('- [in_progress] #1 ship the digest (owner: worker)')
   expect(document).toContain('- worker')
+  // ... and so is the retiring lead's own parent-list backlog, filtered to it.
+  expect(document).toContain('## Your own assignments on the parent list')
+  expect(document).toContain(
+    '- [in_progress] #1 review the quarterly digest (owner: supervisor)',
+  )
+  expect(document).not.toContain('someone else work')
+})
+
+test('the notes say so when the retiring lead owns nothing on the parent list', async () => {
+  // A list that was never created reads as empty rather than failing the
+  // handoff, exactly as an unreadable sub-team list does.
+  const path = await writeSubLeadHandoffFile({
+    subTeamName: SUB_TEAM,
+    leadAgentId: SUB_LEAD_AGENT_ID,
+    source: 'idle-timeout-hook',
+    members: [],
+    ownAssignments: { taskListId: 'a-list-nobody-created', owner: 'supervisor' },
+  })
+
+  const document = readFileSync(path, 'utf-8')
+  expect(document).toContain('## Your own assignments on the parent list')
+  expect(document).toContain('Nothing on the parent list is assigned to you.')
 })
 
 test('the hook route says it wrote no synthesis instead of faking one', () => {
@@ -144,6 +187,7 @@ test('the hook route says it wrote no synthesis instead of faking one', () => {
   expect(document).toContain('requested by the TeammateIdleTimeout hook')
   expect(document).toContain('None recorded.')
   expect(document).toContain('The task list was empty.')
+  expect(document).toContain('Nothing on the parent list is assigned to you.')
   expect(document).toContain('No members were running.')
 })
 
@@ -155,6 +199,8 @@ test('the successor message points at the notes and carries the predecessor asks
   expect(message).toContain('Read the handoff notes first: /tmp/handoff.md')
   expect(message).toContain('Reason for the handoff: context nearly full')
   expect(message).toContain('confirm the send window')
+  // The successor is told to look at what it inherited on the parent list too.
+  expect(message).toContain('your own assignments on the parent list')
 
   // Optional halves are omitted rather than rendered empty.
   const bare = formatSuccessorHandoffMessage({

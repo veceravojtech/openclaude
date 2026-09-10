@@ -48,7 +48,10 @@ import {
   getProgressUpdate,
   updateProgressFromMessage,
 } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
-import type { CustomAgentDefinition } from '../../tools/AgentTool/loadAgentsDir.js'
+import {
+  type CustomAgentDefinition,
+  isCustomAgent,
+} from '../../tools/AgentTool/loadAgentsDir.js'
 import { runAgent } from '../../tools/AgentTool/runAgent.js'
 import { getTeammateSpawnCapError } from '../../tools/AgentTool/teammateReplicas.js'
 import {
@@ -598,6 +601,15 @@ export type InProcessRunnerConfig = {
   taskId: string
   /** Initial prompt for the teammate. Omit to start idle and wait for work. */
   prompt?: string
+  /**
+   * Skips the eager task-list claim made once at spawn, before the first poll
+   * round. Set for a spawn whose first turn is already decided by a message
+   * waiting in its own inbox — the handoff successor, which must open on its
+   * predecessor's notes rather than on whatever happens to be unclaimed on the
+   * parent's list. The idle loop claims from that list on its next round as
+   * usual, so this delays a claim, it never skips the work.
+   */
+  skipInitialClaim?: boolean
   /** Optional agent definition (for specialized agents) */
   agentDefinition?: CustomAgentDefinition
   /** Teammate context for AsyncLocalStorage */
@@ -949,7 +961,10 @@ type IdlePolicy = {
  * concurrently with itself; the next occurrence is scheduled one interval
  * after the previous hook FINISHED, so a slow hook cannot re-fire back to
  * back. A blocking hook result wakes the teammate with the text as its next
- * prompt; a JSON shutdown action ends the wait. Once
+ * prompt; a JSON action ends the wait — `shutdown` ends the teammate, and
+ * `handoff` retires a teammate that leads a sub-team in favour of a
+ * same-identity successor started on a handoff file (a teammate that leads no
+ * sub-team ignores it and keeps waiting). Once
  * CLAUDE_CODE_TEAMMATE_IDLE_SHUTDOWN_MS has passed and no in-flight hook
  * could still assign work, the wait ends with an idle shutdown; that check
  * runs before a new occurrence is launched, so an always-running hook cannot
@@ -1597,6 +1612,13 @@ async function finalizeSubLeadHandoff(
       source: 'idle-timeout-hook',
       reason: result.detail,
       members: liveSubTeamMemberNames(getAppState().tasks, subTeamName),
+      // A handoff deliberately does NOT unassign this lead's own work (see
+      // above), and the successor inherits the name it is owned under — so
+      // the document has to name it, or the successor never learns of it.
+      ownAssignments: {
+        taskListId: resolveTeammateTaskListId(identity),
+        owner: identity.agentName,
+      },
     })
     armSubLeadHandoff({
       subTeamName,
@@ -1642,16 +1664,36 @@ async function completeSubLeadHandoff(
   pending: PendingSubLeadHandoff,
 ): Promise<void> {
   const { setAppState } = toolUseContext
+  // Set the moment the successor's runner is started. Everything after that
+  // point is re-attach and notification, and a failure there must not tell the
+  // lead the seat is empty: RecoverTeam would then refuse (a live lead) or, out
+  // of the adopted corner, spawn a second runner under the same id.
+  let successorStarted = false
   const warn = async (reason: string): Promise<void> => {
     logForDebugging(
       `[inProcessRunner] Handoff of ${pending.subTeamName} could not be completed: ${reason}`,
     )
-    await sendMessageToLeader(
-      identity.agentName,
-      `${identity.agentName} retired to hand sub-team "${pending.subTeamName}" over, but no successor could be started (${reason}). Its members are still running and their reports are reaching nobody: recover it with RecoverTeam (action "respawn" to start a lead, "adopt" to take the members yourself). The handoff notes are at ${pending.handoffPath}.`,
-      identity.color,
-      identity.teamName,
-    )
+    // The fallback notifier is the last thing here that can throw, and it runs
+    // AFTER the completion tail marked this run terminal and evicted its task:
+    // `writeToMailbox` awaits an `ensureInboxDir` mkdir outside its own
+    // try/catch, so an escaping rejection would run the runner's FAILURE tail
+    // against a task that is already gone — a second, contradictory `failed`
+    // bookend, and an `orphanedLead` record written beside a live successor.
+    // Warning the lead is best effort; re-entering the failure tail is not.
+    try {
+      await sendMessageToLeader(
+        identity.agentName,
+        successorStarted
+          ? `${identity.agentName} handed sub-team "${pending.subTeamName}" to a successor that is running with the same identity (${identity.agentId}), but the re-attach or the notification failed (${reason}) — check its team file. The handoff notes are at ${pending.handoffPath}.`
+          : `${identity.agentName} retired to hand sub-team "${pending.subTeamName}" over, but no successor could be started (${reason}). Its members are still running and their reports are reaching nobody: recover it with RecoverTeam (action "respawn" to start a lead, "adopt" to take the members yourself). The handoff notes are at ${pending.handoffPath}.`,
+        identity.color,
+        identity.teamName,
+      )
+    } catch (err) {
+      logForDebugging(
+        `[inProcessRunner] Could not tell the lead of ${identity.teamName} that the handoff of ${pending.subTeamName} needed attention: ${err}`,
+      )
+    }
   }
 
   try {
@@ -1674,6 +1716,46 @@ async function completeSubLeadHandoff(
     const planModeRequired =
       identity.planModeRequired ?? spawnRecord?.planModeRequired ?? false
     const model = spawnRecord?.model
+    // A sub-lead spawned as a custom agent comes back as one. The roster keeps
+    // the `agent_type` it was spawned with, and the definition behind that type
+    // is resolved from the live set exactly as the ordinary spawn path does
+    // (`spawnMultiAgent.ts`). Without it the successor keeps the seat but loses
+    // the system prompt, tools and memory that defined the agent in it.
+    const subagentType = spawnRecord?.agentType
+    let agentDefinition: CustomAgentDefinition | undefined
+    if (subagentType) {
+      const found = toolUseContext.options.agentDefinitions?.activeAgents.find(
+        a => a.agentType === subagentType,
+      )
+      if (found && isCustomAgent(found)) {
+        agentDefinition = found
+      }
+      logForDebugging(
+        `[inProcessRunner] Successor of ${identity.agentId}: agent_type=${subagentType}, definition found=${!!agentDefinition}`,
+      )
+    }
+
+    // FIRST, before anything is registered. `writeToMailbox` awaits an
+    // `ensureInboxDir` mkdir outside its own try/catch, so a read-only or full
+    // disk rejects here; writing before the spawn is what keeps that failure
+    // clean — the catch below warns the lead and NOTHING is left registered,
+    // rather than a never-started `running` task under this id that the caps
+    // would count, `RecoverTeam respawn` would refuse as a live lead, and a
+    // kill would cascade the sub-team away.
+    //
+    // The inbox is keyed by `name@team` and the retiring run is already
+    // terminal, so nobody else is polling it: the successor inherits this
+    // message, and anything else left unread, when it starts below.
+    await writeToMailbox(
+      identity.agentName,
+      {
+        from: SUB_LEAD_HANDOFF_SENDER,
+        text: formatSuccessorHandoffMessage(pending),
+        timestamp: new Date().toISOString(),
+        color,
+      },
+      identity.teamName,
+    )
 
     const spawn = await spawnInProcessTeammate(
       {
@@ -1695,22 +1777,14 @@ async function completeSubLeadHandoff(
       return
     }
 
-    // Written BEFORE the successor's runner starts, so its very first poll
-    // round already carries it. It lands in the same inbox the retired lead
-    // read — the successor inherits it, unread messages included.
-    await writeToMailbox(
-      identity.agentName,
-      {
-        from: SUB_LEAD_HANDOFF_SENDER,
-        text: formatSuccessorHandoffMessage(pending),
-        timestamp: new Date().toISOString(),
-        color,
-      },
-      identity.teamName,
-    )
-
-    // Idle: no prompt, so the successor registers as waiting for work and
-    // takes its first turn on the handoff message above.
+    // Idle: no prompt, so the successor registers as waiting for work. Its
+    // first turn is the handoff message written above — but only because
+    // `skipInitialClaim` drops the eager spawn-time task-list claim. A sub-lead
+    // claims from its PARENT's list, so without the flag an unowned pending
+    // task there would become the successor's first turn instead, spent on
+    // unrelated work with none of the sub-team's context. The poll loop reads
+    // this teammate's own inbox before it claims, so the notes win; a pending
+    // parent-list task is claimed on the next round as usual.
     startInProcessTeammate({
       identity: {
         agentId: spawn.agentId,
@@ -1723,6 +1797,9 @@ async function completeSubLeadHandoff(
       taskId: spawn.taskId,
       description: `successor sub-lead of ${pending.subTeamName}`,
       model,
+      agentDefinition,
+      subagentType,
+      skipInitialClaim: true,
       teammateContext: spawn.teammateContext,
       // Same reason the ordinary spawn path strips them: the teammate builds
       // its own history, and the parent's conversation would otherwise be
@@ -1730,6 +1807,7 @@ async function completeSubLeadHandoff(
       toolUseContext: { ...toolUseContext, messages: [] },
       abortController: spawn.abortController,
     })
+    successorStarted = true
 
     // LAST, and U9's primitive rather than a second writer of the field: it
     // clears any orphan record, takes the sub-team back if it was adopted
@@ -1992,6 +2070,7 @@ export async function runInProcessTeammate(
     identity,
     taskId,
     prompt,
+    skipInitialClaim,
     description,
     agentDefinition,
     teammateContext,
@@ -2143,11 +2222,15 @@ export async function runInProcessTeammate(
   // own list for a member of a sub-team — see resolveTeammateTaskListId.
   // A prompted spawn is driven by the lead's prompt, so the claimed task's
   // text is not used here; an idle spawn has no other prompt, so the claimed
-  // task becomes its first turn (see below).
-  const claimedTaskPrompt = await tryClaimNextTask(
-    resolveTeammateTaskListId(identity),
-    identity.agentName,
-  )
+  // task becomes its first turn (see below) — which is exactly why
+  // skipInitialClaim exists: a spawn whose first turn is already waiting in
+  // its own inbox must not have it pre-empted here.
+  const claimedTaskPrompt = skipInitialClaim
+    ? undefined
+    : await tryClaimNextTask(
+        resolveTeammateTaskListId(identity),
+        identity.agentName,
+      )
 
   try {
     // Add initial prompt to task.messages for display (wrapped with XML)
@@ -2632,7 +2715,21 @@ export async function runInProcessTeammate(
     // sub-team that is no longer there.
     const pendingHandoff = takeSubLeadHandoff(identity.agentId)
     if (pendingHandoff && !alreadyTerminal) {
-      await completeSubLeadHandoff(identity, toolUseContext, pendingHandoff)
+      // Guarded, and this is the point of the guard: the task is already
+      // `completed`, evicted and bookended, so anything escaping here would run
+      // the failure tail below against a task that no longer exists —
+      // `updateTaskState` returns `prev` for a missing task, so `alreadyTerminal`
+      // would stay false and a second, contradictory `failed` bookend would go
+      // out, followed by an `orphanedLead` record beside a live successor. A
+      // handoff that could not be completed says so through `warn`, not by
+      // failing a run that succeeded.
+      try {
+        await completeSubLeadHandoff(identity, toolUseContext, pendingHandoff)
+      } catch (err) {
+        logForDebugging(
+          `[inProcessRunner] Handoff of ${pendingHandoff.subTeamName} threw after ${identity.agentId} had already completed: ${err}`,
+        )
+      }
     }
 
     return { success: true, messages: allMessages }

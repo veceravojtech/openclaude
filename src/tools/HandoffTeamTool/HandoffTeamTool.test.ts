@@ -11,6 +11,7 @@ import type { ToolUseContext } from '../../Tool.js'
 import { asAgentId } from '../../types/ids.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
 import { TEAM_LEAD_NAME } from '../../utils/swarm/constants.js'
+import { createTask } from '../../utils/tasks.js'
 import { takeSubLeadHandoff } from '../../utils/swarm/subLeadHandoff.js'
 import {
   getTeamFilePath,
@@ -33,12 +34,19 @@ const SUB_LEAD_AGENT_ID = `${SUB_LEAD}@${PARENT_TEAM}`
 const WORKER = 'worker'
 const TURN_AGENT_ID = asAgentId('a00000000000cafe')
 
+/** The lead's session-keyed list, which `asTeammate` names as the parent. */
+const PARENT_LIST = 'parent-session'
+
 let configDir: string | undefined
+/** Agent Teams are on by default; a developer shell may have opted out. */
+let savedDisableAgentTeams: string | undefined
 
 beforeEach(async () => {
   await acquireSharedMutationLock('tools/HandoffTeamTool/HandoffTeamTool.test.ts')
   configDir = mkdtempSync(join(tmpdir(), 'openclaude-handoff-tool-'))
   setClaudeConfigHomeDirForTesting(configDir)
+  savedDisableAgentTeams = process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS
+  delete process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS
 })
 
 afterEach(() => {
@@ -48,6 +56,12 @@ afterEach(() => {
     takeSubLeadHandoff(SUB_LEAD_AGENT_ID)
     clearDynamicTeamContext()
     setClaudeConfigHomeDirForTesting(undefined)
+    if (savedDisableAgentTeams === undefined) {
+      delete process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS
+    } else {
+      process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS = savedDisableAgentTeams
+    }
+    savedDisableAgentTeams = undefined
     if (configDir) rmSync(configDir, { recursive: true, force: true })
     configDir = undefined
   } finally {
@@ -191,6 +205,22 @@ const INPUT: ToolInput = {
 test('the sub-lead hands its own sub-team over: notes written, handoff armed, run ended', async () => {
   writeSubTeamWorld()
   const { context, abortController } = makeContext()
+  await createTask(PARENT_LIST, {
+    subject: 'review the digest',
+    description: 'the lead asked for it last week',
+    status: 'in_progress',
+    owner: SUB_LEAD,
+    blocks: [],
+    blockedBy: [],
+  })
+  await createTask(PARENT_LIST, {
+    subject: 'someone else work',
+    description: 'not the sub-lead',
+    status: 'in_progress',
+    owner: WORKER,
+    blocks: [],
+    blockedBy: [],
+  })
 
   const result = await asTeammate(SUB_LEAD, PARENT_TEAM, () =>
     callTool(INPUT, context),
@@ -206,6 +236,14 @@ test('the sub-lead hands its own sub-team over: notes written, handoff armed, ru
   expect(document).toContain('the digest ships on Fridays')
   expect(document).toContain('- confirm the send window')
   expect(document).toContain('- Requested by: the sub-lead itself (HandoffTeam)')
+  // The caller's own work on the PARENT list travels with the seat: a handoff
+  // unassigns nothing and the successor inherits the name it is owned under,
+  // so the notes name it — and only what is actually the caller's.
+  expect(document).toContain('## Your own assignments on the parent list')
+  expect(document).toContain(
+    `- [in_progress] #1 review the digest (owner: ${SUB_LEAD})`,
+  )
+  expect(document).not.toContain('someone else work')
 
   // Armed for the runner's completion tail — the tool never spawns itself.
   const pending = takeSubLeadHandoff(SUB_LEAD_AGENT_ID)
@@ -273,6 +311,11 @@ test('a sub-lead with no running task of its own is refused before anything is w
 })
 
 test('the tool is gated on Agent Teams and is never read-only', () => {
+  // The opt-out is cleared in beforeEach and restored in afterEach: this
+  // assertion is about the default, not about the developer's shell.
   expect(HandoffTeamTool.isEnabled()).toBe(true)
   expect(HandoffTeamTool.isReadOnly?.(INPUT)).toBe(false)
+
+  process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS = '1'
+  expect(HandoffTeamTool.isEnabled()).toBe(false)
 })
