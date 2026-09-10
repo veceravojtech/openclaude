@@ -580,17 +580,6 @@ function seedConfigDir(
         theme: 'dark',
         hasCompletedOnboarding: true,
         migrationVersion: 11,
-        // The teammates tree panel is ON by default once Agent Teams are
-        // enabled, and with no teammates it draws two rows (`team-lead` plus
-        // its empty-state line) directly above the prompt. Every scenario here
-        // was written against the layout WITHOUT it: scenario 4 in particular
-        // walks Shift+Down twice from a COLLAPSED tree (the first press expands
-        // and parks on the leader) and then greps the `@supervisor` pill, which
-        // the panel replaces while it is on. Seeding the toggle off is a
-        // precondition, not a weakened assertion — none of the four predicates
-        // changes. The panel's own scenarios (boot with it on, zero teammates,
-        // a row through its grace window) are T3's, and must NOT inherit this.
-        showSpinnerTree: false,
         projects: {
           [REPO_ROOT]: {
             hasTrustDialogAccepted: true,
@@ -923,15 +912,23 @@ async function scenarioSplitEscape(): Promise<ScenarioResult> {
 }
 
 /**
- * Scenario 4 - Escape must leave an idle teammate's transcript view.
+ * Scenario 4 - the teammates panel is up with zero teammates, and Escape must
+ * leave an idle teammate's transcript view.
  *
- * Reproduces the "stuck on Viewing @supervisor" report: a live in-process
- * teammate keeps `status: 'running'` for its whole life (idle is a separate
- * flag), and the Escape handler used to gate on that status alone - it aborted
- * the current turn and returned WITHOUT leaving the view. An idle teammate has
- * no turn to abort, so Escape did nothing and the header's "esc return" hint
- * lied. The fix (src/hooks/useBackgroundTaskNavigation.ts) interrupts a busy
- * teammate and returns from an idle one.
+ * Two halves, in that order. The first is asserted at boot, before the model is
+ * asked for anything: the panel draws its `team-lead` row and its empty state
+ * with no teammate alive at all. Nothing in the seeded config sets the toggle,
+ * so what is under test there is the shipped default; it is the only point in
+ * the run where the panel can be seen with zero rows, because every later step
+ * has a teammate in it.
+ *
+ * The second half reproduces the "stuck on Viewing @supervisor" report: a live
+ * in-process teammate keeps `status: 'running'` for its whole life (idle is a
+ * separate flag), and the Escape handler used to gate on that status alone - it
+ * aborted the current turn and returned WITHOUT leaving the view. An idle
+ * teammate has no turn to abort, so Escape did nothing and the header's "esc
+ * return" hint lied. The fix (src/hooks/useBackgroundTaskNavigation.ts)
+ * interrupts a busy teammate and returns from an idle one.
  *
  * The teammate has to come from the model calling the Agent tool, and the
  * harness runs offline, so the CLI is pointed (ANTHROPIC_BASE_URL) at a fake
@@ -951,6 +948,25 @@ const E2E_TEAM = 'e2e-team'
  * which is what the "teammate survived Escape" check below looks for.
  */
 const E2E_TEAMMATE_HEADER = `Viewing team-lead \u203A ${E2E_TEAMMATE}`
+
+/**
+ * The two rows the teammates tree panel draws with NO teammates at all - its
+ * entire visible surface at boot, and the thing the panel exists for ("visible
+ * every time it is enabled, even when no teammates are available").
+ *
+ * Both come from `src/components/Spinner/TeammateSpinnerTree.tsx`: the root row
+ * is assembled from the highlighted-leader glyph, `team-lead` and
+ * TEAMMATE_SELECT_HINT (`\u2552\u2550`, :77; `team-lead`, :91; the hint, :128,
+ * defined in `Spinner/teammateSelectHint.ts`), and the muted line under it is
+ * EmptyTeammatesRow (:329-333). The panel passes no verb, idle text or token
+ * count, so nothing else can appear between `team-lead` and the hint.
+ *
+ * Spelled with escapes on purpose: `\u00B7` and `\u2026` are one editor
+ * round-trip away from an ASCII `.` or `...`, and a silently degraded literal
+ * here would turn a real regression into a 15s timeout with no clue why.
+ */
+const E2E_TREE_LEADER_ROW = `\u2552\u2550 team-lead \u00B7 shift + \u2191/\u2193 to select`
+const E2E_TREE_EMPTY_ROW = `no teammates \u00B7 Agent(name: "\u2026") spawns one`
 
 type FakeAnthropicApi = {
   baseUrl: string
@@ -1102,8 +1118,8 @@ function startFakeAnthropicApi(): FakeAnthropicApi {
 
 async function scenarioTeammateViewEscape(): Promise<ScenarioResult> {
   const name =
-    'Scenario 4 (teammate view): Escape returns from an idle @supervisor view without killing the teammate'
-  const expected = `"${E2E_TEAMMATE_HEADER}" gone and the prompt back after one Escape, with the @${E2E_TEAMMATE} pill still shown`
+    'Scenario 4 (teammate view): the teammates panel is visible with zero teammates, and Escape returns from an idle @supervisor view without killing the teammate'
+  const expected = `the teammates panel visible BEFORE the spawn (its "team-lead" row and its "no teammates" line), then "${E2E_TEAMMATE_HEADER}" gone and the prompt back after one Escape, with the @${E2E_TEAMMATE} row still shown`
   const fail = (actual: string, pane: string): ScenarioResult => ({
     name,
     passed: false,
@@ -1129,6 +1145,24 @@ async function scenarioTeammateViewEscape(): Promise<ScenarioResult> {
     },
   })
   try {
+    // BEFORE anything spawns: the panel is up at its real default with zero
+    // teammates. Nothing in the seeded config touches the toggle, so this is
+    // the shipped default path - the one behaviour the panel exists for, and
+    // the one no other scenario can observe once a teammate is alive.
+    const panelAtBoot = await waitForPane(
+      `scenario 4: the teammates panel at boot - "${E2E_TREE_LEADER_ROW}" over "${E2E_TREE_EMPTY_ROW}"`,
+      pane => pane.includes(E2E_TREE_LEADER_ROW) && pane.includes(E2E_TREE_EMPTY_ROW),
+      UI_TIMEOUT_MS,
+    )
+    if (!panelAtBoot.ok) {
+      return fail(
+        `the teammates panel was not visible with zero teammates before the spawn (leader row: ${
+          panelAtBoot.pane.includes(E2E_TREE_LEADER_ROW) ? 'present' : 'MISSING'
+        }, empty state: ${panelAtBoot.pane.includes(E2E_TREE_EMPTY_ROW) ? 'present' : 'MISSING'})`,
+        panelAtBoot.pane,
+      )
+    }
+
     tmux('send-keys', '-t', CLI_WINDOW, 'spawn an idle supervisor teammate', 'Enter')
     // With a teammate alive the footer hint changes from "? for shortcuts" to
     // "shift + ↓ to expand", so the turn's end is read from the scripted final
@@ -1146,15 +1180,16 @@ async function scenarioTeammateViewEscape(): Promise<ScenarioResult> {
       return fail(`the idle teammate was not spawned (fake API served ${api.mainTurns()} main turn(s))`, spawned.pane)
     }
 
-    // Shift+Down opens the teammate selection on the leader row, a second one
-    // moves to the first teammate, Enter opens its transcript view.
-    tmux('send-keys', '-t', CLI_WINDOW, 'S-Down')
-    await sleep(200)
+    // ONE Shift+Down, not two. `stepTeammateSelection`
+    // (src/hooks/useBackgroundTaskNavigation.ts:36-43) spends a first press
+    // expanding a COLLAPSED tree onto the leader row; the panel above is
+    // already expanded, so that branch is skipped and this press moves the
+    // selection straight to the teammate. Enter opens its transcript view.
     tmux('send-keys', '-t', CLI_WINDOW, 'S-Down')
     await sleep(200)
     tmux('send-keys', '-t', CLI_WINDOW, 'Enter')
     const viewing = await waitForPane(
-      `scenario 4: "${E2E_TEAMMATE_HEADER}" after Shift+Down, Shift+Down, Enter`,
+      `scenario 4: "${E2E_TEAMMATE_HEADER}" after Shift+Down, Enter`,
       pane => pane.includes(E2E_TEAMMATE_HEADER),
       UI_TIMEOUT_MS,
     )
@@ -1170,8 +1205,8 @@ async function scenarioTeammateViewEscape(): Promise<ScenarioResult> {
     const actual = !returned.ok
       ? `still "${E2E_TEAMMATE_HEADER}" ${UI_TIMEOUT_MS}ms after Escape (the pre-fix behaviour)`
       : stillAlive
-        ? 'returned to the leader view; the teammate pill is still shown'
-        : 'returned to the leader view, but the teammate pill is gone (Escape killed it)'
+        ? 'the panel was visible with zero teammates before the spawn; returned to the leader view, and the teammate row/pill is still shown'
+        : 'returned to the leader view, but the teammate row/pill is gone (Escape killed it)'
     return { name, passed: returned.ok && stillAlive, expected, actual, rows: [], pane: returned.pane }
   } finally {
     await stopCliSession()
