@@ -4,12 +4,18 @@ import * as React from 'react';
 import { Box, Text, type TextProps } from '../../ink.js';
 import { useAppState } from '../../state/AppState.js';
 import { getRunningTeammatesSorted } from '../../tasks/InProcessTeammateTask/InProcessTeammateTask.js';
+import type { TeammateSelection } from '../../tasks/InProcessTeammateTask/teammateSelection.js';
 import { formatNumber } from '../../utils/format.js';
 import { getParentTeamName, getTeamDepth } from '../../utils/swarm/teamHelpers.js';
 import { TeammateSpinnerLine } from './TeammateSpinnerLine.js';
 import { TEAMMATE_SELECT_HINT } from './teammateSelectHint.js';
 type Props = {
-  selectedIndex?: number;
+  /**
+   * Which row is selected, keyed by task id — never a position. A row leaving
+   * or arriving no longer re-points this at a different teammate, which is the
+   * whole reason the positional selectedIndex it replaced was hard to use.
+   */
+  selection?: TeammateSelection | null;
   isInSelectionMode?: boolean;
   allIdle?: boolean;
   /** Leader's active verb (when leader is actively processing) */
@@ -24,7 +30,7 @@ const SUB_TEAM_INDENT = 2;
 export function TeammateSpinnerTree(t0) {
   const $ = _c(61);
   const {
-    selectedIndex,
+    selection,
     isInSelectionMode,
     allIdle,
     leaderVerb,
@@ -41,7 +47,7 @@ export function TeammateSpinnerTree(t0) {
   let t3;
   let t4;
   let t5;
-  if ($[0] !== allIdle || $[1] !== isInSelectionMode || $[2] !== leaderIdleText || $[3] !== leaderTokenCount || $[4] !== leaderVerb || $[5] !== selectedIndex || $[6] !== showTeammateMessagePreview || $[7] !== tasks || $[8] !== viewingAgentTaskId) {
+  if ($[0] !== allIdle || $[1] !== isInSelectionMode || $[2] !== leaderIdleText || $[3] !== leaderTokenCount || $[4] !== leaderVerb || $[5] !== selection || $[6] !== showTeammateMessagePreview || $[7] !== tasks || $[8] !== viewingAgentTaskId) {
     t5 = Symbol.for("react.early_return_sentinel");
     bb0: {
       // Every row the tree draws: running teammates plus the ones still inside
@@ -55,9 +61,9 @@ export function TeammateSpinnerTree(t0) {
       // the compiler emitted them rather than renumbering all 61 slots — the same
       // trade U8 made for the unused slot 9 in BackgroundTaskStatus.
       const isLeaderForegrounded = viewingAgentTaskId === undefined;
-      const isLeaderSelected = isInSelectionMode && selectedIndex === -1;
+      const isLeaderSelected = isInSelectionMode && selection?.kind === "leader";
       const isLeaderHighlighted = isLeaderForegrounded || isLeaderSelected;
-      isHideSelected = isInSelectionMode === true && selectedIndex === teammateTasks.length;
+      isHideSelected = isInSelectionMode === true && selection?.kind === "hide";
       T0 = Box;
       t1 = "column";
       t2 = 1;
@@ -178,13 +184,13 @@ export function TeammateSpinnerTree(t0) {
         // The line is told its own indent as well as wrapped in it: those
         // columns are spent before the row starts, so they have to come off the
         // row's width budget or a deep row overruns the terminal.
-        const line = <TeammateSpinnerLine key={teammate.id} teammate={teammate} isLast={!isInSelectionMode && index === teammateTasks.length - 1} isSelected={isInSelectionMode && selectedIndex === index} isForegrounded={viewingAgentTaskId === teammate.id} allIdle={allIdle} showPreview={showTeammateMessagePreview} indent={indent} />;
+        const line = <TeammateSpinnerLine key={teammate.id} teammate={teammate} isLast={!isInSelectionMode && index === teammateTasks.length - 1} isSelected={isInSelectionMode === true && selection?.kind === "teammate" && selection.taskId === teammate.id} isForegrounded={viewingAgentTaskId === teammate.id} allIdle={allIdle} showPreview={showTeammateMessagePreview} indent={indent} />;
         const row = indent > 0 ? <Box key={teammate.id} paddingLeft={indent}>{line}</Box> : line;
         // Each sub-lead above this row that has no row of its own gets a dimmed
         // `@name · not running` placeholder at ITS indent, outermost first, so
         // the nesting still reads down the real tree. Render-only: a placeholder
-        // is never part of getRunningTeammatesSorted, because selectedIPAgentIndex
-        // indexes that array and a synthetic entry would shift every consumer.
+        // is never part of getRunningTeammatesSorted: that array is the one every
+        // surface agrees on, and a synthetic entry would appear in all of them.
         const absentLeads: React.ReactNode[] = [];
         for (const lead of leadChain(teamName)) {
           const key = teamRowKey(lead.leadName, lead.leadTeam);
@@ -205,7 +211,7 @@ export function TeammateSpinnerTree(t0) {
     $[2] = leaderIdleText;
     $[3] = leaderTokenCount;
     $[4] = leaderVerb;
-    $[5] = selectedIndex;
+    $[5] = selection;
     $[6] = showTeammateMessagePreview;
     $[7] = tasks;
     $[8] = viewingAgentTaskId;

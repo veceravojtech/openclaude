@@ -15,6 +15,7 @@ import {
   type Tool,
   type ToolPermissionContext,
 } from '../Tool.js'
+import type { TeammateSelection } from '../tasks/InProcessTeammateTask/teammateSelection.js'
 import type { TaskState } from '../tasks/types.js'
 import type { AgentColorName } from '../tools/AgentTool/agentColorManager.js'
 import type { AgentDefinitionsResult } from '../tools/AgentTool/loadAgentsDir.js'
@@ -98,7 +99,13 @@ export type AppState = DeepImmutable<{
   isBriefOnly: boolean
   // Optional - only present when ENABLE_AGENT_SWARMS is true (for dead code elimination)
   showTeammateMessagePreview?: boolean
-  selectedIPAgentIndex: number
+  // Which row of the teammates tree is selected, keyed by TASK ID (see
+  // tasks/InProcessTeammateTask/teammateSelection). null is "nothing selected".
+  // Deliberately NOT a position: the index this replaced named whichever
+  // teammate happened to sit at that spot, so a row leaving or arriving above
+  // it moved the highlight to somebody else. Type-only import — a runtime edge
+  // from state/ into tasks/ would risk the cycle teammateViewHelpers documents.
+  selectedTeammate: TeammateSelection | null
   // CoordinatorTaskPanel selection: -1 = pill, 0 = main, 1..N = agent rows.
   // AppState (not local) so the panel can read it directly without prop-drilling
   // through PromptInput → PromptInputFooter.
@@ -515,7 +522,7 @@ export function getDefaultAppState(): AppState {
     expandedView: 'none',
     isBriefOnly: false,
     showTeammateMessagePreview: false,
-    selectedIPAgentIndex: -1,
+    selectedTeammate: null,
     coordinatorTaskIndex: -1,
     viewSelectionMode: 'none',
     footerSelection: null,

@@ -2870,7 +2870,7 @@ async function run(): Promise<CommanderCommand> {
       isBriefOnly: initialIsBriefOnly,
       expandedView: deriveInitialExpandedView(getGlobalConfig(), isAgentSwarmsEnabled()),
       showTeammateMessagePreview: isAgentSwarmsEnabled() ? false : undefined,
-      selectedIPAgentIndex: -1,
+      selectedTeammate: null,
       coordinatorTaskIndex: -1,
       viewSelectionMode: 'none',
       footerSelection: null,

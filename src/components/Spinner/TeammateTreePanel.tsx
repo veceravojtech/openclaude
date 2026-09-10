@@ -27,7 +27,7 @@ import { TeammateSpinnerTree } from './TeammateSpinnerTree.js'
 export function TeammateTreePanel(): React.ReactNode {
   const expandedView = useAppState(s => s.expandedView)
   const tasks = useAppState(s => s.tasks)
-  const selectedIndex = useAppState(s => s.selectedIPAgentIndex)
+  const selection = useAppState(s => s.selectedTeammate)
   const isInSelectionMode = useAppState(
     s => s.viewSelectionMode === 'selecting-agent',
   )
@@ -43,14 +43,24 @@ export function TeammateTreePanel(): React.ReactNode {
     return running.length > 0 && running.every(t => t.isIdle)
   }, [tasks])
 
-  // The earliest moment a row currently on screen stops being in grace, or
-  // undefined when nothing is in grace.
+  // The earliest eviction deadline among the terminal rows, whether or not it
+  // has already passed, and undefined when no row has one.
+  //
+  // An expired deadline is deliberately INCLUDED. Skipping it — which is what
+  // an `isRetainedOrWithinGrace` check here used to do — meant a row whose
+  // deadline lapsed between a `tasks` change and the timer firing was never
+  // scheduled at all, so it lingered in AppState (undrawn, because the shared
+  // order already dropped it) until the lead's next turn ran the lazy GC. The
+  // delay below floors at 0, so such a row is collected on the next tick, and
+  // the timer body re-checks the shared retain/grace rule before evicting
+  // anything. A retained row genuinely has no deadline to wait for.
   const nextDeadline = React.useMemo(() => {
     let earliest: number | undefined
     for (const task of getAllInProcessTeammateTasks(tasks)) {
       if (!isTerminalTaskStatus(task.status)) continue
+      if (task.retain === true) continue
       const deadline = task.evictAfter
-      if (deadline === undefined || !isRetainedOrWithinGrace(task)) continue
+      if (deadline === undefined) continue
       if (earliest === undefined || deadline < earliest) earliest = deadline
     }
     return earliest
@@ -96,7 +106,7 @@ export function TeammateTreePanel(): React.ReactNode {
   // on whether the lead happens to be mid-turn.
   return (
     <TeammateSpinnerTree
-      selectedIndex={selectedIndex}
+      selection={selection}
       isInSelectionMode={isInSelectionMode}
       allIdle={allIdle}
     />

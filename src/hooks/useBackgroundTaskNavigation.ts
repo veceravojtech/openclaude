@@ -13,6 +13,14 @@ import {
 } from '../state/teammateViewHelpers.js'
 import { getRunningTeammatesSorted } from '../tasks/InProcessTeammateTask/InProcessTeammateTask.js'
 import {
+  LEADER_SELECTION,
+  orderSignature,
+  resolveSurvivingSelection,
+  selectedTeammateTask,
+  selectionsEqual,
+  stepSelection,
+} from '../tasks/InProcessTeammateTask/teammateSelection.js'
+import {
   type InProcessTeammateTaskState,
   isInProcessTeammateTask,
 } from '../tasks/InProcessTeammateTask/types.js'
@@ -23,38 +31,37 @@ import {
 } from '../utils/interruptionTrace.js'
 import { killInProcessTeammate } from '../utils/swarm/spawnInProcess.js'
 
-// Step teammate selection by delta, wrapping across leader(-1)..teammates(0..n-1)..hide(n).
+// Step teammate selection by delta over the selectable rows — leader, then the
+// teammates in depth-first tree order, then the hide row — storing the
+// SELECTION it lands on rather than the position it landed at.
 // First step from a collapsed tree expands it and parks on leader.
 function stepTeammateSelection(
   delta: 1 | -1,
   setAppState: (updater: (prev: AppState) => AppState) => void,
 ): void {
   setAppState(prev => {
-    const currentCount = getRunningTeammatesSorted(prev.tasks).length
-    if (currentCount === 0) return prev
-
     if (prev.expandedView !== 'teammates') {
       return {
         ...prev,
         expandedView: 'teammates' as const,
         viewSelectionMode: 'selecting-agent',
-        selectedIPAgentIndex: -1,
+        selectedTeammate: LEADER_SELECTION,
       }
     }
 
-    const maxIdx = currentCount // hide row
-    const cur = prev.selectedIPAgentIndex
-    const next =
-      delta === 1
-        ? cur >= maxIdx
-          ? -1
-          : cur + 1
-        : cur <= -1
-          ? maxIdx
-          : cur - 1
+    // No zero-row bail: with no teammates the selectable rows are still leader
+    // and hide, so the panel's own rows stay reachable when it is showing its
+    // empty state. Whether Shift+Up/Down belongs to the tree at all is the
+    // caller's decision (it hands the press to the background-tasks dialog when
+    // there is neither a teammate nor a panel).
+    const next = stepSelection(
+      prev.selectedTeammate,
+      getRunningTeammatesSorted(prev.tasks),
+      delta,
+    )
     return {
       ...prev,
-      selectedIPAgentIndex: next,
+      selectedTeammate: next,
       viewSelectionMode: 'selecting-agent',
     }
   })
@@ -72,12 +79,13 @@ export function useBackgroundTaskNavigation(options?: {
   const tasks = useAppState(s => s.tasks)
   const viewSelectionMode = useAppState(s => s.viewSelectionMode)
   const viewingAgentTaskId = useAppState(s => s.viewingAgentTaskId)
-  const selectedIPAgentIndex = useAppState(s => s.selectedIPAgentIndex)
+  const expandedView = useAppState(s => s.expandedView)
+  const selectedTeammate = useAppState(s => s.selectedTeammate)
   const setAppState = useSetAppState()
 
   // Running teammates in the one shared depth-first tree order, so Shift+Up/Down
-  // walks a sub-lead straight into its own sub-team and selectedIPAgentIndex
-  // keeps addressing the row TeammateSpinnerTree draws at that position.
+  // walks a sub-lead straight into its own sub-team and the selection names the
+  // same row TeammateSpinnerTree draws at that position.
   const teammateTasks = getRunningTeammatesSorted(tasks)
   const teammateCount = teammateTasks.length
 
@@ -86,63 +94,63 @@ export function useBackgroundTaskNavigation(options?: {
     t => isBackgroundTask(t) && t.type !== 'in_process_teammate',
   )
 
-  // Track previous teammate count to detect when teammates are removed
-  const prevTeammateCountRef = useRef<number>(teammateCount)
+  // The rows as they were when this effect last ran. The ROWS, not their ids:
+  // the survivor rule needs each row's identity to find siblings and sub-leads.
+  const prevOrderRef =
+    useRef<readonly InProcessTeammateTaskState[]>(teammateTasks)
 
-  // Clamp selection index if teammates are removed or reset when count becomes 0
+  // Changes when the ordered rows change by membership OR by position, and is
+  // the survivor effect's only trigger.
+  const teammateOrderSignature = orderSignature(teammateTasks)
+
+  // Move the selection to the nearest survivor when the ordered list changes.
+  //
+  // Keyed on the ORDER, never on the count, which is the defect this replaced:
+  // a leave+join that keeps the count unchanged never re-ran the old clamp, and
+  // a row leaving above the selection shifted the highlight onto a different
+  // teammate instead of being noticed at all.
   useEffect(() => {
-    const prevCount = prevTeammateCountRef.current
-    prevTeammateCountRef.current = teammateCount
-
     setAppState(prev => {
-      const currentTeammates = getRunningTeammatesSorted(prev.tasks)
-      const currentCount = currentTeammates.length
+      // ONE `now` for the whole updater, so the grace deadlines cannot be read
+      // two different ways inside a single decision.
+      const now = Date.now()
+      const nextOrder = getRunningTeammatesSorted(prev.tasks, now)
+      const prevOrder = prevOrderRef.current
+      // Safe inside the updater: this store calls it exactly once and
+      // synchronously (state/store.ts), so this is not a React useState updater
+      // that StrictMode may invoke twice.
+      prevOrderRef.current = nextOrder
 
-      // When teammates are removed (count goes from >0 to 0), reset selection
-      // Only reset if we previously had teammates (not on initial mount with 0)
-      // Don't clobber viewSelectionMode if actively viewing a teammate transcript —
-      // the user may be reviewing a completed teammate and needs escape to exit
-      if (
-        currentCount === 0 &&
-        prevCount > 0 &&
-        prev.selectedIPAgentIndex !== -1
-      ) {
-        if (prev.viewSelectionMode === 'viewing-agent') {
-          return {
-            ...prev,
-            selectedIPAgentIndex: -1,
-          }
-        }
-        return {
-          ...prev,
-          selectedIPAgentIndex: -1,
-          viewSelectionMode: 'none',
-        }
+      const next = resolveSurvivingSelection(
+        prev.selectedTeammate,
+        prevOrder,
+        nextOrder,
+      )
+      // The last teammate left while one was selected: also drop out of
+      // selection mode, unless a transcript is being viewed — the user may be
+      // reading a finished teammate and needs Escape to exit.
+      const clearsSelectionMode =
+        nextOrder.length === 0 &&
+        prev.selectedTeammate?.kind === 'teammate' &&
+        prev.viewSelectionMode !== 'viewing-agent'
+
+      if (selectionsEqual(next, prev.selectedTeammate) && !clearsSelectionMode) {
+        return prev
       }
-
-      // Clamp if index is out of bounds
-      // Max valid index is currentCount (the "hide" row) when spinner tree is shown
-      const maxIndex =
-        prev.expandedView === 'teammates' ? currentCount : currentCount - 1
-      if (currentCount > 0 && prev.selectedIPAgentIndex > maxIndex) {
-        return {
-          ...prev,
-          selectedIPAgentIndex: maxIndex,
-        }
+      return {
+        ...prev,
+        selectedTeammate: next,
+        ...(clearsSelectionMode && { viewSelectionMode: 'none' as const }),
       }
-
-      return prev
     })
-  }, [teammateCount, setAppState])
+  }, [teammateOrderSignature, setAppState])
 
   // Get the selected teammate's task info
   const getSelectedTeammate = (): {
     taskId: string
     task: InProcessTeammateTaskState
   } | null => {
-    if (teammateCount === 0) return null
-    const selectedIndex = selectedIPAgentIndex
-    const task = teammateTasks[selectedIndex]
+    const task = selectedTeammateTask(selectedTeammate, teammateTasks)
     if (!task) return null
 
     return { taskId: task.id, task }
@@ -198,17 +206,19 @@ export function useBackgroundTaskNavigation(options?: {
       setAppState(prev => ({
         ...prev,
         viewSelectionMode: 'none',
-        selectedIPAgentIndex: -1,
+        selectedTeammate: null,
       }))
       return
     }
 
-    // Shift+Up/Down for teammate transcript switching (with wrapping)
-    // Index -1 represents the leader, 0+ are teammates
-    // When showSpinnerTree is true, index === teammateCount is the "hide" row
+    // Shift+Up/Down for teammate transcript switching (with wrapping) over
+    // leader → teammates → hide. The panel showing its empty state is reason
+    // enough to step: its leader and hide rows are selectable with no teammate
+    // alive. With the panel off and no teammate, the press still belongs to the
+    // background-tasks dialog.
     if (e.shift && (e.key === 'up' || e.key === 'down')) {
       e.preventDefault()
-      if (teammateCount > 0) {
+      if (teammateCount > 0 || expandedView === 'teammates') {
         stepTeammateSelection(e.key === 'down' ? 1 : -1, setAppState)
       } else if (hasNonTeammateBackgroundTasks) {
         options?.onOpenBackgroundTasks?.()
@@ -233,15 +243,17 @@ export function useBackgroundTaskNavigation(options?: {
     // Enter to confirm selection (only when in selecting mode)
     if (e.key === 'return' && viewSelectionMode === 'selecting-agent') {
       e.preventDefault()
-      if (selectedIPAgentIndex === -1) {
+      // Nothing selected reads as the leader row, exactly as index -1 did.
+      const kind = selectedTeammate?.kind ?? 'leader'
+      if (kind === 'leader') {
         exitTeammateView(setAppState)
-      } else if (selectedIPAgentIndex >= teammateCount) {
+      } else if (kind === 'hide') {
         // "Hide" row selected - collapse the spinner tree
         setAppState(prev => ({
           ...prev,
           expandedView: 'none' as const,
           viewSelectionMode: 'none',
-          selectedIPAgentIndex: -1,
+          selectedTeammate: null,
         }))
       } else {
         const selected = getSelectedTeammate()
@@ -252,11 +264,17 @@ export function useBackgroundTaskNavigation(options?: {
       return
     }
 
-    // k to kill selected teammate (only in selecting mode)
+    // k to kill selected teammate (only in selecting mode).
+    // The outer guard is "a row below the leader is selected" — a teammate or
+    // the hide row, the same population index >= 0 covered — so k stays
+    // swallowed on the hide row instead of reaching the prompt. The kill itself
+    // needs a listed teammate that is still running, which is what makes k a
+    // no-op on a row inside its grace window.
     if (
       e.key === 'k' &&
       viewSelectionMode === 'selecting-agent' &&
-      selectedIPAgentIndex >= 0
+      selectedTeammate !== null &&
+      selectedTeammate.kind !== 'leader'
     ) {
       e.preventDefault()
       const selected = getSelectedTeammate()

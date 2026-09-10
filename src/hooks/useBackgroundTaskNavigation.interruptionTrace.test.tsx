@@ -199,7 +199,7 @@ test('records kill-key causality before aborting the teammate lifecycle', async 
     ...getDefaultAppState(),
     tasks: { [task.id]: task },
     expandedView: 'teammates',
-    selectedIPAgentIndex: 0,
+    selectedTeammate: { kind: 'teammate', taskId: task.id },
     viewSelectionMode: 'selecting-agent',
   })
 

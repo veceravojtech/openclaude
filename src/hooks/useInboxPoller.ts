@@ -45,6 +45,7 @@ import {
   removeTeammateFromTeamFile,
   setMemberMode,
 } from '../utils/swarm/teamHelpers.js'
+import { TEAMMATE_GRACE_MS } from '../utils/task/framework.js'
 import { unassignTeammateTasks } from '../utils/tasks.js'
 import {
   getAgentName,
@@ -800,6 +801,13 @@ export function useInboxPoller({
                     ...task,
                     status: 'completed' as const,
                     endTime: Date.now(),
+                    // The same retention marker every in-process terminal
+                    // transition writes. Without it an out-of-process
+                    // (tmux/iTerm2) teammate's row vanished the instant it shut
+                    // down instead of keeping its place for the grace window,
+                    // and carried no deadline for the lazy GC to collect it by.
+                    retain: false,
+                    evictAfter: Date.now() + TEAMMATE_GRACE_MS,
                   }
                 }
               }

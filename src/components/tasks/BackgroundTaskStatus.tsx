@@ -3,6 +3,7 @@ import figures from 'figures';
 import * as React from 'react';
 import { useMemo, useState } from 'react';
 import { useTerminalSize } from 'src/hooks/useTerminalSize.js';
+import { isTerminalTaskStatus } from 'src/Task.js';
 import { stringWidth } from 'src/ink/stringWidth.js';
 import { useAppState, useSetAppState } from 'src/state/AppState.js';
 import { enterTeammateView, exitTeammateView } from 'src/state/teammateViewHelpers.js';
@@ -50,15 +51,14 @@ export function BackgroundTaskStatus(t0) {
   const runningTasks = t3;
   const expandedView = useAppState(_temp4);
   const showSpinnerTree = expandedView === "teammates";
-  const allTeammates = !showSpinnerTree && runningTasks.length > 0 && runningTasks.every(_temp5);
   let t4;
-  // The SAME widened source the navigation hook and the PromptInput footer index
-  // into (getRunningTeammatesSorted: running plus rows still in their 30s grace
+  // The SAME widened source the navigation hook and the PromptInput footer read
+  // (getRunningTeammatesSorted: running plus rows still in their 30s grace
   // window), not a status-running filter of its own. With the tree panel OFF the
-  // pills are what selectedIPAgentIndex addresses, so a pill row built from a
+  // pills are what the footer selection addresses, so a pill row built from a
   // narrower array would put the highlight on a different teammate than the one
-  // the index names. Memoised on `tasks` because that is what it now reads; the
-  // slot numbers are untouched.
+  // the selection names. Memoised on `tasks` because that is what it now reads;
+  // the slot numbers are untouched.
   if ($[2] !== tasks) {
     t4 = getRunningTeammatesSorted(tasks);
     $[2] = tasks;
@@ -67,6 +67,13 @@ export function BackgroundTaskStatus(t0) {
     t4 = $[3];
   }
   const teammateEntries = t4;
+  // Keyed on the WIDENED order, not on runningTasks: a terminal task is not a
+  // background task, so once every teammate is inside its grace window
+  // runningTasks is empty and `.every` is vacuously true — the pill row renders
+  // the grace pills instead of vanishing for 30s. A live non-teammate task
+  // still fails `.every` and falls through to the summary pill exactly as
+  // before. A plain statement move; allTeammates holds no cache slot.
+  const allTeammates = !showSpinnerTree && teammateEntries.length > 0 && runningTasks.every(_temp5);
   let t5;
   if ($[4] !== isLeaderIdle) {
     t5 = {
@@ -109,7 +116,7 @@ export function BackgroundTaskStatus(t0) {
     const selectedIdx = tasksSelected ? teammateFooterIndex : -1;
     let t8;
     if ($[12] !== teammateEntries || $[13] !== viewingAgentTaskId) {
-      t8 = viewingAgentTaskId ? teammateEntries.findIndex(t_3 => t_3.id === viewingAgentTaskId) + 1 : 0;
+      t8 = viewingAgentTaskId === undefined ? 0 : viewedPillIndex(teammateEntries, viewingAgentTaskId);
       $[12] = teammateEntries;
       $[13] = viewingAgentTaskId;
       $[14] = t8;
@@ -158,7 +165,7 @@ export function BackgroundTaskStatus(t0) {
     if ($[25] !== selectedIdx || $[26] !== setAppState || $[27] !== viewedIdx || $[28] !== visiblePills) {
       t13 = visiblePills.map((pill_1, i_1) => {
         const needsSeparator = i_1 > 0;
-        return <React.Fragment key={pill_1.name}>{needsSeparator && <Text> </Text>}<AgentPill name={pill_1.name} color={pill_1.color} isSelected={selectedIdx === pill_1.idx} isViewed={viewedIdx === pill_1.idx} isIdle={pill_1.isIdle} onClick={() => pill_1.taskId ? enterTeammateView(pill_1.taskId, setAppState) : exitTeammateView(setAppState)} /></React.Fragment>;
+        return <React.Fragment key={pill_1.taskId ?? LEADER_PILL_KEY}>{needsSeparator && <Text> </Text>}<AgentPill name={pill_1.name} color={pill_1.color} isSelected={selectedIdx === pill_1.idx} isViewed={viewedIdx === pill_1.idx} isIdle={pill_1.isIdle} onClick={() => pill_1.taskId ? enterTeammateView(pill_1.taskId, setAppState) : exitTeammateView(setAppState)} /></React.Fragment>;
       });
       $[25] = selectedIdx;
       $[26] = setAppState;
@@ -249,16 +256,51 @@ function _temp0(pill, i) {
   };
 }
 function _temp8(t_2) {
+  // A sub-team member is prefixed by the sub-leads above it, so
+  // `@supervisor/worker-1` says whose worker it is; a root-team member keeps
+  // its bare `@name`. The width math below measures this same label.
+  const label = [...getSubLeadPath(t_2.identity.teamName), t_2.identity.agentName].join("/");
+  // A row inside its 30s grace window is finished, so its terminal word IS its
+  // status — the same thing TeammateSpinnerLine draws in the tree. The word is
+  // folded into `name` rather than passed as its own AgentPill prop on purpose:
+  // AgentPill's label memos pack their dependencies contiguously, so a new prop
+  // would renumber _c(19). Folding also keeps the width math honest for free,
+  // because it measures `@${name}` — the exact string rendered.
+  const isTerminal = isTerminalTaskStatus(t_2.status);
   return {
-    // A sub-team member is prefixed by the sub-leads above it, so
-    // `@supervisor/worker-1` says whose worker it is; a root-team member keeps
-    // its bare `@name`. The width math below measures this same label.
-    name: [...getSubLeadPath(t_2.identity.teamName), t_2.identity.agentName].join("/"),
+    name: isTerminal ? `${label} \xB7 ${t_2.status}` : label,
     color: getAgentThemeColor(t_2.identity.color),
-    isIdle: t_2.isIdle,
+    // AgentPill's "not actively working, draw dimmed" channel. A finished row
+    // is dimmed for the same reason the tree dims it.
+    isIdle: isTerminal || t_2.isIdle,
     taskId: t_2.id
   };
 }
+
+/**
+ * The pill index of the teammate whose transcript is being viewed: `i + 1`,
+ * because pill 0 is the leader's own `main` pill.
+ *
+ * -1 when the viewed task is not in the list — NOT 0. `findIndex(...) + 1`
+ * turned a missing task into 0 and lit up the `main` pill as if the leader were
+ * being viewed, which is exactly the thing this unit exists to stop: a pill
+ * highlight naming somebody other than what it points at. -1 highlights no pill
+ * at all, the same sentinel `selectedIdx` already uses.
+ */
+function viewedPillIndex(entries: readonly {
+  id: string;
+}[], viewingAgentTaskId: string): number {
+  const index = entries.findIndex(entry => entry.id === viewingAgentTaskId);
+  return index === -1 ? -1 : index + 1;
+}
+
+/**
+ * React key for the leader's pill. The pills used to be keyed by their LABEL,
+ * so a teammate that happened to be named `main` collided with the leader's own
+ * pill and React dropped one of them. Every teammate pill carries its task id;
+ * only the leader has none, and no task id can be this sentinel.
+ */
+const LEADER_PILL_KEY = "\u0000leader-pill";
 function _temp5(t_0) {
   return t_0.type === "in_process_teammate";
 }

@@ -8,8 +8,8 @@ import {
 import type { InProcessTeammateTaskState } from './types.js'
 
 /**
- * The one order every teammate surface indexes into: the spinner tree's rows,
- * the pill row, PromptInput's footer selector and selectedIPAgentIndex in
+ * The one order every teammate surface reads: the spinner tree's rows, the pill
+ * row, PromptInput's footer selector and the selection stepper in
  * useBackgroundTaskNavigation. It has to be depth-first over the team tree —
  * a sub-lead immediately followed by its own sub-team — or the row a key
  * selects and the row the operator sees stop being the same row.

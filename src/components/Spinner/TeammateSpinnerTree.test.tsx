@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, test } from 'bun:test'
 import chalk from 'chalk'
+import figures from 'figures'
 import React from 'react'
 
 import { stringWidth } from '../../ink/stringWidth.js'
@@ -299,17 +300,82 @@ describe('TeammateSpinnerTree', () => {
     expect(rows.find(row => row.name === 'stray')!.indent).toBe(root + 2)
   })
 
-  test('marks the selected row, which is the row at that index of the shared order', async () => {
-    // selectedIndex 2 is worker-1 in depth-first order — the same index
-    // useBackgroundTaskNavigation would put in selectedIPAgentIndex.
+  test('marks the row the selection NAMES, wherever that row now sits', async () => {
+    // The selection is a task id, not a position — the same value
+    // useBackgroundTaskNavigation stores in AppState.selectedTeammate.
+    const selection = {
+      kind: 'teammate' as const,
+      taskId: 'task-email/supervisor-worker-1',
+    }
     const frame = await renderTree(TWO_LEVEL, {
       isInSelectionMode: true,
-      selectedIndex: 2,
+      selection,
     })
-    const selected = frame
-      .split('\n')
-      .find(line => line.includes('enter to view'))
-    expect(selected).toContain('@worker-1')
+    expect(
+      frame.split('\n').find(line => line.includes('enter to view')),
+    ).toContain('@worker-1')
+
+    // Insert a row above it: worker-1 moves from the third row to the fourth
+    // and the highlight moves WITH it. A positional selection would have stayed
+    // on the third row, which is now `supervisor`.
+    const shifted = await renderTree(
+      [...TWO_LEVEL, teammate('aaron', 'email')],
+      { isInSelectionMode: true, selection },
+    )
+    const rows = teammateRows(shifted)
+    expect(rows.map(row => row.name)).toEqual([
+      'aaron',
+      'alice',
+      'supervisor',
+      'worker-1',
+      'worker-2',
+      'zoe',
+    ])
+    expect(
+      shifted.split('\n').find(line => line.includes('enter to view')),
+    ).toContain('@worker-1')
+  })
+
+  test('marks the leader row and the hide row from the same selection value', async () => {
+    // The leader row is already highlighted while the leader is foregrounded,
+    // so what says SELECTED is the pointer glyph in its first column.
+    const leaderLine = (frame: string): string =>
+      frame.split('\n').find(line => line.includes('team-lead'))!
+
+    const onLeader = await renderTree(TWO_LEVEL, {
+      isInSelectionMode: true,
+      selection: { kind: 'leader' },
+    })
+    expect(leaderLine(onLeader)).toContain(figures.pointer)
+
+    const onTeammate = await renderTree(TWO_LEVEL, {
+      isInSelectionMode: true,
+      selection: { kind: 'teammate', taskId: 'task-email-alice' },
+    })
+    expect(leaderLine(onTeammate)).not.toContain(figures.pointer)
+    expect(
+      onTeammate.split('\n').find(line => line.includes('enter to view')),
+    ).toContain('@alice')
+
+    const onHide = await renderTree(TWO_LEVEL, {
+      isInSelectionMode: true,
+      selection: { kind: 'hide' },
+    })
+    expect(onHide.split('\n').find(line => line.includes('hide'))).toContain(
+      'enter to collapse',
+    )
+    expect(leaderLine(onHide)).not.toContain(figures.pointer)
+  })
+
+  test('marks no row at all for a selection naming a teammate that is not listed', async () => {
+    // The one frame between a row leaving and the survivor rule repairing the
+    // selection: nothing is highlighted, and in particular the highlight is NOT
+    // handed to whoever happens to sit at that position.
+    const frame = await renderTree(TWO_LEVEL, {
+      isInSelectionMode: true,
+      selection: { kind: 'teammate', taskId: 'task-email-ghost' },
+    })
+    expect(frame).not.toContain('enter to view')
   })
 
   test('keeps every row inside a narrow terminal: the sub-team indent is spent from the row\'s own width budget', async () => {
@@ -395,7 +461,7 @@ describe('TeammateSpinnerTree', () => {
     const lines = plain.split('\n').filter(line => line.trim() !== '')
     expect(lines).toHaveLength(2)
 
-    const selecting = await renderTree([], { isInSelectionMode: true, selectedIndex: 0 })
+    const selecting = await renderTree([], { isInSelectionMode: true, selection: { kind: 'hide' } })
     expect(selecting).toContain('hide')
     expect(selecting).toContain('enter to collapse')
   })

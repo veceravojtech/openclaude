@@ -170,15 +170,44 @@ describe('TeammateTreePanel — the lead row carries no lead activity', () => {
 
 describe('TeammateTreePanel — what it passes down', () => {
   test('passes the selection through, hide row included', async () => {
+    // The selection names bob by TASK ID, not by position: the panel reads
+    // AppState.selectedTeammate and the tree marks the row whose id matches.
     const frame = await renderPanel(
       stateWith([teammate('alice'), teammate('bob')], {
         viewSelectionMode: 'selecting-agent',
-        selectedIPAgentIndex: 1,
+        selectedTeammate: { kind: 'teammate', taskId: 'task-bob' },
       }),
     )
     const selected = frame.split('\n').find(line => line.includes('enter to view'))
     expect(selected).toContain('@bob')
     expect(frame).toContain('hide')
+  })
+
+  test('an id-keyed selection follows its teammate when a row is inserted above it', async () => {
+    // The regression this unit exists for: with a positional selection, adding
+    // `aaron` above `bob` left the highlight on index 1 and it slid onto
+    // `alice`. Keyed by id, the same insertion moves bob's row down the screen
+    // and the highlight goes with it.
+    const selectedTeammate = { kind: 'teammate' as const, taskId: 'task-bob' }
+    const before = await renderPanel(
+      stateWith([teammate('alice'), teammate('bob')], {
+        viewSelectionMode: 'selecting-agent',
+        selectedTeammate,
+      }),
+    )
+    expect(
+      before.split('\n').find(line => line.includes('enter to view')),
+    ).toContain('@bob')
+
+    const after = await renderPanel(
+      stateWith([teammate('aaron'), teammate('alice'), teammate('bob')], {
+        viewSelectionMode: 'selecting-agent',
+        selectedTeammate,
+      }),
+    )
+    expect(
+      after.split('\n').find(line => line.includes('enter to view')),
+    ).toContain('@bob')
   })
 
   test('all-idle is read off the RUNNING teammates, so a finished row cannot hold it back', async () => {
@@ -275,6 +304,63 @@ describe('TeammateTreePanel — the grace deadline', () => {
     try {
       await Bun.sleep(250)
       expect(mounted.taskIds()).toContain(held.id)
+    } finally {
+      await mounted.cleanup()
+    }
+  })
+
+  test('collects a row whose deadline had ALREADY passed when the panel mounted', async () => {
+    // S4: the deadline memo used to skip a row that was already out of grace,
+    // so nothing was ever scheduled for it and it lingered in AppState —
+    // undrawn, because the shared order had already dropped it — until the
+    // lead's next turn ran the lazy GC. An expired deadline now schedules
+    // immediately instead of being skipped.
+    const expired = inGrace('bob', -5_000)
+    const initial = stateWith([teammate('alice'), expired])
+    // The row IS in AppState when the panel mounts — it is what has to be
+    // collected. Before this change nothing scheduled it and it stayed.
+    expect(Object.keys(initial.tasks)).toContain(expired.id)
+
+    const mounted = await mount(initial)
+    try {
+      await Bun.sleep(120)
+      expect(mounted.taskIds()).not.toContain(expired.id)
+      expect(mounted.taskIds()).toContain('task-alice')
+    } finally {
+      await mounted.cleanup()
+    }
+  })
+
+  test('a retained row has no deadline to wait for and is never collected', async () => {
+    // retain: true is the UI actively holding the task; it carries no
+    // evictAfter, so including expired deadlines above cannot reach it.
+    const heldByUi = teammate('bob', {
+      status: 'completed',
+      notified: true,
+      retain: true,
+    })
+    const mounted = await mount(stateWith([heldByUi]))
+    try {
+      await Bun.sleep(200)
+      expect(mounted.taskIds()).toContain(heldByUi.id)
+    } finally {
+      await mounted.cleanup()
+    }
+  })
+
+  test('the eviction settles instead of re-arming a timer forever', async () => {
+    // The memo recomputes on the `tasks` change the eviction causes. Once the
+    // expired row is gone no row has a deadline at all, so no timer is armed
+    // and the task map stops changing: the same ids before and after a further
+    // wait, with the live teammate still there.
+    const expired = inGrace('bob', -1)
+    const mounted = await mount(stateWith([teammate('alice'), expired]))
+    try {
+      await Bun.sleep(120)
+      const settled = mounted.taskIds()
+      expect(settled).toEqual(['task-alice'])
+      await Bun.sleep(200)
+      expect(mounted.taskIds()).toEqual(settled)
     } finally {
       await mounted.cleanup()
     }

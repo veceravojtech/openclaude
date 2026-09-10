@@ -45,6 +45,7 @@ import { getActiveAgentForInput, getViewedTeammateTask } from '../../state/selec
 import { enterTeammateView, exitTeammateView, getRegisteredAgentName, stopOrDismissAgent } from '../../state/teammateViewHelpers.js';
 import type { ToolPermissionContext } from '../../Tool.js';
 import { getRunningTeammatesSorted } from '../../tasks/InProcessTeammateTask/InProcessTeammateTask.js';
+import { footerIndexForSelection, LEADER_SELECTION, orderSignature, resolveSurvivingSelection, selectionsEqual, stepFooterSelection, type TeammateSelection } from '../../tasks/InProcessTeammateTask/teammateSelection.js';
 import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js';
 import { type LocalAgentTaskState } from '../../tasks/LocalAgentTask/LocalAgentTask.js';
 import { AGENT_COLOR_TO_THEME_COLOR, AGENT_COLORS, type AgentColorName } from '../../tools/AgentTool/agentColorManager.js';
@@ -376,8 +377,16 @@ function PromptInput({
   // one TeammateSpinnerTree draws and the pill row shows.
   const inProcessTeammates = useMemo(() => getRunningTeammatesSorted(tasks), [tasks]);
 
-  // Team mode: all background tasks are in-process teammates
-  const isTeammateMode = inProcessTeammates.length > 0 || viewedTeammate !== undefined;
+  // Team mode: ←/→ belongs to the team member list rather than to the footer.
+  // Keyed on LIVE teammates, not on the widened order: a finished teammate keeps
+  // a pill for its 30s grace window (so you can still see and open it), but once
+  // every teammate is terminal there is no live team to cycle through and ←/→
+  // goes back to ordinary footer navigation instead of being held for 30s.
+  // The cycle and Enter below still operate over the WIDENED list, so a row that
+  // finished while others are live stays reachable — matching the tree, where a
+  // grace row is selectable.
+  const liveTeammates = useMemo(() => inProcessTeammates.filter(t => t.status === 'running'), [inProcessTeammates]);
+  const isTeammateMode = liveTeammates.length > 0 || viewedTeammate !== undefined;
 
   // When viewing a teammate, show their permission mode in the footer instead of the leader's
   const effectiveToolPermissionContext = useMemo((): ToolPermissionContext => {
@@ -416,7 +425,32 @@ function PromptInput({
   const pendingSpaceAfterPillRef = useRef(false);
   const [showTeamsDialog, setShowTeamsDialog] = useState(false);
   const [showBridgeDialog, setShowBridgeDialog] = useState(false);
-  const [teammateFooterIndex, setTeammateFooterIndex] = useState(0);
+  // The footer's own selection, id-keyed like the tree's but deliberately NOT
+  // merged into AppState's: ←/→ in the footer and Shift+↑/↓ in the tree are
+  // different modes, and sharing one value would make ←/→ move the tree
+  // highlight. It never holds `hide` — the footer has no hide row.
+  const [teammateFooterSelection, setTeammateFooterSelection] = useState<TeammateSelection>(LEADER_SELECTION);
+  // The prop every footer component still takes: 0 is the leader's `main` pill,
+  // a teammate is its position + 1, and -1 highlights nothing. Derived per
+  // render from the order, so no positional value is ever stored and
+  // PromptInputFooterLeftSide / ModeIndicator need no change at all.
+  const teammateFooterIndex = footerIndexForSelection(teammateFooterSelection, inProcessTeammates);
+  // The clamp the footer never had: when the list changes, a selection whose
+  // teammate is gone moves to the nearest survivor (previous sibling, else the
+  // parent sub-lead, else the leader) using the SAME helper the tree uses.
+  const teammateOrderSignature = orderSignature(inProcessTeammates);
+  const prevTeammateOrderRef = useRef(inProcessTeammates);
+  useEffect(() => {
+    setTeammateFooterSelection(prev => {
+      const prevOrder = prevTeammateOrderRef.current;
+      prevTeammateOrderRef.current = inProcessTeammates;
+      const next = resolveSurvivingSelection(prev, prevOrder, inProcessTeammates);
+      // resolveSurvivingSelection only answers null for a null input, and this
+      // state is never null.
+      return next !== null && !selectionsEqual(next, prev) ? next : prev;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the order signature; inProcessTeammates IS the order it names
+  }, [teammateOrderSignature]);
   // -1 sentinel: tasks pill is selected but no specific agent row is selected yet.
   // First ↓ selects the pill, second ↓ moves to row 0. Prevents double-select
   // of pill + row when both bg tasks (pill) and forked agents (rows) are visible.
@@ -535,7 +569,7 @@ function PromptInput({
       footerSelection: item
     });
     if (item === 'tasks') {
-      setTeammateFooterIndex(0);
+      setTeammateFooterSelection(LEADER_SELECTION);
       setCoordinatorTaskIndex(minCoordinatorIndex);
     }
   }
@@ -1907,16 +1941,14 @@ function PromptInput({
     'footer:next': () => {
       // Teammate mode: ←/→ cycles within the team member list
       if (tasksSelected && isTeammateMode) {
-        const totalAgents = 1 + inProcessTeammates.length;
-        setTeammateFooterIndex(prev => (prev + 1) % totalAgents);
+        setTeammateFooterSelection(prev => stepFooterSelection(prev, inProcessTeammates, 1));
         return;
       }
       navigateFooter(1);
     },
     'footer:previous': () => {
       if (tasksSelected && isTeammateMode) {
-        const totalAgents = 1 + inProcessTeammates.length;
-        setTeammateFooterIndex(prev => (prev - 1 + totalAgents) % totalAgents);
+        setTeammateFooterSelection(prev => stepFooterSelection(prev, inProcessTeammates, -1));
         return;
       }
       navigateFooter(-1);
@@ -1935,10 +1967,11 @@ function PromptInput({
         case 'tasks':
           if (isTeammateMode) {
             // Enter switches to the selected agent's view
-            if (teammateFooterIndex === 0) {
+            if (teammateFooterSelection.kind !== 'teammate') {
               exitTeammateView(setAppState);
             } else {
-              const teammate = inProcessTeammates[teammateFooterIndex - 1];
+              const selectedTaskId = teammateFooterSelection.taskId;
+              const teammate = inProcessTeammates.find(t => t.id === selectedTaskId);
               if (teammate) enterTeammateView(teammate.id, setAppState);
             }
           } else if (coordinatorTaskIndex === 0 && coordinatorTaskCount > 0) {
