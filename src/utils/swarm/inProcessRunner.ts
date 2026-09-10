@@ -55,6 +55,7 @@ import {
 } from '../interruptionTrace.js'
 import { awaitClassifierAutoApproval } from '../../tools/BashTool/bashPermissions.js'
 import { BASH_TOOL_NAME } from '../../tools/BashTool/toolName.js'
+import { RECOVER_TEAM_TOOL_NAME } from '../../tools/RecoverTeamTool/constants.js'
 import { SEND_MESSAGE_TOOL_NAME } from '../../tools/SendMessageTool/constants.js'
 import { TASK_CREATE_TOOL_NAME } from '../../tools/TaskCreateTool/constants.js'
 import { TASK_GET_TOOL_NAME } from '../../tools/TaskGetTool/constants.js'
@@ -146,6 +147,10 @@ import {
   sendPermissionRequestViaMailbox,
 } from './permissionSync.js'
 import { cascadeSubTeamTeardown } from './spawnInProcess.js'
+import {
+  noteSubLeadFailure,
+  resolveUpwardInboxTeam,
+} from './subTeamRecovery.js'
 import {
   getParentTeamName,
   getSubTeamNameFor,
@@ -607,6 +612,13 @@ export type InProcessRunnerConfig = {
   /** request_id of the API call that spawned this teammate, for lineage
    *  tracing on tengu_api_* events. */
   invokingRequestId?: string
+  /**
+   * Prior conversation this run continues, for a teammate resumed from a dead
+   * one's transcript (`respawnSubLead`). Seeds the accumulating history the
+   * loop turns into `forkContextMessages`, so the first turn already carries
+   * it. Absent for every ordinary spawn, which starts with no history.
+   */
+  resumedMessages?: Message[]
 }
 
 /**
@@ -651,6 +663,12 @@ function updateTaskState(
 /**
  * Sends a message to the leader's file-based mailbox.
  * Uses the same mailbox system as tmux teammates for consistency.
+ *
+ * The team is resolved rather than used verbatim, because a member of an
+ * ADOPTED sub-team has no lead of its own left: `resolveUpwardInboxTeam`
+ * returns `teamName` unchanged in every other case — every root-team teammate
+ * without touching the disk — and the caretaker's team when the sub-team's
+ * `parentAgentId` names one, so the report reaches an inbox somebody polls.
  */
 async function sendMessageToLeader(
   from: string,
@@ -666,7 +684,7 @@ async function sendMessageToLeader(
       timestamp: new Date().toISOString(),
       color,
     },
-    teamName,
+    await resolveUpwardInboxTeam(teamName),
   )
 }
 
@@ -1739,6 +1757,7 @@ export async function runInProcessTeammate(
     allowedTools,
     allowPermissionPrompts,
     invokingRequestId,
+    resumedMessages,
   } = config
   const { setAppState } = toolUseContext
 
@@ -1828,6 +1847,9 @@ export async function runInProcessTeammate(
             SEND_MESSAGE_TOOL_NAME,
             TEAM_CREATE_TOOL_NAME,
             TEAM_DELETE_TOOL_NAME,
+            // A sub-lead is the recovery authority for its OWN sub-teams, so
+            // it needs this for the same reason it needs TeamCreate.
+            RECOVER_TEAM_TOOL_NAME,
             TASK_CREATE_TOOL_NAME,
             TASK_GET_TOOL_NAME,
             TASK_LIST_TOOL_NAME,
@@ -1844,8 +1866,17 @@ export async function runInProcessTeammate(
     ...(fallbackModel ? { model: fallbackModel } : {}),
   }
 
-  // All messages across all prompts
-  const allMessages: Message[] = []
+  // All messages across all prompts. A teammate resumed from a dead one's
+  // transcript starts with that conversation already in the buffer, which is
+  // all it takes for the first turn to carry it: the loop below hands the
+  // buffer to runAgent as `forkContextMessages` on every iteration.
+  const allMessages: Message[] = resumedMessages ? [...resumedMessages] : []
+  /**
+   * The tool-context agent id of the turn currently running, kept for the
+   * failure path: a teammate's transcript is one file per turn, keyed on this
+   * id, so it is the only key a later resume can reach the conversation with.
+   */
+  let lastTurnAgentId: string | undefined
   // Wrap initial prompt with XML for proper styling in transcript view.
   // Undefined for an idle spawn: the teammate waits for its first message.
   const wrappedInitialPrompt =
@@ -1976,6 +2007,7 @@ export async function runInProcessTeammate(
       // per-turn transcript, metadata and cleanup paths keyed on it are
       // unchanged.
       const turnAgentId = createAgentId()
+      lastTurnAgentId = turnAgentId
       const turnTeammateContext = { ...teammateContext, turnAgentId }
 
       // Prepare prompt messages for this iteration
@@ -2396,6 +2428,20 @@ export async function runInProcessTeammate(
         failureReason: errorMessage,
       },
     )
+
+    // This is the one terminal path with no sub-team cascade, and that is
+    // deliberate: a crash should be recoverable, not destructive. But the
+    // notification above only says THIS teammate failed — if it led a
+    // sub-team, that team's members are still working and still writing an
+    // inbox nobody will read again. Record the orphan and say so, so the lead
+    // can adopt or respawn (RecoverTeam) rather than discover it by silence.
+    // A teammate that led nothing does nothing here.
+    await noteSubLeadFailure({
+      identity,
+      turnAgentId: lastTurnAgentId,
+      reason: errorMessage,
+      tasks: toolUseContext.getAppState().tasks,
+    })
 
     unregisterPerfettoAgent(identity.agentId)
     return {

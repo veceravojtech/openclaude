@@ -3,7 +3,7 @@ import { mkdir, readdir, readFile, rm, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { z } from 'zod/v4'
 import { getSessionCreatedTeams } from '../../bootstrap/state.js'
-import { parseAgentId } from '../agentId.js'
+import { formatAgentId, parseAgentId } from '../agentId.js'
 import { logForDebugging } from '../debug.js'
 import { getTeamsDir } from '../envUtils.js'
 import { errorMessage, getErrnoCode } from '../errors.js'
@@ -55,6 +55,29 @@ export type CleanupOutput = {
   team_name?: string
 }
 
+/**
+ * What a sub-lead left behind when its runner ended abnormally, recorded in
+ * the sub-team's own team file by the detection in the runner's failure path.
+ *
+ * `turnAgentId` is the per-turn transcript id of the turn that threw. A
+ * teammate has no single transcript: the runner mints a fresh `AgentId` per
+ * turn and hands it to `runAgent`, so each turn writes its own
+ * `subagents/agent-<id>.jsonl`. The id of the last turn is therefore the only
+ * key that reaches the dead lead's conversation, and a respawn resumes from
+ * it. Optional because a teammate can fail before its first turn is minted,
+ * in which case recovery is still possible, just cold.
+ */
+export type OrphanedLeadRecord = {
+  /** Agent id (`name@team`) of the sub-lead whose runner failed. */
+  agentId: string
+  /** Per-turn transcript id of its last turn, when it had one. */
+  turnAgentId?: string
+  /** The runner's error message, for the lead deciding what to do. */
+  reason?: string
+  /** When the failure was detected. */
+  detectedAt: number
+}
+
 export type TeamAllowedPath = {
   path: string // Directory path (absolute)
   toolName: string // The tool this applies to (e.g., "Edit", "Write")
@@ -76,6 +99,14 @@ export type TeamFile = {
   parentTeam?: string
   /** Agent id (`name@team`) of the teammate leading this sub-team. */
   parentAgentId?: string
+  /**
+   * Set when the teammate that led this sub-team ended abnormally — the
+   * runner's failure path, the one terminal path that does not cascade. Its
+   * presence is what tells a lead that a sub-team is unled rather than idle,
+   * and it carries the transcript id a respawn resumes from. Cleared when the
+   * sub-team is re-attached to its natural lead.
+   */
+  orphanedLead?: OrphanedLeadRecord
   hiddenPaneIds?: string[] // Pane IDs that are currently hidden from the UI
   teamAllowedPaths?: TeamAllowedPath[] // Paths all teammates can edit without asking
   members: Array<{
@@ -158,6 +189,24 @@ export function getSubTeamNameFor(
   const parsed = parseAgentId(callerAgentId)
   if (!parsed?.teamName) return undefined
   return `${parsed.teamName}${SUB_TEAM_SEPARATOR}${callerName}`
+}
+
+/**
+ * The agent id of the ONE teammate that can lead `subTeamName` by name:
+ * `email/supervisor` is led by `supervisor@email`. The inverse of
+ * {@link getSubTeamNameFor}, and exact rather than a guess — `readSubTeamLedBy`
+ * only ever accepts a team whose recorded name is `<caller team>/<caller name>`.
+ *
+ * Undefined for a root team, which has no leading teammate at all.
+ */
+export function getNaturalSubLeadAgentId(
+  subTeamName: string,
+): string | undefined {
+  const parentTeam = getParentTeamName(subTeamName)
+  if (parentTeam === undefined) return undefined
+  const leadName = subTeamName.slice(parentTeam.length + 1)
+  if (leadName.length === 0) return undefined
+  return formatAgentId(leadName, parentTeam)
 }
 
 /**
@@ -303,6 +352,94 @@ export async function writeTeamFileAsync(
   const teamDir = getTeamDir(teamName)
   await mkdir(teamDir, { recursive: true })
   await writeFile(getTeamFilePath(teamName), jsonStringify(teamFile, null, 2))
+}
+
+/**
+ * Outcome of {@link reattachSubTeamToLead}. A refusal names the reason rather
+ * than throwing, because both recovery paths want to report it to a lead.
+ */
+export type SubTeamReattachResult =
+  | {
+      ok: true
+      subTeamName: string
+      /** The lead recorded before this call, if the file had one. */
+      previousLeadAgentId: string | undefined
+      newLeadAgentId: string
+      /** True when the new lead is the sub-team's natural lead. */
+      isNaturalLead: boolean
+      /** True when an `orphanedLead` record was cleared by this call. */
+      clearedOrphanRecord: boolean
+    }
+  | {
+      ok: false
+      subTeamName: string
+      reason: 'not-a-sub-team' | 'missing-team-file' | 'directory-collision'
+    }
+
+/**
+ * Points a sub-team at a (new) lead: the one on-disk transition both recovery
+ * paths end with, and the primitive a successor flow reuses.
+ *
+ * `parentAgentId` IS the "who leads this sub-team" pointer, so re-attaching is
+ * a re-point of it and nothing else. `parentTeam` is deliberately left alone:
+ * the teardown funnel descends by a disk scan of recorded `parentTeam` links
+ * (`collectDescendantTeamNames`), so a sub-team stays inside its parent's
+ * sub-tree — and therefore stays cleanable — whoever is leading it.
+ *
+ * Two leads are possible, and the difference is one field:
+ * - the sub-team's NATURAL lead (`<name>@<parentTeam>`) — a respawned or
+ *   successor sub-lead. `readSubTeamLedBy` starts answering for it again, the
+ *   dual-inbox poll and the kill cascade come back with it, and the
+ *   `orphanedLead` record is cleared because the sub-team is led again.
+ * - anyone else, in practice `team-lead@<parentTeam>` — an adoption. The
+ *   record is KEPT as provenance: the sub-team has a caretaker, not a lead.
+ *
+ * Refuses without writing when the name is not a sub-team, when no team file
+ * exists, or when the file at that path records a different `name` — team
+ * directories are one sanitized segment, so `email/supervisor` and a root team
+ * literally named `email-supervisor` share a `config.json` and a re-attach must
+ * never rewrite the wrong team's file. Every other field is preserved through a
+ * read-modify-write of the parsed file.
+ */
+export async function reattachSubTeamToLead(
+  subTeamName: string,
+  newLeadAgentId: string,
+): Promise<SubTeamReattachResult> {
+  const naturalLeadAgentId = getNaturalSubLeadAgentId(subTeamName)
+  if (naturalLeadAgentId === undefined) {
+    return { ok: false, subTeamName, reason: 'not-a-sub-team' }
+  }
+
+  const teamFile = await readTeamFileAsync(subTeamName)
+  if (!teamFile) {
+    return { ok: false, subTeamName, reason: 'missing-team-file' }
+  }
+  if (teamFile.name !== subTeamName) {
+    return { ok: false, subTeamName, reason: 'directory-collision' }
+  }
+
+  const previousLeadAgentId = teamFile.parentAgentId
+  const isNaturalLead = newLeadAgentId === naturalLeadAgentId
+  const clearedOrphanRecord = isNaturalLead && teamFile.orphanedLead !== undefined
+
+  const { orphanedLead, ...withoutRecord } = teamFile
+  await writeTeamFileAsync(subTeamName, {
+    ...withoutRecord,
+    parentAgentId: newLeadAgentId,
+    ...(isNaturalLead || orphanedLead === undefined ? {} : { orphanedLead }),
+  })
+
+  logForDebugging(
+    `[TeammateTool] Re-attached sub-team ${subTeamName} to ${newLeadAgentId} (was ${previousLeadAgentId ?? 'unrecorded'}, natural=${isNaturalLead})`,
+  )
+  return {
+    ok: true,
+    subTeamName,
+    previousLeadAgentId,
+    newLeadAgentId,
+    isNaturalLead,
+    clearedOrphanRecord,
+  }
 }
 
 /**
