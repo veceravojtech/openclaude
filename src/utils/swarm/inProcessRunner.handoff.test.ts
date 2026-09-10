@@ -29,10 +29,14 @@ import {
 import { getTeamsDir, setClaudeConfigHomeDirForTesting } from '../envUtils.js'
 import { createTask, getTasksDir, listTasks } from '../tasks.js'
 import type { TeammateMessage } from '../teammateMailbox.js'
-import { spawnInProcessTeammate } from './spawnInProcess.js'
+import {
+  killInProcessTeammateAndCascade,
+  spawnInProcessTeammate,
+} from './spawnInProcess.js'
 import {
   armSubLeadHandoff,
   getHandoffDir,
+  takeSubLeadHandoff,
   writeSubLeadHandoffFile,
 } from './subLeadHandoff.js'
 import {
@@ -129,6 +133,9 @@ afterEach(() => {
     if (previousRegisteredHooks) {
       registerHookCallbacks(previousRegisteredHooks)
     }
+    // The pending-handoff registry is module-level: nothing may leak from one
+    // test into the next.
+    takeSubLeadHandoff(SUB_LEAD_AGENT_ID)
     setIsInteractive(previousInteractive)
     setClaudeConfigHomeDirForTesting(undefined)
     if (configDir) {
@@ -466,6 +473,13 @@ function findSuccessor(
   )
 }
 
+/** Every task carrying the sub-lead's identity, terminal ones included. */
+function tasksForSubLead(state: AppState): string[] {
+  return teammateTasks(state)
+    .filter(task => task.identity.agentId === SUB_LEAD_AGENT_ID)
+    .map(task => task.id)
+}
+
 /** Stops a successor the test started indirectly, so no runner outlives it. */
 async function stopSuccessor(world: World, taskId: string): Promise<void> {
   const task = world.getState().tasks[taskId]
@@ -713,4 +727,65 @@ test('a handoff action asked of a teammate that leads no sub-team is ignored and
 
   helper.abortController.abort()
   await helper.done
+})
+
+test('a handoff overtaken by a kill is disarmed, and no later run under the same id acts on it', async () => {
+  const harness = await importRunnerWithMocks()
+  const world = createWorld()
+  writeSubTeamWorld()
+
+  const subLead = await startIdleTeammate(harness, world, SUB_LEAD, PARENT_TEAM)
+  const handoffPath = await writeSubLeadHandoffFile({
+    subTeamName: SUB_TEAM,
+    leadAgentId: SUB_LEAD_AGENT_ID,
+    source: 'tool',
+    synthesis: 'the digest ships on Fridays',
+    members: [WORKER],
+  })
+  armSubLeadHandoff({
+    subTeamName: SUB_TEAM,
+    leadAgentId: SUB_LEAD_AGENT_ID,
+    handoffPath,
+    source: 'tool',
+  })
+
+  // The kill wins the race: it takes the task terminal — and cascades the
+  // sub-team away — before the runner's completion tail gets there.
+  const killed = killInProcessTeammateAndCascade(
+    subLead.taskId,
+    world.setAppState,
+  )
+  await subLead.done
+  expect(await killed).toBe(true)
+
+  // The tail took the already-terminal branch, so no successor was started:
+  // handing over a sub-team the kill has just torn down would resurrect a
+  // lead for a team that no longer exists.
+  expect(harness.terminatedEvents).toEqual([
+    { taskId: subLead.taskId, status: 'stopped' },
+  ])
+  expect(findSuccessor(world.getState(), subLead.taskId)).toBeUndefined()
+  expect(
+    harness.inbox(SUB_LEAD, PARENT_TEAM).some(m => m.from === 'handoff'),
+  ).toBe(false)
+  expect(existsSync(getTeamDir(SUB_TEAM))).toBe(false)
+
+  // And the request is GONE rather than waiting for the next run under this
+  // id. The registry is keyed on the stable name@team, so the next teammate
+  // of that name — a RecoverTeam respawn, or a fresh spawn as here, the
+  // sub-team having been cascaded away — must inherit nothing.
+  const second = await startIdleTeammate(harness, world, SUB_LEAD, PARENT_TEAM)
+  second.abortController.abort()
+  await second.done
+
+  // Both runs ended and were evicted; no third task was ever created.
+  expect(tasksForSubLead(world.getState())).toEqual([])
+  expect(
+    harness.inbox(SUB_LEAD, PARENT_TEAM).some(m => m.from === 'handoff'),
+  ).toBe(false)
+  expect(
+    harness
+      .inbox(TEAM_LEAD, PARENT_TEAM)
+      .some(m => m.text.includes('handed sub-team')),
+  ).toBe(false)
 })

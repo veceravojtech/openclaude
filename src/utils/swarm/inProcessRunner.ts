@@ -1639,12 +1639,8 @@ async function finalizeSubLeadHandoff(
 async function completeSubLeadHandoff(
   identity: TeammateIdentity,
   toolUseContext: ToolUseContext,
+  pending: PendingSubLeadHandoff,
 ): Promise<void> {
-  const pending: PendingSubLeadHandoff | undefined = takeSubLeadHandoff(
-    identity.agentId,
-  )
-  if (!pending) return
-
   const { setAppState } = toolUseContext
   const warn = async (reason: string): Promise<void> => {
     logForDebugging(
@@ -2624,10 +2620,19 @@ export async function runInProcessTeammate(
     // A handoff ends here rather than where it was decided: the task is
     // terminal now, so the successor can take this seat without racing this
     // run's own eviction. A no-op for every ordinary run — nothing is armed.
-    // `alreadyTerminal` means something else (a kill) took the task, and that
-    // path has already cascaded the sub-team away.
-    if (!alreadyTerminal) {
-      await completeSubLeadHandoff(identity, toolUseContext)
+    //
+    // TAKE first, act second, mirroring the failure tail's discard-then-record
+    // below. The request MUST be disarmed whichever way this run ended: the
+    // registry is keyed on the stable `name@team` id, so a handoff overtaken
+    // by a kill (`alreadyTerminal`, and that path has already cascaded the
+    // sub-team away) would otherwise still be armed for the NEXT run under
+    // that id — a RecoverTeam respawn, or a fresh teammate of the same name —
+    // which would then spawn a successor nobody asked for, point it at a
+    // handoff document `cleanupTeamTree` has deleted, and re-attach a
+    // sub-team that is no longer there.
+    const pendingHandoff = takeSubLeadHandoff(identity.agentId)
+    if (pendingHandoff && !alreadyTerminal) {
+      await completeSubLeadHandoff(identity, toolUseContext, pendingHandoff)
     }
 
     return { success: true, messages: allMessages }
