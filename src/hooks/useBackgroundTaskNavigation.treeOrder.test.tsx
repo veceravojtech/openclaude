@@ -106,8 +106,9 @@ type Observed = {
   /**
    * The position the SELECTION currently resolves to in the shared order: -1
    * for the leader, the row's index for a teammate, and order.length for the
-   * hide row — the exact mapping the removed selectedIPAgentIndex held. Derived
-   * here, never stored, which is the point of the unit.
+   * hide row — the exact mapping the removed selectedIPAgentIndex held — plus
+   * the two sentinels {@link indexOfSelection} gives the states that resolve to
+   * no row at all. Derived here, never stored, which is the point of the unit.
    */
   selectedIndex: number
   selectedTeammate: TeammateSelection | null
@@ -116,13 +117,25 @@ type Observed = {
   viewingAgentTaskId: string | undefined
 }
 
-/** The index a selection resolves to, or -1 when it resolves to no row. */
+/**
+ * The two states that name no row. They used to read back as -1, which is also
+ * the leader, so a `toBe(-1)` could not tell "parked on the leader" from a
+ * selection left dangling on a task id the order does not contain, or dropped
+ * to null — both of which draw no pointer on the leader row. Giving them their
+ * own values leaves -1 meaning the leader and nothing else.
+ */
+const DANGLING_ROW = -2
+const NO_SELECTION = -3
+
+/** The index a selection resolves to, or a sentinel when it names no row. */
 function indexOfSelection(state: AppState): number {
   const selection = state.selectedTeammate
-  if (selection === null || selection.kind === 'leader') return -1
+  if (selection === null) return NO_SELECTION
+  if (selection.kind === 'leader') return -1
   const order = getRunningTeammatesSorted(state.tasks)
   if (selection.kind === 'hide') return order.length
-  return order.findIndex(task => task.id === selection.taskId)
+  const index = order.findIndex(task => task.id === selection.taskId)
+  return index === -1 ? DANGLING_ROW : index
 }
 
 function stateWith(teammates: InProcessTeammateTaskState[]): AppState {
@@ -241,7 +254,7 @@ async function renderNavigation(initialState: AppState): Promise<{
   let handler: ((event: KeyboardEvent) => void) | undefined
   let setTasks: ((teammates: InProcessTeammateTaskState[]) => void) | undefined
   let latest: Observed = {
-    selectedIndex: -1,
+    selectedIndex: NO_SELECTION,
     selectedTeammate: null,
     expandedView: 'none',
     viewSelectionMode: 'none',
@@ -301,6 +314,7 @@ test('Shift+Down walks the team tree depth-first, sub-team before the next sibli
     await rendered.press(arrow('down', true))
     expect(rendered.state().expandedView).toBe('teammates')
     expect(rendered.state().selectedIndex).toBe(-1)
+    expect(rendered.state().selectedTeammate).toEqual({ kind: 'leader' })
 
     const visited: string[] = []
     for (let step = 0; step < DEPTH_FIRST.length; step++) {
@@ -316,6 +330,7 @@ test('Shift+Down walks the team tree depth-first, sub-team before the next sibli
     expect(rendered.state().selectedIndex).toBe(DEPTH_FIRST.length)
     await rendered.press(arrow('down', true))
     expect(rendered.state().selectedIndex).toBe(-1)
+    expect(rendered.state().selectedTeammate).toEqual({ kind: 'leader' })
   } finally {
     await rendered.cleanup()
   }
