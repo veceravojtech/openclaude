@@ -33,7 +33,6 @@ import { getViewedTeammateTask } from '../state/selectors.js';
 import { TEARDROP_ASTERISK } from '../constants/figures.js';
 import figures from 'figures';
 import { getCurrentTurnTokenBudget, getTurnOutputTokens } from '../bootstrap/state.js';
-import { TeammateSpinnerTree } from './Spinner/TeammateSpinnerTree.js';
 import { useAnimationFrame } from '../ink.js';
 import { getGlobalConfig } from '../utils/config.js';
 export type { SpinnerMode } from './Spinner/index.js';
@@ -109,9 +108,12 @@ function SpinnerWithVerbInner({
   const viewingAgentTaskId = useAppState(s_0 => s_0.viewingAgentTaskId);
   const expandedView = useAppState(s_1 => s_1.expandedView);
   const showExpandedTodos = expandedView === 'tasks';
+  // The tree itself is no longer rendered here — it has its own REPL mount
+  // (components/Spinner/TeammateTreePanel), so it survives the spinner
+  // unmounting. What is left for this flag in the spinner is the teammate-token
+  // aggregation below (the tree gives every teammate its own line, so the
+  // spinner does not also sum them) and the tip/todo branch at the end.
   const showSpinnerTree = expandedView === 'teammates';
-  const selectedIPAgentIndex = useAppState(s_2 => s_2.selectedIPAgentIndex);
-  const viewSelectionMode = useAppState(s_3 => s_3.viewSelectionMode);
   // Get foregrounded teammate (if viewing a teammate's transcript)
   const foregroundedTeammate = viewingAgentTaskId ? getViewedTeammateTask({
     viewingAgentTaskId,
@@ -207,10 +209,6 @@ function SpinnerWithVerbInner({
   // a coarse 30s threshold.
   const elapsedSnapshot = pauseStartTimeRef.current !== null ? pauseStartTimeRef.current - loadingStartTimeRef.current - totalPausedMsRef.current : Date.now() - loadingStartTimeRef.current - totalPausedMsRef.current;
 
-  // Leader token count for TeammateSpinnerTree — read raw (non-animated) from
-  // the ref. The tree is only shown when teammates are running; teammate
-  // progress updates to s.tasks trigger re-renders that keep this fresh.
-  const leaderTokenCount = Math.round(responseLengthRef.current / 4);
   const defaultColor: keyof Theme = 'brand';
   const defaultShimmerColor = 'brandShimmer';
   const messageColor = overrideColor ?? defaultColor;
@@ -227,7 +225,6 @@ function SpinnerWithVerbInner({
             {!allIdle && ' · teammates running'}
           </Text>
         </Box>
-        {showSpinnerTree && <TeammateSpinnerTree selectedIndex={selectedIPAgentIndex} isInSelectionMode={viewSelectionMode === 'selecting-agent'} allIdle={allIdle} leaderTokenCount={leaderTokenCount} leaderIdleText="Idle" />}
       </Box>;
   }
 
@@ -238,7 +235,6 @@ function SpinnerWithVerbInner({
         <Box flexDirection="row" flexWrap="nowrap" marginTop={1} width="100%">
           <Text dimColor>{idleText}</Text>
         </Box>
-        {showSpinnerTree && hasRunningTeammates && <TeammateSpinnerTree selectedIndex={selectedIPAgentIndex} isInSelectionMode={viewSelectionMode === 'selecting-agent'} allIdle={allIdle} leaderVerb={leaderIsIdle ? undefined : leaderVerb} leaderIdleText={leaderIsIdle ? 'Idle' : undefined} leaderTokenCount={leaderTokenCount} />}
       </Box>;
   }
 
@@ -272,7 +268,7 @@ function SpinnerWithVerbInner({
   }
   return <Box flexDirection="column" width="100%" alignItems="flex-start">
       <SpinnerAnimationRow mode={mode} reducedMotion={reducedMotion} hasActiveTools={hasActiveTools} responseLengthRef={responseLengthRef} responseLength={responseLength} message={message} messageColor={messageColor} shimmerColor={shimmerColor} overrideColor={overrideColor} loadingStartTimeRef={loadingStartTimeRef} totalPausedMsRef={totalPausedMsRef} pauseStartTimeRef={pauseStartTimeRef} spinnerSuffix={spinnerSuffix} verbose={verbose} columns={columns} hasRunningTeammates={hasRunningTeammates} teammateTokens={teammateTokens} foregroundedTeammate={foregroundedTeammate} leaderIsIdle={leaderIsIdle} thinkingStatus={thinkingStatus} effortSuffix={effortSuffix} />
-      {showSpinnerTree && hasRunningTeammates ? <TeammateSpinnerTree selectedIndex={selectedIPAgentIndex} isInSelectionMode={viewSelectionMode === 'selecting-agent'} allIdle={allIdle} leaderVerb={leaderIsIdle ? undefined : leaderVerb} leaderIdleText={leaderIsIdle ? 'Idle' : undefined} leaderTokenCount={leaderTokenCount} /> : showExpandedTodos && tasksV2 && tasksV2.length > 0 ? <Box width="100%" flexDirection="column">
+      {showExpandedTodos && tasksV2 && tasksV2.length > 0 ? <Box width="100%" flexDirection="column">
           <MessageResponse>
             <TaskListV2 tasks={tasksV2} />
           </MessageResponse>

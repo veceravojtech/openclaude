@@ -268,3 +268,101 @@ describe('getRunningTeammatesSorted', () => {
     expect(getRunningTeammatesSorted(tasks)).toHaveLength(5)
   })
 })
+
+/**
+ * A finished teammate keeps its place in the shared order for
+ * TEAMMATE_GRACE_MS, so no row can vanish from under the cursor the instant a
+ * status flips. The marker is the retain/grace pair the three terminal-marking
+ * sites write; the deadline is compared against the `now` the caller passes, so
+ * none of this needs a timer.
+ */
+const GRACE_NOW = 1_700_000_100_000
+
+/** A terminal teammate as the terminal-marking sites leave it. */
+function inGrace(
+  name: string,
+  teamName: string,
+  status: 'completed' | 'failed' | 'killed' = 'killed',
+): InProcessTeammateTaskState {
+  return teammate(name, teamName, {
+    status,
+    notified: true,
+    retain: false,
+    evictAfter: GRACE_NOW + 30_000,
+  })
+}
+
+describe('getRunningTeammatesSorted — rows inside their grace window', () => {
+  test('keeps a finished teammate at its own place in the order', () => {
+    // `supervisor` was killed: it keeps the slot between alice and its own
+    // sub-team, so an index that named it before still names it.
+    const withGrace = [
+      ...TWO_LEVEL.filter(t => t.identity.agentName !== 'supervisor'),
+      inGrace('supervisor', 'email'),
+    ]
+    expect(names(getRunningTeammatesSorted(tasksOf(withGrace), GRACE_NOW))).toEqual([
+      'alice',
+      'supervisor',
+      'worker-1',
+      'worker-2',
+      'zoe',
+    ])
+  })
+
+  test('keeps a sub-team nested under its sub-lead while that lead is in grace', () => {
+    // The nesting is what the indent is drawn from, and it must not collapse
+    // just because the lead finished: worker-1/worker-2 stay immediately after
+    // `supervisor`, never after `zoe`.
+    const withGrace = [
+      ...TWO_LEVEL.filter(t => t.identity.agentName !== 'supervisor'),
+      inGrace('supervisor', 'email', 'completed'),
+    ]
+    const order = names(getRunningTeammatesSorted(tasksOf(withGrace), GRACE_NOW))
+    expect(order.indexOf('worker-1')).toBe(order.indexOf('supervisor') + 1)
+    expect(order.indexOf('worker-2')).toBe(order.indexOf('supervisor') + 2)
+    expect(order.at(-1)).toBe('zoe')
+  })
+
+  test('drops the row the moment its deadline passes', () => {
+    const withGrace = [...TWO_LEVEL, inGrace('ghost', 'email')]
+    expect(names(getRunningTeammatesSorted(tasksOf(withGrace), GRACE_NOW))).toContain(
+      'ghost',
+    )
+    expect(
+      names(getRunningTeammatesSorted(tasksOf(withGrace), GRACE_NOW + 30_000)),
+    ).not.toContain('ghost')
+  })
+
+  test.each(['completed', 'failed', 'killed'] as const)(
+    'gives a %s teammate the same grace',
+    status => {
+      const withGrace = [...TWO_LEVEL, inGrace('ghost', 'email', status)]
+      expect(
+        names(getRunningTeammatesSorted(tasksOf(withGrace), GRACE_NOW)),
+      ).toContain('ghost')
+    },
+  )
+
+  test('a terminal teammate with no marker at all is still left out', () => {
+    // The marker is what grants the grace. A task that never went through a
+    // terminal-marking site (a pane teammate shut down through the inbox poller,
+    // a hand-built fixture) has no retain field, so the shared predicate does not
+    // take it and the row is gone at once — today's behaviour, unchanged.
+    const withDead = [...TWO_LEVEL, teammate('gone', 'email', { status: 'killed' })]
+    expect(names(getRunningTeammatesSorted(tasksOf(withDead), GRACE_NOW))).not.toContain(
+      'gone',
+    )
+  })
+
+  test('defaults `now` to the real clock', () => {
+    // The production call sites pass no `now`; a deadline set from Date.now()
+    // must therefore be honoured without one.
+    const live = teammate('fresh', 'email', {
+      status: 'killed',
+      notified: true,
+      retain: false,
+      evictAfter: Date.now() + 30_000,
+    })
+    expect(names(getRunningTeammatesSorted(tasksOf([live])))).toEqual(['fresh'])
+  })
+})

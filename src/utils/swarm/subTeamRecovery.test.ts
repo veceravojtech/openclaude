@@ -164,6 +164,26 @@ function markTaskFailed(world: World, taskId: string): void {
   })
 }
 
+/**
+ * What the runner's failure path leaves in AppState SINCE the teammates tree got
+ * its 30s row grace: the same terminal task, plus the retain/grace pair that
+ * keeps its row on screen. The row is visible; the teammate is not live.
+ */
+function markTaskFailedInGrace(world: World, taskId: string): void {
+  markTaskFailed(world, taskId)
+  world.setAppState(prev => {
+    const task = prev.tasks[taskId]
+    if (!task || task.type !== 'in_process_teammate') return prev
+    const inGrace: InProcessTeammateTaskState = {
+      ...task,
+      notified: true,
+      retain: false,
+      evictAfter: Date.now() + 30_000,
+    }
+    return { ...prev, tasks: { ...prev.tasks, [taskId]: inGrace } }
+  })
+}
+
 function stateOf(teamName: string, world: World): string | undefined {
   const teamFile = readTeamFile(teamName)
   return teamFile
@@ -177,6 +197,32 @@ test('getNaturalSubLeadAgentId names the one teammate that can lead a sub-team',
   // A root team has no leading teammate at all.
   expect(getNaturalSubLeadAgentId('email')).toBeUndefined()
   expect(getNaturalSubLeadAgentId('email/')).toBeUndefined()
+})
+
+test('a failed sub-lead still inside its row-grace window is orphaned, not respawning', async () => {
+  // hasLiveTaskFor keys on isTerminalTaskStatus, and the grace pair does not
+  // touch the status — so a sub-lead whose row is still drawn (dimmed, reading
+  // `failed`) is NOT a live lead, and the sub-team below it is an orphan that
+  // recovery must act on now rather than 30 seconds from now.
+  const world = createWorld()
+  writeSubTeamWorld()
+  const leadTaskId = await registerTeammate(world, SUB_LEAD, PARENT_TEAM)
+  await noteSubLeadFailure({
+    identity: {
+      agentId: SUB_LEAD_AGENT_ID,
+      agentName: SUB_LEAD,
+      teamName: PARENT_TEAM,
+    },
+    reason: 'boom',
+    tasks: world.getState().tasks,
+  })
+  expect(stateOf(SUB_TEAM, world)).toBe('respawning')
+
+  markTaskFailedInGrace(world, leadTaskId)
+  const graced = world.getState().tasks[leadTaskId]
+  expect(graced?.status).toBe('failed')
+  expect((graced as InProcessTeammateTaskState).evictAfter).toBeGreaterThan(Date.now())
+  expect(stateOf(SUB_TEAM, world)).toBe('orphaned')
 })
 
 test('classifySubTeamState derives led, orphaned, adopted and respawning', async () => {

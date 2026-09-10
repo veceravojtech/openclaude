@@ -11,8 +11,7 @@ import { useKeybinding } from '../keybindings/useKeybinding.js';
 import type { Screen } from '../screens/REPL.js';
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../services/analytics/index.js';
-import { useAppState, useSetAppState } from '../state/AppState.js';
-import { count } from '../utils/array.js';
+import { type AppState, useAppState, useSetAppState } from '../state/AppState.js';
 import { getTerminalPanel } from '../utils/terminalPanel.js';
 type Props = {
   screen: Screen;
@@ -25,6 +24,29 @@ type Props = {
   virtualScrollActive?: boolean;
   searchBarOpen?: boolean;
 };
+
+/**
+ * The Ctrl+T cycle: none → tasks → teammates → none.
+ *
+ * Every step is reachable at any time. It used to fall back to none ↔ tasks
+ * unless a teammate was already RUNNING, which made the teammates panel
+ * unreachable exactly when a user would go looking for it — with no teammates
+ * yet — and silently downgraded a persisted 'teammates' to 'tasks' on the first
+ * press. The panel draws its own empty state instead, so there is nothing left
+ * for the keybinding to protect against.
+ *
+ * Pure and exported so the cycle can be asserted without a keybinding context.
+ */
+export function nextExpandedView(current: AppState['expandedView']): AppState['expandedView'] {
+  switch (current) {
+    case 'none':
+      return 'tasks';
+    case 'tasks':
+      return 'teammates';
+    case 'teammates':
+      return 'none';
+  }
+}
 
 /**
  * Registers global keybinding handlers for:
@@ -52,39 +74,10 @@ export function GlobalKeybindingHandlers({
     logEvent('tengu_toggle_todos', {
       is_expanded: expandedView === 'tasks'
     });
-    setAppState(prev => {
-      const {
-        getAllInProcessTeammateTasks
-      } =
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      require('../tasks/InProcessTeammateTask/InProcessTeammateTask.js') as typeof import('../tasks/InProcessTeammateTask/InProcessTeammateTask.js');
-      const hasTeammates = count(getAllInProcessTeammateTasks(prev.tasks), t => t.status === 'running') > 0;
-      if (hasTeammates) {
-        // Both exist: none → tasks → teammates → none
-        switch (prev.expandedView) {
-          case 'none':
-            return {
-              ...prev,
-              expandedView: 'tasks' as const
-            };
-          case 'tasks':
-            return {
-              ...prev,
-              expandedView: 'teammates' as const
-            };
-          case 'teammates':
-            return {
-              ...prev,
-              expandedView: 'none' as const
-            };
-        }
-      }
-      // Only tasks: none ↔ tasks
-      return {
-        ...prev,
-        expandedView: prev.expandedView === 'tasks' ? 'none' as const : 'tasks' as const
-      };
-    });
+    setAppState(prev => ({
+      ...prev,
+      expandedView: nextExpandedView(prev.expandedView)
+    }));
   }, [expandedView, setAppState]);
 
   // Toggle transcript mode (ctrl+o). Two-way prompt ↔ transcript.

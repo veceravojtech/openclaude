@@ -5,7 +5,7 @@ import { Box, Text, type TextProps } from '../../ink.js';
 import { useAppState } from '../../state/AppState.js';
 import { getRunningTeammatesSorted } from '../../tasks/InProcessTeammateTask/InProcessTeammateTask.js';
 import { formatNumber } from '../../utils/format.js';
-import { getTeamDepth } from '../../utils/swarm/teamHelpers.js';
+import { getParentTeamName, getTeamDepth } from '../../utils/swarm/teamHelpers.js';
 import { TeammateSpinnerLine } from './TeammateSpinnerLine.js';
 import { TEAMMATE_SELECT_HINT } from './teammateSelectHint.js';
 type Props = {
@@ -44,11 +44,16 @@ export function TeammateSpinnerTree(t0) {
   if ($[0] !== allIdle || $[1] !== isInSelectionMode || $[2] !== leaderIdleText || $[3] !== leaderTokenCount || $[4] !== leaderVerb || $[5] !== selectedIndex || $[6] !== showTeammateMessagePreview || $[7] !== tasks || $[8] !== viewingAgentTaskId) {
     t5 = Symbol.for("react.early_return_sentinel");
     bb0: {
+      // Every row the tree draws: running teammates plus the ones still inside
+      // their 30s grace window, in the one shared depth-first order.
       const teammateTasks = getRunningTeammatesSorted(tasks);
-      if (teammateTasks.length === 0) {
-        t5 = null;
-        break bb0;
-      }
+      // NO early return any more. The tree used to answer `null` here at zero
+      // rows, which is what made it vanish the moment the last teammate ended;
+      // the panel that owns the mount (TeammateTreePanel) is the only gate now,
+      // and at zero rows this renders the team-lead row plus one muted line.
+      // The early-return sentinel above and its slot ($[15]) are kept exactly as
+      // the compiler emitted them rather than renumbering all 61 slots — the same
+      // trade U8 made for the unused slot 9 in BackgroundTaskStatus.
       const isLeaderForegrounded = viewingAgentTaskId === undefined;
       const isLeaderSelected = isInSelectionMode && selectedIndex === -1;
       const isLeaderHighlighted = isLeaderForegrounded || isLeaderSelected;
@@ -149,7 +154,17 @@ export function TeammateSpinnerTree(t0) {
       } else {
         t3 = $[50];
       }
-      t4 = teammateTasks.map((teammate, index) => {
+      // F5: which (name, team) pairs actually have a row, so a sub-team whose
+      // lead is gone can be given a placeholder at the lead's own position
+      // instead of letting its members nest under the previous root sibling.
+      // Derived from the rows themselves — no disk read, no team file.
+      const drawnRows = new Set<string>();
+      for (const drawn of teammateTasks) {
+        drawnRows.add(teamRowKey(drawn.identity.agentName, drawn.identity.teamName));
+      }
+      // One placeholder per absent lead, however many members it has.
+      const placeholderKeys = new Set<string>();
+      t4 = teammateTasks.length === 0 ? <EmptyTeammatesRow /> : teammateTasks.map((teammate, index) => {
         // Depth-first order (getRunningTeammatesSorted) already puts a sub-team
         // straight under the teammate that leads it; the indent is what makes
         // that visible. A root-team member renders exactly as before — no
@@ -164,7 +179,25 @@ export function TeammateSpinnerTree(t0) {
         // columns are spent before the row starts, so they have to come off the
         // row's width budget or a deep row overruns the terminal.
         const line = <TeammateSpinnerLine key={teammate.id} teammate={teammate} isLast={!isInSelectionMode && index === teammateTasks.length - 1} isSelected={isInSelectionMode && selectedIndex === index} isForegrounded={viewingAgentTaskId === teammate.id} allIdle={allIdle} showPreview={showTeammateMessagePreview} indent={indent} />;
-        return indent > 0 ? <Box key={teammate.id} paddingLeft={indent}>{line}</Box> : line;
+        const row = indent > 0 ? <Box key={teammate.id} paddingLeft={indent}>{line}</Box> : line;
+        // Each sub-lead above this row that has no row of its own gets a dimmed
+        // `@name · not running` placeholder at ITS indent, outermost first, so
+        // the nesting still reads down the real tree. Render-only: a placeholder
+        // is never part of getRunningTeammatesSorted, because selectedIPAgentIndex
+        // indexes that array and a synthetic entry would shift every consumer.
+        const absentLeads: React.ReactNode[] = [];
+        for (const lead of leadChain(teamName)) {
+          const key = teamRowKey(lead.leadName, lead.leadTeam);
+          if (drawnRows.has(key) || placeholderKeys.has(key)) {
+            continue;
+          }
+          placeholderKeys.add(key);
+          absentLeads.push(<AbsentLeadRow key={`absent-${key}`} name={lead.leadName} indent={(getTeamDepth(lead.leadTeam) - 1) * SUB_TEAM_INDENT} />);
+        }
+        if (absentLeads.length === 0) {
+          return row;
+        }
+        return <React.Fragment key={`row-${teammate.id}`}>{absentLeads}{row}</React.Fragment>;
       });
     }
     $[0] = allIdle;
@@ -218,6 +251,87 @@ export function TeammateSpinnerTree(t0) {
     t7 = $[60];
   }
   return t7;
+}
+/**
+ * Identity of a row for the absent-sub-lead lookup: the pair that names a
+ * teammate inside the tree. A row whose identity carries no team name belongs to
+ * the root team, keyed on '' — the same tolerance orderTeammatesDepthFirst and
+ * getSubLeadPath apply.
+ */
+function teamRowKey(agentName: string, teamName: string | undefined): string {
+  return `${agentName}\u0000${teamName ?? ''}`;
+}
+
+/**
+ * The sub-leads above `teamName`, outermost first, each with the team it is a
+ * member OF: `email/supervisor/worker-1` →
+ * `[{supervisor, email}, {worker-1, email/supervisor}]`.
+ *
+ * Walks up with getParentTeamName exactly as getSubLeadPath does, so the
+ * separator stays teamHelpers' business; this variant keeps the parent team as
+ * well as the segment, because the placeholder has to be drawn at the lead's own
+ * depth. An absent or root team name yields no ancestors.
+ */
+function leadChain(teamName: string | undefined): Array<{
+  leadName: string;
+  leadTeam: string;
+}> {
+  if (!teamName) {
+    return [];
+  }
+  const chain: Array<{
+    leadName: string;
+    leadTeam: string;
+  }> = [];
+  let team = teamName;
+  let parent = getParentTeamName(team);
+  while (parent !== undefined) {
+    chain.unshift({
+      leadName: team.slice(parent.length + 1),
+      leadTeam: parent
+    });
+    team = parent;
+    parent = getParentTeamName(team);
+  }
+  return chain;
+}
+
+/**
+ * A sub-team whose lead has no row of its own — it was never spawned, it
+ * crashed, or its grace window has closed. Drawn at the lead's position so its
+ * members nest under it instead of under an unrelated sibling.
+ *
+ * Hand-written, deliberately NOT react-compiler output: it has no cache slots,
+ * so it cannot fall out of step with the 61-slot map of the component above. Its
+ * inputs are two primitives and it renders three Text nodes.
+ */
+function AbsentLeadRow({
+  name,
+  indent
+}: {
+  name: string;
+  indent: number;
+}): React.ReactNode {
+  return <Box paddingLeft={3 + indent}>
+      <Text dimColor={true}> </Text>
+      <Text dimColor={true}>{"\u251C\u2500"} </Text>
+      <Text dimColor={true}>@{name} · not running</Text>
+    </Box>;
+}
+
+/**
+ * The empty state: what the panel shows with no teammate rows at all. One muted
+ * line under the team-lead row, never `null` — the tree is a panel now, and the
+ * user's rule is that it is visible every time it is enabled.
+ *
+ * Hand-written like AbsentLeadRow, with no cache slots and no inputs.
+ */
+function EmptyTeammatesRow(): React.ReactNode {
+  return <Box paddingLeft={3}>
+      <Text dimColor={true}> </Text>
+      <Text dimColor={true}>{"\u2514\u2500"} </Text>
+      <Text dimColor={true}>no teammates · Agent(name: "…") spawns one</Text>
+    </Box>;
 }
 function _temp3(s_1) {
   return s_1.showTeammateMessagePreview;

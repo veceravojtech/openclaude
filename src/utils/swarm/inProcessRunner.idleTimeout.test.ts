@@ -491,10 +491,14 @@ async function expectIdleShutdown(
   const result = await started.done
   expect(result.success).toBe(true)
 
-  // Exits like a normal completion: status completed, task evicted, SDK
-  // terminated event; never failed or killed.
+  // Exits like a normal completion: status completed, SDK terminated event;
+  // never failed or killed. The task is NOT evicted any more — a completed
+  // teammate keeps its row for TEAMMATE_GRACE_MS — so what says the teammate is
+  // gone is that nothing of it is live, which the running count below pins.
   expect(started.statusTrail).toEqual(['running', 'completed'])
-  expect(getTeammateTask(started.getState(), started.taskId)).toBeUndefined()
+  const ended = getTeammateTask(started.getState(), started.taskId)
+  expect(ended?.status).toBe('completed')
+  expect(ended?.evictAfter).toBeGreaterThan(Date.now())
   expect(runningTeammateTasks(started.getState())).toBe(0)
   expect(harness.terminatedEvents).toEqual([
     { taskId: started.taskId, status: 'completed' },

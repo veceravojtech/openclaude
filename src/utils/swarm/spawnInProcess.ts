@@ -38,11 +38,7 @@ import {
 } from '../interruptionTrace.js'
 import { emitTaskTerminatedSdk } from '../sdkEventQueue.js'
 import { evictTaskOutput } from '../task/diskOutput.js'
-import {
-  evictTerminalTask,
-  registerTask,
-  STOPPED_DISPLAY_MS,
-} from '../task/framework.js'
+import { registerTask, TEAMMATE_GRACE_MS } from '../task/framework.js'
 import { createTeammateContext } from '../teammateContext.js'
 import {
   isPerfettoTracingEnabled,
@@ -516,6 +512,12 @@ function killOneInProcessTeammate(
           status: 'killed' as const,
           notified: true,
           endTime: Date.now(),
+          // The killed row stays in the tree for TEAMMATE_GRACE_MS, drawn dimmed
+          // and reading `killed`, instead of lingering 3s undrawn and then being
+          // evicted by a timer of its own. The shared retain/grace rule holds
+          // both evictors off until the deadline passes.
+          retain: false,
+          evictAfter: Date.now() + TEAMMATE_GRACE_MS,
           onIdleCallbacks: [], // Clear callbacks to prevent stale references
           messages: teammateTask.messages?.length
             ? [teammateTask.messages[teammateTask.messages.length - 1]!]
@@ -545,10 +547,6 @@ function killOneInProcessTeammate(
       toolUseId,
       summary: description,
     })
-    setTimeout(
-      evictTerminalTask.bind(null, taskId, setAppState),
-      STOPPED_DISPLAY_MS,
-    )
   }
 
   // Release perfetto agent registry entry

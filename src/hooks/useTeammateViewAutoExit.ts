@@ -1,26 +1,30 @@
 import { useEffect } from 'react'
 import { useAppState, useSetAppState } from '../state/AppState.js'
 import { exitTeammateView } from '../state/teammateViewHelpers.js'
-import { isInProcessTeammateTask } from '../tasks/InProcessTeammateTask/types.js'
 
 /**
- * Auto-exits teammate viewing mode when the viewed teammate
- * is killed or encounters an error. Users stay viewing completed
- * teammates so they can review the full transcript.
+ * Auto-exits teammate viewing mode when the viewed task is gone from AppState.
+ *
+ * That is the ONE reason left. A finished teammate (completed, failed or killed)
+ * keeps its task — and its row — for TEAMMATE_GRACE_MS so the user can open and
+ * read its transcript; ejecting on the status change instead, which is what this
+ * hook used to do, made exactly that impossible. Once the grace window closes
+ * the lazy GC deletes the task and the branch below takes the view back to the
+ * leader, so the view still never outlives what it is showing.
+ *
+ * Local agents are unaffected: they are viewed through the same
+ * viewingAgentTaskId and were never subject to the status ejections (the checks
+ * were teammate-narrowed), and they are retained by enterTeammateView while
+ * viewed, so they cannot be evicted from under the view either.
  */
 export function useTeammateViewAutoExit(): void {
   const setAppState = useSetAppState()
   const viewingAgentTaskId = useAppState(s => s.viewingAgentTaskId)
-  // Select only the viewed task, not the full tasks map — otherwise every
-  // streaming update from any teammate re-renders this hook.
-  const task = useAppState(s =>
-    s.viewingAgentTaskId ? s.tasks[s.viewingAgentTaskId] : undefined,
+  // Select only whether the viewed task still exists, not the full tasks map —
+  // otherwise every streaming update from any teammate re-renders this hook.
+  const taskExists = useAppState(s =>
+    s.viewingAgentTaskId ? s.tasks[s.viewingAgentTaskId] !== undefined : false,
   )
-
-  const viewedTask = task && isInProcessTeammateTask(task) ? task : undefined
-  const viewedStatus = viewedTask?.status
-  const viewedError = viewedTask?.error
-  const taskExists = task !== undefined
 
   useEffect(() => {
     // Not viewing any teammate
@@ -28,36 +32,11 @@ export function useTeammateViewAutoExit(): void {
       return
     }
 
-    // Task no longer exists in the map — evicted out from under us.
-    // Check raw `task` not teammate-narrowed `viewedTask`; local_agent
-    // tasks exist but narrow to undefined, which would eject immediately.
+    // Task no longer exists in the map — evicted out from under us. Keyed on the
+    // raw presence of the task, never on its type: a local_agent task exists but
+    // would narrow to undefined, which used to eject the view immediately.
     if (!taskExists) {
       exitTeammateView(setAppState)
-      return
     }
-    // Status checks below are teammate-only (viewedTask is teammate-narrowed).
-    // For local_agent, viewedStatus is undefined → all checks falsy → no eject.
-    if (!viewedTask) return
-
-    // Auto-exit if teammate is killed, stopped, has error, or is no longer running
-    // This handles shutdown scenarios where teammate becomes inactive
-    if (
-      viewedStatus === 'killed' ||
-      viewedStatus === 'failed' ||
-      viewedError ||
-      (viewedStatus !== 'running' &&
-        viewedStatus !== 'completed' &&
-        viewedStatus !== 'pending')
-    ) {
-      exitTeammateView(setAppState)
-      return
-    }
-  }, [
-    viewingAgentTaskId,
-    taskExists,
-    viewedTask,
-    viewedStatus,
-    viewedError,
-    setAppState,
-  ])
+  }, [viewingAgentTaskId, taskExists, setAppState])
 }

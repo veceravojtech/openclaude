@@ -18,8 +18,14 @@
 
 /**
  * The two fields the rule reads. Structural on purpose — LocalAgentTaskState
- * (the only task type that declares them) lives in a .tsx module, and this
- * util must not reach into the UI layer to describe two primitives.
+ * lives in a .tsx module, and this util must not reach into the UI layer to
+ * describe two primitives.
+ *
+ * Two task types declare them: LocalAgentTaskState (the coordinator panel) and
+ * InProcessTeammateTaskState (the teammates tree), which writes the pair at its
+ * terminal transition so a finished teammate keeps its row for
+ * TEAMMATE_GRACE_MS. Both therefore get the same grace from the same rule and
+ * from the same two evictors.
  */
 type RetainableTask = {
   retain: boolean
@@ -31,11 +37,12 @@ type RetainableTask = {
  *
  * The three checks do different jobs, and all three are needed:
  *   - `'retain' in task` is the TYPE narrow — a property PRESENCE check that
- *     narrows to LocalAgentTaskState (the only task type carrying the field).
+ *     narrows to a task shape carrying the field (LocalAgentTaskState, or an
+ *     InProcessTeammateTaskState that has reached its terminal transition).
  *     It must stay a presence check on `retain`: `evictAfter` is optional, so
  *     narrowing on `'evictAfter' in task` instead would miss panel tasks that
  *     haven't had a deadline set yet. Task shapes without the field at all
- *     (shell/monitor/remote/workflow) never get the panel grace period.
+ *     (shell/monitor/remote/workflow) never get a grace period.
  *   - `task.retain === true` is the VALUE check — the UI is actively holding
  *     this task, which is an independent reason to stay visible (and so to
  *     survive GC) regardless of the eviction deadline. Without it a retained

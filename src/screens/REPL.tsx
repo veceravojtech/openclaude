@@ -72,6 +72,7 @@ import { useSSHSession } from '../hooks/useSSHSession.js';
 import { useAssistantHistory } from '../hooks/useAssistantHistory.js';
 import type { SSHSession } from '../ssh/createSSHSession.js';
 import { SpinnerWithVerb, BriefIdleStatus, type SpinnerMode } from '../components/Spinner.js';
+import { TeammateTreePanel } from '../components/Spinner/TeammateTreePanel.js';
 import { CompletionFlash } from '../components/Spinner/CompletionFlash.js';
 import { getSystemPrompt } from '../constants/prompts.js';
 import { buildEffectiveSystemPrompt } from '../utils/systemPrompt.js';
@@ -5227,6 +5228,14 @@ export function REPL({
           {toolJSX?.isLocalJSXCommand && toolJSX.isImmediate && !toolJsxCentered && <Box flexDirection="column" width="100%">
             {toolJSX.jsx}
           </Box>}
+          {/* The teammates tree's own stable slot. It lives here, outside the
+                  ScrollBox and above the prompt, rather than inside the spinner:
+                  the spinner unmounts the moment the lead is idle with no running
+                  teammate, which is what used to make the tree vanish. The panel
+                  itself decides whether to draw anything (toggle on + Agent Teams
+                  enabled), so this mount is unconditional and there is exactly
+                  one tree on screen whatever the spinner is doing. */}
+          <TeammateTreePanel />
           {!showSpinner && !toolJSX?.isLocalJSXCommand && showExpandedTodos && tasksV2 && tasksV2.length > 0 && <Box width="100%" flexDirection="column">
             <TaskListV2 tasks={tasksV2} isStandalone={true} />
           </Box>}

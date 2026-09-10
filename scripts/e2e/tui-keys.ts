@@ -580,6 +580,17 @@ function seedConfigDir(
         theme: 'dark',
         hasCompletedOnboarding: true,
         migrationVersion: 11,
+        // The teammates tree panel is ON by default once Agent Teams are
+        // enabled, and with no teammates it draws two rows (`team-lead` plus
+        // its empty-state line) directly above the prompt. Every scenario here
+        // was written against the layout WITHOUT it: scenario 4 in particular
+        // walks Shift+Down twice from a COLLAPSED tree (the first press expands
+        // and parks on the leader) and then greps the `@supervisor` pill, which
+        // the panel replaces while it is on. Seeding the toggle off is a
+        // precondition, not a weakened assertion — none of the four predicates
+        // changes. The panel's own scenarios (boot with it on, zero teammates,
+        // a row through its grace window) are T3's, and must NOT inherit this.
+        showSpinnerTree: false,
         projects: {
           [REPO_ROOT]: {
             hasTrustDialogAccepted: true,

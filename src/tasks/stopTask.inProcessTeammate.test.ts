@@ -17,6 +17,7 @@ import {
   readTeamFile,
   type TeamFile,
 } from '../utils/swarm/teamHelpers.js'
+import { TEAMMATE_GRACE_MS } from '../utils/task/framework.js'
 import { createTask, getTasksDir } from '../utils/tasks.js'
 import type { InProcessTeammateTaskState } from './InProcessTeammateTask/types.js'
 import { stopTask, StopTaskError } from './stopTask.js'
@@ -112,6 +113,40 @@ test('stopTask kills an idle in-process teammate', async () => {
 
   // Already stopped: the shared guard rejects a second stop.
   await expect(stopTask(task.id, context)).rejects.toBeInstanceOf(StopTaskError)
+})
+
+test('a killed teammate keeps its row for the grace window instead of lingering 3s undrawn', async () => {
+  // The kill path used to set a 3s setTimeout that evicted the task — and the
+  // row was not drawn during those 3s anyway, so a killed teammate simply
+  // disappeared. It now writes the same retain/grace pair the other two terminal
+  // paths write, which keeps the row in the tree for 30s, dimmed and reading
+  // `killed`, and hands the collecting to the shared funnel.
+  const abortController = new AbortController()
+  const task = idleTeammate(abortController)
+  let state = {
+    tasks: { [task.id]: task },
+    teamContext: {
+      teamName: 'alpha',
+      teamFilePath: '',
+      leadAgentId: 'lead-id',
+      teammates: { [task.identity.agentId]: { name: 'idler' } },
+    },
+  } as unknown as AppState
+  const context = {
+    getAppState: () => state,
+    setAppState: (f: (prev: AppState) => AppState) => {
+      state = f(state)
+    },
+  }
+
+  const before = Date.now()
+  await stopTask(task.id, context)
+  const killed = state.tasks[task.id] as InProcessTeammateTaskState | undefined
+
+  expect(killed?.status).toBe('killed')
+  expect(killed?.retain).toBe(false)
+  expect(killed?.evictAfter).toBeGreaterThanOrEqual(before + TEAMMATE_GRACE_MS)
+  expect(killed?.evictAfter).toBeLessThanOrEqual(Date.now() + TEAMMATE_GRACE_MS)
 })
 
 // U7: TaskStop on a teammate that leads a sub-team takes the sub-team with

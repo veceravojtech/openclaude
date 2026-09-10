@@ -8,6 +8,7 @@ import { useElapsedTime } from '../../hooks/useElapsedTime.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { stringWidth } from '../../ink/stringWidth.js';
 import { Box, Text } from '../../ink.js';
+import { isTerminalTaskStatus } from '../../Task.js';
 import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js';
 import { summarizeRecentActivities } from '../../utils/collapseReadSearch.js';
 import { formatDuration, formatNumber, truncateToWidth } from '../../utils/format.js';
@@ -88,6 +89,10 @@ export function TeammateSpinnerLine({
   const [randomVerb] = useState(() => teammate.spinnerVerb ?? sample(getSpinnerVerbs()));
   const [pastTenseVerb] = useState(() => teammate.pastTenseVerb ?? sample(TURN_COMPLETION_VERBS));
   const isHighlighted = isSelected || isForegrounded;
+  // A finished teammate keeps its row for TEAMMATE_GRACE_MS so the tree never
+  // changes shape under the cursor. The row reads as past tense: its status word
+  // replaces the activity text and its @name is dimmed with it.
+  const isTerminal = isTerminalTaskStatus(teammate.status);
   const treeChar = isHighlighted ? isLast ? '╘═' : '╞═' : isLast ? '└─' : '├─';
   const nameColor = toInkColor(teammate.identity.color);
   const {
@@ -112,7 +117,9 @@ export function TeammateSpinnerLine({
   }
 
   // Get elapsed idle time (how long they've been idle) - for "Idle for X..." display
-  const idleElapsedTime = useElapsedTime(idleStartRef.current ?? Date.now(), teammate.isIdle && !allIdle);
+  // Not on a terminal row: its time stopped, and a 1s tick per grace row would
+  // repaint the tree for no visible change.
+  const idleElapsedTime = useElapsedTime(idleStartRef.current ?? Date.now(), teammate.isIdle && !allIdle && !isTerminal);
 
   // Freeze the duration when we first detect all idle
   // Use the teammate's actual work time (since task started) for the past-tense display
@@ -183,6 +190,12 @@ export function TeammateSpinnerLine({
 
   // Status rendering logic
   const renderStatus = (): React.ReactNode => {
+    // Before every live-state branch: a row in its grace window is finished, so
+    // the terminal word IS its status. `completed` / `failed` / `killed` comes
+    // straight off the task so the row cannot claim a state the task is not in.
+    if (isTerminal) {
+      return <Text dimColor>{teammate.status}</Text>;
+    }
     if (teammate.shutdownRequested) {
       return <Text dimColor>[stopping]</Text>;
     }
@@ -220,7 +233,7 @@ export function TeammateSpinnerLine({
         </Text>
         <Text dimColor={!isSelected}>{treeChar} </Text>
         {/* Agent name: hidden on very narrow screens */}
-        {showName && <Text color={isSelected ? 'suggestion' : nameColor}>
+        {showName && <Text color={isSelected ? 'suggestion' : nameColor} dimColor={isTerminal && !isSelected}>
             @{teammate.identity.agentName}
           </Text>}
         {showName && <Text dimColor={!isSelected}>: </Text>}

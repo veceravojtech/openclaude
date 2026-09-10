@@ -6,8 +6,7 @@ import { useTerminalSize } from 'src/hooks/useTerminalSize.js';
 import { stringWidth } from 'src/ink/stringWidth.js';
 import { useAppState, useSetAppState } from 'src/state/AppState.js';
 import { enterTeammateView, exitTeammateView } from 'src/state/teammateViewHelpers.js';
-import { getSubLeadPath, orderTeammatesDepthFirst } from 'src/tasks/InProcessTeammateTask/InProcessTeammateTask.js';
-import { isInProcessTeammateTask } from 'src/tasks/InProcessTeammateTask/types.js';
+import { getRunningTeammatesSorted, getSubLeadPath } from 'src/tasks/InProcessTeammateTask/InProcessTeammateTask.js';
 import { getPillLabel, pillNeedsCta } from 'src/tasks/pillLabel.js';
 import { type BackgroundTaskState, type TaskState } from 'src/tasks/types.js';
 import { calculateHorizontalScrollWindow } from 'src/utils/horizontalScroll.js';
@@ -53,9 +52,16 @@ export function BackgroundTaskStatus(t0) {
   const showSpinnerTree = expandedView === "teammates";
   const allTeammates = !showSpinnerTree && runningTasks.length > 0 && runningTasks.every(_temp5);
   let t4;
-  if ($[2] !== runningTasks) {
-    t4 = orderTeammatesDepthFirst(runningTasks.filter(isInProcessTeammateTask));
-    $[2] = runningTasks;
+  // The SAME widened source the navigation hook and the PromptInput footer index
+  // into (getRunningTeammatesSorted: running plus rows still in their 30s grace
+  // window), not a status-running filter of its own. With the tree panel OFF the
+  // pills are what selectedIPAgentIndex addresses, so a pill row built from a
+  // narrower array would put the highlight on a different teammate than the one
+  // the index names. Memoised on `tasks` because that is what it now reads; the
+  // slot numbers are untouched.
+  if ($[2] !== tasks) {
+    t4 = getRunningTeammatesSorted(tasks);
+    $[2] = tasks;
     $[3] = t4;
   } else {
     t4 = $[3];

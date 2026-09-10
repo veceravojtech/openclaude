@@ -16,6 +16,7 @@ import { createUserMessage } from '../../utils/messages.js';
 import { killInProcessTeammateAndCascade } from '../../utils/swarm/spawnInProcess.js';
 import { getParentTeamName, getSubTeamNameFor } from '../../utils/swarm/teamHelpers.js';
 import { updateTaskState } from '../../utils/task/framework.js';
+import { isRetainedOrWithinGrace } from '../../utils/task/retention.js';
 import type { InProcessTeammateTaskState } from './types.js';
 import { appendCappedMessage, isInProcessTeammateTask } from './types.js';
 
@@ -205,13 +206,35 @@ export function orderTeammatesDepthFirst(teammates: InProcessTeammateTaskState[]
 }
 
 /**
- * Get running in-process teammates in depth-first tree order (each team's
- * members by name, a sub-lead immediately followed by its sub-team).
+ * Get the in-process teammates that currently have a row, in depth-first tree
+ * order (each team's members by name, a sub-lead immediately followed by its
+ * sub-team).
+ *
+ * "Has a row" is running OR terminal-but-still-inside-its-grace-window: a
+ * completed/failed/killed teammate keeps its place for TEAMMATE_GRACE_MS so a
+ * row can never vanish from under the cursor, drawn dimmed and reading its
+ * terminal word (TeammateSpinnerLine). The composition is the same one
+ * isPanelVisibleAgent uses for the coordinator panel's local agents: the
+ * terminal-status check here, the retain/grace deadline in the shared predicate
+ * (utils/task/retention). The row therefore leaves the order the moment the
+ * deadline passes, while the task object itself survives until the next lazy GC
+ * sweep — the single eviction funnel, which consults the same predicate.
+ *
+ * A grace row is NOT live: every spawn-cap and liveness helper keys on status or
+ * isTerminalTaskStatus (countLiveInProcessTeammates / countLiveTeammatesInTeam in
+ * tools/AgentTool/teammateReplicas, hasLiveTaskFor in utils/swarm/subTeamRecovery,
+ * findBusySubTeamChildren in utils/swarm/inProcessRunner), so widening this order
+ * cannot widen a cap.
+ *
  * Shared between TeammateSpinnerTree display, PromptInput footer selector,
- * useBackgroundTaskNavigation and — through orderTeammatesDepthFirst — the
- * BackgroundTaskStatus pill row; selectedIPAgentIndex maps into this array, so
- * all of them must agree on sort order.
+ * useBackgroundTaskNavigation and the BackgroundTaskStatus pill row;
+ * selectedIPAgentIndex maps into this array, so all of them must agree on sort
+ * order — which is why the widening happens HERE and not per consumer.
+ *
+ * `now` defaults to Date.now(); the explicit parameter keeps the grace deadline
+ * testable without timers, exactly as on isRetainedOrWithinGrace and
+ * isPanelVisibleAgent.
  */
-export function getRunningTeammatesSorted(tasks: Record<string, TaskStateBase>): InProcessTeammateTaskState[] {
-  return orderTeammatesDepthFirst(getAllInProcessTeammateTasks(tasks).filter(t => t.status === 'running'));
+export function getRunningTeammatesSorted(tasks: Record<string, TaskStateBase>, now: number = Date.now()): InProcessTeammateTaskState[] {
+  return orderTeammatesDepthFirst(getAllInProcessTeammateTasks(tasks).filter(t => t.status === 'running' || isTerminalTaskStatus(t.status) && isRetainedOrWithinGrace(t, now)));
 }

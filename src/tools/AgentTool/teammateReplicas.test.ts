@@ -531,3 +531,68 @@ test('a replica batch that fits its own team is still refused by the total cap',
   process.env[MAX_TEAM_TOTAL_ENV] = '30'
   expect(getTeammateSpawnCapError(batch)).toBeUndefined()
 })
+
+/**
+ * A finished teammate whose row is still on screen inside its 30s grace window.
+ * The pair is what the terminal-marking sites write; the point of these cases is
+ * that it changes nothing here. A grace row is a row, not a slot: the caps and
+ * the liveness counts key on status, so a teammate that has stopped stops
+ * counting the instant it stops — exactly as before the grace existed.
+ */
+function teammateInGrace(
+  name: string,
+  status: 'completed' | 'failed' | 'killed' = 'killed',
+  team?: string,
+): InProcessTeammateTaskState {
+  return {
+    ...teammateTask(name, { status, team }),
+    notified: true,
+    retain: false,
+    evictAfter: Date.now() + 30_000,
+  }
+}
+
+test('countLiveInProcessTeammates ignores a teammate inside its grace window', () => {
+  const tasks = tasksOf(
+    teammateTask('busy'),
+    teammateInGrace('done', 'completed'),
+    teammateInGrace('stopped', 'killed'),
+    teammateInGrace('broken', 'failed'),
+  )
+  expect(countLiveInProcessTeammates(tasks)).toBe(1)
+})
+
+test('countLiveTeammatesInTeam ignores grace rows in its own team', () => {
+  const tasks = tasksOf(
+    ...teamMembers('team', 2),
+    teammateInGrace('done', 'completed', 'team'),
+    teammateInGrace('stopped', 'killed', 'team'),
+  )
+  expect(countLiveTeammatesInTeam(tasks, 'team')).toBe(2)
+})
+
+test('the spawn cap is not spent by grace rows: a team full of them still accepts a spawn', () => {
+  // MAX_LIVE_TEAMMATES worth of finished teammates, all still drawn. If a grace
+  // row counted as live this would be refused, and a user who had just stopped a
+  // full team would have to wait out the grace window to spawn anything.
+  const graced = Array.from({ length: DEFAULT_MAX_LIVE_TEAMMATES }, (_, i) =>
+    teammateInGrace(`done-${i + 1}`, 'completed', 'team'),
+  )
+  expect(
+    getTeammateSpawnCapError({
+      name: 'fresh',
+      isTeammateSpawn: true,
+      teamName: 'team',
+      tasks: tasksOf(...graced),
+    }),
+  ).toBeUndefined()
+  // …while the same number of RUNNING teammates is still refused.
+  expect(
+    getTeammateSpawnCapError({
+      name: 'fresh',
+      isTeammateSpawn: true,
+      teamName: 'team',
+      tasks: tasksOf(...teamMembers('team', DEFAULT_MAX_LIVE_TEAMMATES)),
+    }),
+  ).toContain(String(DEFAULT_MAX_LIVE_TEAMMATES))
+})

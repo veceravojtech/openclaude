@@ -463,6 +463,40 @@ export type AppState = DeepImmutable<{
 
 export type AppStateStore = Store<AppState>
 
+/**
+ * The expandedView a fresh session starts in, from the two persisted booleans
+ * (utils/config: `showSpinnerTree` / `showExpandedTodos`, written by
+ * state/onChangeAppState) and whether Agent Teams are enabled.
+ *
+ * Pure: the caller reads the config and the feature gate, so the policy itself
+ * can be asserted without either. The order is the whole policy:
+ *   1. a persisted 'teammates' is honoured — that is the user's last explicit
+ *      choice, and it used to be silently downgraded when no teammate was
+ *      running at startup;
+ *   2. a persisted 'tasks' is honoured next, so someone who expanded the todo
+ *      list and never touched the tree keeps what they had;
+ *   3. with NO tree preference recorded at all (first run), the teammates panel
+ *      is ON when Agent Teams are enabled — the approved default, and the
+ *      reason the tree is "visible every time it is enabled";
+ *   4. `showSpinnerTree: false` is a recorded preference, not an absent one: the
+ *      user hid the panel with Ctrl+T or Enter on `hide`, so it stays hidden.
+ */
+export function deriveInitialExpandedView(
+  config: { showSpinnerTree?: boolean; showExpandedTodos?: boolean },
+  agentTeamsEnabled: boolean,
+): AppState['expandedView'] {
+  if (config.showSpinnerTree) {
+    return 'teammates'
+  }
+  if (config.showExpandedTodos) {
+    return 'tasks'
+  }
+  if (config.showSpinnerTree === undefined && agentTeamsEnabled) {
+    return 'teammates'
+  }
+  return 'none'
+}
+
 export function getDefaultAppState(): AppState {
   // Determine initial permission mode for teammates spawned with plan_mode_required
   const initialMode: PermissionMode =

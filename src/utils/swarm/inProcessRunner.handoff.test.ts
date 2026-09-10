@@ -582,6 +582,20 @@ function tasksForSubLead(state: AppState): string[] {
     .map(task => task.id)
 }
 
+/**
+ * The LIVE ones among those. A terminal teammate keeps its task — and its row —
+ * for TEAMMATE_GRACE_MS, so "the seat is free" is a question about status, not
+ * about presence in AppState.
+ */
+function runningTasksForSubLead(state: AppState): string[] {
+  return teammateTasks(state)
+    .filter(
+      task =>
+        task.identity.agentId === SUB_LEAD_AGENT_ID && task.status === 'running',
+    )
+    .map(task => task.id)
+}
+
 /** Stops a successor the test started indirectly, so no runner outlives it. */
 async function stopSuccessor(world: World, taskId: string): Promise<void> {
   const task = world.getState().tasks[taskId]
@@ -641,15 +655,20 @@ test('the handoff action retires the sub-lead, spawns a successor on the notes, 
   await subLead.done
 
   // 1. The old task completed — not failed, and not killed. The runner's own
-  //    bookend is the record: a completed teammate task carries no panel
-  //    retain field, so it is evicted from AppState as it goes terminal, and
-  //    that eviction is itself half of "the seat is free".
+  //    bookend is the record. The task is no longer LIVE, which is what "the
+  //    seat is free" means; it is no longer evicted on the spot, because a
+  //    terminal teammate now keeps its row for TEAMMATE_GRACE_MS (dimmed,
+  //    reading `completed`) and the shared funnel collects it after that.
   expect(harness.terminatedEvents).toContainEqual({
     taskId: subLead.taskId,
     status: 'completed',
   })
   expect(harness.terminatedEvents.some(e => e.status === 'failed')).toBe(false)
-  expect(world.getState().tasks[subLead.taskId]).toBeUndefined()
+  const retired = world.getState().tasks[subLead.taskId]
+  expect(retired?.status).toBe('completed')
+  expect((retired as InProcessTeammateTaskState).evictAfter).toBeGreaterThan(
+    Date.now(),
+  )
   // A handoff is not a crash: no orphan record was written for the sub-team.
   expect(readTeamFile(SUB_TEAM)?.orphanedLead).toBeUndefined()
 
@@ -896,8 +915,13 @@ test('a handoff overtaken by a kill is disarmed, and no later run under the same
   second.abortController.abort()
   await second.done
 
-  // Both runs ended and were evicted; no third task was ever created.
-  expect(tasksForSubLead(world.getState())).toEqual([])
+  // Both runs ended; no third task was ever created. Their rows are inside the
+  // 30s grace window rather than evicted, so the two ids are still there — what
+  // matters is that neither is live and no successor joined them.
+  expect(tasksForSubLead(world.getState()).sort()).toEqual(
+    [subLead.taskId, second.taskId].sort(),
+  )
+  expect(runningTasksForSubLead(world.getState())).toEqual([])
   expect(
     harness.inbox(SUB_LEAD, PARENT_TEAM).some(m => m.from === 'handoff'),
   ).toBe(false)
@@ -964,7 +988,10 @@ test('a handoff whose inbox write fails registers no successor at all', async ()
     harness.mailboxWrites.filter(w => w.from === 'handoff' && w.failed),
   ).toHaveLength(1)
   expect(findSuccessor(world.getState(), subLead.taskId)).toBeUndefined()
-  expect(tasksForSubLead(world.getState())).toEqual([])
+  // Only the run's own task, and it is no longer live — it is sitting out its
+  // row-grace window instead of being evicted at once.
+  expect(tasksForSubLead(world.getState())).toEqual([subLead.taskId])
+  expect(runningTasksForSubLead(world.getState())).toEqual([])
 
   // The run still ended as the completed handoff it was, exactly once.
   expect(harness.terminatedEvents).toEqual([
@@ -1269,7 +1296,12 @@ test('a run that crashes with a handoff armed becomes an orphan and the request 
   const second = await startIdleTeammate(harness, world, SUB_LEAD, PARENT_TEAM)
   second.abortController.abort()
   await second.done
-  expect(tasksForSubLead(world.getState())).toEqual([])
+  // Same as above: both ended runs keep their rows for the grace window, and
+  // nothing is live under the sub-lead's identity.
+  expect(tasksForSubLead(world.getState()).sort()).toEqual(
+    [subLead.taskId, second.taskId].sort(),
+  )
+  expect(runningTasksForSubLead(world.getState())).toEqual([])
   expect(
     harness.inbox(SUB_LEAD, PARENT_TEAM).some(m => m.from === 'handoff'),
   ).toBe(false)

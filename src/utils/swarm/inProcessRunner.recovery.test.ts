@@ -11,12 +11,15 @@ import {
 } from '../../bootstrap/state.js'
 import type { AppState } from '../../state/AppState.js'
 import { getDefaultAppState } from '../../state/AppStateStore.js'
+import { getRunningTeammatesSorted } from '../../tasks/InProcessTeammateTask/InProcessTeammateTask.js'
+import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import type { ToolUseContext } from '../../Tool.js'
 import { setClaudeConfigHomeDirForTesting } from '../envUtils.js'
+import { TEAMMATE_GRACE_MS } from '../task/framework.js'
 import { createUserMessage } from '../messages.js'
 import type { TeammateMessage } from '../teammateMailbox.js'
 import { TEAM_LEAD_NAME } from './constants.js'
@@ -474,6 +477,42 @@ test('a failing teammate that leads no sub-team records nothing and reports only
   const leadInbox = harness.inbox(TEAM_LEAD_NAME, PARENT_TEAM)
   expect(leadInbox).toHaveLength(1)
   expect(leadInbox[0]!.text).toContain('"idleReason":"failed"')
+})
+
+test('a failed teammate keeps its task and its row for the grace window', async () => {
+  // The failure tail used to evict the task from AppState on the spot, which is
+  // how a row vanished between two keystrokes. It now writes the retain/grace
+  // pair instead and leaves the collecting to the shared funnel, so the row
+  // stays — dimmed, reading `failed` — and the transcript can still be opened.
+  const world = createWorld()
+  writeTeam(PARENT_TEAM, [
+    { agentId: ROOT_LEAD_AGENT_ID, name: TEAM_LEAD_NAME },
+    { agentId: `${WORKER}@${PARENT_TEAM}`, name: WORKER },
+  ])
+  const harness = await importRunnerWithMocks({ failTurns: true })
+
+  const worker = await startTeammate(harness, world, WORKER, PARENT_TEAM, {
+    prompt: 'work',
+  })
+  expect((await worker.done).success).toBe(false)
+
+  const task = world.getState().tasks[worker.taskId]
+  expect(task).toBeDefined()
+  expect(task?.status).toBe('failed')
+  expect(task?.notified).toBe(true)
+  const graced = task as InProcessTeammateTaskState
+  expect(graced.retain).toBe(false)
+  expect(graced.evictAfter).toBe(Date.now() + TEAMMATE_GRACE_MS)
+  expect(getRunningTeammatesSorted(world.getState().tasks).map(t => t.id)).toEqual([
+    worker.taskId,
+  ])
+  // …and it is gone from the order the moment the window closes.
+  expect(
+    getRunningTeammatesSorted(
+      world.getState().tasks,
+      Date.now() + TEAMMATE_GRACE_MS,
+    ),
+  ).toEqual([])
 })
 
 test("a member of an adopted sub-team reports into the adopting team's inbox", async () => {

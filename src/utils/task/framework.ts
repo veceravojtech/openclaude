@@ -22,11 +22,22 @@ import { isRetainedOrWithinGrace } from './retention.js'
 // Standard polling interval for all tasks
 export const POLL_INTERVAL_MS = 1000
 
-// Duration to display killed tasks before eviction
-export const STOPPED_DISPLAY_MS = 3_000
-
 // Grace period for terminal local_agent tasks in the coordinator panel
 export const PANEL_GRACE_MS = 30_000
+
+/**
+ * Grace period for a terminal in_process_teammate task in the teammates tree.
+ *
+ * Matches PANEL_GRACE_MS on purpose: both are "how long a finished agent keeps
+ * its row so it cannot vanish under the user's cursor". It replaces the 3s
+ * STOPPED_DISPLAY_MS linger that used to apply to killed teammates only (and
+ * drew nothing), and the immediate eviction completed/failed teammates used to
+ * get. The deadline is written as `evictAfter` at the terminal transition and is
+ * honoured by the one shared retain/grace rule (./retention), which is what both
+ * eviction paths in this file already consult — so the grace needs no collector
+ * of its own.
+ */
+export const TEAMMATE_GRACE_MS = 30_000
 
 // Attachment type for task status updates
 export type TaskAttachment = {
@@ -85,8 +96,14 @@ export function registerTask(task: TaskState, setAppState: SetAppState): void {
     // the panel sort stable; messages + diskLoaded preserve the viewed
     // transcript across the replace (the user's just-appended prompt lives
     // in messages and isn't on disk yet).
+    //
+    // Keyed on the task TYPE, not on `'retain' in existing`: this carry-forward
+    // is about the panel's local agents (diskLoaded and pendingMessages are
+    // theirs alone), and in_process_teammate now also carries a retain/grace
+    // pair for its own 30s row grace. A field-presence narrow would hand a
+    // re-registered teammate a dead agent's transcript.
     const merged =
-      existing && 'retain' in existing
+      existing && existing.type === 'local_agent'
         ? {
             ...task,
             retain: existing.retain,

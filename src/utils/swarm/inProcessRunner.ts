@@ -75,7 +75,7 @@ import {
   createUserMessage,
 } from '../../utils/messages.js'
 import { evictTaskOutput } from '../../utils/task/diskOutput.js'
-import { evictTerminalTask } from '../../utils/task/framework.js'
+import { TEAMMATE_GRACE_MS } from '../../utils/task/framework.js'
 import { tokenCountWithEstimation } from '../../utils/tokens.js'
 import { createAbortController } from '../abortController.js'
 import { type AgentContext, runWithAgentContext } from '../agentContext.js'
@@ -2675,6 +2675,12 @@ export async function runInProcessTeammate(
           status: 'completed' as const,
           notified: true,
           endTime: Date.now(),
+          // Keep the row for TEAMMATE_GRACE_MS instead of evicting here: the
+          // retain/grace pair is what isRetainedOrWithinGrace reads, and the one
+          // eviction funnel (the lazy GC in utils/task/framework) collects the
+          // task once the deadline passes. See types.ts on the pair.
+          retain: false,
+          evictAfter: Date.now() + TEAMMATE_GRACE_MS,
           messages: task.messages?.length ? [task.messages.at(-1)!] : undefined,
           pendingUserMessages: [],
           inProgressToolUseIDs: undefined,
@@ -2687,8 +2693,6 @@ export async function runInProcessTeammate(
       setAppState,
     )
     void evictTaskOutput(taskId)
-    // Eagerly evict task from AppState since it's been consumed
-    evictTerminalTask(taskId, setAppState)
     // notified:true pre-set → no XML notification → print.ts won't emit
     // the SDK task_notification. Close the task_started bookend directly.
     if (!alreadyTerminal) {
@@ -2761,6 +2765,9 @@ export async function runInProcessTeammate(
           error: errorMessage,
           isIdle: true,
           endTime: Date.now(),
+          // Same 30s grace as the completion tail above.
+          retain: false,
+          evictAfter: Date.now() + TEAMMATE_GRACE_MS,
           onIdleCallbacks: [],
           messages: task.messages?.length ? [task.messages.at(-1)!] : undefined,
           pendingUserMessages: [],
@@ -2773,8 +2780,6 @@ export async function runInProcessTeammate(
       setAppState,
     )
     void evictTaskOutput(taskId)
-    // Eagerly evict task from AppState since it's been consumed
-    evictTerminalTask(taskId, setAppState)
     // notified:true pre-set → no XML notification → close SDK bookend directly.
     if (!alreadyTerminal) {
       emitTaskTerminatedSdk(taskId, 'failed', {

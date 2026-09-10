@@ -66,6 +66,26 @@ export type InProcessTeammateTaskState = TaskStateBase & {
   isIdle: boolean
   shutdownRequested: boolean
 
+  /**
+   * Retain/grace pair, written TOGETHER at the terminal transition (the runner's
+   * completion and failure tails, and killInProcessTeammate) and never before:
+   * `retain: false` plus `evictAfter = Date.now() + TEAMMATE_GRACE_MS`.
+   *
+   * `retain` is what makes `isRetainedOrWithinGrace` (utils/task/retention) take
+   * this task at all — it narrows on the PRESENCE of the field, not on its
+   * value — and `evictAfter` is the deadline it compares against. While the
+   * deadline stands, the row stays in the teammates tree (drawn dimmed, reading
+   * the terminal word) and both evictors in utils/task/framework refuse to
+   * collect the task; once it passes, the row leaves the shared order at the
+   * next render and the lazy GC deletes the task.
+   *
+   * Optional because a teammate that has not finished has no deadline yet, and
+   * because the 24 hand-built fixtures across the suites must stay valid without
+   * declaring a lifecycle field they never reach.
+   */
+  retain?: boolean
+  evictAfter?: number
+
   // Callbacks to notify when teammate becomes idle (runtime only)
   // Used by leader to efficiently wait without polling
   onIdleCallbacks?: Array<() => void>

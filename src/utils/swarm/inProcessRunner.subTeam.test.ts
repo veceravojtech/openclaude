@@ -17,12 +17,14 @@ import {
 } from '../../bootstrap/state.js'
 import type { AppState } from '../../state/AppState.js'
 import { getDefaultAppState } from '../../state/AppStateStore.js'
+import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js'
 import type { ToolUseContext } from '../../Tool.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import { setClaudeConfigHomeDirForTesting } from '../envUtils.js'
+import { TEAMMATE_GRACE_MS } from '../task/framework.js'
 import { createTask, getTasksDir, listTasks } from '../tasks.js'
 import {
   createIdleNotification,
@@ -665,6 +667,64 @@ test('idle shutdown is refused while a child of the sub-team is busy, and allowe
   expect(
     harness.inbox(TEAM_LEAD, PARENT_TEAM).some(m => m.text.includes('shut down')),
   ).toBe(true)
+})
+
+test('a child whose row is still inside its 30s grace window does not hold the gate', async () => {
+  // findBusySubTeamChildren skips a child that is isIdle OR terminal, and the
+  // retain/grace pair the teammates tree added leaves the status alone. So a
+  // child that FINISHED — its row still drawn, dimmed, reading `killed` — is not
+  // busy, and its sub-lead may end its own idle period. Counting a drawn row as
+  // busy would keep every sub-lead alive for 30s after its last worker stopped.
+  process.env.CLAUDE_CODE_TEAMMATE_IDLE_SHUTDOWN_MS = '1000'
+  const harness = await importRunnerWithMocks()
+  const world = createWorld()
+  writeSubTeamWorld([{ agentId: `worker@${SUB_TEAM}`, name: 'worker' }])
+
+  const worker = await registerTeammate(world, 'worker', SUB_TEAM, 'do the work')
+  const subLead = await startIdleTeammate(harness, world, SUB_LEAD, PARENT_TEAM)
+
+  await waitFor(
+    () => virtualNow >= 1_700_000_005_000,
+    'the idle policy to pass the shutdown threshold several times over',
+  )
+  expect(memberNames(PARENT_TEAM)).toContain(SUB_LEAD)
+
+  // The child is killed and keeps its row: terminal status, grace deadline in
+  // the future, isIdle still false.
+  world.setAppState(prev => {
+    const task = prev.tasks[worker.taskId]
+    if (!task || task.type !== 'in_process_teammate') return prev
+    return {
+      ...prev,
+      tasks: {
+        ...prev.tasks,
+        [worker.taskId]: {
+          ...task,
+          status: 'killed' as const,
+          notified: true,
+          retain: false,
+          evictAfter: Date.now() + 30_000,
+          isIdle: false,
+        },
+      },
+    }
+  })
+
+  await subLead.done
+  expect(memberNames(PARENT_TEAM)).not.toContain(SUB_LEAD)
+  expect(
+    harness.inbox(TEAM_LEAD, PARENT_TEAM).some(m => m.text.includes('shut down')),
+  ).toBe(true)
+
+  // And the sub-lead's OWN row enters the same grace window on the way out: the
+  // runner's completion tail marks the pair instead of evicting the task, so the
+  // last thing the user saw does not disappear as the runner returns.
+  const leadTask = world.getState().tasks[subLead.taskId]
+  expect(leadTask?.status).toBe('completed')
+  expect((leadTask as InProcessTeammateTaskState).retain).toBe(false)
+  expect((leadTask as InProcessTeammateTaskState).evictAfter).toBe(
+    Date.now() + TEAMMATE_GRACE_MS,
+  )
 })
 
 test('a teammate that leads no sub-team is unaffected by the gate', async () => {

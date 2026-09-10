@@ -1,4 +1,5 @@
-import { describe, expect, test } from 'bun:test'
+import { afterAll, describe, expect, test } from 'bun:test'
+import chalk from 'chalk'
 import React from 'react'
 
 import { stringWidth } from '../../ink/stringWidth.js'
@@ -8,7 +9,7 @@ import {
   getDefaultAppState,
 } from '../../state/AppState.js'
 import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js'
-import { renderToString } from '../../utils/staticRender.js'
+import { renderToAnsiString, renderToString } from '../../utils/staticRender.js'
 import { TeammateSpinnerTree } from './TeammateSpinnerTree.js'
 
 /**
@@ -19,6 +20,14 @@ import { TeammateSpinnerTree } from './TeammateSpinnerTree.js'
  * react-compiler output, so a wrong cache slot would silently serve a stale
  * node that only the frame can catch.
  */
+
+// The dim checks below read SGR codes; pin chalk to truecolor so they are
+// emitted even though test stdout is not a TTY (precedent: WordmarkRow.test).
+const originalChalkLevel = chalk.level
+chalk.level = 3
+afterAll(() => {
+  chalk.level = originalChalkLevel
+})
 
 const COLUMNS = 120
 /** The narrow terminal the width budget has to survive at every depth. */
@@ -112,6 +121,48 @@ async function renderTree(
 }
 
 /**
+ * The same render with the ANSI codes left in, for the assertions that are about
+ * how a row is styled rather than what it says. `\u001B[2m` is dim.
+ */
+async function renderTreeAnsi(
+  teammates: InProcessTeammateTaskState[],
+  props: Record<string, unknown> = {},
+): Promise<string> {
+  return await renderToAnsiString(
+    <AppStateProvider initialState={stateWith(teammates)}>
+      <TeammateSpinnerTree {...props} />
+    </AppStateProvider>,
+    COLUMNS,
+  )
+}
+
+/**
+ * A teammate inside its 30s grace window: terminal, with the retain/grace pair
+ * the three terminal-marking sites write. The deadline is taken off the real
+ * clock because the tree's own call to getRunningTeammatesSorted passes no `now`.
+ */
+function inGrace(
+  t: InProcessTeammateTaskState,
+  status: 'completed' | 'failed' | 'killed' = 'killed',
+): InProcessTeammateTaskState {
+  return {
+    ...t,
+    status,
+    notified: true,
+    retain: false,
+    evictAfter: Date.now() + 30_000,
+  }
+}
+
+/** The same teammate one millisecond past its grace deadline. */
+function pastGrace(
+  t: InProcessTeammateTaskState,
+  status: 'completed' | 'failed' | 'killed' = 'killed',
+): InProcessTeammateTaskState {
+  return { ...inGrace(t, status), evictAfter: Date.now() - 1 }
+}
+
+/**
  * An activity description far longer than any row can show, so every row has to
  * truncate and therefore has to have budgeted its own width correctly.
  */
@@ -132,6 +183,35 @@ function busy(t: InProcessTeammateTaskState): InProcessTeammateTaskState {
       },
     },
   }
+}
+
+/** The same line with its ANSI codes removed. */
+function stripped(line: string): string {
+  return line.replace(/\u001B\[[0-9;]*m/g, '')
+}
+
+/**
+ * The text of every dimmed run on a line.
+ *
+ * `dimColor` resolves to theme.inactive — rgb(153,153,153) — in ThemedText
+ * (design-system/ThemedText: dimColor wins over an explicit color), so a dimmed
+ * run starts with that truecolor gray and ends at the next SGR escape of any
+ * kind. Ending the run at ANY escape is what makes the reading precise: a live
+ * row's `@name` carries its own agent colour, so it opens a new escape and falls
+ * OUTSIDE the dim run, while a finished row's name stays inside it. Reading runs
+ * rather than matching one escape lets a case say WHICH text is dimmed.
+ */
+const DIM_GRAY = '\u001B[38;2;153;153;153m'
+
+function dimSpans(line: string): string[] {
+  const spans: string[] = []
+  const pattern = /\u001B\[38;2;153;153;153m((?:(?!\u001B\[)[\s\S])*)/g
+  let match = pattern.exec(line)
+  while (match !== null) {
+    spans.push(match[1] ?? '')
+    match = pattern.exec(line)
+  }
+  return spans
 }
 
 /** One entry per teammate row: its @name and the column its tree char sits in. */
@@ -193,9 +273,11 @@ describe('TeammateSpinnerTree', () => {
     expect(rows.find(row => row.name === 'worker-2')!.indent).toBe(root + 2)
   })
 
-  test('draws an orphaned sub-team member once, at its own depth', async () => {
-    // Its sub-lead `ghost` is not running: the row must still be there, exactly
-    // once, indented as its team name says.
+  test('draws an orphaned sub-team member once, under a placeholder for its absent lead', async () => {
+    // Its sub-lead `ghost` has no row at all. The member must still be there,
+    // exactly once and indented as its team name says — and since this change it
+    // nests under a `@ghost · not running` placeholder drawn at the LEAD's
+    // position, instead of appearing to hang off the previous root sibling.
     const frame = await renderTree([...TWO_LEVEL, teammate('stray', 'email/ghost')])
     const rows = teammateRows(frame)
 
@@ -205,10 +287,15 @@ describe('TeammateSpinnerTree', () => {
       'worker-1',
       'worker-2',
       'zoe',
+      'ghost',
       'stray',
     ])
     expect(rows.filter(row => row.name === 'stray')).toHaveLength(1)
+    expect(frame).toContain('@ghost · not running')
     const root = rows.find(row => row.name === 'alice')!.indent
+    // The placeholder sits at the root indent (ghost is a member of `email`);
+    // its sub-team's member sits one level in, under it.
+    expect(rows.find(row => row.name === 'ghost')!.indent).toBe(root)
     expect(rows.find(row => row.name === 'stray')!.indent).toBe(root + 2)
   })
 
@@ -292,9 +379,145 @@ describe('TeammateSpinnerTree', () => {
     expect(rows.find(row => row.name === 'worker-1')!.indent).toBe(root + 2)
   })
 
-  test('renders nothing when no teammate is running', async () => {
+  test('draws the team-lead row and one muted line when there is no teammate at all', async () => {
+    // This used to render `null`, which is what made the tree disappear the
+    // moment the last teammate ended. The panel is always on screen while the
+    // toggle is on, so the zero-row case is a state with its own text.
     const frame = await renderTree([])
-    expect(frame).not.toContain('team-lead')
-    expect(frame.trim()).toBe('')
+    expect(frame).toContain('team-lead')
+    expect(frame).toContain('no teammates · Agent(name: "…") spawns one')
+    expect(frame.indexOf('team-lead')).toBeLessThan(frame.indexOf('no teammates'))
+    expect(teammateRows(frame)).toEqual([])
+  })
+
+  test('the empty state is one line, and it still offers the hide row in selection mode', async () => {
+    const plain = await renderTree([])
+    const lines = plain.split('\n').filter(line => line.trim() !== '')
+    expect(lines).toHaveLength(2)
+
+    const selecting = await renderTree([], { isInSelectionMode: true, selectedIndex: 0 })
+    expect(selecting).toContain('hide')
+    expect(selecting).toContain('enter to collapse')
+  })
+
+  test('a row inside its grace window keeps its place and reads its terminal word', async () => {
+    // `supervisor` was killed while its own sub-team is still working: the row
+    // stays exactly where it was — between alice and its workers — so an index
+    // that named it still names it, and it now reads `killed` instead of an
+    // activity it is no longer doing.
+    const withGrace = [
+      ...TWO_LEVEL.filter(t => t.identity.agentName !== 'supervisor'),
+      inGrace(teammate('supervisor', 'email')),
+    ]
+    const frame = await renderTree(withGrace)
+    const rows = teammateRows(frame)
+
+    expect(rows.map(row => row.name)).toEqual([
+      'alice',
+      'supervisor',
+      'worker-1',
+      'worker-2',
+      'zoe',
+    ])
+    const line = frame.split('\n').find(l => l.includes('@supervisor'))!
+    expect(line).toContain('killed')
+    const root = rows.find(row => row.name === 'alice')!.indent
+    expect(rows.find(row => row.name === 'supervisor')!.indent).toBe(root)
+    expect(rows.find(row => row.name === 'worker-1')!.indent).toBe(root + 2)
+  })
+
+  test.each(['completed', 'failed', 'killed'] as const)(
+    'a %s row is drawn dimmed, with the status word in place of the activity',
+    async status => {
+      const withGrace = [inGrace(teammate('supervisor', 'email'), status)]
+      const ansi = await renderTreeAnsi(withGrace)
+      const line = ansi.split('\n').find(l => l.includes('@supervisor'))!
+      expect(line).toContain(DIM_GRAY)
+      // The whole row — its @name and its status word together — is inside one
+      // dim span, which is what "drawn dimmed" means for a finished teammate.
+      expect(
+        dimSpans(line).some(
+          span => span.includes('@supervisor') && span.includes(status),
+        ),
+      ).toBe(true)
+      expect(stripped(line)).toContain(status)
+      // …and not the verb it would have shown while running.
+      expect(stripped(line)).not.toContain('Working')
+    },
+  )
+
+  test('a row past its grace deadline is gone, and the last one leaves the empty state', async () => {
+    const frame = await renderTree([pastGrace(teammate('supervisor', 'email'))])
+    expect(frame).not.toContain('@supervisor')
+    expect(frame).toContain('no teammates · Agent(name: "…") spawns one')
+  })
+
+  test('a sub-team stays nested under its sub-lead while that lead is in grace, and moves to the placeholder after it', async () => {
+    const lead = teammate('supervisor', 'email')
+    const members = TWO_LEVEL.filter(
+      t => t.identity.teamName === 'email/supervisor',
+    )
+
+    const during = teammateRows(await renderTree([inGrace(lead), ...members]))
+    expect(during.map(row => row.name)).toEqual([
+      'supervisor',
+      'worker-1',
+      'worker-2',
+    ])
+    const after = await renderTree([pastGrace(lead), ...members])
+    const afterRows = teammateRows(after)
+    expect(after).toContain('@supervisor · not running')
+    // Same order, same nesting — only the lead's row changed from a real row to
+    // the placeholder, so its members never jump under a sibling.
+    expect(afterRows.map(row => row.name)).toEqual([
+      'supervisor',
+      'worker-1',
+      'worker-2',
+    ])
+    const placeholderIndent = afterRows.find(row => row.name === 'supervisor')!.indent
+    expect(afterRows.find(row => row.name === 'worker-1')!.indent).toBe(
+      placeholderIndent + 2,
+    )
+  })
+
+  test('one placeholder per absent lead, however many members it has', async () => {
+    const frame = await renderTree([
+      teammate('worker-1', 'email/ghost'),
+      teammate('worker-2', 'email/ghost'),
+    ])
+    const matches = frame.match(/@ghost · not running/g) ?? []
+    expect(matches).toHaveLength(1)
+  })
+
+  test('a chain of absent leads is drawn outermost first, each at its own depth', async () => {
+    // Only the deepest member is left: both `ghost` (a member of `email`) and
+    // `phantom` (a member of `email/ghost`) need a placeholder, in that order.
+    const frame = await renderTree([teammate('stray', 'email/ghost/phantom')])
+    const rows = teammateRows(frame)
+    expect(rows.map(row => row.name)).toEqual(['ghost', 'phantom', 'stray'])
+    expect(rows[0]!.indent + 2).toBe(rows[1]!.indent)
+    expect(rows[1]!.indent + 2).toBe(rows[2]!.indent)
+    expect(frame).toContain('@ghost · not running')
+    expect(frame).toContain('@phantom · not running')
+  })
+
+  test('the placeholder is drawn dimmed, while a running row keeps its own colour', async () => {
+    const ansi = await renderTreeAnsi([
+      teammate('stray', 'email/ghost'),
+      teammate('alice', 'email', { progress: { toolUseCount: 1, tokenCount: 2 } }),
+    ])
+    const placeholder = ansi.split('\n').find(l => l.includes('@ghost'))!
+    expect(
+      dimSpans(placeholder).some(span => span.includes('@ghost · not running')),
+    ).toBe(true)
+    // The contrast that makes the assertion above mean something: a live row's
+    // name is NOT inside a dim span.
+    const live = ansi.split('\n').find(l => l.includes('@alice'))!
+    expect(dimSpans(live).some(span => span.includes('@alice'))).toBe(false)
+  })
+
+  test('no placeholder for a lead that does have a row', async () => {
+    const frame = await renderTree(TWO_LEVEL)
+    expect(frame).not.toContain('not running')
   })
 })

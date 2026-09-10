@@ -482,6 +482,11 @@ test('an idle spawn killed before it parks neither touches the task nor tells th
   await settle()
   expect(harness.runAgentCalls).toHaveLength(0)
   expect(idleNotifications(harness.leadMailbox)).toHaveLength(0)
-  // The runner's exit path evicts the terminal task, as for a prompted spawn.
-  expect(getTeammateTask(getState(), taskId)).toBeUndefined()
+  // The runner's exit path no longer evicts the terminal task: a killed teammate
+  // keeps its row for TEAMMATE_GRACE_MS, dimmed and reading `killed`, and the
+  // shared funnel collects it once the window closes.
+  const killed = getTeammateTask(getState(), taskId)
+  expect(killed?.status).toBe('killed')
+  expect(killed?.retain).toBe(false)
+  expect(killed?.evictAfter).toBeGreaterThan(Date.now())
 })
