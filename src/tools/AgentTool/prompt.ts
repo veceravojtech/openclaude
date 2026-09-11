@@ -1,4 +1,5 @@
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
+import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js'
 import { getSubscriptionType } from '../../utils/auth.js'
 import { hasEmbeddedSearchTools } from '../../utils/embeddedTools.js'
 import { isEnvDefinedFalsy, isEnvTruthy } from '../../utils/envUtils.js'
@@ -84,14 +85,24 @@ export function shouldInjectAgentListInMessages(): boolean {
  * every teammate, which is exactly how the sub-team rule below stopped
  * reaching the one reader it was written for. Telling both, once, costs a
  * clause and is true in either render order.
+ *
+ * Rendered only when `isAgentSwarmsEnabled()` — `toolToAPISchema` strips
+ * `name`, `team_name` and `mode` from the input schema in that same cache-miss
+ * branch when Agent Teams is off (`src/utils/api.ts:89-91,224-227`), and
+ * `TeamCreate` is not even registered (`TeamCreateTool.ts:245-247`), so this
+ * text would describe parameters the model cannot pass and a tool it does not
+ * have. That gate is process-level — env plus a `_CACHED_MAY_BE_STALE` read,
+ * the same one the strip above uses — so the description and the schema flip
+ * together, and this is NOT the ambient branch the paragraph above forbids.
  */
 const TEAMMATE_SPAWN_RULES = `
 - \`name\` spawns a TEAMMATE, and which team it lands in depends on who you are: as a LEAD, the team you pass in \`team_name\` or the team you are already in; as a TEAMMATE — running inside your lead's session or in your own terminal — the sub-team YOU lead, never your own team. Create that sub-team first with \`${TEAM_CREATE_TOOL_NAME}(team_name: "<your team>/<your name>")\`; until it exists the spawn is refused. \`team_name\` is then optional: omit it and your sub-team is used, and if you do pass it, it must name exactly that sub-team. Omit \`name\` and you get an ordinary subagent either way.
 - \`mode\` applies to such a teammate spawn — \`mode: "plan"\` requires it to get its plan approved by you before it implements. A teammate you spawn works on its own and reports back with ${SEND_MESSAGE_TOOL_NAME}, which states when its messages reach you.`
 
 /**
- * Appended only when `run_in_background` is actually on the schema — see
- * `backgroundAgentsAvailable` in getPrompt(). Same reader-attributed shape as
+ * Appended only when `run_in_background` is actually on the schema AND there
+ * are teammates to be one — see `backgroundAgentsAvailable` and
+ * `teammateSpawnAvailable` in getPrompt(). Same reader-attributed shape as
  * TEAMMATE_SPAWN_RULES, and for the same reason.
  */
 const TEAMMATE_BACKGROUND_RULE = `
@@ -119,6 +130,12 @@ export async function getPrompt(
     // eslint-disable-next-line custom-rules/no-process-env-top-level
     !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS) &&
     !forkEnabled
+
+  // Same rule for the teammate parameters: `name`, `team_name` and `mode` are
+  // stripped from the schema when Agent Teams is off (`api.ts:89-91,224-227`),
+  // so the text that explains them must go with them. Process-level, like the
+  // gate above — see TEAMMATE_SPAWN_RULES.
+  const teammateSpawnAvailable = isAgentSwarmsEnabled()
 
   const whenToForkSection = forkEnabled
     ? `
@@ -302,8 +319,12 @@ Usage notes:
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple ${AGENT_TOOL_NAME} tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result.
-- When the current session is outside a git repository (for example a parent folder that contains multiple git repos), set \`cwd\` to the absolute path of the target child repository. You can combine \`cwd\` with \`isolation: "worktree"\` so the worktree is created from that child repo. If worktree creation fails only because no git repository is available, the agent still runs with that \`cwd\` override instead of failing, and the tool result notes that worktree isolation was unavailable.${TEAMMATE_SPAWN_RULES}${
-    backgroundAgentsAvailable ? TEAMMATE_BACKGROUND_RULE : ''
+- When the current session is outside a git repository (for example a parent folder that contains multiple git repos), set \`cwd\` to the absolute path of the target child repository. You can combine \`cwd\` with \`isolation: "worktree"\` so the worktree is created from that child repo. If worktree creation fails only because no git repository is available, the agent still runs with that \`cwd\` override instead of failing, and the tool result notes that worktree isolation was unavailable.${
+    teammateSpawnAvailable ? TEAMMATE_SPAWN_RULES : ''
+  }${
+    teammateSpawnAvailable && backgroundAgentsAvailable
+      ? TEAMMATE_BACKGROUND_RULE
+      : ''
   }${whenToForkSection}${writingThePromptSection}
 
 ${forkEnabled ? forkExamples : currentExamples}`

@@ -14,6 +14,7 @@ import type { AgentDefinition } from './loadAgentsDir.js'
 const originalEnv = {
   CLAUDE_CODE_AGENT_LIST_IN_MESSAGES:
     process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES,
+  CLAUDE_CODE_DISABLE_AGENT_TEAMS: process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS,
   USER_TYPE: process.env.USER_TYPE,
 }
 
@@ -24,6 +25,7 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     restoreEnv('CLAUDE_CODE_AGENT_LIST_IN_MESSAGES')
+    restoreEnv('CLAUDE_CODE_DISABLE_AGENT_TEAMS')
     restoreEnv('USER_TYPE')
   } finally {
     releaseSharedMutationLock()
@@ -115,6 +117,7 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
 
   test('states the lead case and the teammate sub-team rule in ONE render', async () => {
     process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
+    process.env.USER_TYPE = 'ant' // Agent Teams on, whatever the killswitch says
 
     const prompt = await getPrompt(agents)
 
@@ -145,6 +148,7 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
 
   test('the rendered text does not depend on where it is rendered', async () => {
     process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
+    process.env.USER_TYPE = 'ant'
 
     expect(await inTeammateContext(() => getPrompt(agents))).toBe(
       await getPrompt(agents),
@@ -153,6 +157,7 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
 
   test('the memoised description carries the sub-team rule in either render order', async () => {
     process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
+    process.env.USER_TYPE = 'ant'
 
     // Lead first — the only order a real session can take.
     clearToolSchemaCache()
@@ -184,6 +189,7 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
 
   test('promises nothing about a tree row for the spawned teammate', async () => {
     process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
+    process.env.USER_TYPE = 'ant'
 
     const prompt = await getPrompt(agents)
     // Only the teammate block: the rest of the prompt says "worktree".
@@ -196,5 +202,41 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     for (const promise of ['tree', 'row', 'pill', 'visible']) {
       expect(teammateBlock).not.toContain(promise)
     }
+  })
+
+  // The description may not offer a parameter the schema does not carry.
+  // `toolToAPISchema` strips `name`, `team_name` and `mode` from the input
+  // schema when Agent Teams is off (src/utils/api.ts:89-91,224-227) in the very
+  // same cache-miss branch that renders this text, and `TeamCreate` is not
+  // registered at all (TeamCreateTool.ts:245-247). Asserted against the schema
+  // the API receives, so the two can only drift together.
+  test('offers no teammate parameter that the schema does not carry', async () => {
+    process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
+    process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS = '1'
+    delete process.env.USER_TYPE // 'ant' forces Agent Teams back on
+
+    clearToolSchemaCache()
+    const schema = (await toolToAPISchema(AgentTool, {
+      getToolPermissionContext: async () => getEmptyToolPermissionContext(),
+      tools: [] as unknown as Tools,
+      agents,
+    })) as { description: string; input_schema: { properties?: object } }
+
+    const properties = Object.keys(schema.input_schema.properties ?? {})
+    expect(properties).not.toContain('name')
+    expect(properties).not.toContain('team_name')
+    expect(properties).not.toContain('mode')
+
+    for (const clause of [
+      '`name` spawns a TEAMMATE',
+      '`team_name` is then optional',
+      '`mode: "plan"` requires',
+      'TeamCreate(team_name:',
+      '`run_in_background` is not available to you when you are a teammate',
+    ]) {
+      expect(schema.description).not.toContain(clause)
+    }
+    // The rest of the description is untouched by the gate.
+    expect(schema.description).toContain('isolation: "worktree"')
   })
 })
