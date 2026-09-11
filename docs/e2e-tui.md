@@ -131,7 +131,7 @@ and that a row killed under the cursor keeps its place, reads the terminal word
 `killed`, and keeps the highlight: never dangling, never jumped onto the
 teammate that is still alive.
 
-Two details of scenario 6 are load-bearing. First, "the leader row is selected"
+Three details of scenario 6 are load-bearing. First, "the leader row is selected"
 is asserted on the **selection pointer**, not on the leader row's text: the
 leader row is drawn highlighted whenever no teammate transcript is open
 (`isLeaderHighlighted = isLeaderForegrounded || isLeaderSelected`), so its `╒═`
@@ -141,9 +141,17 @@ verbatim from a capture). Second, the empty state is reached with `ctrl+t`
 rather than `Shift+Down`: `Shift+Down` is handed to the tree only when a
 teammate is alive or the panel is already expanded, so on a collapsed panel with
 nothing spawned it belongs to the background-tasks dialog and cannot expand
-anything. The killed row is re-checked 2s later rather than after the full 30s
-grace, which has no env or config knob to shorten — the grace boundary itself is
-a unit test's job, with a mocked clock.
+anything. Third, the first of the two `ctrl+t` presses is watched for its
+NON-effect: with nothing spawned the intermediate `tasks` view leaves no
+positive signal to wait on, so the scenario requires the panel to stay ABSENT
+for the whole settle window instead. A `ctrl+t` that ever reached the teammates
+view in one step fails there by name (`one ctrl+t reached the teammates panel -
+the none → tasks → teammates cycle has changed`) rather than silently leaving
+the second press to cycle the panel back off; the cycle's arity itself is
+pinned by a unit test (`useGlobalKeybindings.cycle.test.ts`). The killed row is
+re-checked 2s later rather than after the full 30s grace, which has no env or
+config knob to shorten — the grace boundary itself is a unit test's job, with a
+mocked clock.
 
 All six scenarios pass on the current tree, so `bun run e2e:tui` exits 0. It
 exits non-zero the moment any of them reproduces again, which is what makes it a
@@ -164,12 +172,22 @@ route is a 404.
 
 The fake must never outlive its run. Each of those scenarios boots the CLI
 *inside* its own `try`, so a boot timeout still reaches the `finally` that calls
-`api.stop()`, and `startFakeAnthropicApi` additionally `unref`s the server: a
-listening `Bun.serve` is a live handle, and either hole alone would leave the
-harness hanging with the exit code already set. The run report is not what such
-a run prints — `report()` is called inside `main()`, after the results array a
-boot timeout abandons, so the only output is the error the top-level rejection
-handler writes before setting that code.
+`api.stop()`, and `startFakeAnthropicApi` additionally `unref`s the server,
+because a listening `Bun.serve` is a live handle. The two guards are redundant
+by measurement rather than cumulative: a deliberate boot timeout, run in four
+shapes, hung only with BOTH holes open (exit 124, killed at 60s) and exited 1 in
+about 4s with the boot inside the `try` alone, with the `unref` alone, and with
+both. Each guard closes the hang on its own; both are kept because each covers a
+different hole — the `try` closes the boot timeout that was actually found, the
+`unref` closes any future throw that gets past `api.stop()` — and one guard
+alone is a single point of failure.
+
+The run report is not what such a run prints: `report()` is called inside
+`main()`, after the results array a boot timeout abandons. What it prints
+instead is `waitForPane`'s `TIMEOUT after ...` line and the last captured pane
+it dumps between two rule lines — written before it returns `ok: false`, so
+before `startCliSession` throws at all — and after that the error the top-level
+rejection handler writes before setting the exit code.
 
 Each scenario hands the fake ONE script — a list of steps per role, each step a
 single content block plus its `stop_reason`:
@@ -264,12 +282,15 @@ two zero-teammate rows (`E2E_TREE_LEADER_ROW`, `E2E_TREE_EMPTY_ROW`), the three
 view headers (`E2E_TEAMMATE_HEADER`, `E2E_SUB_LEAD_HEADER`,
 `E2E_SUB_WORKER_HEADER`), the selection pointer and the tree glyphs that may
 follow it (`SELECTION_MARKER`, aliased as `E2E_TREE_POINTER`, plus
-`TREE_GLYPH_AFTER_POINTER` and the row pattern inside `treeRowColumn`), the
-killed row (`E2E_TREE_KILLED_SELECTED_ROW`) and the prompt box rule
-(`PROMPT_BOX_RULE`). That list is the named constants, not everything the
-scenarios key on: the selected teammate row each of scenarios 4-6 gates on is
-built inline as `` `\u255E\u2550 @${name}:` `` — escaped the same way, and
-stopping at the colon on purpose, which the comment above scenario 6's copy
+`TREE_GLYPH_AFTER_POINTER`), the killed row (`E2E_TREE_KILLED_SELECTED_ROW`)
+and the prompt box rule (`PROMPT_BOX_RULE`). One escaped literal is deliberately
+absent from that list: `treeRowColumn` builds its row pattern with
+`new RegExp(...)` in the function body, once per call, out of the same
+box-drawing glyph classes — escaped for the same reason, just never hoisted to a
+constant. That list is the named constants, not everything the scenarios key
+on: the selected teammate row each of scenarios 4-6 gates on is built inline as
+`` `\u255E\u2550 @${name}:` `` — escaped the same way, and stopping at the
+colon on purpose, which the comment above scenario 6's copy
 explains. Those strings are what a timeout now reports: `waitForPane` takes a
 label and, on timeout, prints the step that was waiting plus the last captured
 pane, so a renamed string yields a readable diff instead of a silent 15-second

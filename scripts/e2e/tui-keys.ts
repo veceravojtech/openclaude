@@ -894,9 +894,10 @@ async function scenarioWindowSwitch(): Promise<ScenarioResult> {
  *
  * Outcome (a) ("swallow the Escape, picker stays open, selection moves down
  * one row") is IMPOSSIBLE at the parser layer and is documented as such in
- * `src/ink/parse-keypress.ts:375-381`: by the time the orphaned tail is read,
- * the lone Escape has already been emitted AND dispatched to the UI by the
- * earlier flush, and a pure token->key function cannot un-send it. So the
+ * `parseMultipleKeypresses`' orphaned-tail branch (`src/ink/parse-keypress.ts`,
+ * the "Only HALF of this is fixable here" note): by the time the orphaned tail
+ * is read, the lone Escape has already been emitted AND dispatched to the UI by
+ * the earlier flush, and a pure token->key function cannot un-send it. So the
  * picker closes, and that dismissal is the accepted, documented residual of
  * ruling (b) - not a regression this harness should chase.
  *
@@ -1018,9 +1019,12 @@ const E2E_TEAMMATE_HEADER = `Viewing team-lead \u203A ${E2E_TEAMMATE}`
  * text or token count, so nothing else can appear between `team-lead` and the
  * hint.
  *
- * Cited by SYMBOL rather than by line: the numbers this comment used to carry
- * (`:77` / `:91` / `:128` / `:329-333`) were stale within two commits of being
- * written, and a confidently wrong citation costs more than none at all.
+ * Cited by SYMBOL rather than by line - here and in every other comment in this
+ * file: the numbers this one used to carry (`:77` / `:91` / `:128` /
+ * `:329-333`) were stale within two commits of being written, and a
+ * confidently wrong citation costs more than none at all. The rule is
+ * checkable rather than aspirational: `grep -nE '\.tsx?:[0-9]+'` over this
+ * file now matches nothing.
  *
  * Spelled with escapes on purpose: `\u00B7` and `\u2026` are one editor
  * round-trip away from an ASCII `.` or `...`, and a silently degraded literal
@@ -1109,6 +1113,13 @@ const PROMPT_BOX_RULE = /^\u2500{20,}\s*$/
  * input line sits directly under the rule - so this reads the pane's structure
  * rather than the prompt's padding, and an empty input comes back as `''`
  * instead of being confused with "no input box".
+ *
+ * It reads that pointer through `E2E_TREE_POINTER` - the TREE's name for it,
+ * not the prompt's. A naming slip, not a behaviour: `E2E_TREE_POINTER` is a
+ * plain alias (`= SELECTION_MARKER`), the same binding, so the read is
+ * identical either way - but by the alias's own rule ("each side of the
+ * harness reads in its own vocabulary") a prompt-side reader should say
+ * `SELECTION_MARKER`.
  */
 function promptInputLine(pane: string): string | null {
   const lines = pane.split('\n')
@@ -1134,10 +1145,15 @@ const PROMPT_RESTORE_SETTLE_MS = 400
  * input box on screen with nothing drawn over it.
  *
  * The view header being gone is NOT the prompt being back, and both scenario 4
- * and scenario 5 used to stop at that gap. The Escape that leaves the view can
- * reach the prompt as well, and Escape at the prompt opens the Rewind dialog
- * (`MessageSelector`) - a modal that REPLACES the input box while leaving the
- * leader view visible behind it, so a bare `!pane.includes(header)` is
+ * and scenario 5 used to stop at that gap. The Escapes that leave the view can
+ * reach the prompt as well, and a DOUBLE press there - not a single Escape -
+ * opens the Rewind dialog (`MessageSelector`): `PromptInput`'s Escape branch
+ * runs `doublePressEscFromEmpty`, a `useDoublePress` whose SECOND press inside
+ * `DOUBLE_PRESS_TIMEOUT_MS` calls `onShowMessageSelector`, and only with an
+ * empty input, a non-empty transcript and nothing loading. This loop sends up
+ * to `PROMPT_RESTORE_ATTEMPTS` Escapes, so a pair inside that window is
+ * something it can produce. That dialog REPLACES the input box while leaving
+ * the leader view visible behind it, so a bare `!pane.includes(header)` is
  * satisfied by it. Whether it appears depends on how the view-exit render
  * interleaves with the keys before it (observed both ways while building
  * scenario 5), so it is DISMISSED when present rather than asserted: pinning
@@ -1273,8 +1289,9 @@ type FakeRequestBody = {
 }
 
 /**
- * The heading of the teammate system-prompt addendum
- * (`src/utils/swarm/teammatePromptAddendum.ts:9`), appended to a teammate's
+ * The heading of the teammate system-prompt addendum: the first line of
+ * `TEAMMATE_SYSTEM_PROMPT_ADDENDUM`
+ * (`src/utils/swarm/teammatePromptAddendum.ts`), appended to a teammate's
  * system prompt and to nothing else.
  */
 const TEAMMATE_SYSTEM_MARKER = '# Agent Teammate Communication'
@@ -1289,20 +1306,23 @@ const TEAMMATE_SYSTEM_MARKER = '# Agent Teammate Communication'
  * A second signal was tried and REJECTED on evidence: "the last user message
  * contains `<teammate-message`". It misclassifies the LEAD, because the LEAD's
  * own inbox poller wraps an incoming message in that tag before submitting it
- * into the lead's turn (`src/hooks/useInboxPoller.ts:866` and `:970`; the same
- * wrapping in `formatTeammateMessages`, `src/utils/teammateMailbox.ts:386`) -
- * and a teammate's idle notification is delivered to the lead. The tag is
- * therefore written for whoever RECEIVES the message, lead included; it is NOT
- * a teammate marker. (`formatAsTeammateMessage`,
- * `src/utils/swarm/inProcessRunner.ts:583-592`, is the teammate-side twin: all
- * three of its call sites - `:1856`, `:1892`, `:2214` - build a TEAMMATE's
+ * into the lead's turn (both of `useInboxPoller`'s delivery paths wrap the
+ * text in `TEAMMATE_MESSAGE_TAG`; the same wrapping in
+ * `formatTeammateMessages`, `src/utils/teammateMailbox.ts`) - and a teammate's
+ * idle notification is delivered to the lead. The tag is therefore written for
+ * whoever RECEIVES the message, lead included; it is NOT
+ * a teammate marker. (`formatAsTeammateMessage`
+ * (`src/utils/swarm/inProcessRunner.ts`) is the teammate-side twin: all three
+ * of its call sites - two in `resolveNextPrompt`, one building
+ * `wrappedInitialPrompt` in `runInProcessTeammate` - build a TEAMMATE's
  * prompt, so it is not what puts the tag in front of the lead.) Observed
  * directly while building scenario 5: a request with 34 tools, the lead's model
  * and NO addendum, carrying `<teammate-message teammate_id="supervisor-one">`.
  * Reading that as a teammate turn would serve the lead a teammate's script
  * step. The addendum is
  * appended to every in-process teammate's system prompt
- * (`inProcessRunner.ts:2124`) except one this harness never uses
+ * (`runInProcessTeammate` pushes `TEAMMATE_SYSTEM_PROMPT_ADDENDUM` onto the
+ * system-prompt parts) except under one mode this harness never uses
  * (`systemPromptMode: 'replace'`), so it is both sufficient and safe here.
  */
 function classifyRole(body: FakeRequestBody): FakeRole {
@@ -1516,13 +1536,16 @@ function startFakeAnthropicApi(script: FakeScript): FakeAnthropicApi {
   // set - hanging with the error printed and nothing after it, which is exactly
   // what the "nothing outlives main()" note at the bottom of this file promises
   // cannot happen. The run REPORT is not what such a run prints: `report()` is
-  // called inside `main()`, after the `results` array the throw abandons, so
-  // the only output is the top-level rejection handler's `console.error`. Belt
-  // and braces with booting each scenario INSIDE its `try`: that closes the one
-  // hole we found (a boot timeout), this closes the next one. `unref` does not
-  // stop the server answering - every request of every scenario is served
-  // exactly as before; it only stops an idle server from being a reason to
-  // stay alive.
+  // called inside `main()`, after the `results` array the throw abandons. It is
+  // not the ONLY output either: a boot timeout prints `waitForPane`'s `TIMEOUT
+  // after ...` line and the pane it dumps between two rule lines FIRST - that
+  // report is written before `ok: false` comes back and `startCliSession`
+  // throws - and the top-level rejection handler's `console.error` after it.
+  // Belt and braces with booting each scenario INSIDE its `try`: that closes
+  // the one hole we found (a boot timeout), this closes the next one. `unref`
+  // does not stop the server answering - every request of every scenario is
+  // served exactly as before; it only stops an idle server from being a reason
+  // to stay alive.
   server.unref()
   return {
     baseUrl: `http://127.0.0.1:${server.port}`,
@@ -1723,7 +1746,8 @@ const E2E_SUB_LEAD = 'supervisor-one'
 const E2E_SUB_WORKER = 'worker-one'
 /**
  * The team a teammate may create for itself: `<its team>/<its name>`, the only
- * name TeamCreate accepts from a teammate (`TeamCreateTool.ts:143-156`).
+ * name TeamCreate accepts from a teammate (`TeamCreateTool` derives it with
+ * `getSubTeamNameFor` and throws on any other `requestedName`).
  */
 const E2E_SUB_TEAM = `${E2E_TEAM}/${E2E_SUB_LEAD}`
 /**
@@ -1752,14 +1776,17 @@ const E2E_SUB_WORKER_HEADER = `${E2E_SUB_LEAD_HEADER} \u203A ${E2E_SUB_WORKER}`
  * itself idle over the team mailbox), yet it never gets a row, a pill, or a
  * selectable entry, because a tool running inside a teammate's turn is handed
  * an isolated no-op `setAppState` and that is the callback the spawn registers
- * its task through. Chain, verified at this commit:
- * `inProcessRunner.ts:2500` runs the turn with `isAsync: true` →
- * `runAgent.ts:758` passes `shareSetAppState: !isAsync` →
- * `forkedAgent.ts:421-423` substitutes `() => {}` →
- * `spawnInProcess.ts:124,:224` registers through it. The escape hatch that
- * exists for exactly this (`setAppStateForTasks`, `forkedAgent.ts:426-428` -
+ * its task through. Chain, verified at this commit and cited by symbol:
+ * `runInProcessTeammate` (`inProcessRunner.ts`) runs the turn with
+ * `isAsync: true` →
+ * `runAgent` (`runAgent.ts`) passes `shareSetAppState: !isAsync` →
+ * `createSubagentContext` (`forkedAgent.ts`) substitutes `() => {}` for
+ * `setAppState` when that flag is off →
+ * `spawnInProcessTeammate` (`spawnInProcess.ts`) takes `setAppState` off its
+ * `SpawnContext` and registers the task through it. The escape hatch that
+ * exists for exactly this (`setAppStateForTasks` in `createSubagentContext` -
  * "Task registration/kill must always reach the root store, even when
- * setAppState is a no-op") is not on `SpawnContext` (`spawnInProcess.ts:66`).
+ * setAppState is a no-op") is not on `SpawnContext` at all.
  * The tree is not at fault and this scenario proves it: spawned by the lead,
  * the very same sub-team member is drawn indented under its sub-lead. Restoring
  * the intended shape is a two-step script edit once that gap is fixed - drop
@@ -1803,7 +1830,8 @@ const E2E_NESTED_TREE_SCRIPT: FakeScript = {
         id: 'toolu_e2e_sub_team',
         name: 'TeamCreate',
         // The only name TeamCreate accepts from a teammate: its own
-        // `<its team>/<its name>` (`TeamCreateTool.ts:143-156`).
+        // `<its team>/<its name>` (`TeamCreateTool`'s `getSubTeamNameFor`, and
+        // the `requestedName` check that throws on anything else).
         input: { team_name: E2E_SUB_TEAM },
       },
       stopReason: 'tool_use',
@@ -1824,7 +1852,8 @@ const E2E_NESTED_TREE_SCRIPT: FakeScript = {
  * `classifyRole`.
  *
  * It walks DOWN only. Shift+Up is bound to `chat:messageActions` in the Chat
- * context (`src/keybindings/defaultBindings.ts:88-90`) and never reaches
+ * context (`src/keybindings/defaultBindings.ts`, the
+ * `feature('MESSAGE_ACTIONS')` spread) and never reaches
  * `useBackgroundTaskNavigation`, so in a real terminal today the leader row's
  * own `shift + ↑/↓ to select` hint is half true: Shift+Down steps, Shift+Up
  * does nothing. Measured three times in three different selection states while
@@ -1904,9 +1933,10 @@ async function scenarioNestedTeamTree(): Promise<ScenarioResult> {
     // sub-team` a full turn after that prompt was answered. Typed straight on
     // top of it, the next prompt would be submitted as the two concatenated
     // (`...sub-teamadd worker-one...`), which is what this scenario used to do.
-    // Ctrl+U is the input's kill-to-line-start key (`useTextInput.ts:672-680`),
-    // and the wait after it is what makes "the second prompt lands in an EMPTY
-    // input" a property this scenario CHECKS rather than one it assumes.
+    // Ctrl+U is the input's kill-to-line-start key (`useTextInput`'s ctrl map
+    // sends `u` to `killToLineStart`), and the wait after it is what makes "the
+    // second prompt lands in an EMPTY input" a property this scenario CHECKS
+    // rather than one it assumes.
     tmux('send-keys', '-t', CLI_WINDOW, 'C-u')
     const inputCleared = await waitForPane(
       'scenario 5: an empty prompt input after Ctrl+U, before the second prompt',
@@ -2133,14 +2163,15 @@ const E2E_TWO_TEAMMATES_SCRIPT: FakeScript = {
  *
  * This is the only scenario that boots with the toggle OFF, and the seed is
  * deliberate rather than convenient: the branch under test is
- * `stepTeammateSelection`'s first-press-expands-a-collapsed-tree
- * (`useBackgroundTaskNavigation.ts:43-50`), which no scenario can reach from
- * the shipped default. Every OTHER scenario boots at the default, on.
+ * `stepTeammateSelection`'s first-press-expands-a-collapsed-tree branch
+ * (`useBackgroundTaskNavigation.ts`), which no scenario can reach from the
+ * shipped default. Every OTHER scenario boots at the default, on.
  *
  * The order of the steps is forced by one product rule: Shift+Down is handed to
  * the tree only when a teammate is alive OR the panel is already expanded
- * (`useBackgroundTaskNavigation.ts:219-226`), so with a collapsed panel and no
- * teammates the press belongs to the background-tasks dialog and CANNOT expand
+ * (the `e.shift && up/down` branch of `useBackgroundTaskNavigation`'s
+ * `handleKeyDown`), so with a collapsed panel and no teammates the press
+ * belongs to the background-tasks dialog and CANNOT expand
  * the panel. The empty state is therefore reached the way a user reaches it
  * with nothing spawned - ctrl+t, which cycles none → tasks → teammates → none
  * (`nextExpandedView`) - and the expand-from-collapsed press comes later, once
