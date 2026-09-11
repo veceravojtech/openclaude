@@ -4050,9 +4050,15 @@ async function drainInboxForMidTurnDelivery(
  * runner's poll loop uses.
  *
  * Entries are evicted by `invalidateSubTeamLeadership` when the answer changes
- * under us, and never otherwise: the key is a live teammate's agent id and
- * in-process teammates are capped at MAX_LIVE_TEAMMATES (16,
- * teammateReplicas.ts), so the map is bounded by that cap per session.
+ * under us, and never otherwise — not even when a teammate dies. The key is a
+ * teammate's `name@team`, so the map holds one entry per distinct teammate
+ * this session has run, not per teammate alive right now: the spawn caps
+ * (`getMaxTeamTotal()`, DEFAULT_MAX_TEAM_TOTAL = 24 across all teams of the
+ * session, and `getMaxLiveTeammates()`, DEFAULT_MAX_LIVE_TEAMMATES = 16 per
+ * team — both env-tunable, tools/AgentTool/teammateReplicas.ts) bound how many
+ * are live at once, and therefore bound the map only between them and how
+ * often teammates are replaced. Two small strings per entry, so that is worth
+ * saying rather than fixing.
  */
 const subTeamLeadershipCache = new Map<
   string,

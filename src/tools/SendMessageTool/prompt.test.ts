@@ -11,8 +11,12 @@ import { getPrompt } from './prompt.js'
 // the claim and the delivery path stay in step.
 // T5/F2: that sentence then over-promised in the other direction — a lead and
 // a tmux teammate are still served by useInboxPoller, which submits what
-// arrived mid-turn only once they are idle. The wording is now chosen per
-// context; both variants are pinned here, and so is the default.
+// arrived mid-turn only once they are idle. The sentence now states BOTH
+// timings and which reader each belongs to, in one wording, because it cannot
+// be chosen per reader: toolToAPISchema memoises a tool's description
+// process-wide by name (src/utils/api.ts:207-214,
+// src/utils/toolSchemaCache.ts:18) and a teammate shares that process with its
+// lead, so the first render wins for everybody.
 
 /** The ambient context an in-process teammate's turn runs inside. */
 function asInProcessTeammate<T>(fn: () => T): T {
@@ -31,38 +35,33 @@ function asInProcessTeammate<T>(fn: () => T): T {
   )
 }
 
-test('an in-process teammate is promised mid-turn delivery', () => {
-  const prompt = getPrompt(true)
+test('both delivery timings are stated, each with the reader it belongs to', () => {
+  const prompt = getPrompt()
 
   expect(prompt).toContain(
     "Messages addressed to you are delivered automatically; you don't check an inbox.",
   )
-  expect(prompt).toContain('They arrive at your next tool call')
+  // Mid-turn, for the agent T4's path actually serves that way.
+  expect(prompt).toContain(
+    'They arrive at your next tool call when you are a teammate running inside your lead',
+  )
   expect(prompt).toContain(
     'a message sent while you are working reaches you without waiting for you to finish',
   )
+  // Once idle, for the agents useInboxPoller serves.
+  expect(prompt).toContain(
+    'once you are idle, as your next turn, when you are a lead or a teammate running in its own terminal',
+  )
 })
 
-test('everyone else is promised delivery once they are idle', () => {
-  const prompt = getPrompt(false)
-
-  expect(prompt).toContain(
-    "Messages addressed to you are delivered automatically; you don't check an inbox.",
-  )
-  expect(prompt).toContain('They arrive as your next turn, once you are idle')
-  expect(prompt).toContain(
-    'a message sent while you are working reaches you when you finish, not inside the turn you are in',
-  )
-  // The promise the lead and a tmux teammate cannot keep.
-  expect(prompt).not.toContain('at your next tool call')
-  expect(prompt).not.toContain('without waiting for you to finish')
-})
-
-test('the variant is chosen by the ambient context, not by the caller', () => {
-  // SendMessageTool.prompt() takes no argument, so the default is the whole
-  // production wiring: what an agent is told depends on where getPrompt runs.
-  expect(getPrompt()).toBe(getPrompt(false))
-  expect(asInProcessTeammate(() => getPrompt())).toBe(getPrompt(true))
+test('the rendered text does not depend on where it is rendered', () => {
+  // Required, not incidental: SendMessage's description is memoised per
+  // process under its tool name (src/utils/api.ts:207-214, the Map at
+  // src/utils/toolSchemaCache.ts:18, cleared only on an auth or tool-set
+  // change), and an in-process teammate shares that process with its lead. A
+  // prompt that read the ambient context would ship whichever agent rendered
+  // first — always the lead, which spawns the teammate — to everyone.
+  expect(asInProcessTeammate(() => getPrompt())).toBe(getPrompt())
 })
 
 test('it still tells a teammate to use the tool rather than plain text', () => {
