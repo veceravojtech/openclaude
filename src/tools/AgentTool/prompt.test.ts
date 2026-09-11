@@ -183,9 +183,15 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     expect(prompt).toContain('`team_name` is then optional')
     expect(prompt).toContain('must name exactly that sub-team')
     expect(prompt).toContain('`mode: "plan"` starts the teammate in plan mode')
-    // AgentTool.tsx:462-464 — scoped to the in-process teammate, and said so.
+    // The guard is isInProcessTeammate(), so the rule is FALSE of a pane
+    // teammate — a separate process that keeps the parameter. Both halves are
+    // pinned: stopping at "when you are a teammate" leaves the blanket wording
+    // green.
     expect(prompt).toContain(
-      '`run_in_background` is not available to you when you are a teammate',
+      "`run_in_background` is not available to you when you are a teammate running inside your lead's session",
+    )
+    expect(prompt).toContain(
+      'a lead, or a teammate running in its own terminal, can use it',
     )
     // U3 made both of these false; neither may come back.
     expect(prompt).not.toContain('teammates cannot spawn other teammates')
@@ -354,11 +360,23 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
   // combination and the fork render has to hold the invariant too. Both renders
   // are exercised below.
 
-  /** The Agent schema the API receives with Agent Teams OFF. */
-  async function teamsOffSchema(): Promise<{
+  type AgentAPISchema = {
     description: string
     input_schema: { properties?: object }
-  }> {
+  }
+
+  /** Rendered past the cache, so the caller's env is the env that renders. */
+  async function agentAPISchema(): Promise<AgentAPISchema> {
+    clearToolSchemaCache()
+    return (await toolToAPISchema(AgentTool, {
+      getToolPermissionContext: async () => getEmptyToolPermissionContext(),
+      tools: [] as unknown as Tools,
+      agents,
+    })) as AgentAPISchema
+  }
+
+  /** The Agent schema the API receives with Agent Teams OFF. */
+  async function teamsOffSchema(): Promise<AgentAPISchema> {
     process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
     process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS = '1'
     // The opt-out already wins on its own (agentSwarmsEnabled.ts:21-24 checks
@@ -366,13 +384,23 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     // render independent of an ambient ant build if that precedence ever moves.
     delete process.env.USER_TYPE
 
-    clearToolSchemaCache()
-    return (await toolToAPISchema(AgentTool, {
-      getToolPermissionContext: async () => getEmptyToolPermissionContext(),
-      tools: [] as unknown as Tools,
-      agents,
-    })) as { description: string; input_schema: { properties?: object } }
+    return agentAPISchema()
   }
+
+  /** The same schema with Agent Teams ON — the strip must not reach here. */
+  async function teamsOnSchema(): Promise<AgentAPISchema> {
+    process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
+    forceAgentTeamsOn()
+
+    return agentAPISchema()
+  }
+
+  /**
+   * Every teammate-only parameter filterSwarmFieldsFromSchema takes out of the
+   * Agent schema. `replicas` belongs here because its own describe() requires
+   * `name`, which the same cache-miss branch has just stripped.
+   */
+  const TEAMMATE_SCHEMA_FIELDS = ['name', 'team_name', 'mode', 'replicas']
 
   /** Clauses of TEAMMATE_SPAWN_RULES / TEAMMATE_BACKGROUND_RULE. */
   const TEAMMATE_PARAM_CLAUSES = [
@@ -380,6 +408,9 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     '`team_name` is then optional',
     '`mode: "plan"` starts the teammate in plan mode',
     'TeamCreate(team_name:',
+    // Deliberately the SHORT substring. This list is asserted with
+    // not.toContain, where a LONGER needle matches less and so pins less — the
+    // opposite of the positive pin above.
     '`run_in_background` is not available to you when you are a teammate',
   ]
 
@@ -417,9 +448,9 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     expect(schema.description).not.toContain('## When to fork')
 
     const properties = Object.keys(schema.input_schema.properties ?? {})
-    expect(properties).not.toContain('name')
-    expect(properties).not.toContain('team_name')
-    expect(properties).not.toContain('mode')
+    for (const field of TEAMMATE_SCHEMA_FIELDS) {
+      expect(properties).not.toContain(field)
+    }
 
     for (const clause of TEAMMATE_PARAM_CLAUSES) {
       expect(schema.description).not.toContain(clause)
@@ -447,9 +478,9 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     )
 
     const properties = Object.keys(schema.input_schema.properties ?? {})
-    expect(properties).not.toContain('name')
-    expect(properties).not.toContain('team_name')
-    expect(properties).not.toContain('mode')
+    for (const field of TEAMMATE_SCHEMA_FIELDS) {
+      expect(properties).not.toContain(field)
+    }
 
     for (const clause of [
       ...TEAMMATE_PARAM_CLAUSES,
@@ -469,6 +500,15 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
       'Never write its output yourself or discard its result when it lands.',
     )
     expect(schema.description).toContain('isolation: "worktree"')
+  })
+
+  test('carries every teammate parameter when Agent Teams is ON', async () => {
+    const schema = await teamsOnSchema()
+
+    const properties = Object.keys(schema.input_schema.properties ?? {})
+    for (const field of TEAMMATE_SCHEMA_FIELDS) {
+      expect(properties).toContain(field)
+    }
   })
 
   test('the FORK render keeps those fragments when Agent Teams is ON', async () => {
