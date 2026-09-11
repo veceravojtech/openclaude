@@ -1530,9 +1530,17 @@ const E2E_SUB_WORKER = 'worker-one'
  * name TeamCreate accepts from a teammate (`TeamCreateTool.ts:143-156`).
  */
 const E2E_SUB_TEAM = `${E2E_TEAM}/${E2E_SUB_LEAD}`
-/** The view header names a teammate by its path down the tree, one `›` per level. */
-const E2E_SUB_LEAD_HEADER = `Viewing team-lead › ${E2E_SUB_LEAD}`
-const E2E_SUB_WORKER_HEADER = `${E2E_SUB_LEAD_HEADER} › ${E2E_SUB_WORKER}`
+/**
+ * The view header names a teammate by its path down the tree, one `›` per
+ * level. Spelled `\u203A`, like `E2E_TEAMMATE_HEADER` above and for the same
+ * reason: both are compared against real pane text, so an editor round-trip
+ * that degraded the separator into an ASCII `>` would cost a 15s timeout
+ * instead of a diff. The deeper header is built FROM the sub-lead's, which is
+ * what makes the one a prefix of the other - the property scenario 5 asserts
+ * when it opens the sub-lead and requires the deeper row to be absent.
+ */
+const E2E_SUB_LEAD_HEADER = `Viewing team-lead \u203A ${E2E_SUB_LEAD}`
+const E2E_SUB_WORKER_HEADER = `${E2E_SUB_LEAD_HEADER} \u203A ${E2E_SUB_WORKER}`
 
 /**
  * How many times scenario 5 will dismiss whatever the final Escape left drawn
@@ -2017,10 +2025,15 @@ async function scenarioTreePersists(): Promise<ScenarioResult> {
     }
 
     // One more press moves onto the FIRST teammate row - the one about to die.
+    // The prefix stops at the colon on purpose: the row is still ALIVE here, so
+    // its activity is whatever the spinner last drew, and only
+    // `E2E_TREE_KILLED_SELECTED_ROW` below may carry the terminal word. Same
+    // `\u255E\u2550` escapes as that constant - the glyphs are compared against
+    // real pane text either way.
     tmux('send-keys', '-t', CLI_WINDOW, 'S-Down')
     const onTarget = await waitForPane(
       `scenario 6: the selection on @${E2E_KILL_TARGET}, the first teammate row`,
-      pane => selectedTreeRow(pane)?.startsWith(`╞═ @${E2E_KILL_TARGET}:`) === true,
+      pane => selectedTreeRow(pane)?.startsWith(`\u255E\u2550 @${E2E_KILL_TARGET}:`) === true,
       UI_TIMEOUT_MS,
     )
     if (!onTarget.ok) {
