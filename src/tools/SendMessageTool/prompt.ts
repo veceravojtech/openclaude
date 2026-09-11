@@ -46,7 +46,7 @@ A teammate can lead a sub-team named \`<its team>/<its name>\`, so the same name
 
 \`team-lead\` is the lead of YOUR team — from inside a sub-team that is your sub-lead, not the root lead. Address the root lead explicitly as \`team-lead@<root team>\`. Copy a \`to\` from \`ListAgents\` and it resolves to exactly the agent on that row.
 
-Your plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages from teammates are delivered automatically; you don't check an inbox. Refer to teammates by name, never by UUID. When relaying, don't quote the original — it's already rendered to the user.${udsSection}
+Your plain text output is NOT visible to other agents — to communicate, you MUST call this tool. Messages addressed to you are delivered automatically; you don't check an inbox. They arrive at your next tool call, or as your next turn when you have no tool call left to make — so a message sent while you are working reaches you without waiting for you to finish. Refer to teammates by name, never by UUID. When relaying, don't quote the original — it's already rendered to the user.${udsSection}
 
 ## Protocol responses (legacy)
 

@@ -251,8 +251,10 @@ import {
   readUnreadMessages,
   markMessagesAsReadByPredicate,
   isShutdownApproved,
+  isShutdownRejected,
   isStructuredProtocolMessage,
   isIdleNotification,
+  type TeammateMessage,
 } from './teammateMailbox.js'
 import {
   getAgentName,
@@ -260,8 +262,17 @@ import {
   getTeamName,
   isTeamLead,
 } from './teammate.js'
-import { isInProcessTeammate } from './teammateContext.js'
-import { removeTeammateFromTeamFile } from './swarm/teamHelpers.js'
+import { getTeammateContext, isInProcessTeammate } from './teammateContext.js'
+import {
+  type CallerIdentity,
+  resolveCallerIdentity,
+} from './agentIdentity.js'
+import {
+  getSubTeamNameFor,
+  readSubTeamLedBy,
+  removeTeammateFromTeamFile,
+} from './swarm/teamHelpers.js'
+import { TEAM_LEAD_NAME } from './swarm/constants.js'
 import { unassignTeammateTasks } from './tasks.js'
 import { getCompanionIntroAttachment } from '../buddy/prompt.js'
 import { isBuddyEnabled } from '../buddy/feature.js'
@@ -3347,6 +3358,11 @@ export const __test = {
   getLSPDiagnosticAttachments,
   maybe,
   processAtMentionedFilesWithDependencies,
+  // The per-tool-round teammate mailbox hook, reached from getAttachments at
+  // the `teammate_mailbox` call site. Exposed so a runner test can invoke it
+  // at the same point in a turn without building the whole attachment set.
+  getTeammateMailboxAttachments,
+  resetSubTeamLeadershipCache: (): void => subTeamLeadershipCache.clear(),
 }
 
 export async function* getAttachmentMessages(
@@ -3933,6 +3949,181 @@ async function getAsyncHookResponseAttachments(): Promise<Attachment[]> {
 }
 
 /**
+ * The messages a teammate's own inbox hands straight to the model, mid-turn.
+ *
+ * Everything else in the inbox belongs to a consumer that is still waiting for
+ * it, and reading it here would mark it read and destroy that consumer's only
+ * copy:
+ * - `isStructuredProtocolMessage` — permission_request / permission_response /
+ *   sandbox_permission_request / sandbox_permission_response /
+ *   shutdown_request / shutdown_approved / team_permission_update /
+ *   mode_set_request / plan_approval_request / plan_approval_response. The
+ *   permission-fallback poll inside the teammate's own turn takes the response
+ *   matching its request_id (inProcessRunner.ts), the idle loop scans unread
+ *   for `isShutdownRequest` ahead of every other message, and useInboxPoller
+ *   routes the rest on the lead's side.
+ * - `isShutdownRejected` — the reply to a shutdown this teammate asked for.
+ *   Not in isStructuredProtocolMessage, but the same rule: it belongs to the
+ *   idle loop's shutdown handling, which is where a teammate awaiting that
+ *   answer is parked.
+ * - `isIdleNotification` — a child reporting itself idle. The idle loop owns
+ *   it: it is the wake-up that hands a sub-lead its next turn, and it is
+ *   deliberately collapsed to the latest per agent on the lead's path.
+ *
+ * Everything else — a peer DM, a lead DM, a task_assignment — is ordinary work
+ * addressed to this teammate, has no other consumer on the teammate side, and
+ * is exactly what sat unread while the teammate was busy.
+ */
+function isMidTurnDeliverableMessage(text: string): boolean {
+  return (
+    !isStructuredProtocolMessage(text) &&
+    isShutdownRejected(text) === null &&
+    isIdleNotification(text) === null
+  )
+}
+
+/** Identity of one mailbox entry, so only the delivered ones are marked read. */
+function mailboxMessageKey(m: {
+  from: string
+  text: string
+  timestamp: string
+}): string {
+  return JSON.stringify([m.from, m.timestamp, m.text])
+}
+
+/**
+ * Reads one inbox, takes the messages that may be delivered mid-turn, and
+ * marks exactly those read.
+ *
+ * The mark predicate is keyed on the messages actually taken rather than
+ * re-testing the filter, so a message that lands between the read and the mark
+ * stays unread and is delivered by the next tool round instead of being
+ * silently consumed.
+ */
+async function drainInboxForMidTurnDelivery(
+  agentName: string,
+  teamName: string,
+): Promise<TeammateMailboxAttachment['messages']> {
+  const unread = await readUnreadMessages(agentName, teamName)
+  const deliverable = unread.filter(m => isMidTurnDeliverableMessage(m.text))
+  if (deliverable.length === 0) {
+    return []
+  }
+  const delivered = new Set(deliverable.map(mailboxMessageKey))
+  await markMessagesAsReadByPredicate(
+    agentName,
+    (m: TeammateMessage) => delivered.has(mailboxMessageKey(m)),
+    teamName,
+  )
+  logForDebugging(
+    `[SwarmMailbox] mid-turn: delivering ${deliverable.length} of ${unread.length} unread message(s) from inbox "${agentName}" team="${teamName}"`,
+  )
+  return deliverable.map(m => ({
+    from: m.from,
+    text: m.text,
+    timestamp: m.timestamp,
+    color: m.color,
+    summary: m.summary,
+  }))
+}
+
+/**
+ * How long "do I lead a sub-team?" is trusted before the team file is read
+ * again — the same bound the runner's poll loop uses
+ * (`SUB_TEAM_RECHECK_INTERVAL_MS`, inProcessRunner.ts), for the same reason: a
+ * sub-team may be created after the teammate started, but a team-file read on
+ * every tool round of every teammate is not worth the answer.
+ */
+const SUB_TEAM_LEADERSHIP_TTL_MS = 5_000
+
+const subTeamLeadershipCache = new Map<
+  string,
+  { checkedAtMs: number; subTeamName: string | undefined }
+>()
+
+/**
+ * The sub-team this caller leads, or undefined. A teammate whose name could
+ * never name a sub-team never touches the disk at all: `getSubTeamNameFor` is
+ * pure and settles that first.
+ */
+async function resolveLedSubTeamName(
+  caller: CallerIdentity,
+): Promise<string | undefined> {
+  const candidate = getSubTeamNameFor(caller.agentId, caller.name)
+  if (!candidate || !caller.agentId) {
+    return undefined
+  }
+  const now = Date.now()
+  const cached = subTeamLeadershipCache.get(caller.agentId)
+  if (cached && now - cached.checkedAtMs < SUB_TEAM_LEADERSHIP_TTL_MS) {
+    return cached.subTeamName
+  }
+  let subTeamName: string | undefined
+  try {
+    subTeamName = (await readSubTeamLedBy(caller)) ? candidate : undefined
+  } catch (err) {
+    logForDebugging(
+      `[SwarmMailbox] could not read the sub-team file for ${caller.agentId}: ${err}`,
+    )
+    subTeamName = undefined
+  }
+  subTeamLeadershipCache.set(caller.agentId, { checkedAtMs: now, subTeamName })
+  return subTeamName
+}
+
+/**
+ * Mid-turn inbox delivery for an in-process teammate (F1/F2).
+ *
+ * An in-process teammate reads its own inbox only in the idle poll loop, so
+ * while it is busy — looping on tools, waiting for a worker, waiting on a
+ * permission — nothing reads it and a peer's message sits unread for the whole
+ * turn. This runs on every tool round of the teammate's OWN turn and hands it
+ * the messages the idle loop would have handed it, in the same
+ * `<teammate-message>` shape (normalizeAttachmentForAPI ->
+ * formatTeammateMessages emits byte-for-byte what the runner's
+ * formatAsTeammateMessage emits).
+ *
+ * Returns undefined — rather than [] — when this is NOT an in-process
+ * teammate's own turn, so the pre-existing `ant` lead path runs exactly as
+ * before for everyone it ran for before.
+ */
+async function getInProcessTeammateMailboxMessages(
+  toolUseContext: ToolUseContext,
+): Promise<TeammateMailboxAttachment['messages'] | undefined> {
+  // ALS-only gate: never decide "am I a teammate" from an id being present.
+  if (!isInProcessTeammate()) {
+    return undefined
+  }
+  const teammateContext = getTeammateContext()
+  if (!teammateContext) {
+    return undefined
+  }
+  // A background subagent spawned inside the teammate's turn inherits the
+  // teammate's AsyncLocalStorage context, so isInProcessTeammate() is true for
+  // it too. Its rounds must not drain the teammate's inbox into the subagent's
+  // context: resolveCallerIdentity is the only thing that tells the two apart
+  // (context.agentId === the runner's turnAgentId is the teammate itself).
+  const caller = resolveCallerIdentity(toolUseContext)
+  if (!caller.isTeammate) {
+    return undefined
+  }
+
+  // Own inbox first, then the sub-team's — the idle loop's order (U5), for the
+  // same reason: obligations upward outrank coordination downward.
+  const messages = await drainInboxForMidTurnDelivery(
+    teammateContext.agentName,
+    teammateContext.teamName,
+  )
+  const subTeamName = await resolveLedSubTeamName(caller)
+  if (subTeamName) {
+    messages.push(
+      ...(await drainInboxForMidTurnDelivery(TEAM_LEAD_NAME, subTeamName)),
+    )
+  }
+  return messages
+}
+
+/**
  * Get teammate mailbox attachments for agent swarm communication
  * Teammates are independent Claude Code sessions running in parallel (swarms),
  * not parent-child subagent relationships.
@@ -3950,6 +4141,21 @@ async function getTeammateMailboxAttachments(
   if (!isAgentSwarmsEnabled()) {
     return []
   }
+
+  // F1/F2: an in-process teammate's OWN turn drains its own inbox — and, when
+  // it leads one, its sub-team's `team-lead` inbox — on every tool round, and
+  // returns here. Everything below is the LEAD path and stays exactly as it
+  // was: it must not run for a teammate, because `viewedTeammate` below
+  // resolves against the AppState an in-process teammate SHARES with the lead
+  // and would read whichever teammate the lead happens to be viewing.
+  const midTurnMessages =
+    await getInProcessTeammateMailboxMessages(toolUseContext)
+  if (midTurnMessages !== undefined) {
+    return midTurnMessages.length > 0
+      ? [{ type: 'teammate_mailbox', messages: midTurnMessages }]
+      : []
+  }
+
   if (process.env.USER_TYPE !== 'ant') {
     return []
   }

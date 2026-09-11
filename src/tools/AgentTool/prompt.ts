@@ -8,6 +8,7 @@ import { FILE_READ_TOOL_NAME } from '../FileReadTool/prompt.js'
 import { FILE_WRITE_TOOL_NAME } from '../FileWriteTool/prompt.js'
 import { GLOB_TOOL_NAME } from '../GlobTool/prompt.js'
 import { SEND_MESSAGE_TOOL_NAME } from '../SendMessageTool/constants.js'
+import { TEAM_CREATE_TOOL_NAME } from '../TeamCreateTool/constants.js'
 import { AGENT_TOOL_NAME } from './constants.js'
 import { isForkSubagentEnabled } from './forkSubagent.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
@@ -265,7 +266,9 @@ Usage notes:
 - When the current session is outside a git repository (for example a parent folder that contains multiple git repos), set \`cwd\` to the absolute path of the target child repository. You can combine \`cwd\` with \`isolation: "worktree"\` so the worktree is created from that child repo. If worktree creation fails only because no git repository is available, the agent still runs with that \`cwd\` override instead of failing, and the tool result notes that worktree isolation was unavailable.${
     isInProcessTeammate()
       ? `
-- The run_in_background, name, team_name, and mode parameters are not available in this context. Only synchronous subagents are supported.`
+- \`name\` spawns a TEAMMATE into the sub-team you lead — not into your own team. Create that sub-team first with \`${TEAM_CREATE_TOOL_NAME}(team_name: "<your team>/<your name>")\`; until it exists the spawn is refused. \`team_name\` is optional: omit it and your sub-team is used, and if you do pass it, it must name exactly that sub-team.
+- \`mode\` applies to such a teammate spawn — \`mode: "plan"\` requires it to get its plan approved by you before it implements. A teammate you spawn works on its own and reports back with ${SEND_MESSAGE_TOOL_NAME}; its messages reach you on your next tool call.
+- \`run_in_background\` is not available in this context — omit it. Omit \`name\` as well and you get an ordinary synchronous subagent.`
       : isTeammate()
         ? `
 - The name, team_name, and mode parameters are not available in this context — teammates cannot spawn other teammates. Omit them to spawn a subagent.`
