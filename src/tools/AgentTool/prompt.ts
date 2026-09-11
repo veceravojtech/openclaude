@@ -82,20 +82,32 @@ export function shouldInjectAgentListInMessages(): boolean {
  * lead.
  *
  * `mode: "plan"` splits along the same seam, and the third bullet says so. The
- * plan always arrives as a message — `useInboxPoller.ts:699-702` for a lead,
- * `inProcessRunner.ts:1351-1384` for a teammate reading the `team-lead` inbox
- * of the sub-team it leads — but only a lead's own session APPROVES one. The
- * auto-approver is gated on `isTeamLead(teamContext)`
- * (`useInboxPoller.ts:641-644`) and answers into its OWN team (`:669-677`),
- * while a sub-team child writes its request to the SUB-team's `team-lead`
- * mailbox (`ExitPlanModeV2Tool.ts:292-300`, that team being the one
+ * plan arrives as a message for the two readers that bullet names —
+ * `useInboxPoller.ts:699-702` for a lead, `inProcessRunner.ts:1351-1384` for a
+ * teammate reading the `team-lead` inbox of the sub-team it leads — but not for
+ * every spawner, which is why it no longer says "whoever you are": a plain
+ * subagent inside a lead's turn is not a teammate, so `AgentTool.tsx:437` is
+ * skipped and `:481` spawns a real teammate into the LEAD's team, whose plan
+ * reaches the lead and never the subagent that asked for it. Only a lead's own
+ * INTERACTIVE session approves one: the auto-approver is gated on
+ * `isTeamLead(teamContext)` (`useInboxPoller.ts:641-644`) and answers into its
+ * OWN team (`:669-677`), and that poller is a REPL hook (`REPL.tsx:4700`) which
+ * does not run under `-p`, where only `shutdown_approved` is handled out of
+ * band (`attachments.ts:4382-4384`) and a headless lead answers the request by
+ * hand with `SendMessage` (`SendMessageTool/prompt.ts:79`). A sub-team child
+ * writes its request to the SUB-team's `team-lead` mailbox
+ * (`ExitPlanModeV2Tool.ts:292-300`, that team being the one
  * `AgentTool.tsx:457` substituted); a teammate's own poller returns before any
  * of this (`useInboxPoller.ts:97-99`). Nor can a sub-lead approve by hand:
  * `handlePlanApproval` throws unless `isTeamLead`
- * (`SendMessageTool.ts:479-483`), which compares `getAgentId()` to
- * `teamContext.leadAgentId` (`teammate.ts:171-190`). So a sub-team member
- * spawned with `mode: "plan"` can never be approved by anyone — the bullet
- * tells that reader not to spawn one, which is the only half it can act on.
+ * (`SendMessageTool.ts:479-482`), which compares `getAgentId()` to
+ * `teamContext.leadAgentId` (`teammate.ts:171-190`). So nothing within that
+ * reader's reach approves a sub-team member spawned with `mode: "plan"` — the
+ * ROOT lead still can, out of band, by addressing `child@<sub-team>`
+ * (`addressing.ts:126-133` resolves a qualified `to`, and `handlePlanApproval`
+ * gates only on ITS own team) — which is why the bullet says nothing approves
+ * it AUTOMATICALLY, and tells that reader not to spawn one: the only half it
+ * can act on.
  *
  * DO NOT branch this text on the ambient context (an `isInProcessTeammate()`
  * or `isTeammate()` read in the render path, or anything like it). Tool
@@ -122,7 +134,7 @@ export function shouldInjectAgentListInMessages(): boolean {
 const TEAMMATE_SPAWN_RULES = `
 - \`name\` spawns a TEAMMATE, and which team it lands in depends on who you are: as a LEAD, the team you pass in \`team_name\` or the team you are already in — with neither, \`name\` makes no teammate at all and the call runs an ordinary subagent, which needs a prompt; as a TEAMMATE running inside your lead's session, the sub-team YOU lead, never your own team; as a TEAMMATE running in your own terminal, none — you cannot lead a sub-team there, so a spawn with \`name\` is refused: ask your team lead to create the team and spawn its members instead. Omit \`name\` and you get an ordinary subagent whoever you are.
 - To lead a sub-team from inside your lead's session, create it first with \`${TEAM_CREATE_TOOL_NAME}(team_name: "<your team>/<your name>")\`; until it exists the spawn is refused. \`team_name\` is then optional: omit it and your sub-team is used, and if you do pass it, it must name exactly that sub-team.
-- \`mode: "plan"\` starts the teammate in plan mode and is the only \`mode\` value a teammate spawn acts on. Its plan reaches you as a message whoever you are. As a LEAD it is also approved for you automatically — you see it, you do not gate it. As a TEAMMATE leading a sub-team from inside your lead's session, nothing approves it: your lead auto-approves only requests addressed to its own team, and you cannot approve a plan yourself — so do not spawn your sub-team members with \`mode: "plan"\`. A teammate you spawn works on its own and reports back with ${SEND_MESSAGE_TOOL_NAME}, which states when its messages reach you.`
+- \`mode: "plan"\` starts the teammate in plan mode and is the only \`mode\` value a teammate spawn acts on. Its plan reaches you as a message. As a LEAD in an interactive session it is also approved for you automatically. As a TEAMMATE leading a sub-team from inside your lead's session, nothing approves it automatically: your lead auto-approves only requests addressed to its own team, and you cannot approve a plan yourself — so do not spawn your sub-team members with \`mode: "plan"\`. A teammate you spawn works on its own and reports back with ${SEND_MESSAGE_TOOL_NAME}, which states when its messages reach you.`
 
 /**
  * Appended only when `run_in_background` is actually on the schema AND Agent
@@ -160,12 +172,14 @@ export async function getPrompt(
   // Same rule for the teammate parameters: `name`, `team_name` and `mode` are
   // stripped from the schema when Agent Teams is off (`api.ts:89-91,224-227`),
   // so the text that explains them must go with them. Process-level, like the
-  // gate above — see TEAMMATE_SPAWN_RULES. It gates three fragments of the FORK
-  // render too — the `name` sentence in "When to fork", the `name:` line of the
-  // fork example and the omit-name/team_name note under the code-reviewer
-  // example. `isForkSubagentEnabled()` is independent of this flag, so a fork
-  // render with Agent Teams off would otherwise offer `name`/`team_name` that
-  // the same cache-miss branch has just stripped from the schema.
+  // gate above — see TEAMMATE_SPAWN_RULES. It also gates the FORK render's
+  // omit-name/team_name note — `isForkSubagentEnabled()` is independent of this
+  // flag, so a fork render with Agent Teams off would otherwise discuss
+  // `name`/`team_name` that the same cache-miss branch has just stripped from
+  // the schema — and every mention of `SendMessage`, whose own `isEnabled()` is
+  // this same `isAgentSwarmsEnabled()` (`SendMessageTool.ts:583-585`): with
+  // Agent Teams off that tool is not registered, so naming it would offer a
+  // tool the model does not have.
   const teammateSpawnAvailable = isAgentSwarmsEnabled()
 
   const whenToForkSection = forkEnabled
@@ -177,13 +191,13 @@ Fork yourself (omit \`subagent_type\`) when the intermediate tool output isn't w
 - **Research**: fork open-ended questions. If research can be broken into independent questions, launch parallel forks in one message. A fork beats a fresh subagent for this \u2014 it inherits context and shares your cache.
 - **Implementation**: prefer to fork implementation work that requires more than a couple of edits. Do research before jumping to implementation.
 
-Forks are cheap because they share your prompt cache. Don't set \`model\` on a fork \u2014 a different model can't reuse the parent's cache.${teammateSpawnAvailable ? ' Pass a short `name` (one or two words, lowercase) so the user can see the fork in the teams panel and steer it mid-run.' : ''}
+Forks are cheap because they share your prompt cache. Don't set \`model\` on a fork \u2014 a different model can't reuse the parent's cache.
 
-**Don't peek.** The tool result includes an \`output_file\` path — do not Read or tail it unless the user explicitly asks for a progress check. You get a completion notification; trust it. Reading the transcript mid-flight pulls the fork's tool noise into your context, which defeats the point of forking. If you need to course-correct, use SendMessage — never Read.
+**Don't peek.** The tool result includes an \`output_file\` path — do not Read or tail it unless the user explicitly asks for a progress check. You get a completion notification; trust it. Reading the transcript mid-flight pulls the fork's tool noise into your context, which defeats the point of forking.${teammateSpawnAvailable ? ` If you need to course-correct, use ${SEND_MESSAGE_TOOL_NAME} — never Read.` : ''}
 
 **Don't race.** After launching, you know nothing about what the fork found. Never fabricate or predict fork results in any format — not as prose, summary, or structured output. The notification arrives as a user-role message in a later turn; it is never something you write yourself. If the user asks a follow-up before the notification lands, tell them the fork is still running — give status, not a guess.
 
-**Don't take over.** A fork that looks stuck is usually in its read phase, not failing. Course-correct with SendMessage; never write its output yourself or discard its result when it lands. Override belongs to the Review phase.
+**Don't take over.** A fork that looks stuck is usually in its read phase, not failing. ${teammateSpawnAvailable ? `Course-correct with ${SEND_MESSAGE_TOOL_NAME}; never` : 'Never'} write its output yourself or discard its result when it lands. Override belongs to the Review phase.
 
 **Writing a fork prompt.** Since the fork inherits your context, the prompt is a *directive* — what to do, not what the situation is. Be specific about scope: what's in, what's out, what another agent is handling. Don't re-explain background.
 `
@@ -210,7 +224,7 @@ ${forkEnabled ? 'For fresh agents, terse' : 'Terse'} command-style prompts produ
 <example>
 user: "What's left on this branch before we can ship?"
 assistant: <thinking>Forking this \u2014 it's a survey question. I want the punch list, not the git output in my context.</thinking>
-${AGENT_TOOL_NAME}({${teammateSpawnAvailable ? '\n  name: "ship-audit",' : ''}
+${AGENT_TOOL_NAME}({
   description: "Branch ship-readiness audit",
   prompt: "Audit what's left before this branch can ship. Check: uncommitted changes, commits ahead of main, whether tests exist, whether the GrowthBook gate is wired up, whether CI-relevant files changed. Report a punch list \u2014 done vs. missing. Under 200 words."
 })
@@ -342,7 +356,7 @@ Usage notes:
 - **Foreground vs background**: Use foreground (default) when you need the agent's results before you can proceed — e.g., research agents whose findings inform your next steps. Use background when you have genuinely independent work to do in parallel.`
       : ''
   }
-- To continue a previously spawned agent, use ${SEND_MESSAGE_TOOL_NAME} with the agent's ID or name as the \`to\` field. The agent resumes with its full context preserved. ${forkEnabled ? 'Each fresh Agent invocation with a subagent_type starts without context — provide a complete task description.' : 'Each Agent invocation starts fresh — provide a complete task description.'}
+- ${teammateSpawnAvailable ? `To continue a previously spawned agent, use ${SEND_MESSAGE_TOOL_NAME} with the agent's ID or name as the \`to\` field. The agent resumes with its full context preserved. ` : ''}${forkEnabled ? 'Each fresh Agent invocation with a subagent_type starts without context — provide a complete task description.' : 'Each Agent invocation starts fresh — provide a complete task description.'}
 - The agent's outputs should generally be trusted
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.)${forkEnabled ? '' : ", since it is not aware of the user's intent"}
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.

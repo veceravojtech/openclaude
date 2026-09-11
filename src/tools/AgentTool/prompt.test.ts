@@ -25,9 +25,12 @@ const FORK_SUBAGENT_MODULE = './forkSubagent.js'
 /**
  * Render under the FORK branch. getPrompt() picks it on isForkSubagentEnabled()
  * alone (prompt.ts), and that needs `feature('FORK_SUBAGENT')` (false in the
- * test build) AND `!getIsNonInteractiveSession()` (true under `bun test`,
- * forkSubagent.ts:35-40) — neither is settable from a test, so replacing the
- * gate is the only way to reach that render at all. Restored in `finally`.
+ * test build) AND `!getIsNonInteractiveSession()` — ALSO false here, which is
+ * why the mock is needed: `STATE.isInteractive` defaults to false
+ * (bootstrap/state.ts:286, read back at :1063-1064) and nothing under
+ * `bun test` sets it (forkSubagent.ts:35-40). Neither term is settable from a
+ * test, so replacing the gate is the only way to reach that render at all.
+ * Restored in `finally`.
  */
 async function withForkRender<T>(render: () => Promise<T>): Promise<T> {
   mock.module(FORK_SUBAGENT_MODULE, () => ({
@@ -213,7 +216,8 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
   // is false. Its child writes to the SUB-team's `team-lead` mailbox
   // (ExitPlanModeV2Tool.ts:292-300 over the team AgentTool.tsx:457
   // substituted); the auto-approver never sees it (useInboxPoller.ts:97-99
-  // returns early for an in-process teammate, and :641-644 gates on
+  // returns early for an IN-PROCESS teammate — a pane teammate falls to the
+  // isTeammate() branch just below — and :641-644 gates on
   // isTeamLead() over the ROOT team's inbox); and it cannot approve by hand
   // either (SendMessageTool.ts:479-483, isTeamLead at teammate.ts:171-190).
   // Only "reaches you as a message" survives for it
@@ -235,17 +239,32 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
       'with neither, `name` makes no teammate at all and the call runs an ordinary subagent, which needs a prompt',
     )
     expect(prompt).toContain('is the only `mode` value a teammate spawn acts on')
-    // True for both readers: useInboxPoller.ts:699-702 for the lead,
-    // inProcessRunner.ts:1351-1384 for the sub-lead.
-    expect(prompt).toContain('Its plan reaches you as a message whoever you are')
-    // The automatic approval is the LEAD's half alone (useInboxPoller.ts:643).
+    // True for both readers the bullet names: useInboxPoller.ts:699-702 for the
+    // lead, inProcessRunner.ts:1351-1384 for the sub-lead. Round 3 dropped
+    // "whoever you are": a plain subagent inside a lead's turn that passes
+    // `name` is not a teammate, so AgentTool.tsx:437 is skipped and :481 spawns
+    // a real teammate into the LEAD's team — that plan reaches the LEAD, never
+    // the subagent that spawned it.
+    expect(prompt).toContain('Its plan reaches you as a message.')
+    expect(prompt).not.toContain('reaches you as a message whoever you are')
+    // The automatic approval is the LEAD's half alone (useInboxPoller.ts:643),
+    // and only in an INTERACTIVE session: the poller is a REPL hook mounted at
+    // REPL.tsx:4700, so it does not run under `-p`, where only
+    // shutdown_approved is handled out of band (attachments.ts:4382-4384) and a
+    // headless lead answers the request by hand with SendMessage
+    // (SendMessageTool/prompt.ts:79, permitted at SendMessageTool.ts:479-482).
     expect(prompt).toContain(
-      'As a LEAD it is also approved for you automatically',
+      'As a LEAD in an interactive session it is also approved for you automatically',
     )
-    // And the sub-lead's half: nobody can approve it (useInboxPoller.ts:97-99,
-    // SendMessageTool.ts:479-483), so it should not ask for one.
+    expect(prompt).not.toContain('you see it, you do not gate it')
+    // And the sub-lead's half: nothing within its own reach approves it
+    // (useInboxPoller.ts:97-99, SendMessageTool.ts:479-482), so it should not
+    // ask for one. "automatically" is load-bearing — the ROOT lead can still
+    // approve a sub-team child out of band, by addressing `child@<sub-team>`
+    // (addressing.ts:126-133) into a handlePlanApproval that gates only on ITS
+    // own team.
     expect(prompt).toContain(
-      "As a TEAMMATE leading a sub-team from inside your lead's session, nothing approves it",
+      "As a TEAMMATE leading a sub-team from inside your lead's session, nothing approves it automatically",
     )
     expect(prompt).toContain(
       'do not spawn your sub-team members with `mode: "plan"`',
@@ -365,15 +384,29 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
   ]
 
   /**
-   * The complete set of FORK-render fragments that offer a teammate parameter:
-   * the `name` sentence in "When to fork", the `name:` line of the fork example
-   * and the omit-name/team_name note under the code-reviewer example. All three
-   * are gated on the same flag that strips those parameters from the schema.
+   * The FORK-render fragment that still discusses a teammate parameter: the
+   * omit-name/team_name note under the code-reviewer example, gated on the same
+   * flag that strips those parameters from the schema.
+   *
+   * Round 3 DELETED the two that made a promise instead. The `name` sentence in
+   * "When to fork" was false on both halves for the only reader it rendered to
+   * (Agent Teams on): a fork is a `local_agent` and the panel lists teammate
+   * rows by `type === 'in_process_teammate'`
+   * (BackgroundTasksDialog.tsx:229,234), so a fork never gets one; and a lead
+   * already in a team that passes `name` spawns a TEAMMATE, not a named fork —
+   * AgentTool.tsx:481 branches on `teamName && name` with no regard for
+   * `subagent_type`, over the team resolveTeamName (:1773-1782) hands it. The
+   * `name:` line of the fork example demonstrated exactly that call.
+   * DELETED_FORK_NAME_PROMISES pins that neither comes back.
    */
   const FORK_TEAMMATE_PARAM_FRAGMENTS = [
-    'Pass a short `name` (one or two words, lowercase)',
-    'name: "ship-audit",',
     'Omit name/team_name so it runs as a standard subagent',
+  ]
+
+  /** Gone from every render, Agent Teams on or off. */
+  const DELETED_FORK_NAME_PROMISES = [
+    'see the fork in the teams panel',
+    'name: "ship-audit"',
   ]
 
   test('offers no teammate parameter that the schema does not carry', async () => {
@@ -391,6 +424,14 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     for (const clause of TEAMMATE_PARAM_CLAUSES) {
       expect(schema.description).not.toContain(clause)
     }
+    // Same class, same gate: SendMessageTool.isEnabled() IS
+    // isAgentSwarmsEnabled() (SendMessageTool.ts:583-585), so with Agent Teams
+    // off that tool is not registered and the description may not name it.
+    expect(schema.description).not.toContain('SendMessage')
+    // Only the SendMessage half of that bullet is gated; its advice survives.
+    expect(schema.description).toContain(
+      'Each Agent invocation starts fresh — provide a complete task description.',
+    )
     // The rest of the description is untouched by the gate.
     expect(schema.description).toContain('isolation: "worktree"')
   })
@@ -413,9 +454,20 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     for (const clause of [
       ...TEAMMATE_PARAM_CLAUSES,
       ...FORK_TEAMMATE_PARAM_FRAGMENTS,
+      ...DELETED_FORK_NAME_PROMISES,
     ]) {
       expect(schema.description).not.toContain(clause)
     }
+    // The fork section named SendMessage twice ungated ("Don't peek", "Don't
+    // take over"); with the tool unregistered, both mentions go with it.
+    expect(schema.description).not.toContain('SendMessage')
+    // What the gate must NOT take with it: the advice itself, in both places.
+    expect(schema.description).toContain(
+      'Each fresh Agent invocation with a subagent_type starts without context',
+    )
+    expect(schema.description).toContain(
+      'Never write its output yourself or discard its result when it lands.',
+    )
     expect(schema.description).toContain('isolation: "worktree"')
   })
 
@@ -429,9 +481,22 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     for (const fragment of FORK_TEAMMATE_PARAM_FRAGMENTS) {
       expect(prompt).toContain(fragment)
     }
-    // Gating the `name:` line must not disturb the example's shape.
+    // Deleting the `name:` line must not disturb the example's shape.
     expect(prompt).toContain(
-      `${AGENT_TOOL_NAME}({\n  name: "ship-audit",\n  description: "Branch ship-readiness audit",`,
+      `${AGENT_TOOL_NAME}({\n  description: "Branch ship-readiness audit",`,
+    )
+    // Neither deleted promise comes back in the render they were written for.
+    for (const promise of DELETED_FORK_NAME_PROMISES) {
+      expect(prompt).not.toContain(promise)
+    }
+    // SendMessage IS registered with Agent Teams on, so both fork-section
+    // mentions and the tail bullet keep naming it.
+    expect(prompt).toContain(
+      'If you need to course-correct, use SendMessage — never Read.',
+    )
+    expect(prompt).toContain('Course-correct with SendMessage; never write')
+    expect(prompt).toContain(
+      'To continue a previously spawned agent, use SendMessage',
     )
     // And the teammate rules themselves are back with the parameters.
     expect(prompt).toContain('`name` spawns a TEAMMATE')
