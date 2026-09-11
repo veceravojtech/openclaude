@@ -1289,10 +1289,11 @@ type FakeRequestBody = {
 }
 
 /**
- * The heading of the teammate system-prompt addendum: the first line of
- * `TEAMMATE_SYSTEM_PROMPT_ADDENDUM`
- * (`src/utils/swarm/teammatePromptAddendum.ts`), appended to a teammate's
- * system prompt and to nothing else.
+ * The heading of the teammate system-prompt addendum: the first NON-EMPTY line
+ * of `TEAMMATE_SYSTEM_PROMPT_ADDENDUM`
+ * (`src/utils/swarm/teammatePromptAddendum.ts`) - the literal opens with a
+ * newline, so its own first line is empty - appended to a teammate's system
+ * prompt and to nothing else.
  */
 const TEAMMATE_SYSTEM_MARKER = '# Agent Teammate Communication'
 /**
@@ -1322,8 +1323,9 @@ const TEAMMATE_SYSTEM_MARKER = '# Agent Teammate Communication'
  * step. The addendum is
  * appended to every in-process teammate's system prompt
  * (`runInProcessTeammate` pushes `TEAMMATE_SYSTEM_PROMPT_ADDENDUM` onto the
- * system-prompt parts) except under one mode this harness never uses
- * (`systemPromptMode: 'replace'`), so it is both sufficient and safe here.
+ * system-prompt parts) except when `systemPromptMode: 'replace'` arrives WITH a
+ * system prompt to replace it with - the mode alone does not exclude it - and
+ * this harness's spawns set neither, so it is both sufficient and safe here.
  */
 function classifyRole(body: FakeRequestBody): FakeRole {
   for (const block of body.system ?? []) {
@@ -1536,11 +1538,11 @@ function startFakeAnthropicApi(script: FakeScript): FakeAnthropicApi {
   // set - hanging with the error printed and nothing after it, which is exactly
   // what the "nothing outlives main()" note at the bottom of this file promises
   // cannot happen. The run REPORT is not what such a run prints: `report()` is
-  // called inside `main()`, after the `results` array the throw abandons. It is
-  // not the ONLY output either: a boot timeout prints `waitForPane`'s `TIMEOUT
-  // after ...` line and the pane it dumps between two rule lines FIRST - that
-  // report is written before `ok: false` comes back and `startCliSession`
-  // throws - and the top-level rejection handler's `console.error` after it.
+  // called inside `main()`, after the `results` array the throw abandons. What
+  // it prints instead is `waitForPane`'s `TIMEOUT after ...` line and the last
+  // captured pane it dumps between two rule lines - written before it returns
+  // `ok: false`, so before `startCliSession` throws at all - and after that the
+  // error the top-level rejection handler writes before setting the exit code.
   // Belt and braces with booting each scenario INSIDE its `try`: that closes
   // the one hole we found (a boot timeout), this closes the next one. `unref`
   // does not stop the server answering - every request of every scenario is
@@ -2340,8 +2342,8 @@ async function scenarioTreePersists(): Promise<ScenarioResult> {
     // instead, driven by an injected `now` rather than the wall clock:
     // `src/tasks/InProcessTeammateTask/teammateSelection.test.ts`, "treats a
     // grace row leaving at its deadline like any other removal". The same
-    // division of labour is written down in `docs/e2e-tui.md`, under "Two
-    // details of scenario 6 are load-bearing".)
+    // division of labour is written down in `docs/e2e-tui.md`, in its
+    // scenario 6 notes.)
     tmux('send-keys', '-t', CLI_WINDOW, 'k')
     const killed = await waitForPane(
       `scenario 6: "${E2E_TREE_KILLED_SELECTED_ROW}" still selected, with @${E2E_KILL_SURVIVOR} alive`,

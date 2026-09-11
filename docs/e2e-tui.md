@@ -70,8 +70,9 @@ covers the split-escape defect: a `DOWN` whose `ESC` byte is separated from
 plus a nameless `[B` key, which dismissed the dialog *and* typed `[B` into the
 prompt. The parser now re-synthesizes that orphaned tail as a real `DOWN`, so
 the literal text is gone — but the Escape had already been dispatched to the UI
-by the earlier flush and cannot be un-sent
-(`src/ink/parse-keypress.ts:375-381`), so the dialog is still dismissed. That
+by the earlier flush and cannot be un-sent (the "Only HALF of this is fixable
+here" note in `parseMultipleKeypresses`' orphaned-tail branch,
+`src/ink/parse-keypress.ts`), so the dialog is still dismissed. That
 residual is accepted and asserted rather than chased: the scenario passes on
 `Kept model as …` (never `Set model to …`) plus no literal `[B` anywhere in the
 captured pane.
