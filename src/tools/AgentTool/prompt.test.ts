@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { getEmptyToolPermissionContext, type Tools } from '../../Tool.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
+import { toolToAPISchema } from '../../utils/api.js'
 import { runWithTeammateContext } from '../../utils/teammateContext.js'
+import { clearToolSchemaCache } from '../../utils/toolSchemaCache.js'
+import { AgentTool } from './AgentTool.js'
 import { getPrompt } from './prompt.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
 
@@ -63,10 +67,21 @@ describe('AgentTool prompt isolation contract', () => {
 
 // T4/F3: the in-process teammate branch used to say `name`, `team_name` and
 // `mode` "are not available in this context". False since U3 — a teammate CAN
-// spawn into the sub-team it leads, once it has created it. These pin the
-// truthful replacement, and that it promises nothing about a tree row (the
-// spawned teammate is not registered in the lead's AppState at HEAD).
-describe('AgentTool prompt for an in-process teammate', () => {
+// spawn into the sub-team it leads, once it has created it.
+// T8: the branch ITSELF was the defect. What a model reads is not what
+// getPrompt() returns on a given call but what `toolToAPISchema` cached at the
+// session's FIRST render (src/utils/api.ts:207-214, the Map at
+// src/utils/toolSchemaCache.ts:18, cleared only on an auth or a tool-set
+// change). An in-process teammate shares that process and that Map with its
+// lead, and the lead necessarily renders `Agent` before it can call it to
+// spawn a teammate — so the sub-team rule, gated on isInProcessTeammate(),
+// never reached a teammate at all. ONE text now states the LEAD case and the
+// TEAMMATE case with the reader each belongs to. These pin both clauses in one
+// render, that the bytes do not depend on where they are rendered (at
+// getPrompt and through the production toolToAPISchema, in both orders), and
+// that the block still promises nothing about a tree row — a teammate spawned
+// by a teammate is not registered in the lead's AppState at HEAD.
+describe('AgentTool prompt: one text for the lead and for the teammate', () => {
   function inTeammateContext<T>(fn: () => T): T {
     return runWithTeammateContext(
       {
@@ -82,30 +97,95 @@ describe('AgentTool prompt for an in-process teammate', () => {
     )
   }
 
-  test('describes the sub-team spawn rule instead of denying `name`', async () => {
+  /** The description bytes the API actually receives, memoised and all. */
+  async function renderThroughAPISchema(): Promise<string> {
+    const schema = await toolToAPISchema(AgentTool, {
+      getToolPermissionContext: async () => getEmptyToolPermissionContext(),
+      tools: [] as unknown as Tools,
+      agents,
+    })
+    return (schema as { description: string }).description
+  }
+
+  afterEach(() => {
+    // The schema cache is module-level state shared with every other suite in
+    // this process — leave it as we found it.
+    clearToolSchemaCache()
+  })
+
+  test('states the lead case and the teammate sub-team rule in ONE render', async () => {
     process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
 
-    const prompt = await inTeammateContext(() => getPrompt(agents))
+    const prompt = await getPrompt(agents)
 
+    // The LEAD's half: AgentTool.tsx:434-436 resolves team_name, or the team
+    // the caller is already in, and :481 spawns into it.
     expect(prompt).toContain(
-      '`name` spawns a TEAMMATE into the sub-team you lead',
+      'as a LEAD, the team you pass in `team_name` or the team you are already in',
     )
+    // The TEAMMATE's half: AgentTool.tsx:437-457.
+    expect(prompt).toContain('`name` spawns a TEAMMATE')
+    expect(prompt).toContain('the sub-team YOU lead, never your own team')
     expect(prompt).toContain('TeamCreate(team_name: "<your team>/<your name>")')
-    expect(prompt).toContain('`team_name` is optional')
+    expect(prompt).toContain('`team_name` is then optional')
     expect(prompt).toContain('must name exactly that sub-team')
     expect(prompt).toContain(
       '`mode: "plan"` requires it to get its plan approved by you',
     )
-    expect(prompt).toContain('`run_in_background` is not available')
-    expect(prompt).not.toContain(
-      'The run_in_background, name, team_name, and mode parameters are not available',
+    // AgentTool.tsx:462-464 — scoped to the in-process teammate, and said so.
+    expect(prompt).toContain(
+      '`run_in_background` is not available to you when you are a teammate',
     )
+    // U3 made both of these false; neither may come back.
+    expect(prompt).not.toContain('teammates cannot spawn other teammates')
+    expect(prompt).not.toContain(
+      'The name, team_name, and mode parameters are not available',
+    )
+  })
+
+  test('the rendered text does not depend on where it is rendered', async () => {
+    process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
+
+    expect(await inTeammateContext(() => getPrompt(agents))).toBe(
+      await getPrompt(agents),
+    )
+  })
+
+  test('the memoised description carries the sub-team rule in either render order', async () => {
+    process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
+
+    // Lead first — the only order a real session can take.
+    clearToolSchemaCache()
+    const leadFirstLead = await renderThroughAPISchema()
+    const leadFirstTeammate = await inTeammateContext(() =>
+      renderThroughAPISchema(),
+    )
+
+    // Teammate first — the order that used to be the only one that worked.
+    clearToolSchemaCache()
+    const teammateFirstTeammate = await inTeammateContext(() =>
+      renderThroughAPISchema(),
+    )
+    const teammateFirstLead = await renderThroughAPISchema()
+
+    for (const description of [
+      leadFirstLead,
+      leadFirstTeammate,
+      teammateFirstTeammate,
+      teammateFirstLead,
+    ]) {
+      expect(description).toContain('the sub-team YOU lead, never your own team')
+    }
+    // And the cache hands every reader the same bytes, whoever missed first.
+    expect(leadFirstTeammate).toBe(leadFirstLead)
+    expect(teammateFirstLead).toBe(teammateFirstTeammate)
+    expect(teammateFirstLead).toBe(leadFirstLead)
   })
 
   test('promises nothing about a tree row for the spawned teammate', async () => {
     process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
 
-    const prompt = await inTeammateContext(() => getPrompt(agents))
+    const prompt = await getPrompt(agents)
     // Only the teammate block: the rest of the prompt says "worktree".
     const start = prompt.indexOf('- `name` spawns a TEAMMATE')
     const end = prompt.indexOf('## Writing the prompt')
@@ -116,14 +196,5 @@ describe('AgentTool prompt for an in-process teammate', () => {
     for (const promise of ['tree', 'row', 'pill', 'visible']) {
       expect(teammateBlock).not.toContain(promise)
     }
-  })
-
-  test('the non-teammate prompt says none of it', async () => {
-    process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
-
-    const prompt = await getPrompt(agents)
-
-    expect(prompt).not.toContain('`name` spawns a TEAMMATE')
-    expect(prompt).not.toContain('TeamCreate')
   })
 })

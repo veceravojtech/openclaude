@@ -2,8 +2,6 @@ import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/gr
 import { getSubscriptionType } from '../../utils/auth.js'
 import { hasEmbeddedSearchTools } from '../../utils/embeddedTools.js'
 import { isEnvDefinedFalsy, isEnvTruthy } from '../../utils/envUtils.js'
-import { isTeammate } from '../../utils/teammate.js'
-import { isInProcessTeammate } from '../../utils/teammateContext.js'
 import { FILE_READ_TOOL_NAME } from '../FileReadTool/prompt.js'
 import { FILE_WRITE_TOOL_NAME } from '../FileWriteTool/prompt.js'
 import { GLOB_TOOL_NAME } from '../GlobTool/prompt.js'
@@ -64,6 +62,41 @@ export function shouldInjectAgentListInMessages(): boolean {
   return getFeatureValue_CACHED_MAY_BE_STALE('tengu_agent_list_attach', true)
 }
 
+/**
+ * What `name`, `team_name` and `mode` mean for a LEAD and for a TEAMMATE —
+ * both answers in one text, because only one of them can ever reach the model.
+ *
+ * The two cases are genuinely different. A lead spawns a teammate into the
+ * team it names or the team it is already in; a teammate — in-process or in
+ * its own terminal — can only spawn into the sub-team it leads, and only once
+ * it has created that sub-team (`AgentTool.tsx:437-457`, whose refusals name
+ * `TeamCreate` and the `team_name` equality rule).
+ *
+ * DO NOT branch this text on the ambient context (an `isInProcessTeammate()`
+ * or `isTeammate()` read in the render path, or anything like it). Tool
+ * descriptions are memoised process-wide by `toolToAPISchema`
+ * (`src/utils/api.ts:207-214`) in the Map at `src/utils/toolSchemaCache.ts:18`,
+ * keyed on the tool NAME — `Agent` carries no `inputJSONSchema`, so the key is
+ * the bare string `'Agent'` — and cleared only on an auth change or a tool-set
+ * change. An in-process teammate shares that process, and that Map, with its
+ * lead, and the lead necessarily renders `Agent` before it can spawn a
+ * teammate: a context-dependent branch therefore ships the LEAD's text to
+ * every teammate, which is exactly how the sub-team rule below stopped
+ * reaching the one reader it was written for. Telling both, once, costs a
+ * clause and is true in either render order.
+ */
+const TEAMMATE_SPAWN_RULES = `
+- \`name\` spawns a TEAMMATE, and which team it lands in depends on who you are: as a LEAD, the team you pass in \`team_name\` or the team you are already in; as a TEAMMATE — running inside your lead's session or in your own terminal — the sub-team YOU lead, never your own team. Create that sub-team first with \`${TEAM_CREATE_TOOL_NAME}(team_name: "<your team>/<your name>")\`; until it exists the spawn is refused. \`team_name\` is then optional: omit it and your sub-team is used, and if you do pass it, it must name exactly that sub-team. Omit \`name\` and you get an ordinary subagent either way.
+- \`mode\` applies to such a teammate spawn — \`mode: "plan"\` requires it to get its plan approved by you before it implements. A teammate you spawn works on its own and reports back with ${SEND_MESSAGE_TOOL_NAME}, which states when its messages reach you.`
+
+/**
+ * Appended only when `run_in_background` is actually on the schema — see
+ * `backgroundAgentsAvailable` in getPrompt(). Same reader-attributed shape as
+ * TEAMMATE_SPAWN_RULES, and for the same reason.
+ */
+const TEAMMATE_BACKGROUND_RULE = `
+- \`run_in_background\` is not available to you when you are a teammate running inside your lead's session — omit it there; a lead, or a teammate running in its own terminal, can use it.`
+
 export async function getPrompt(
   agentDefinitions: AgentDefinition[],
   isCoordinator?: boolean,
@@ -77,6 +110,15 @@ export async function getPrompt(
   // Fork subagent feature: when enabled, insert the "When to fork" section
   // (fork semantics, directive-style prompts) and swap in fork-aware examples.
   const forkEnabled = isForkSubagentEnabled()
+
+  // `run_in_background` is stripped from the schema when either of these is
+  // set (`inputSchema()`, AgentTool.tsx:141-143), so the description must not
+  // offer it then. Both are process-level, unlike the ambient reads this text
+  // used to branch on — see TEAMMATE_SPAWN_RULES.
+  const backgroundAgentsAvailable =
+    // eslint-disable-next-line custom-rules/no-process-env-top-level
+    !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS) &&
+    !forkEnabled
 
   const whenToForkSection = forkEnabled
     ? `
@@ -248,10 +290,7 @@ ${whenNotToUseSection}
 Usage notes:
 - Always include a short description (3-5 words) summarizing what the agent will do${concurrencyNote}
 - When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.${
-    // eslint-disable-next-line custom-rules/no-process-env-top-level
-    !isEnvTruthy(process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS) &&
-    !isInProcessTeammate() &&
-    !forkEnabled
+    backgroundAgentsAvailable
       ? `
 - You can optionally run agents in the background using the run_in_background parameter. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.
 - **Foreground vs background**: Use foreground (default) when you need the agent's results before you can proceed — e.g., research agents whose findings inform your next steps. Use background when you have genuinely independent work to do in parallel.`
@@ -263,16 +302,8 @@ Usage notes:
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple ${AGENT_TOOL_NAME} tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result.
-- When the current session is outside a git repository (for example a parent folder that contains multiple git repos), set \`cwd\` to the absolute path of the target child repository. You can combine \`cwd\` with \`isolation: "worktree"\` so the worktree is created from that child repo. If worktree creation fails only because no git repository is available, the agent still runs with that \`cwd\` override instead of failing, and the tool result notes that worktree isolation was unavailable.${
-    isInProcessTeammate()
-      ? `
-- \`name\` spawns a TEAMMATE into the sub-team you lead — not into your own team. Create that sub-team first with \`${TEAM_CREATE_TOOL_NAME}(team_name: "<your team>/<your name>")\`; until it exists the spawn is refused. \`team_name\` is optional: omit it and your sub-team is used, and if you do pass it, it must name exactly that sub-team.
-- \`mode\` applies to such a teammate spawn — \`mode: "plan"\` requires it to get its plan approved by you before it implements. A teammate you spawn works on its own and reports back with ${SEND_MESSAGE_TOOL_NAME}; its messages reach you on your next tool call.
-- \`run_in_background\` is not available in this context — omit it. Omit \`name\` as well and you get an ordinary synchronous subagent.`
-      : isTeammate()
-        ? `
-- The name, team_name, and mode parameters are not available in this context — teammates cannot spawn other teammates. Omit them to spawn a subagent.`
-        : ''
+- When the current session is outside a git repository (for example a parent folder that contains multiple git repos), set \`cwd\` to the absolute path of the target child repository. You can combine \`cwd\` with \`isolation: "worktree"\` so the worktree is created from that child repo. If worktree creation fails only because no git repository is available, the agent still runs with that \`cwd\` override instead of failing, and the tool result notes that worktree isolation was unavailable.${TEAMMATE_SPAWN_RULES}${
+    backgroundAgentsAvailable ? TEAMMATE_BACKGROUND_RULE : ''
   }${whenToForkSection}${writingThePromptSection}
 
 ${forkEnabled ? forkExamples : currentExamples}`
