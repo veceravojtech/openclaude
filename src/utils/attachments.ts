@@ -4233,12 +4233,16 @@ async function getTeammateMailboxAttachments(
   // the inbox of whichever teammate the lead happens to be viewing, destroying
   // the delivery to the lead.
   //
-  // `agentId` is set on a ToolUseContext only by createSubagentContext
-  // (forkedAgent.ts:459, which always sets it), never by the main-loop
-  // contexts (REPL.tsx:2749's getToolUseContext and QueryEngine.ts:401 have no
-  // such key). An in-process teammate's OWN turn does carry one — its runner
-  // mints it at inProcessRunner.ts:2336 — but it has an ambient teammate
-  // context and so returned above; it never reaches this line.
+  // `agentId` is never on a MAIN-LOOP context: neither REPL.tsx:2749's
+  // getToolUseContext nor QueryEngine.ts:401's processUserInputContext has the
+  // key, and those two are the only contexts `query()` is ever entered with
+  // that are not a fork. Every fork sets one — createSubagentContext
+  // (forkedAgent.ts:459) for runAgent and runForkedAgent, and
+  // execAgentHook.ts:127 for the stop-hook agent, which builds its own context
+  // rather than going through createSubagentContext. An in-process teammate's
+  // OWN turn also carries one — its runner mints it at inProcessRunner.ts:2336
+  // — but it has an ambient teammate context and so returned above; it never
+  // reaches this line.
   //
   // Spelled `!== undefined` rather than `!toolUseContext.agentId` (the
   // isMainThread idiom at :825) on purpose: the two differ only on '', which

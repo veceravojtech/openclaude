@@ -449,9 +449,13 @@ test("an `ant` lead's own turn still drains the viewed teammate's inbox", async 
  * maps the LEAD's teammates, so it holds no entry for `leadAgentId` and the
  * fallback is what a real lead takes — hence TEAM_LEAD_NAME's inbox below.
  */
-function createLeadHarness(turnAgentId?: string): Harness {
+function createLeadHarness(
+  turnAgentId?: string,
+  inbox?: AppState['inbox'],
+): Harness {
   return createHarness(turnAgentId, prev => ({
     ...prev,
+    ...(inbox ? { inbox } : {}),
     teamContext: {
       teamName: TEAM,
       teamFilePath: getTeamFilePath(TEAM),
@@ -459,6 +463,21 @@ function createLeadHarness(turnAgentId?: string): Harness {
       teammates: {},
     },
   }))
+}
+
+/** One message useInboxPoller queued on the lead mid-turn, still pending. */
+function pendingInbox(text: string): AppState['inbox'] {
+  return {
+    messages: [
+      {
+        id: 'inbox-1',
+        from: 'worker',
+        text,
+        timestamp: new Date().toISOString(),
+        status: 'pending' as const,
+      },
+    ],
+  }
 }
 
 test("an `ant` lead's own turn still drains its own inbox", async () => {
@@ -508,6 +527,40 @@ test("a lead-spawned subagent takes nothing from the viewed teammate's inbox", a
 
   expect(attachments).toEqual([])
   expect((await readMailbox(SUB_LEAD, TEAM)).map(m => m.read)).toEqual([false])
+})
+
+test("an `ant` lead's own turn still drains AppState.inbox", async () => {
+  // The lead path's THIRD mail source, and the only one that is not on disk:
+  // useInboxPoller queues a message onto `appState.inbox` mid-turn and the lead
+  // path hands it over without waiting for the turn to end, flipping it to
+  // `processed` so the poller does not deliver it twice. Pinned so the T9 guard
+  // is shown to leave this source alone for the lead.
+  process.env.USER_TYPE = 'ant'
+  const harness = createLeadHarness(undefined, pendingInbox('queued mid-turn'))
+
+  const attachments = await drain(harness)
+
+  expect(textsOf(attachments)).toEqual(['queued mid-turn'])
+  expect(harness.state().inbox.messages.map(m => m.status)).toEqual([
+    'processed',
+  ])
+})
+
+test('a lead-spawned subagent takes nothing from AppState.inbox', async () => {
+  // T9, the lead path's third mail source. `appState.inbox` holds the messages
+  // queued FOR THE LEAD, and a subagent reads the same AppState its spawner
+  // does — so without the guard it was handed them and marked them `processed`,
+  // which is the same destruction of delivery as marking a file message read.
+  process.env.USER_TYPE = 'ant'
+  const harness = createLeadHarness(
+    createAgentId(),
+    pendingInbox('queued mid-turn'),
+  )
+
+  const attachments = await drain(harness)
+
+  expect(attachments).toEqual([])
+  expect(harness.state().inbox.messages.map(m => m.status)).toEqual(['pending'])
 })
 
 test("a teammate's turn ignores whichever teammate the lead is viewing", async () => {
