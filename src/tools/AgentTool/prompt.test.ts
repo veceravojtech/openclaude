@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { getEmptyToolPermissionContext, type Tools } from '../../Tool.js'
 import {
   acquireSharedMutationLock,
@@ -8,8 +8,38 @@ import { toolToAPISchema } from '../../utils/api.js'
 import { runWithTeammateContext } from '../../utils/teammateContext.js'
 import { clearToolSchemaCache } from '../../utils/toolSchemaCache.js'
 import { AgentTool } from './AgentTool.js'
+import { AGENT_TOOL_NAME } from './constants.js'
+import * as forkSubagentModule from './forkSubagent.js'
 import { getPrompt } from './prompt.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
+
+/**
+ * Snapshot of the real fork gate, taken at module load and BEFORE any
+ * mock.module() call: bun never unregisters a mock.module() override, and
+ * re-reading the namespace object after mocking hands back the MOCK (the live
+ * binding has already been swapped). Restoring means re-registering this copy.
+ */
+const realForkSubagentModule = { ...forkSubagentModule }
+const FORK_SUBAGENT_MODULE = './forkSubagent.js'
+
+/**
+ * Render under the FORK branch. getPrompt() picks it on isForkSubagentEnabled()
+ * alone (prompt.ts), and that needs `feature('FORK_SUBAGENT')` (false in the
+ * test build) AND `!getIsNonInteractiveSession()` (true under `bun test`,
+ * forkSubagent.ts:35-40) — neither is settable from a test, so replacing the
+ * gate is the only way to reach that render at all. Restored in `finally`.
+ */
+async function withForkRender<T>(render: () => Promise<T>): Promise<T> {
+  mock.module(FORK_SUBAGENT_MODULE, () => ({
+    ...realForkSubagentModule,
+    isForkSubagentEnabled: () => true,
+  }))
+  try {
+    return await render()
+  } finally {
+    mock.module(FORK_SUBAGENT_MODULE, () => realForkSubagentModule)
+  }
+}
 
 const originalEnv = {
   CLAUDE_CODE_AGENT_LIST_IN_MESSAGES:
@@ -177,6 +207,18 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
   //    lead's session useInboxPoller.ts:641-701 writes the approval itself and
   //    only then passes the request through as a message. The shipped text
   //    promised the spawner gates the plan.
+  // Round 2 corrected the same bullet again: "in a lead's session that plan is
+  // approved automatically" read as its own case to the in-process SUB-LEAD,
+  // which bullets 1 and 2 address in those exact words, and for that reader it
+  // is false. Its child writes to the SUB-team's `team-lead` mailbox
+  // (ExitPlanModeV2Tool.ts:292-300 over the team AgentTool.tsx:457
+  // substituted); the auto-approver never sees it (useInboxPoller.ts:97-99
+  // returns early for an in-process teammate, and :641-644 gates on
+  // isTeamLead() over the ROOT team's inbox); and it cannot approve by hand
+  // either (SendMessageTool.ts:479-483, isTeamLead at teammate.ts:171-190).
+  // Only "reaches you as a message" survives for it
+  // (inProcessRunner.ts:1351-1384), so the bullet now scopes the automatic
+  // approval to the LEAD and tells the sub-lead the half it can act on.
   test('states the truth for the own-terminal teammate, the no-team lead and `mode`', async () => {
     process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
     forceAgentTeamsOn()
@@ -193,8 +235,20 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
       'with neither, `name` makes no teammate at all and the call runs an ordinary subagent, which needs a prompt',
     )
     expect(prompt).toContain('is the only `mode` value a teammate spawn acts on')
+    // True for both readers: useInboxPoller.ts:699-702 for the lead,
+    // inProcessRunner.ts:1351-1384 for the sub-lead.
+    expect(prompt).toContain('Its plan reaches you as a message whoever you are')
+    // The automatic approval is the LEAD's half alone (useInboxPoller.ts:643).
     expect(prompt).toContain(
-      'that plan is approved automatically and reaches you as a message',
+      'As a LEAD it is also approved for you automatically',
+    )
+    // And the sub-lead's half: nobody can approve it (useInboxPoller.ts:97-99,
+    // SendMessageTool.ts:479-483), so it should not ask for one.
+    expect(prompt).toContain(
+      "As a TEAMMATE leading a sub-team from inside your lead's session, nothing approves it",
+    )
+    expect(prompt).toContain(
+      'do not spawn your sub-team members with `mode: "plan"`',
     )
     // The sub-team instruction now addresses only the reader that can act on it.
     expect(prompt).toContain("To lead a sub-team from inside your lead's session")
@@ -204,6 +258,11 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     )
     expect(prompt).not.toContain('`mode` applies to such a teammate spawn')
     expect(prompt).not.toContain('requires it to get its plan approved by you')
+    // Round 2's over-promise: true of the lead, false of the sub-lead that
+    // reads "a lead's session" as its own.
+    expect(prompt).not.toContain(
+      "In a lead's session that plan is approved automatically",
+    )
   })
 
   test('the rendered text does not depend on where it is rendered', async () => {
@@ -264,13 +323,23 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     }
   })
 
-  // The description may not offer a parameter the schema does not carry.
-  // `toolToAPISchema` strips `name`, `team_name` and `mode` from the input
-  // schema when Agent Teams is off (src/utils/api.ts:89-91,224-227) in the very
-  // same cache-miss branch that renders this text, and `TeamCreate` is not
-  // registered at all (TeamCreateTool.ts:245-247). Asserted against the schema
-  // the API receives, so the two can only drift together.
-  test('offers no teammate parameter that the schema does not carry', async () => {
+  // The description may not offer a parameter the schema does not carry, in
+  // EITHER render. `toolToAPISchema` strips `name`, `team_name` and `mode` from
+  // the input schema when Agent Teams is off (src/utils/api.ts:89-91,224-227)
+  // in the very same cache-miss branch that renders the description, and
+  // `TeamCreate` is not registered at all (TeamCreateTool.ts:245-247). Asserted
+  // against the schema the API receives, so the two can only drift together.
+  //
+  // getPrompt() picks the fork render on isForkSubagentEnabled() ALONE, which
+  // is independent of Agent Teams — so "fork on, teams off" is a reachable
+  // combination and the fork render has to hold the invariant too. Both renders
+  // are exercised below.
+
+  /** The Agent schema the API receives with Agent Teams OFF. */
+  async function teamsOffSchema(): Promise<{
+    description: string
+    input_schema: { properties?: object }
+  }> {
     process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
     process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS = '1'
     // The opt-out already wins on its own (agentSwarmsEnabled.ts:21-24 checks
@@ -279,11 +348,62 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     delete process.env.USER_TYPE
 
     clearToolSchemaCache()
-    const schema = (await toolToAPISchema(AgentTool, {
+    return (await toolToAPISchema(AgentTool, {
       getToolPermissionContext: async () => getEmptyToolPermissionContext(),
       tools: [] as unknown as Tools,
       agents,
     })) as { description: string; input_schema: { properties?: object } }
+  }
+
+  /** Clauses of TEAMMATE_SPAWN_RULES / TEAMMATE_BACKGROUND_RULE. */
+  const TEAMMATE_PARAM_CLAUSES = [
+    '`name` spawns a TEAMMATE',
+    '`team_name` is then optional',
+    '`mode: "plan"` starts the teammate in plan mode',
+    'TeamCreate(team_name:',
+    '`run_in_background` is not available to you when you are a teammate',
+  ]
+
+  /**
+   * The complete set of FORK-render fragments that offer a teammate parameter:
+   * the `name` sentence in "When to fork", the `name:` line of the fork example
+   * and the omit-name/team_name note under the code-reviewer example. All three
+   * are gated on the same flag that strips those parameters from the schema.
+   */
+  const FORK_TEAMMATE_PARAM_FRAGMENTS = [
+    'Pass a short `name` (one or two words, lowercase)',
+    'name: "ship-audit",',
+    'Omit name/team_name so it runs as a standard subagent',
+  ]
+
+  test('offers no teammate parameter that the schema does not carry', async () => {
+    const schema = await teamsOffSchema()
+
+    // This is the DEFAULT render, not the fork one — named so the fork case
+    // below cannot be mistaken for a duplicate of it.
+    expect(schema.description).not.toContain('## When to fork')
+
+    const properties = Object.keys(schema.input_schema.properties ?? {})
+    expect(properties).not.toContain('name')
+    expect(properties).not.toContain('team_name')
+    expect(properties).not.toContain('mode')
+
+    for (const clause of TEAMMATE_PARAM_CLAUSES) {
+      expect(schema.description).not.toContain(clause)
+    }
+    // The rest of the description is untouched by the gate.
+    expect(schema.description).toContain('isolation: "worktree"')
+  })
+
+  test('the FORK render offers no teammate parameter either', async () => {
+    const schema = await withForkRender(() => teamsOffSchema())
+
+    // Prove the fork branch actually rendered: without these two the rest of
+    // this test would pass vacuously on the default render.
+    expect(schema.description).toContain('## When to fork')
+    expect(schema.description).toContain(
+      'Forks are cheap because they share your prompt cache',
+    )
 
     const properties = Object.keys(schema.input_schema.properties ?? {})
     expect(properties).not.toContain('name')
@@ -291,15 +411,29 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     expect(properties).not.toContain('mode')
 
     for (const clause of [
-      '`name` spawns a TEAMMATE',
-      '`team_name` is then optional',
-      '`mode: "plan"` starts the teammate in plan mode',
-      'TeamCreate(team_name:',
-      '`run_in_background` is not available to you when you are a teammate',
+      ...TEAMMATE_PARAM_CLAUSES,
+      ...FORK_TEAMMATE_PARAM_FRAGMENTS,
     ]) {
       expect(schema.description).not.toContain(clause)
     }
-    // The rest of the description is untouched by the gate.
     expect(schema.description).toContain('isolation: "worktree"')
+  })
+
+  test('the FORK render keeps those fragments when Agent Teams is ON', async () => {
+    process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
+    forceAgentTeamsOn()
+
+    const prompt = await withForkRender(() => getPrompt(agents))
+
+    expect(prompt).toContain('## When to fork')
+    for (const fragment of FORK_TEAMMATE_PARAM_FRAGMENTS) {
+      expect(prompt).toContain(fragment)
+    }
+    // Gating the `name:` line must not disturb the example's shape.
+    expect(prompt).toContain(
+      `${AGENT_TOOL_NAME}({\n  name: "ship-audit",\n  description: "Branch ship-readiness audit",`,
+    )
+    // And the teammate rules themselves are back with the parameters.
+    expect(prompt).toContain('`name` spawns a TEAMMATE')
   })
 })

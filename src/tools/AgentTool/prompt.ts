@@ -81,6 +81,22 @@ export function shouldInjectAgentListInMessages(): boolean {
  * spawn every time — the only honest thing to tell that reader is to ask its
  * lead.
  *
+ * `mode: "plan"` splits along the same seam, and the third bullet says so. The
+ * plan always arrives as a message — `useInboxPoller.ts:699-702` for a lead,
+ * `inProcessRunner.ts:1351-1384` for a teammate reading the `team-lead` inbox
+ * of the sub-team it leads — but only a lead's own session APPROVES one. The
+ * auto-approver is gated on `isTeamLead(teamContext)`
+ * (`useInboxPoller.ts:641-644`) and answers into its OWN team (`:669-677`),
+ * while a sub-team child writes its request to the SUB-team's `team-lead`
+ * mailbox (`ExitPlanModeV2Tool.ts:292-300`, that team being the one
+ * `AgentTool.tsx:457` substituted); a teammate's own poller returns before any
+ * of this (`useInboxPoller.ts:97-99`). Nor can a sub-lead approve by hand:
+ * `handlePlanApproval` throws unless `isTeamLead`
+ * (`SendMessageTool.ts:479-483`), which compares `getAgentId()` to
+ * `teamContext.leadAgentId` (`teammate.ts:171-190`). So a sub-team member
+ * spawned with `mode: "plan"` can never be approved by anyone — the bullet
+ * tells that reader not to spawn one, which is the only half it can act on.
+ *
  * DO NOT branch this text on the ambient context (an `isInProcessTeammate()`
  * or `isTeammate()` read in the render path, or anything like it). Tool
  * descriptions are memoised process-wide by `toolToAPISchema`
@@ -106,7 +122,7 @@ export function shouldInjectAgentListInMessages(): boolean {
 const TEAMMATE_SPAWN_RULES = `
 - \`name\` spawns a TEAMMATE, and which team it lands in depends on who you are: as a LEAD, the team you pass in \`team_name\` or the team you are already in — with neither, \`name\` makes no teammate at all and the call runs an ordinary subagent, which needs a prompt; as a TEAMMATE running inside your lead's session, the sub-team YOU lead, never your own team; as a TEAMMATE running in your own terminal, none — you cannot lead a sub-team there, so a spawn with \`name\` is refused: ask your team lead to create the team and spawn its members instead. Omit \`name\` and you get an ordinary subagent whoever you are.
 - To lead a sub-team from inside your lead's session, create it first with \`${TEAM_CREATE_TOOL_NAME}(team_name: "<your team>/<your name>")\`; until it exists the spawn is refused. \`team_name\` is then optional: omit it and your sub-team is used, and if you do pass it, it must name exactly that sub-team.
-- \`mode: "plan"\` starts the teammate in plan mode and is the only \`mode\` value a teammate spawn acts on. In a lead's session that plan is approved automatically and reaches you as a message — you see it, you do not gate it. A teammate you spawn works on its own and reports back with ${SEND_MESSAGE_TOOL_NAME}, which states when its messages reach you.`
+- \`mode: "plan"\` starts the teammate in plan mode and is the only \`mode\` value a teammate spawn acts on. Its plan reaches you as a message whoever you are. As a LEAD it is also approved for you automatically — you see it, you do not gate it. As a TEAMMATE leading a sub-team from inside your lead's session, nothing approves it: your lead auto-approves only requests addressed to its own team, and you cannot approve a plan yourself — so do not spawn your sub-team members with \`mode: "plan"\`. A teammate you spawn works on its own and reports back with ${SEND_MESSAGE_TOOL_NAME}, which states when its messages reach you.`
 
 /**
  * Appended only when `run_in_background` is actually on the schema AND Agent
@@ -144,7 +160,12 @@ export async function getPrompt(
   // Same rule for the teammate parameters: `name`, `team_name` and `mode` are
   // stripped from the schema when Agent Teams is off (`api.ts:89-91,224-227`),
   // so the text that explains them must go with them. Process-level, like the
-  // gate above — see TEAMMATE_SPAWN_RULES.
+  // gate above — see TEAMMATE_SPAWN_RULES. It gates three fragments of the FORK
+  // render too — the `name` sentence in "When to fork", the `name:` line of the
+  // fork example and the omit-name/team_name note under the code-reviewer
+  // example. `isForkSubagentEnabled()` is independent of this flag, so a fork
+  // render with Agent Teams off would otherwise offer `name`/`team_name` that
+  // the same cache-miss branch has just stripped from the schema.
   const teammateSpawnAvailable = isAgentSwarmsEnabled()
 
   const whenToForkSection = forkEnabled
@@ -156,7 +177,7 @@ Fork yourself (omit \`subagent_type\`) when the intermediate tool output isn't w
 - **Research**: fork open-ended questions. If research can be broken into independent questions, launch parallel forks in one message. A fork beats a fresh subagent for this \u2014 it inherits context and shares your cache.
 - **Implementation**: prefer to fork implementation work that requires more than a couple of edits. Do research before jumping to implementation.
 
-Forks are cheap because they share your prompt cache. Don't set \`model\` on a fork \u2014 a different model can't reuse the parent's cache. Pass a short \`name\` (one or two words, lowercase) so the user can see the fork in the teams panel and steer it mid-run.
+Forks are cheap because they share your prompt cache. Don't set \`model\` on a fork \u2014 a different model can't reuse the parent's cache.${teammateSpawnAvailable ? ' Pass a short `name` (one or two words, lowercase) so the user can see the fork in the teams panel and steer it mid-run.' : ''}
 
 **Don't peek.** The tool result includes an \`output_file\` path — do not Read or tail it unless the user explicitly asks for a progress check. You get a completion notification; trust it. Reading the transcript mid-flight pulls the fork's tool noise into your context, which defeats the point of forking. If you need to course-correct, use SendMessage — never Read.
 
@@ -189,8 +210,7 @@ ${forkEnabled ? 'For fresh agents, terse' : 'Terse'} command-style prompts produ
 <example>
 user: "What's left on this branch before we can ship?"
 assistant: <thinking>Forking this \u2014 it's a survey question. I want the punch list, not the git output in my context.</thinking>
-${AGENT_TOOL_NAME}({
-  name: "ship-audit",
+${AGENT_TOOL_NAME}({${teammateSpawnAvailable ? '\n  name: "ship-audit",' : ''}
   description: "Branch ship-readiness audit",
   prompt: "Audit what's left before this branch can ship. Check: uncommitted changes, commits ahead of main, whether tests exist, whether the GrowthBook gate is wired up, whether CI-relevant files changed. Report a punch list \u2014 done vs. missing. Under 200 words."
 })
@@ -214,8 +234,7 @@ assistant: Still waiting on the audit \u2014 that's one of the things it's check
 user: "Can you get a second opinion on whether this migration is safe?"
 assistant: <thinking>I'll ask the code-reviewer agent — it won't see my analysis, so it can give an independent read. The code-reviewer requires the diff inline, so I need to include the changed hunks.</thinking>
 <commentary>
-A subagent_type is specified, so the agent starts fresh. It needs full context in the prompt. The code-reviewer contract requires the caller to provide the diff or changed hunks inline — the reviewer cannot run git diff itself.
-Note: do NOT add a name parameter here — code-reviewer is a built-in and will be rejected if spawned as a teammate. Omit name/team_name so it runs as a standard subagent.
+A subagent_type is specified, so the agent starts fresh. It needs full context in the prompt. The code-reviewer contract requires the caller to provide the diff or changed hunks inline — the reviewer cannot run git diff itself.${teammateSpawnAvailable ? '\nNote: do NOT add a name parameter here — code-reviewer is a built-in and will be rejected if spawned as a teammate. Omit name/team_name so it runs as a standard subagent.' : ''}
 </commentary>
 ${AGENT_TOOL_NAME}({
   description: "Independent migration review",
