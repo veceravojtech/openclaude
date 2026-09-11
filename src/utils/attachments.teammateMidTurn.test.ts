@@ -124,12 +124,14 @@ type Harness = {
 
 /**
  * A tool-use context as runAgent builds it for a teammate's own turn, or for a
- * background subagent.
+ * fork that SHARES its spawner's setAppState — a sync subagent; a background
+ * one gets a no-op instead (forkedAgent.ts:420-422).
  *
  * `turnAgentId` is `undefined` for a MAIN LOOP — the lead's own turn, or a
  * tmux teammate's. Neither REPL.tsx's getToolUseContext (:2749) nor
  * QueryEngine.ts's processUserInputContext (:401) puts an `agentId` on the
- * context it builds; only createSubagentContext does (forkedAgent.ts:459).
+ * context it builds; the forks do — createSubagentContext (forkedAgent.ts:459)
+ * and execAgentHook.ts:127.
  */
 function createHarness(
   turnAgentId: string | undefined,
@@ -548,9 +550,12 @@ test("an `ant` lead's own turn still drains AppState.inbox", async () => {
 
 test('a lead-spawned subagent takes nothing from AppState.inbox', async () => {
   // T9, the lead path's third mail source. `appState.inbox` holds the messages
-  // queued FOR THE LEAD, and a subagent reads the same AppState its spawner
-  // does — so without the guard it was handed them and marked them `processed`,
-  // which is the same destruction of delivery as marking a file message read.
+  // queued FOR THE LEAD, and a fork reads the same AppState its spawner does —
+  // so without the guard it was handed them. The `processed` flip lands only
+  // where setAppState is shared (`shareSetAppState: !isAsync`,
+  // runAgent.ts:758) — a SYNC subagent like this one, the forked skill or
+  // slash command, the stop-hook agent. A background subagent's setAppState is
+  // a no-op, so for it the leak is the read alone.
   process.env.USER_TYPE = 'ant'
   const harness = createLeadHarness(
     createAgentId(),
