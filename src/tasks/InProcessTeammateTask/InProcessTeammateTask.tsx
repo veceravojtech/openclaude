@@ -227,9 +227,9 @@ export function orderTeammatesDepthFirst(teammates: InProcessTeammateTaskState[]
  * cannot widen a cap.
  *
  * Shared between TeammateSpinnerTree display, PromptInput footer selector,
- * useBackgroundTaskNavigation and the BackgroundTaskStatus pill row;
- * selectedIPAgentIndex maps into this array, so all of them must agree on sort
- * order — which is why the widening happens HERE and not per consumer.
+ * useBackgroundTaskNavigation and the BackgroundTaskStatus pill row; the
+ * selection stepper walks this array, so all of them must agree on sort order —
+ * which is why the widening happens HERE and not per consumer.
  *
  * `now` defaults to Date.now(); the explicit parameter keeps the grace deadline
  * testable without timers, exactly as on isRetainedOrWithinGrace and

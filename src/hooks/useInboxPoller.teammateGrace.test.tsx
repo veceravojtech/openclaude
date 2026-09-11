@@ -1,5 +1,5 @@
 import { PassThrough } from 'node:stream'
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test'
 import React from 'react'
 
 import { createRoot } from '../ink.js'
@@ -7,6 +7,7 @@ import {
   type AppState,
   AppStateProvider,
   useAppState,
+  useSetAppState,
 } from '../state/AppState.js'
 import { getDefaultAppState } from '../state/AppStateStore.js'
 import { getRunningTeammatesSorted } from '../tasks/InProcessTeammateTask/InProcessTeammateTask.js'
@@ -15,7 +16,7 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
-import { TEAMMATE_GRACE_MS } from '../utils/task/framework.js'
+import { evictTerminalTask, TEAMMATE_GRACE_MS } from '../utils/task/framework.js'
 import type { TeammateMessage } from '../utils/teammateMailbox.js'
 import { useInboxPoller } from './useInboxPoller.js'
 
@@ -127,8 +128,12 @@ function leadState(task: InProcessTeammateTaskState): AppState {
 
 function Harness({
   onTasks,
+  onSetAppState,
 }: {
   onTasks: (tasks: Record<string, InProcessTeammateTaskState>) => void
+  onSetAppState: (
+    setAppState: (updater: (prev: AppState) => AppState) => void,
+  ) => void
 }): React.ReactNode {
   useInboxPoller({
     enabled: true,
@@ -137,15 +142,21 @@ function Harness({
     onSubmitMessage: () => true,
   })
   const tasks = useAppState(s => s.tasks)
+  const setAppState = useSetAppState()
   React.useEffect(
     () => onTasks(tasks as Record<string, InProcessTeammateTaskState>),
     [tasks, onTasks],
+  )
+  React.useEffect(
+    () => onSetAppState(setAppState),
+    [setAppState, onSetAppState],
   )
   return null
 }
 
 async function pollOnce(initialState: AppState): Promise<{
   tasks: () => Record<string, InProcessTeammateTaskState>
+  setAppState: (updater: (prev: AppState) => AppState) => void
   cleanup: () => Promise<void>
 }> {
   const stdout = new PassThrough()
@@ -166,11 +177,17 @@ async function pollOnce(initialState: AppState): Promise<{
     patchConsole: false,
   })
   let latest: Record<string, InProcessTeammateTaskState> = {}
+  let setAppState:
+    | ((updater: (prev: AppState) => AppState) => void)
+    | undefined
   root.render(
     <AppStateProvider initialState={initialState}>
       <Harness
         onTasks={next => {
           latest = next
+        }}
+        onSetAppState={next => {
+          setAppState = next
         }}
       />
     </AppStateProvider>,
@@ -179,8 +196,10 @@ async function pollOnce(initialState: AppState): Promise<{
     await Bun.sleep(25)
     if (latest['task-supervisor']?.status === 'completed') break
   }
+  expect(setAppState).toBeDefined()
   return {
     tasks: () => latest,
+    setAppState: updater => setAppState!(updater),
     async cleanup() {
       root.unmount()
       await Bun.sleep(30)
@@ -224,6 +243,54 @@ test('a pane teammate shutting down keeps its row for the grace window', async (
     expect(
       getRunningTeammatesSorted(tasks, task!.evictAfter! + 1),
     ).toHaveLength(0)
+  } finally {
+    await polled.cleanup()
+  }
+})
+
+test('…and the task is then COLLECTED once the deadline passes, instead of sitting in AppState for the session', async () => {
+  // The other half of the marker. Both evictors bail on `!task.notified`, so
+  // writing status/retain/evictAfter without it meant the row left the shared
+  // order at the deadline and the task object stayed behind for the rest of the
+  // session. The completion IS delivered — the same updater appends the
+  // `teammate_terminated` system message the lead reads — so this transition
+  // owes no further notification and the flag is honest.
+  let delivered = false
+  mock.module(MAILBOX_MODULE, () => ({
+    ...actualMailbox,
+    readUnreadMessages: async () => {
+      if (delivered) return []
+      delivered = true
+      return [shutdownApproval()]
+    },
+    markMessagesAsRead: async () => {},
+  }))
+
+  const polled = await pollOnce(leadState(paneTeammateTask()))
+  try {
+    const task = polled.tasks()['task-supervisor']
+    expect(task?.status).toBe('completed')
+    expect(task?.notified).toBe(true)
+
+    // Inside the window the shared retain/grace rule still holds the task, so
+    // the eager collector refuses it — the row is still on screen.
+    evictTerminalTask('task-supervisor', polled.setAppState)
+    await Bun.sleep(30)
+    expect(polled.tasks()['task-supervisor']).toBeDefined()
+
+    // Past the deadline it goes. The clock is mocked across the one synchronous
+    // updater rather than waiting 30s; evictTerminalTask reads Date.now()
+    // through isRetainedOrWithinGrace, which takes no `now` from its callers.
+    const nowSpy = spyOn(Date, 'now').mockReturnValue(
+      task!.evictAfter! + 1_000,
+    )
+    try {
+      evictTerminalTask('task-supervisor', polled.setAppState)
+    } finally {
+      nowSpy.mockRestore()
+    }
+    await Bun.sleep(30)
+    expect(polled.tasks()['task-supervisor']).toBeUndefined()
   } finally {
     await polled.cleanup()
   }

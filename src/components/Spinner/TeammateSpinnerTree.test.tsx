@@ -1,13 +1,16 @@
+import { PassThrough } from 'node:stream'
 import { afterAll, describe, expect, test } from 'bun:test'
 import chalk from 'chalk'
 import figures from 'figures'
 import React from 'react'
 
+import { createRoot } from '../../ink.js'
 import { stringWidth } from '../../ink/stringWidth.js'
 import {
   type AppState,
   AppStateProvider,
   getDefaultAppState,
+  useSetAppState,
 } from '../../state/AppState.js'
 import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js'
 import { renderToAnsiString, renderToString } from '../../utils/staticRender.js'
@@ -585,5 +588,179 @@ describe('TeammateSpinnerTree', () => {
   test('no placeholder for a lead that does have a row', async () => {
     const frame = await renderTree(TWO_LEVEL)
     expect(frame).not.toContain('not running')
+  })
+})
+
+/**
+ * Row IDENTITY across a placeholder appearing above a row.
+ *
+ * A row's React key used to flip between `teammate.id` and `row-${teammate.id}`
+ * — and its element type between the row itself and a Fragment — depending on
+ * whether an absent-lead placeholder was emitted with it. So when a sub-lead's
+ * grace window closed, or a missing lead respawned, React unmounted and
+ * remounted every member row below: TeammateSpinnerLine re-ran its
+ * `useState(() => teammate.spinnerVerb ?? sample(verbs))` initializer and its
+ * idleStartRef / frozenDurationRef reset, so the verb changed and "Idle for 12s"
+ * restarted at 0s under the cursor.
+ *
+ * The probe is that initializer. It reads the prop ONCE, at mount: feed the row
+ * a different `spinnerVerb` along with the change and the old verb surviving on
+ * screen is proof the row was not remounted — and the second case shows the same
+ * probe catching a remount when the identity really does change, so a passing
+ * first case cannot be an artefact of the probe.
+ */
+function verbed(
+  t: InProcessTeammateTaskState,
+  spinnerVerb: string,
+): InProcessTeammateTaskState {
+  return { ...t, spinnerVerb }
+}
+
+function Driver({
+  onReady,
+}: {
+  onReady: (
+    setTeammates: (teammates: InProcessTeammateTaskState[]) => void,
+  ) => void
+}): null {
+  const setAppState = useSetAppState()
+  React.useEffect(
+    () =>
+      onReady(teammates =>
+        setAppState(prev => ({
+          ...prev,
+          tasks: Object.fromEntries(teammates.map(t => [t.id, t])),
+        })),
+      ),
+    [setAppState, onReady],
+  )
+  return null
+}
+
+async function mountTree(teammates: InProcessTeammateTaskState[]): Promise<{
+  setTeammates: (next: InProcessTeammateTaskState[]) => Promise<string>
+  cleanup: () => Promise<void>
+}> {
+  const stdout = new PassThrough()
+  const stdin = new PassThrough() as PassThrough & {
+    isTTY: boolean
+    setRawMode: (mode: boolean) => void
+    ref: () => void
+    unref: () => void
+  }
+  stdin.isTTY = true
+  stdin.setRawMode = () => {}
+  stdin.ref = () => {}
+  stdin.unref = () => {}
+  ;(stdout as unknown as { columns: number }).columns = COLUMNS
+  let written = ''
+  stdout.on('data', chunk => {
+    written += String(chunk)
+  })
+  const root = await createRoot({
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+  })
+  let setTeammates:
+    | ((next: InProcessTeammateTaskState[]) => void)
+    | undefined
+  const teardown = async (): Promise<void> => {
+    root.unmount()
+    await Bun.sleep(30)
+    stdin.end()
+    stdout.end()
+  }
+  try {
+    root.render(
+      <AppStateProvider initialState={stateWith(teammates)}>
+        <TeammateSpinnerTree />
+        <Driver
+          onReady={value => {
+            setTeammates = value
+          }}
+        />
+      </AppStateProvider>,
+    )
+    for (let attempt = 0; attempt < 100 && !setTeammates; attempt++) {
+      await Bun.sleep(10)
+    }
+    expect(setTeammates).toBeDefined()
+    return {
+      async setTeammates(next) {
+        // Only the frames drawn AFTER this change are read back.
+        written = ''
+        setTeammates!(next)
+        await Bun.sleep(120)
+        return stripped(written)
+      },
+      cleanup: teardown,
+    }
+  } catch (error) {
+    await teardown()
+    throw error
+  }
+}
+
+describe('TeammateSpinnerTree — row identity', () => {
+  const SUPERVISOR = teammate('supervisor', 'email')
+  const WORKER = teammate('worker-1', 'email/supervisor')
+
+  test('a placeholder appearing above a row does not remount that row', async () => {
+    const mounted = await mountTree([
+      SUPERVISOR,
+      verbed(WORKER, 'AlphaVerb'),
+    ])
+    try {
+      // The sub-lead's row goes away, so worker-1 gets a dimmed
+      // `@supervisor · not running` placeholder above it — the exact moment the
+      // key used to flip. The row is handed a different verb at the same time.
+      const frame = await mounted.setTeammates([verbed(WORKER, 'BetaVerb')])
+
+      expect(frame).toContain('@supervisor · not running')
+      expect(frame).toContain('AlphaVerb')
+      expect(frame).not.toContain('BetaVerb')
+    } finally {
+      await mounted.cleanup()
+    }
+  })
+
+  test('the same row survives the placeholder DISAPPEARING again', async () => {
+    // The other direction: a missing lead respawning used to remount every
+    // member row below it just the same.
+    const mounted = await mountTree([verbed(WORKER, 'AlphaVerb')])
+    try {
+      const frame = await mounted.setTeammates([
+        SUPERVISOR,
+        verbed(WORKER, 'BetaVerb'),
+      ])
+
+      expect(frame).not.toContain('not running')
+      expect(frame).toContain('AlphaVerb')
+      expect(frame).not.toContain('BetaVerb')
+    } finally {
+      await mounted.cleanup()
+    }
+  })
+
+  test('the probe does catch a genuine remount', async () => {
+    // Same change, but the row is a different task: the key really does differ,
+    // React really does mount a new line, and the initializer really does read
+    // the new verb. Without this the case above could pass because the probe
+    // cannot see anything at all.
+    const mounted = await mountTree([
+      SUPERVISOR,
+      verbed(WORKER, 'AlphaVerb'),
+    ])
+    try {
+      const frame = await mounted.setTeammates([
+        { ...verbed(WORKER, 'BetaVerb'), id: 'task-email/supervisor-other' },
+      ])
+
+      expect(frame).toContain('BetaVerb')
+      expect(frame).not.toContain('AlphaVerb')
+    } finally {
+      await mounted.cleanup()
+    }
   })
 })

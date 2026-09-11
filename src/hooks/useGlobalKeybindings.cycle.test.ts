@@ -36,3 +36,45 @@ describe('nextExpandedView', () => {
     expect(nextExpandedView('tasks')).toBe('teammates')
   })
 })
+
+/**
+ * The one thing that DOES gate the teammates step: the feature itself.
+ *
+ * TeammateTreePanel renders nothing at all when Agent Teams are disabled, so an
+ * ungated cycle walked through a state with no pixels — one Ctrl+T did nothing
+ * visible, the invisible view was persisted as `showSpinnerTree: true`, and
+ * Shift+↑/↓ went to a panel that was not on screen instead of to the
+ * background-tasks dialog. With the feature off the cycle is none ↔ tasks, and
+ * 'teammates' is not a step it can land on from anywhere.
+ */
+describe('nextExpandedView with Agent Teams disabled', () => {
+  test('skips the teammates step: the cycle is none ↔ tasks', () => {
+    expect(nextExpandedView('none', false)).toBe('tasks')
+    expect(nextExpandedView('tasks', false)).toBe('none')
+  })
+
+  test('never lands on teammates, from any starting view', () => {
+    for (const from of ['none', 'tasks', 'teammates'] as const) {
+      expect(nextExpandedView(from, false)).not.toBe('teammates')
+    }
+  })
+
+  test('leaves a view that is already teammates, rather than parking on it', () => {
+    // Reachable from a session that ran with the feature ON and persisted the
+    // view; one press must take it somewhere that renders.
+    expect(nextExpandedView('teammates', false)).toBe('none')
+  })
+
+  test('two presses from none return to none instead of taking three', () => {
+    expect(nextExpandedView(nextExpandedView('none', false), false)).toBe('none')
+  })
+
+  test('the enabled cycle is exactly what the default argument gives', () => {
+    // The parameter defaults to the full cycle, which is why every call above
+    // in this file — and the single call site — keeps today's behaviour and why
+    // `nextExpandedView.length` is still 1.
+    for (const from of ['none', 'tasks', 'teammates'] as const) {
+      expect(nextExpandedView(from, true)).toBe(nextExpandedView(from))
+    }
+  })
+})

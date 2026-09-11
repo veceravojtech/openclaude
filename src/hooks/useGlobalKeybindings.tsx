@@ -12,6 +12,7 @@ import type { Screen } from '../screens/REPL.js';
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../services/analytics/index.js';
 import { type AppState, useAppState, useSetAppState } from '../state/AppState.js';
+import { isAgentSwarmsEnabled } from '../utils/agentSwarmsEnabled.js';
 import { getTerminalPanel } from '../utils/terminalPanel.js';
 type Props = {
   screen: Screen;
@@ -26,7 +27,8 @@ type Props = {
 };
 
 /**
- * The Ctrl+T cycle: none → tasks → teammates → none.
+ * The Ctrl+T cycle: none → tasks → teammates → none, with the teammates step
+ * skipped entirely when Agent Teams are disabled.
  *
  * Every step is reachable at any time. It used to fall back to none ↔ tasks
  * unless a teammate was already RUNNING, which made the teammates panel
@@ -35,14 +37,27 @@ type Props = {
  * press. The panel draws its own empty state instead, so there is nothing left
  * for the keybinding to protect against.
  *
+ * The ONE thing it still has to protect against is the opposite case:
+ * TeammateTreePanel renders nothing at all when Agent Teams are off, so an
+ * ungated cycle walked through an INVISIBLE state — one press did nothing
+ * visible, the view was persisted as `showSpinnerTree: true`, and Shift+↑/↓ was
+ * swallowed by a panel that was not on screen. With the flag off the cycle is
+ * none ↔ tasks.
+ *
+ * `agentTeamsEnabled` is a parameter rather than an isAgentSwarmsEnabled() call
+ * so the disabled cycle is assertable without mutating the environment; the
+ * caller supplies the gate. It DEFAULTS to the full cycle, which keeps this a
+ * one-argument function of the current view for every caller that does not care
+ * — there is still no tasks map and no teammate count anywhere in it.
+ *
  * Pure and exported so the cycle can be asserted without a keybinding context.
  */
-export function nextExpandedView(current: AppState['expandedView']): AppState['expandedView'] {
+export function nextExpandedView(current: AppState['expandedView'], agentTeamsEnabled: boolean = true): AppState['expandedView'] {
   switch (current) {
     case 'none':
       return 'tasks';
     case 'tasks':
-      return 'teammates';
+      return agentTeamsEnabled ? 'teammates' : 'none';
     case 'teammates':
       return 'none';
   }
@@ -76,7 +91,7 @@ export function GlobalKeybindingHandlers({
     });
     setAppState(prev => ({
       ...prev,
-      expandedView: nextExpandedView(prev.expandedView)
+      expandedView: nextExpandedView(prev.expandedView, isAgentSwarmsEnabled())
     }));
   }, [expandedView, setAppState]);
 

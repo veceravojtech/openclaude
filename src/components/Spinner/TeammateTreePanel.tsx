@@ -22,7 +22,7 @@ import { TeammateSpinnerTree } from './TeammateSpinnerTree.js'
  *
  * This component is deliberately NOT react-compiler output: it is the gate plus
  * one timer, and keeping it hand-written means there are no cache slots here to
- * fall out of step with the 61-slot map inside TeammateSpinnerTree.
+ * fall out of step with the 45-slot map inside TeammateSpinnerTree.
  */
 export function TeammateTreePanel(): React.ReactNode {
   const expandedView = useAppState(s => s.expandedView)
@@ -73,7 +73,7 @@ export function TeammateTreePanel(): React.ReactNode {
   //
   // Why the deadline has to become an AppState change rather than a bare
   // repaint: TeammateSpinnerTree is react-compiler output whose memo is keyed on
-  // `tasks` ($[7]), so a re-render that leaves `tasks` untouched serves the
+  // `tasks` ($[4]), so a re-render that leaves `tasks` untouched serves the
   // cached rows and an expired row would stay on screen. Evicting also keeps
   // AppState from holding finished teammates until the lead's next turn, which
   // is the only other time the lazy GC runs.
@@ -99,11 +99,13 @@ export function TeammateTreePanel(): React.ReactNode {
     return null
   }
 
-  // No leaderVerb / leaderIdleText / leaderTokenCount: those are the SPINNER's
-  // values (a per-mount verb sample and its response-length ref), and the
+  // The tree takes no lead-activity props at all: those values are the
+  // SPINNER's (a per-mount verb sample and its response-length ref) and the
   // spinner still draws them one row above this panel. Feeding a live token
   // count in here would also make the empty panel render differently depending
-  // on whether the lead happens to be mid-turn.
+  // on whether the lead happens to be mid-turn — which is why the three props
+  // the tree used to declare for them, reachable from no mount, were removed
+  // rather than wired up.
   return (
     <TeammateSpinnerTree
       selection={selection}

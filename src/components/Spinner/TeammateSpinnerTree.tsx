@@ -5,7 +5,6 @@ import { Box, Text, type TextProps } from '../../ink.js';
 import { useAppState } from '../../state/AppState.js';
 import { getRunningTeammatesSorted } from '../../tasks/InProcessTeammateTask/InProcessTeammateTask.js';
 import type { TeammateSelection } from '../../tasks/InProcessTeammateTask/teammateSelection.js';
-import { formatNumber } from '../../utils/format.js';
 import { getParentTeamName, getTeamDepth } from '../../utils/swarm/teamHelpers.js';
 import { TeammateSpinnerLine } from './TeammateSpinnerLine.js';
 import { TEAMMATE_SELECT_HINT } from './teammateSelectHint.js';
@@ -18,24 +17,15 @@ type Props = {
   selection?: TeammateSelection | null;
   isInSelectionMode?: boolean;
   allIdle?: boolean;
-  /** Leader's active verb (when leader is actively processing) */
-  leaderVerb?: string;
-  /** Leader's token count (when leader is actively processing) */
-  leaderTokenCount?: number;
-  /** Leader's idle status text (when leader is idle, e.g. "✻ Idle for 3s") */
-  leaderIdleText?: string;
 };
 /** Columns of indent per level of sub-team below the root team. */
 const SUB_TEAM_INDENT = 2;
 export function TeammateSpinnerTree(t0) {
-  const $ = _c(61);
+  const $ = _c(45);
   const {
     selection,
     isInSelectionMode,
-    allIdle,
-    leaderVerb,
-    leaderTokenCount,
-    leaderIdleText
+    allIdle
   } = t0;
   const tasks = useAppState(_temp);
   const viewingAgentTaskId = useAppState(_temp2);
@@ -47,7 +37,7 @@ export function TeammateSpinnerTree(t0) {
   let t3;
   let t4;
   let t5;
-  if ($[0] !== allIdle || $[1] !== isInSelectionMode || $[2] !== leaderIdleText || $[3] !== leaderTokenCount || $[4] !== leaderVerb || $[5] !== selection || $[6] !== showTeammateMessagePreview || $[7] !== tasks || $[8] !== viewingAgentTaskId) {
+  if ($[0] !== allIdle || $[1] !== isInSelectionMode || $[2] !== selection || $[3] !== showTeammateMessagePreview || $[4] !== tasks || $[5] !== viewingAgentTaskId) {
     t5 = Symbol.for("react.early_return_sentinel");
     bb0: {
       // Every row the tree draws: running teammates plus the ones still inside
@@ -57,9 +47,10 @@ export function TeammateSpinnerTree(t0) {
       // rows, which is what made it vanish the moment the last teammate ended;
       // the panel that owns the mount (TeammateTreePanel) is the only gate now,
       // and at zero rows this renders the team-lead row plus one muted line.
-      // The early-return sentinel above and its slot ($[15]) are kept exactly as
-      // the compiler emitted them rather than renumbering all 61 slots — the same
-      // trade U8 made for the unused slot 9 in BackgroundTaskStatus.
+      // The early-return sentinel above and its slot ($[12]) are a vestige of
+      // that removed early return and are kept exactly as the compiler emitted
+      // them: dropping them would rewrite this block's control flow, which is
+      // not what removing three props is allowed to do.
       const isLeaderForegrounded = viewingAgentTaskId === undefined;
       const isLeaderSelected = isInSelectionMode && selection?.kind === "leader";
       const isLeaderHighlighted = isLeaderForegrounded || isLeaderSelected;
@@ -70,95 +61,64 @@ export function TeammateSpinnerTree(t0) {
       const t6 = isLeaderSelected ? "suggestion" : undefined;
       const t7 = isLeaderSelected ? figures.pointer : " ";
       let t8;
-      if ($[16] !== isLeaderHighlighted || $[17] !== t6 || $[18] !== t7) {
+      if ($[13] !== isLeaderHighlighted || $[14] !== t6 || $[15] !== t7) {
         t8 = <Text color={t6} bold={isLeaderHighlighted}>{t7}</Text>;
-        $[16] = isLeaderHighlighted;
-        $[17] = t6;
-        $[18] = t7;
-        $[19] = t8;
+        $[13] = isLeaderHighlighted;
+        $[14] = t6;
+        $[15] = t7;
+        $[16] = t8;
       } else {
-        t8 = $[19];
+        t8 = $[16];
       }
       const t9 = !isLeaderHighlighted;
       const t10 = isLeaderHighlighted ? "\u2552\u2550" : "\u250C\u2500";
       let t11;
-      if ($[20] !== isLeaderHighlighted || $[21] !== t10 || $[22] !== t9) {
+      if ($[17] !== isLeaderHighlighted || $[18] !== t10 || $[19] !== t9) {
         t11 = <Text dimColor={t9} bold={isLeaderHighlighted}>{t10}{" "}</Text>;
-        $[20] = isLeaderHighlighted;
-        $[21] = t10;
-        $[22] = t9;
-        $[23] = t11;
+        $[17] = isLeaderHighlighted;
+        $[18] = t10;
+        $[19] = t9;
+        $[20] = t11;
       } else {
-        t11 = $[23];
+        t11 = $[20];
       }
       const t12 = isLeaderSelected ? "suggestion" : "cyan_FOR_SUBAGENTS_ONLY";
       let t13;
-      if ($[24] !== isLeaderHighlighted || $[25] !== t12) {
+      if ($[21] !== isLeaderHighlighted || $[22] !== t12) {
         t13 = <Text bold={isLeaderHighlighted} color={t12}>team-lead</Text>;
-        $[24] = isLeaderHighlighted;
-        $[25] = t12;
-        $[26] = t13;
+        $[21] = isLeaderHighlighted;
+        $[22] = t12;
+        $[23] = t13;
       } else {
-        t13 = $[26];
+        t13 = $[23];
       }
       let t14;
-      if ($[27] !== isLeaderForegrounded || $[28] !== leaderVerb) {
-        t14 = !isLeaderForegrounded && leaderVerb && <Text dimColor={true}>: {leaderVerb}…</Text>;
-        $[27] = isLeaderForegrounded;
-        $[28] = leaderVerb;
-        $[29] = t14;
+      if ($[24] !== isLeaderHighlighted) {
+        t14 = isLeaderHighlighted && <Text dimColor={true}> · {TEAMMATE_SELECT_HINT}</Text>;
+        $[24] = isLeaderHighlighted;
+        $[25] = t14;
       } else {
-        t14 = $[29];
+        t14 = $[25];
       }
       let t15;
-      if ($[30] !== isLeaderForegrounded || $[31] !== leaderIdleText || $[32] !== leaderVerb) {
-        t15 = !isLeaderForegrounded && !leaderVerb && leaderIdleText && <Text dimColor={true}>: {leaderIdleText}</Text>;
-        $[30] = isLeaderForegrounded;
-        $[31] = leaderIdleText;
-        $[32] = leaderVerb;
-        $[33] = t15;
+      if ($[26] !== isLeaderForegrounded || $[27] !== isLeaderSelected) {
+        t15 = isLeaderSelected && !isLeaderForegrounded && <Text dimColor={true}> · enter to view</Text>;
+        $[26] = isLeaderForegrounded;
+        $[27] = isLeaderSelected;
+        $[28] = t15;
       } else {
-        t15 = $[33];
+        t15 = $[28];
       }
-      let t16;
-      if ($[34] !== isLeaderHighlighted || $[35] !== leaderTokenCount) {
-        t16 = leaderTokenCount !== undefined && leaderTokenCount > 0 && <Text dimColor={!isLeaderHighlighted}>{" "}· {formatNumber(leaderTokenCount)} tokens</Text>;
-        $[34] = isLeaderHighlighted;
-        $[35] = leaderTokenCount;
-        $[36] = t16;
+      if ($[29] !== t11 || $[30] !== t13 || $[31] !== t14 || $[32] !== t15 || $[33] !== t8) {
+        t3 = <Box paddingLeft={3}>{t8}{t11}{t13}{t14}{t15}</Box>;
+        $[29] = t11;
+        $[30] = t13;
+        $[31] = t14;
+        $[32] = t15;
+        $[33] = t8;
+        $[34] = t3;
       } else {
-        t16 = $[36];
-      }
-      let t17;
-      if ($[37] !== isLeaderHighlighted) {
-        t17 = isLeaderHighlighted && <Text dimColor={true}> · {TEAMMATE_SELECT_HINT}</Text>;
-        $[37] = isLeaderHighlighted;
-        $[38] = t17;
-      } else {
-        t17 = $[38];
-      }
-      let t18;
-      if ($[39] !== isLeaderForegrounded || $[40] !== isLeaderSelected) {
-        t18 = isLeaderSelected && !isLeaderForegrounded && <Text dimColor={true}> · enter to view</Text>;
-        $[39] = isLeaderForegrounded;
-        $[40] = isLeaderSelected;
-        $[41] = t18;
-      } else {
-        t18 = $[41];
-      }
-      if ($[42] !== t11 || $[43] !== t13 || $[44] !== t14 || $[45] !== t15 || $[46] !== t16 || $[47] !== t17 || $[48] !== t18 || $[49] !== t8) {
-        t3 = <Box paddingLeft={3}>{t8}{t11}{t13}{t14}{t15}{t16}{t17}{t18}</Box>;
-        $[42] = t11;
-        $[43] = t13;
-        $[44] = t14;
-        $[45] = t15;
-        $[46] = t16;
-        $[47] = t17;
-        $[48] = t18;
-        $[49] = t8;
-        $[50] = t3;
-      } else {
-        t3 = $[50];
+        t3 = $[34];
       }
       // F5: which (name, team) pairs actually have a row, so a sub-team whose
       // lead is gone can be given a placeholder at the lead's own position
@@ -200,61 +160,66 @@ export function TeammateSpinnerTree(t0) {
           placeholderKeys.add(key);
           absentLeads.push(<AbsentLeadRow key={`absent-${key}`} name={lead.leadName} indent={(getTeamDepth(lead.leadTeam) - 1) * SUB_TEAM_INDENT} />);
         }
-        if (absentLeads.length === 0) {
-          return row;
-        }
-        return <React.Fragment key={`row-${teammate.id}`}>{absentLeads}{row}</React.Fragment>;
+        // ONE wrapper shape for both branches, keyed on the teammate's own id.
+        // It used to return the bare row (key `teammate.id`) when there was no
+        // placeholder and a Fragment (key `row-${teammate.id}`) when there was,
+        // so a sub-lead's grace closing — or a missing lead respawning — changed
+        // both the element TYPE and the key of every member row below it. React
+        // unmounted and remounted them: TeammateSpinnerLine re-ran its
+        // `useState(() => sample(verbs))` initializer and its idleStartRef /
+        // frozenDurationRef reset, so a row's verb changed and "Idle for 12s"
+        // restarted at 0s under the cursor. A Fragment renders nothing of its
+        // own, and `absentLeads` stays one child slot whether it is empty or
+        // not, so the row keeps its position inside it either way.
+        return <React.Fragment key={teammate.id}>{absentLeads}{row}</React.Fragment>;
       });
     }
     $[0] = allIdle;
     $[1] = isInSelectionMode;
-    $[2] = leaderIdleText;
-    $[3] = leaderTokenCount;
-    $[4] = leaderVerb;
-    $[5] = selection;
-    $[6] = showTeammateMessagePreview;
-    $[7] = tasks;
-    $[8] = viewingAgentTaskId;
-    $[9] = T0;
-    $[10] = isHideSelected;
-    $[11] = t1;
-    $[12] = t2;
-    $[13] = t3;
-    $[14] = t4;
-    $[15] = t5;
+    $[2] = selection;
+    $[3] = showTeammateMessagePreview;
+    $[4] = tasks;
+    $[5] = viewingAgentTaskId;
+    $[6] = T0;
+    $[7] = isHideSelected;
+    $[8] = t1;
+    $[9] = t2;
+    $[10] = t3;
+    $[11] = t4;
+    $[12] = t5;
   } else {
-    T0 = $[9];
-    isHideSelected = $[10];
-    t1 = $[11];
-    t2 = $[12];
-    t3 = $[13];
-    t4 = $[14];
-    t5 = $[15];
+    T0 = $[6];
+    isHideSelected = $[7];
+    t1 = $[8];
+    t2 = $[9];
+    t3 = $[10];
+    t4 = $[11];
+    t5 = $[12];
   }
   if (t5 !== Symbol.for("react.early_return_sentinel")) {
     return t5;
   }
   let t6;
-  if ($[51] !== isHideSelected || $[52] !== isInSelectionMode) {
+  if ($[35] !== isHideSelected || $[36] !== isInSelectionMode) {
     t6 = isInSelectionMode && <HideRow isSelected={isHideSelected} />;
-    $[51] = isHideSelected;
-    $[52] = isInSelectionMode;
-    $[53] = t6;
+    $[35] = isHideSelected;
+    $[36] = isInSelectionMode;
+    $[37] = t6;
   } else {
-    t6 = $[53];
+    t6 = $[37];
   }
   let t7;
-  if ($[54] !== T0 || $[55] !== t1 || $[56] !== t2 || $[57] !== t3 || $[58] !== t4 || $[59] !== t6) {
+  if ($[38] !== T0 || $[39] !== t1 || $[40] !== t2 || $[41] !== t3 || $[42] !== t4 || $[43] !== t6) {
     t7 = <T0 flexDirection={t1} marginTop={t2}>{t3}{t4}{t6}</T0>;
-    $[54] = T0;
-    $[55] = t1;
-    $[56] = t2;
-    $[57] = t3;
-    $[58] = t4;
-    $[59] = t6;
-    $[60] = t7;
+    $[38] = T0;
+    $[39] = t1;
+    $[40] = t2;
+    $[41] = t3;
+    $[42] = t4;
+    $[43] = t6;
+    $[44] = t7;
   } else {
-    t7 = $[60];
+    t7 = $[44];
   }
   return t7;
 }
@@ -308,7 +273,7 @@ function leadChain(teamName: string | undefined): Array<{
  * members nest under it instead of under an unrelated sibling.
  *
  * Hand-written, deliberately NOT react-compiler output: it has no cache slots,
- * so it cannot fall out of step with the 61-slot map of the component above. Its
+ * so it cannot fall out of step with the 45-slot map of the component above. Its
  * inputs are two primitives and it renders three Text nodes.
  */
 function AbsentLeadRow({

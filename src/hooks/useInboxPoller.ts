@@ -800,6 +800,22 @@ export function useInboxPoller({
                   updatedTasks[tid] = {
                     ...task,
                     status: 'completed' as const,
+                    // The completion IS delivered — the same setAppState below
+                    // appends the `teammate_terminated` system message the lead
+                    // reads — so this transition owes no further notification,
+                    // exactly like the three in-process terminal writers that
+                    // pre-set the flag (inProcessRunner's completion and failure
+                    // tails, killInProcessTeammate). Without it BOTH evictors
+                    // bail on `!task.notified`, so the task sat in AppState for
+                    // the rest of the session after its row left at the
+                    // deadline. Nothing else reads the flag for a teammate: the
+                    // per-type notification helpers that use it as a claim are
+                    // local_agent/shell/remote only, and the ", unread" suffix
+                    // in BackgroundTask is drawn only for tasks the dialog
+                    // LISTS — a completed teammate is not one (isListedTask is
+                    // isBackgroundTask, running/pending, or isPanelVisibleAgent,
+                    // which answers false for a terminal teammate).
+                    notified: true,
                     endTime: Date.now(),
                     // The same retention marker every in-process terminal
                     // transition writes. Without it an out-of-process

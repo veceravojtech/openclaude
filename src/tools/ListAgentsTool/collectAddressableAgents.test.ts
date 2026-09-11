@@ -147,9 +147,11 @@ test('in-process teammates map idle/busy, skip non-running tasks, and are addres
 })
 
 test('a lingering killed teammate task does not shadow a re-spawned running one', () => {
-  // TaskStop leaves the killed task in AppState for ~3s (STOPPED_DISPLAY_MS);
-  // a re-spawn of the same name gets the identical deterministic agentId and
-  // is inserted after it, so first-wins dedupe would otherwise hide it.
+  // TaskStop leaves the killed task in AppState for the TEAMMATE_GRACE_MS
+  // window — killInProcessTeammate writes the retain/evictAfter marker and the
+  // lazy GC collects the task once the deadline passes — and a re-spawn of the
+  // same name gets the identical deterministic agentId and is inserted after
+  // it, so first-wins dedupe would otherwise hide it.
   const killed = { ...teammate('coder', { status: 'killed' }), id: 't-coder-old' }
   const respawned = teammate('coder', { isIdle: true })
   const agents = collectAddressableAgents({

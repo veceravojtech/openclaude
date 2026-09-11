@@ -1,7 +1,8 @@
 import { PassThrough } from 'node:stream'
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 import React from 'react'
 
+import { TeammateTreePanel } from '../components/Spinner/TeammateTreePanel.js'
 import { createRoot } from '../ink.js'
 import {
   type AppState,
@@ -10,7 +11,9 @@ import {
   useAppState,
   useSetAppState,
 } from '../state/AppState.js'
+import { enterTeammateView } from '../state/teammateViewHelpers.js'
 import type { InProcessTeammateTaskState } from '../tasks/InProcessTeammateTask/types.js'
+import { TEAMMATE_GRACE_MS } from '../utils/task/framework.js'
 import { useTeammateViewAutoExit } from './useTeammateViewAutoExit.js'
 
 /**
@@ -76,7 +79,16 @@ function Probe({
   return null
 }
 
-async function mount(initialState: AppState): Promise<Harness> {
+/**
+ * With `withPanel` the REAL TeammateTreePanel is mounted beside the probe, so
+ * its deadline timer is the thing that takes a row away — the only collector
+ * that runs while the lead is idle. That is what makes "after its grace" mean
+ * something here rather than being asserted against a clock nobody reads.
+ */
+async function mount(
+  initialState: AppState,
+  { withPanel = false }: { withPanel?: boolean } = {},
+): Promise<Harness> {
   const stdout = new PassThrough()
   const stdin = new PassThrough() as PassThrough & {
     isTTY: boolean
@@ -98,6 +110,7 @@ async function mount(initialState: AppState): Promise<Harness> {
   let viewing: string | undefined
   root.render(
     <AppStateProvider initialState={initialState}>
+      {withPanel ? <TeammateTreePanel /> : null}
       <Probe
         onReady={value => {
           update = value
@@ -157,11 +170,75 @@ describe('useTeammateViewAutoExit', () => {
         await Bun.sleep(60)
         // The transcript is exactly what the user wants to read at this moment.
         expect(harness.viewing()).toBe(task.id)
+
+        // …and it is still what they want to read a whole grace window later.
+        // This hook keys on the raw PRESENCE of the task and on nothing else:
+        // the deadline belongs to the panel's collector, so a lapsed evictAfter
+        // on a task that is still in the map must not eject anyone. The clock
+        // is mocked past the deadline and the task map is touched again so the
+        // hook re-evaluates against the new `now`.
+        const nowSpy = spyOn(Date, 'now').mockReturnValue(
+          Date.now() + TEAMMATE_GRACE_MS + 1_000,
+        )
+        try {
+          harness.update(prev => ({
+            ...prev,
+            tasks: { ...prev.tasks },
+          }))
+          await Bun.sleep(60)
+          expect(harness.viewing()).toBe(task.id)
+        } finally {
+          nowSpy.mockRestore()
+        }
       } finally {
         await harness.cleanup()
       }
     },
   )
+
+  test('a viewed RUNNING teammate that is killed still ejects once its grace closes', async () => {
+    // The other side of the retain fix, and the reason it is scoped to rows
+    // that are ALREADY terminal when they are opened: a teammate killed while
+    // being read has its retain/evictAfter pair rewritten by the kill path
+    // (retain: false + a deadline), so the panel collects it when the window
+    // closes and this hook takes the view back to the leader. Reading a live
+    // teammate is not a claim on it for ever.
+    const task = teammate()
+    const harness = await mount(
+      {
+        ...getDefaultAppState(),
+        expandedView: 'teammates',
+        tasks: { [task.id]: task },
+      } as AppState,
+      { withPanel: true },
+    )
+    try {
+      // Opened while running: no retain is written, exactly as for a row the
+      // user would expect to keep changing under them.
+      enterTeammateView(task.id, harness.update)
+      await Bun.sleep(60)
+      expect(harness.viewing()).toBe(task.id)
+
+      // killInProcessTeammate's marker, with a window short enough to watch.
+      harness.update(prev => ({
+        ...prev,
+        tasks: {
+          [task.id]: {
+            ...task,
+            status: 'killed' as const,
+            notified: true,
+            retain: false,
+            evictAfter: Date.now() + 60,
+          },
+        },
+      }))
+      await Bun.sleep(300)
+
+      expect(harness.viewing()).toBeUndefined()
+    } finally {
+      await harness.cleanup()
+    }
+  })
 
   test('returns to the leader once the task is evicted', async () => {
     const task = teammate({ status: 'killed', notified: true })

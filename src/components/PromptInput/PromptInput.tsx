@@ -196,6 +196,24 @@ type Props = {
 };
 
 // Bottom slot has maxHeight="50%"; reserve lines for footer, border, status.
+/**
+ * The footer's survivor updater, as a PURE function of the selection it is
+ * handed plus the two orders captured before it runs.
+ *
+ * Exported for the double-invocation case: this is the body React may run more
+ * than once for a single `setTeammateFooterSelection` call, so "running it twice
+ * lands where running it once does" has to be assertable directly rather than
+ * inferred from a mount. It reads no ref and writes nothing.
+ *
+ * Returns `prev` unchanged when the selection did not move, which keeps
+ * useState's own Object.is short-circuit doing its job.
+ */
+export function footerSurvivor(prev: TeammateSelection, prevOrder: InProcessTeammateTaskState[], nextOrder: InProcessTeammateTaskState[]): TeammateSelection {
+  const next = resolveSurvivingSelection(prev, prevOrder, nextOrder);
+  // resolveSurvivingSelection only answers null for a null input, and this
+  // state is never null.
+  return next !== null && !selectionsEqual(next, prev) ? next : prev;
+}
 const PROMPT_FOOTER_LINES = 5;
 const MIN_INPUT_VIEWPORT_LINES = 3;
 function PromptInput({
@@ -438,17 +456,22 @@ function PromptInput({
   // The clamp the footer never had: when the list changes, a selection whose
   // teammate is gone moves to the nearest survivor (previous sibling, else the
   // parent sub-lead, else the leader) using the SAME helper the tree uses.
+  //
+  // The ref is read AND advanced in the effect body, and only the captured
+  // value goes into the updater. A useState updater is not the AppState store's
+  // single-invocation one: React may run it twice (StrictMode, or a render that
+  // is thrown away), and doing the bookkeeping inside it meant the second run
+  // read back `prevOrder === inProcessTeammates` — so the departed row was not
+  // in prevOrder either, `departedIndex` came out -1, and a departed selection
+  // fell to the leader instead of to the nearest survivor. Captured out here,
+  // the updater is a pure function of its argument and running it twice lands
+  // exactly where running it once does.
   const teammateOrderSignature = orderSignature(inProcessTeammates);
   const prevTeammateOrderRef = useRef(inProcessTeammates);
   useEffect(() => {
-    setTeammateFooterSelection(prev => {
-      const prevOrder = prevTeammateOrderRef.current;
-      prevTeammateOrderRef.current = inProcessTeammates;
-      const next = resolveSurvivingSelection(prev, prevOrder, inProcessTeammates);
-      // resolveSurvivingSelection only answers null for a null input, and this
-      // state is never null.
-      return next !== null && !selectionsEqual(next, prev) ? next : prev;
-    });
+    const prevOrder = prevTeammateOrderRef.current;
+    prevTeammateOrderRef.current = inProcessTeammates;
+    setTeammateFooterSelection(prev => footerSurvivor(prev, prevOrder, inProcessTeammates));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the order signature; inProcessTeammates IS the order it names
   }, [teammateOrderSignature]);
   // -1 sentinel: tasks pill is selected but no specific agent row is selected yet.

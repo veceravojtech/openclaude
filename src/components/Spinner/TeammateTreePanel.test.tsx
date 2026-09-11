@@ -1,5 +1,5 @@
 import { PassThrough } from 'node:stream'
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import React from 'react'
 
 import { createRoot } from '../../ink.js'
@@ -8,10 +8,16 @@ import {
   AppStateProvider,
   getDefaultAppState,
   useAppState,
+  useSetAppState,
 } from '../../state/AppState.js'
+import {
+  enterTeammateView,
+  exitTeammateView,
+} from '../../state/teammateViewHelpers.js'
 import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js'
 import { DISABLE_AGENT_TEAMS_ENV } from '../../utils/agentSwarmsEnabled.js'
 import { renderToString } from '../../utils/staticRender.js'
+import { TEAMMATE_GRACE_MS } from '../../utils/task/framework.js'
 import { TeammateTreePanel } from './TeammateTreePanel.js'
 
 /**
@@ -233,14 +239,28 @@ describe('TeammateTreePanel — what it passes down', () => {
  * task map alone would serve the expired row from cache).
  */
 describe('TeammateTreePanel — the grace deadline', () => {
-  function Probe({ onTasks }: { onTasks: (ids: string[]) => void }): null {
+  function Probe({
+    onTasks,
+    onSetAppState,
+  }: {
+    onTasks: (ids: string[]) => void
+    onSetAppState?: (
+      setAppState: (updater: (prev: AppState) => AppState) => void,
+    ) => void
+  }): null {
     const tasks = useAppState(s => s.tasks)
+    const setAppState = useSetAppState()
     React.useEffect(() => onTasks(Object.keys(tasks)), [tasks, onTasks])
+    React.useEffect(
+      () => onSetAppState?.(setAppState),
+      [setAppState, onSetAppState],
+    )
     return null
   }
 
   async function mount(state: AppState): Promise<{
     taskIds: () => string[]
+    setAppState: (updater: (prev: AppState) => AppState) => void
     cleanup: () => Promise<void>
   }> {
     const stdout = new PassThrough()
@@ -261,6 +281,9 @@ describe('TeammateTreePanel — the grace deadline', () => {
       patchConsole: false,
     })
     let ids: string[] = []
+    let setAppState:
+      | ((updater: (prev: AppState) => AppState) => void)
+      | undefined
     root.render(
       <AppStateProvider initialState={state}>
         <TeammateTreePanel />
@@ -268,12 +291,17 @@ describe('TeammateTreePanel — the grace deadline', () => {
           onTasks={next => {
             ids = next
           }}
+          onSetAppState={next => {
+            setAppState = next
+          }}
         />
       </AppStateProvider>,
     )
     await Bun.sleep(30)
+    expect(setAppState).toBeDefined()
     return {
       taskIds: () => ids,
+      setAppState: updater => setAppState!(updater),
       async cleanup() {
         root.unmount()
         await Bun.sleep(30)
@@ -343,6 +371,54 @@ describe('TeammateTreePanel — the grace deadline', () => {
     try {
       await Bun.sleep(200)
       expect(mounted.taskIds()).toContain(heldByUi.id)
+    } finally {
+      await mounted.cleanup()
+    }
+  })
+
+  test('a row the reader OPENED survives its own deadline', async () => {
+    // The half-built mechanism this closes: the timer has always honoured
+    // `retain: true` (the case below pins it), but nothing wrote the flag for a
+    // teammate, so a grace row opened with Enter was collected at its 30s
+    // deadline and useTeammateViewAutoExit threw the reader back to the leader
+    // mid-transcript. enterTeammateView now retains it, which takes the row out
+    // of the deadline memo entirely — no timer is armed for it at all.
+    const expiring = inGrace('bob', 60)
+    const mounted = await mount(stateWith([teammate('alice'), expiring]))
+    try {
+      enterTeammateView(expiring.id, mounted.setAppState)
+      // Four times the window it would have been collected in.
+      await Bun.sleep(250)
+      expect(mounted.taskIds()).toContain(expiring.id)
+    } finally {
+      await mounted.cleanup()
+    }
+  })
+
+  test('and it leaves once the reader closes it, after one more grace', async () => {
+    // Released, not pinned for the session: exit writes a FULL fresh deadline.
+    // The clock is wound back across that one synchronous write so the fresh
+    // TEAMMATE_GRACE_MS window has already elapsed by the time the panel sees
+    // the change — the alternative is a 30s test.
+    const expiring = inGrace('bob', 60)
+    const mounted = await mount(stateWith([teammate('alice'), expiring]))
+    try {
+      enterTeammateView(expiring.id, mounted.setAppState)
+      await Bun.sleep(120)
+      expect(mounted.taskIds()).toContain(expiring.id)
+
+      const nowSpy = spyOn(Date, 'now').mockReturnValue(
+        Date.now() - TEAMMATE_GRACE_MS - 1_000,
+      )
+      try {
+        exitTeammateView(mounted.setAppState)
+      } finally {
+        nowSpy.mockRestore()
+      }
+
+      await Bun.sleep(150)
+      expect(mounted.taskIds()).not.toContain(expiring.id)
+      expect(mounted.taskIds()).toContain('task-alice')
     } finally {
       await mounted.cleanup()
     }

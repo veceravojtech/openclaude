@@ -31,8 +31,9 @@ import {
 import { KeybindingSetup } from '../../keybindings/KeybindingProviderSetup.js'
 import { DEFAULT_BINDINGS } from '../../keybindings/defaultBindings.js'
 import { parseBindings } from '../../keybindings/parser.js'
+import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js'
 import { formatAgentId } from '../../utils/agentId.js'
-import PromptInput from './PromptInput.js'
+import PromptInput, { footerSurvivor } from './PromptInput.js'
 
 // The auto-updater reaches for a build-time macro that does not exist under the
 // test runner; the same stub promptPlaceholderAgentName.test.tsx uses.
@@ -188,7 +189,16 @@ function Probe({
   return null
 }
 
-async function mountFooter(tasks: AppState['tasks'][string][]): Promise<{
+/**
+ * `strict` mounts the whole tree inside React.StrictMode, which is what makes a
+ * useState updater run TWICE for a single set call — verified in this renderer,
+ * under this React (19) and this NODE_ENV. That is the only way to drive the
+ * footer's survivor effect through the double invocation from the outside.
+ */
+async function mountFooter(
+  tasks: AppState['tasks'][string][],
+  { strict = false }: { strict?: boolean } = {},
+): Promise<{
   press: (sequence: string) => Promise<void>
   viewing: () => string | undefined
   setTeammates: (tasks: AppState['tasks'][string][]) => Promise<void>
@@ -227,27 +237,28 @@ async function mountFooter(tasks: AppState['tasks'][string][]): Promise<{
     stdin.end()
     stdout.end()
   }
-  try {
-    root.render(
-      <AppStateProvider
-        initialState={{
-          ...getDefaultAppState(),
-          tasks: Object.fromEntries(tasks.map(t => [t.id, t])),
-          // The tasks footer item is the one being navigated, which is what
-          // puts ←/→ on the teammate cycle instead of on the footer items.
-          footerSelection: 'tasks',
+  const tree = (
+    <AppStateProvider
+      initialState={{
+        ...getDefaultAppState(),
+        tasks: Object.fromEntries(tasks.map(t => [t.id, t])),
+        // The tasks footer item is the one being navigated, which is what
+        // puts ←/→ on the teammate cycle instead of on the footer items.
+        footerSelection: 'tasks',
+      }}
+    >
+      <KeybindingSetup>
+        <PromptInput {...PROMPT_INPUT_PROPS} />
+      </KeybindingSetup>
+      <Probe
+        onReady={value => {
+          probe = value
         }}
-      >
-        <KeybindingSetup>
-          <PromptInput {...PROMPT_INPUT_PROPS} />
-        </KeybindingSetup>
-        <Probe
-          onReady={value => {
-            probe = value
-          }}
-        />
-      </AppStateProvider>,
-    )
+      />
+    </AppStateProvider>
+  )
+  try {
+    root.render(strict ? <React.StrictMode>{tree}</React.StrictMode> : tree)
     for (let attempt = 0; attempt < 100 && !probe; attempt++) {
       await Bun.sleep(10)
     }
@@ -334,6 +345,28 @@ test('after a shrink the selection lands on the nearest survivor, not on a dangl
   }
 })
 
+test('the shrink lands on the nearest survivor under StrictMode too', async () => {
+  // The same journey as the case above, with the tree in StrictMode so React
+  // runs the survivor updater TWICE for that one set call. The bookkeeping used
+  // to live inside the updater: the second run found `prevOrder` already
+  // advanced to the new order, so no row had departed, and a departed selection
+  // fell to the LEADER — Enter here opened nothing instead of supervisor.
+  const mounted = await mountFooter(TEAM, { strict: true })
+  try {
+    // Four steps is `zoe`, the last pill.
+    await mounted.press(RIGHT)
+    await mounted.press(RIGHT)
+    await mounted.press(RIGHT)
+    await mounted.press(RIGHT)
+    await mounted.setTeammates(TEAM.filter(t => t.id !== ZOE.id))
+    await mounted.press(ENTER)
+
+    expect(mounted.viewing()).toBe(SUPERVISOR.id)
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
 test('Enter on the leader pill leaves the teammate view', async () => {
   const mounted = await mountFooter(TEAM)
   try {
@@ -348,5 +381,58 @@ test('Enter on the leader pill leaves the teammate view', async () => {
     expect(mounted.viewing()).toBeUndefined()
   } finally {
     await mounted.cleanup()
+  }
+})
+
+/**
+ * The survivor updater, run TWICE.
+ *
+ * Unlike the AppState store's updater — one synchronous invocation, documented
+ * on the navigation hook — a useState updater may run more than once for a
+ * single set call (StrictMode, or a render React throws away). The footer's used
+ * to do its own bookkeeping inside itself: it read `prevTeammateOrderRef` and
+ * advanced it in the same breath, so a second run read back
+ * `prevOrder === inProcessTeammates`, found no departed row, and handed a
+ * departed selection to the LEADER instead of to the nearest survivor. The ref
+ * is now read and advanced in the effect body and only the captured order goes
+ * in, which is what makes the updater a pure function of its argument.
+ */
+const ORDER = TEAM as unknown as InProcessTeammateTaskState[]
+const WITHOUT_ZOE = ORDER.filter(t => t.id !== ZOE.id)
+const ON_ZOE = { kind: 'teammate' as const, taskId: ZOE.id }
+
+test('the survivor updater lands on the nearest survivor, once or twice', () => {
+  const once = footerSurvivor(ON_ZOE, ORDER, WITHOUT_ZOE)
+  // zoe's previous sibling in team `email` is supervisor — NOT worker-1, which
+  // sits between them in depth-first order but belongs to the sub-team.
+  expect(once).toEqual({ kind: 'teammate', taskId: SUPERVISOR.id })
+
+  // React re-running the SAME closure: same argument, same captured orders.
+  expect(footerSurvivor(ON_ZOE, ORDER, WITHOUT_ZOE)).toEqual(once)
+  // …and applied to what it produced, which is the other shape a discarded
+  // render can take. Landing on the leader here is exactly the old defect.
+  expect(footerSurvivor(once, ORDER, WITHOUT_ZOE)).toBe(once)
+})
+
+test('a selection that survived is returned by identity, so useState short-circuits', () => {
+  const onSupervisor = { kind: 'teammate' as const, taskId: SUPERVISOR.id }
+  const next = footerSurvivor(onSupervisor, ORDER, WITHOUT_ZOE)
+  expect(next).toBe(onSupervisor)
+  expect(footerSurvivor(next, ORDER, WITHOUT_ZOE)).toBe(onSupervisor)
+})
+
+test('with every teammate gone it answers the leader, twice over', () => {
+  const once = footerSurvivor(ON_ZOE, ORDER, [])
+  expect(once).toEqual({ kind: 'leader' })
+  expect(footerSurvivor(once, ORDER, [])).toEqual({ kind: 'leader' })
+})
+
+test('it never answers null, which the footer state cannot hold', () => {
+  for (const selection of [
+    ON_ZOE,
+    { kind: 'leader' as const },
+    { kind: 'teammate' as const, taskId: 'task-that-never-existed' },
+  ]) {
+    expect(footerSurvivor(selection, ORDER, WITHOUT_ZOE)).not.toBeNull()
   }
 })

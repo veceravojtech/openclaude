@@ -25,6 +25,7 @@ import {
   isInProcessTeammateTask,
 } from '../tasks/InProcessTeammateTask/types.js'
 import { isBackgroundTask } from '../tasks/types.js'
+import { isAgentSwarmsEnabled } from '../utils/agentSwarmsEnabled.js'
 import {
   requestAbort,
   traceInterruptionEvent,
@@ -216,9 +217,21 @@ export function useBackgroundTaskNavigation(options?: {
     // enough to step: its leader and hide rows are selectable with no teammate
     // alive. With the panel off and no teammate, the press still belongs to the
     // background-tasks dialog.
+    //
+    // 'teammates' only counts while Agent Teams are ENABLED, because that is
+    // the same condition TeammateTreePanel gates its own render on: with the
+    // feature off the panel draws nothing, so stepping here would move a
+    // selection nobody can see and would swallow the press that should open the
+    // background-tasks dialog. The view itself is no longer reachable with the
+    // feature off (nextExpandedView skips the step, deriveInitialExpandedView
+    // boots it as 'none'); this is the third of those three gates, and the one
+    // that decides what the key actually does.
     if (e.shift && (e.key === 'up' || e.key === 'down')) {
       e.preventDefault()
-      if (teammateCount > 0 || expandedView === 'teammates') {
+      if (
+        teammateCount > 0 ||
+        (expandedView === 'teammates' && isAgentSwarmsEnabled())
+      ) {
         stepTeammateSelection(e.key === 'down' ? 1 : -1, setAppState)
       } else if (hasNonTeammateBackgroundTasks) {
         options?.onOpenBackgroundTasks?.()

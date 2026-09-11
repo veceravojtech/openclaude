@@ -18,11 +18,31 @@ describe('deriveInitialExpandedView', () => {
     expect(deriveInitialExpandedView({ showSpinnerTree: true }, true)).toBe(
       'teammates',
     )
-    // Even with Agent Teams off: the user asked for this panel, and the gate
-    // that actually hides it lives in the panel, not in the stored preference.
+  })
+
+  test('boots a persisted teammates panel as none when Agent Teams are off', () => {
+    // The gate that hides the panel does live in the panel — which is exactly
+    // why booting INTO this view with the feature off is wrong: it renders
+    // nothing, so the session starts in a view with no pixels, and Shift+↑/↓ is
+    // swallowed by a panel that is not on screen instead of opening the
+    // background-tasks dialog. The preference is not erased, only not honoured
+    // while the feature is off.
     expect(deriveInitialExpandedView({ showSpinnerTree: true }, false)).toBe(
-      'teammates',
+      'none',
     )
+  })
+
+  test('with the feature off a persisted todo list still wins over the unavailable panel', () => {
+    // Only reachable from a hand-edited config (the two booleans are written
+    // together from one expandedView), but it says which way the clause falls:
+    // the teammates step is SKIPPED rather than answered, so the derivation
+    // carries on and lands on a view that actually renders.
+    expect(
+      deriveInitialExpandedView(
+        { showSpinnerTree: true, showExpandedTodos: true },
+        false,
+      ),
+    ).toBe('tasks')
   })
 
   test('defaults to the teammates panel on a first run with Agent Teams enabled', () => {
