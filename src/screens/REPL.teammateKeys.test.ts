@@ -8,7 +8,17 @@ import { describe, expect, test } from 'bun:test'
 // itself either value; what production does is decided here, and an option no
 // caller passes is a gate that never closes. A unit test of the hook cannot
 // catch that, so assert the wiring against the component source.
-const source = readFileSync(join(import.meta.dirname, 'REPL.tsx'), 'utf8')
+//
+// Scanning text means commented-out code reads the same as live code, so the
+// source is stripped of line comments first: the call has to be REACHED, not
+// merely mentioned. The flag is required to be passed by shorthand, because
+// `promptTypingSuppressionActive: false` would satisfy a substring match while
+// holding the gate permanently open.
+const rawSource = readFileSync(join(import.meta.dirname, 'REPL.tsx'), 'utf8')
+const source = rawSource
+  .split('\n')
+  .filter(line => !line.trimStart().startsWith('//'))
+  .join('\n')
 
 describe('REPL teammate-navigation key wiring', () => {
   test('hands the typing flag to useBackgroundTaskNavigation', () => {
@@ -16,7 +26,10 @@ describe('REPL teammate-navigation key wiring', () => {
     expect(start).toBeGreaterThan(-1)
     const end = source.indexOf('});', start)
     expect(end).toBeGreaterThan(start)
-    expect(source.slice(start, end)).toContain('promptTypingSuppressionActive')
+    const call = source.slice(start, end)
+    expect(call).toContain('promptTypingSuppressionActive')
+    // Shorthand only: a `: <literal>` here is a gate that never closes.
+    expect(call).toMatch(/[\s,{]promptTypingSuppressionActive\s*(?:,|\r?\n|$)/)
   })
 
   test('and it is the flag the rest of the screen already defers on', () => {

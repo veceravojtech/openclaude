@@ -77,9 +77,9 @@ function stepTeammateSelection(
 export function useBackgroundTaskNavigation(options?: {
   onOpenBackgroundTasks?: () => void
   /**
-   * REPL's own "the user is typing" flag (isPromptTypingSuppressionActive): the
-   * buffer is non-empty, or was within the last PROMPT_SUPPRESSION_MS. 'f' and
-   * 'k' are ordinary letters, so while it is set they stay text.
+   * REPL's own "the user is typing" flag (isPromptTypingSuppressionActive):
+   * the prompt buffer is non-empty. 'f' and 'k' are ordinary letters, so while
+   * it is set they stay text.
    */
   promptTypingSuppressionActive?: boolean
 }): { handleKeyDown: (e: KeyboardEvent) => void } {
