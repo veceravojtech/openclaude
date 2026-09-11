@@ -136,9 +136,9 @@ export function onChangeAppState({
   //
   // With Agent Teams off, showSpinnerTree is left out of the payload AND barred
   // from opening the save: deriveInitialExpandedView ignores the stored value
-  // while the feature is off, so writing it here could only clear what the user
-  // chose while it was on — and because the guard fired on either key, expanding
-  // the todo list was enough to do it. showExpandedTodos is not a teams
+  // while the feature is off, so writing it here could only overwrite what the
+  // user chose while it was on — and because the guard fired on either key,
+  // expanding the todo list was enough to do it. showExpandedTodos is not a teams
   // preference and is still written.
   if (newState.expandedView !== oldState.expandedView) {
     const agentTeamsEnabled = isAgentSwarmsEnabled()
