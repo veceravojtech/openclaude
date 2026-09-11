@@ -148,6 +148,13 @@ type Harness = {
   turns: number
   sleeps: number
   attachmentInboxReads: InboxRead[]
+  /** Set only around a drain, so only the drain's inbox reads are logged. */
+  recordingInboxReads: boolean
+  /**
+   * While true the permission poll parses no response, so it cannot claim one
+   * before the test says so. Nothing else reads a permission response.
+   */
+  blockingPermissionPoll: boolean
 }
 
 async function importRunnerWithMocks(): Promise<Harness> {
@@ -174,20 +181,39 @@ async function importRunnerWithMocks(): Promise<Harness> {
     turns: 0,
     sleeps: 0,
     attachmentInboxReads: [],
+    recordingInboxReads: false,
+    blockingPermissionPoll: false,
   }
 
   mock.module('../../constants/prompts.js', () => ({
     ...actualPrompts!,
     getSystemPrompt: async () => ['system prompt'],
   }))
-  // Real disk, wrapped: readUnreadMessages is the only way the attachment path
-  // opens an inbox, so this call log is exactly what it read.
+  // Real disk, wrapped twice.
+  //
+  // readMailbox is how the drain opens an inbox — and also how the runner's
+  // own poll loops do, so only the reads made INSIDE a drain are logged. That
+  // flag is exact here: the idle loop does not poll while a turn is in flight,
+  // and the permission poll only runs in the test that installs it.
+  //
+  // isPermissionResponse is the permission poll's only way to recognise its
+  // answer (inProcessRunner.ts), and nothing else calls it — the drain's own
+  // filter goes through isStructuredProtocolMessage, which is internal to the
+  // real module. Withholding it is therefore a clean pause button on that one
+  // consumer, which is what lets the permission case assert on an inbox
+  // without racing a 500 ms timer for it.
   mock.module('../teammateMailbox.js', () => ({
     ...actualMailbox!,
-    readUnreadMessages: async (agentName: string, teamName?: string) => {
-      harness.attachmentInboxReads.push({ agentName, teamName })
-      return actualMailbox!.readUnreadMessages(agentName, teamName)
+    readMailbox: async (agentName: string, teamName?: string) => {
+      if (harness.recordingInboxReads) {
+        harness.attachmentInboxReads.push({ agentName, teamName })
+      }
+      return actualMailbox!.readMailbox(agentName, teamName)
     },
+    isPermissionResponse: (text: string) =>
+      harness.blockingPermissionPoll
+        ? null
+        : actualMailbox!.isPermissionResponse(text),
   }))
   mock.module('../../tools/AgentTool/runAgent.js', () => ({
     ...actualRunAgent!,
@@ -247,8 +273,14 @@ async function drainRound(
   harness: Harness,
   context: ToolUseContext,
 ): Promise<string> {
-  const attachments =
-    await harness.attachments.__test.getTeammateMailboxAttachments(context)
+  harness.recordingInboxReads = true
+  let attachments
+  try {
+    attachments =
+      await harness.attachments.__test.getTeammateMailboxAttachments(context)
+  } finally {
+    harness.recordingInboxReads = false
+  }
   return attachments
     .flatMap(a => normalizeAttachmentForAPI(a))
     .map(m => (typeof m.message.content === 'string' ? m.message.content : ''))
@@ -423,81 +455,83 @@ test('a message that lands mid-turn reaches the teammate on its next round', asy
   const harness = await importRunnerWithMocks()
   writeSubTeamWorld()
   const subLead = await startIdleTeammate(harness, SUB_LEAD, PARENT_TEAM)
-
-  harness.betweenRounds = async () => {
-    // The failed hop, reproduced: the worker DMs its busy sub-lead.
+  try {
+    harness.betweenRounds = async () => {
+      // The failed hop, reproduced: the worker DMs its busy sub-lead.
+      await writeToMailbox(
+        SUB_LEAD,
+        mail(PLAIN, 'build is red on main'),
+        PARENT_TEAM,
+      )
+    }
+    // The lead wakes the teammate — this is turn 1's prompt, via the idle loop.
     await writeToMailbox(
       SUB_LEAD,
-      mail(PLAIN, 'build is red on main'),
+      mail(TEAM_LEAD_NAME, 'start on the release'),
       PARENT_TEAM,
     )
+
+    await waitFor(() => harness.roundInputs.length >= 2, 'two rounds to run')
+
+    expect(harness.roundInputs[0]).toContain('start on the release')
+    // The second round's input carries the message that arrived mid-turn.
+    expect(harness.roundInputs[1]).toContain(
+      '<teammate-message teammate_id="worker">\nbuild is red on main\n</teammate-message>',
+    )
+
+    // Marked read on disk...
+    const inbox = await readMailbox(SUB_LEAD, PARENT_TEAM)
+    expect(inbox.map(m => ({ text: m.text, read: m.read }))).toEqual([
+      { text: 'start on the release', read: true },
+      { text: 'build is red on main', read: true },
+    ])
+
+    // ...so the idle loop does not hand it over a second time as a new turn.
+    await letThePollLoopRun(harness)
+    expect(harness.turns).toBe(1)
+    expect(
+      harness.roundInputs.filter(i => i.includes('build is red')),
+    ).toHaveLength(1)
+  } finally {
+    await stopTeammate(subLead)
   }
-  // The lead wakes the teammate — this is turn 1's prompt, via the idle loop.
-  await writeToMailbox(
-    SUB_LEAD,
-    mail(TEAM_LEAD_NAME, 'start on the release'),
-    PARENT_TEAM,
-  )
-
-  await waitFor(() => harness.roundInputs.length >= 2, 'two rounds to run')
-
-  expect(harness.roundInputs[0]).toContain('start on the release')
-  // The second round's input carries the message that arrived mid-turn.
-  expect(harness.roundInputs[1]).toContain(
-    '<teammate-message teammate_id="worker">\nbuild is red on main\n</teammate-message>',
-  )
-
-  // Marked read on disk...
-  const inbox = await readMailbox(SUB_LEAD, PARENT_TEAM)
-  expect(inbox.map(m => ({ text: m.text, read: m.read }))).toEqual([
-    { text: 'start on the release', read: true },
-    { text: 'build is red on main', read: true },
-  ])
-
-  // ...so the idle loop does not hand it over a second time as a new turn.
-  await letThePollLoopRun(harness)
-  expect(harness.turns).toBe(1)
-  expect(
-    harness.roundInputs.filter(i => i.includes('build is red')),
-  ).toHaveLength(1)
-
-  await stopTeammate(subLead)
 })
 
 test("a sub-lead also gets its sub-team's team-lead inbox mid-turn", async () => {
   const harness = await importRunnerWithMocks()
   writeSubTeamWorld()
   const subLead = await startIdleTeammate(harness, SUB_LEAD, PARENT_TEAM)
+  try {
+    harness.betweenRounds = async () => {
+      // A member of the sub-team addressed `team-lead`; from inside the sub-team
+      // that is this sub-lead, and nothing else polls that inbox.
+      await writeToMailbox(TEAM_LEAD_NAME, mail(PLAIN, 'task 3 is done'), SUB_TEAM)
+    }
+    await writeToMailbox(
+      SUB_LEAD,
+      mail(TEAM_LEAD_NAME, 'start on the release'),
+      PARENT_TEAM,
+    )
 
-  harness.betweenRounds = async () => {
-    // A member of the sub-team addressed `team-lead`; from inside the sub-team
-    // that is this sub-lead, and nothing else polls that inbox.
-    await writeToMailbox(TEAM_LEAD_NAME, mail(PLAIN, 'task 3 is done'), SUB_TEAM)
+    await waitFor(() => harness.roundInputs.length >= 2, 'two rounds to run')
+
+    expect(harness.roundInputs[1]).toContain(
+      '<teammate-message teammate_id="worker">\ntask 3 is done\n</teammate-message>',
+    )
+    expect((await readMailbox(TEAM_LEAD_NAME, SUB_TEAM)).map(m => m.read)).toEqual(
+      [true],
+    )
+    // Own inbox first, then the sub-team's — the idle loop's order.
+    expect(harness.attachmentInboxReads).toEqual([
+      { agentName: SUB_LEAD, teamName: PARENT_TEAM },
+      { agentName: TEAM_LEAD_NAME, teamName: SUB_TEAM },
+    ])
+
+    await letThePollLoopRun(harness)
+    expect(harness.turns).toBe(1)
+  } finally {
+    await stopTeammate(subLead)
   }
-  await writeToMailbox(
-    SUB_LEAD,
-    mail(TEAM_LEAD_NAME, 'start on the release'),
-    PARENT_TEAM,
-  )
-
-  await waitFor(() => harness.roundInputs.length >= 2, 'two rounds to run')
-
-  expect(harness.roundInputs[1]).toContain(
-    '<teammate-message teammate_id="worker">\ntask 3 is done\n</teammate-message>',
-  )
-  expect((await readMailbox(TEAM_LEAD_NAME, SUB_TEAM)).map(m => m.read)).toEqual(
-    [true],
-  )
-  // Own inbox first, then the sub-team's — the idle loop's order.
-  expect(harness.attachmentInboxReads).toEqual([
-    { agentName: SUB_LEAD, teamName: PARENT_TEAM },
-    { agentName: TEAM_LEAD_NAME, teamName: SUB_TEAM },
-  ])
-
-  await letThePollLoopRun(harness)
-  expect(harness.turns).toBe(1)
-
-  await stopTeammate(subLead)
 })
 
 test('a teammate that leads no sub-team never reads a sub-team inbox', async () => {
@@ -507,65 +541,67 @@ test('a teammate that leads no sub-team never reads a sub-team inbox', async () 
     { agentId: `${PLAIN}@${PARENT_TEAM}`, name: PLAIN },
   ])
   const worker = await startIdleTeammate(harness, PLAIN, PARENT_TEAM)
+  try {
+    harness.betweenRounds = async () => {
+      await writeToMailbox(PLAIN, mail(SUB_LEAD, 'status please'), PARENT_TEAM)
+    }
+    await writeToMailbox(
+      PLAIN,
+      mail(TEAM_LEAD_NAME, 'start on the release'),
+      PARENT_TEAM,
+    )
 
-  harness.betweenRounds = async () => {
-    await writeToMailbox(PLAIN, mail(SUB_LEAD, 'status please'), PARENT_TEAM)
+    await waitFor(() => harness.roundInputs.length >= 2, 'two rounds to run')
+
+    expect(harness.roundInputs[1]).toContain('status please')
+    // Exactly one inbox read, and it is its own: no sub-team file, no sub-team
+    // mailbox, no disk read paid for by a teammate that leads nothing.
+    expect(harness.attachmentInboxReads).toEqual([
+      { agentName: PLAIN, teamName: PARENT_TEAM },
+    ])
+  } finally {
+    await stopTeammate(worker)
   }
-  await writeToMailbox(
-    PLAIN,
-    mail(TEAM_LEAD_NAME, 'start on the release'),
-    PARENT_TEAM,
-  )
-
-  await waitFor(() => harness.roundInputs.length >= 2, 'two rounds to run')
-
-  expect(harness.roundInputs[1]).toContain('status please')
-  // Exactly one inbox read, and it is its own: no sub-team file, no sub-team
-  // mailbox, no disk read paid for by a teammate that leads nothing.
-  expect(harness.attachmentInboxReads).toEqual([
-    { agentName: PLAIN, teamName: PARENT_TEAM },
-  ])
-
-  await stopTeammate(worker)
 })
 
 test('a shutdown request that lands mid-turn is left for the idle loop', async () => {
   const harness = await importRunnerWithMocks()
   writeSubTeamWorld()
   const subLead = await startIdleTeammate(harness, SUB_LEAD, PARENT_TEAM)
-
-  harness.betweenRounds = async () => {
+  try {
+    harness.betweenRounds = async () => {
+      await writeToMailbox(
+        SUB_LEAD,
+        mail(
+          TEAM_LEAD_NAME,
+          JSON.stringify(
+            createShutdownRequestMessage({
+              requestId: 'req-1',
+              from: TEAM_LEAD_NAME,
+            }),
+          ),
+        ),
+        PARENT_TEAM,
+      )
+    }
     await writeToMailbox(
       SUB_LEAD,
-      mail(
-        TEAM_LEAD_NAME,
-        JSON.stringify(
-          createShutdownRequestMessage({
-            requestId: 'req-1',
-            from: TEAM_LEAD_NAME,
-          }),
-        ),
-      ),
+      mail(TEAM_LEAD_NAME, 'start on the release'),
       PARENT_TEAM,
     )
+
+    await waitFor(() => harness.roundInputs.length >= 2, 'two rounds to run')
+    expect(harness.roundInputs[1]).toBe('')
+
+    // The idle loop's shutdown scan still finds it, unread, after the turn.
+    await waitFor(
+      () => harness.turns >= 2,
+      'the shutdown request to become the next turn',
+    )
+    expect(harness.roundInputs[2]).toContain('"type":"shutdown_request"')
+  } finally {
+    await stopTeammate(subLead)
   }
-  await writeToMailbox(
-    SUB_LEAD,
-    mail(TEAM_LEAD_NAME, 'start on the release'),
-    PARENT_TEAM,
-  )
-
-  await waitFor(() => harness.roundInputs.length >= 2, 'two rounds to run')
-  expect(harness.roundInputs[1]).toBe('')
-
-  // The idle loop's shutdown scan still finds it, unread, after the turn.
-  await waitFor(
-    () => harness.turns >= 2,
-    'the shutdown request to become the next turn',
-  )
-  expect(harness.roundInputs[2]).toContain('"type":"shutdown_request"')
-
-  await stopTeammate(subLead)
 })
 
 test("a permission response that lands mid-turn is left for the teammate's own poll", async () => {
@@ -575,125 +611,141 @@ test("a permission response that lands mid-turn is left for the teammate's own p
     { agentId: SUB_LEAD_AGENT_ID, name: SUB_LEAD },
   ])
   const subLead = await startIdleTeammate(harness, SUB_LEAD, PARENT_TEAM)
-  const appState = getDefaultAppState()
+  try {
+    // The permission poll is held from before it exists until the snapshot
+    // below has been taken. Without that the assertion "still unread when the
+    // drain finished" is a bet that a 500 ms timer does not tick during the
+    // few milliseconds of disk work between the response landing and the
+    // snapshot — true almost always, and a flake on a loaded machine. The poll
+    // is not slowed down or stubbed out: it runs its real interval against the
+    // real inbox the whole time, it just cannot recognise its answer yet.
+    harness.blockingPermissionPoll = true
+    const appState = getDefaultAppState()
 
-  type PermissionDecision = Awaited<
-    ReturnType<ReturnType<RunnerModule['createInProcessCanUseTool']>>
-  >
-  let decision: Promise<PermissionDecision> | undefined
-  let decided: PermissionDecision | undefined
-  let inboxAfterDrain: Array<{ from: string; read: boolean }> | undefined
+    type PermissionDecision = Awaited<
+      ReturnType<ReturnType<RunnerModule['createInProcessCanUseTool']>>
+    >
+    let decision: Promise<PermissionDecision> | undefined
+    let decided: PermissionDecision | undefined
+    let inboxAfterDrain: Array<{ from: string; read: boolean }> | undefined
 
-  harness.betweenRounds = async () => {
-    // The teammate hits a permission prompt mid-turn. No leader UI queue is
-    // registered, so this takes the mailbox fallback: the request goes to the
-    // lead and the teammate polls its OWN inbox for the answer
-    // (inProcessRunner.ts:529-575). Deliberately not awaited — that poll is
-    // the consumer the drain must not race.
-    decision = harness.runner.createInProcessCanUseTool(
-      {
-        agentId: SUB_LEAD_AGENT_ID,
-        agentName: SUB_LEAD,
-        teamName: PARENT_TEAM,
-        planModeRequired: false,
-        parentSessionId: 'session-1',
-      },
-      subLead.abortController,
-    )(
-      {
-        name: 'MidTurnTool',
-        description: async () => 'needs approval',
-      } as unknown as Tool,
-      {},
-      {
-        getAppState: () => appState,
-        options: { isNonInteractiveSession: false, tools: [] },
-      } as never,
-      {} as never,
-      'tool-use-midturn',
-      { behavior: 'ask', message: 'approval required' },
-    )
+    harness.betweenRounds = async () => {
+      // The teammate hits a permission prompt mid-turn. No leader UI queue is
+      // registered, so this takes the mailbox fallback: the request goes to the
+      // lead and the teammate polls its OWN inbox for the answer
+      // (inProcessRunner.ts:529-575). Deliberately not awaited — that poll is
+      // the consumer the drain must not race.
+      decision = harness.runner.createInProcessCanUseTool(
+        {
+          agentId: SUB_LEAD_AGENT_ID,
+          agentName: SUB_LEAD,
+          teamName: PARENT_TEAM,
+          planModeRequired: false,
+          parentSessionId: 'session-1',
+        },
+        subLead.abortController,
+      )(
+        {
+          name: 'MidTurnTool',
+          description: async () => 'needs approval',
+        } as unknown as Tool,
+        {},
+        {
+          getAppState: () => appState,
+          options: { isNonInteractiveSession: false, tools: [] },
+        } as never,
+        {} as never,
+        'tool-use-midturn',
+        { behavior: 'ask', message: 'approval required' },
+      )
 
-    const requestId = await waitForPermissionRequestId()
-    // The lead answers while the teammate is still inside the turn...
-    await writeToMailbox(
-      SUB_LEAD,
-      mail(
-        TEAM_LEAD_NAME,
-        JSON.stringify(
-          createPermissionResponseMessage({
-            request_id: requestId,
-            subtype: 'success',
-          }),
+      const requestId = await waitForPermissionRequestId()
+      // The lead answers while the teammate is still inside the turn...
+      await writeToMailbox(
+        SUB_LEAD,
+        mail(
+          TEAM_LEAD_NAME,
+          JSON.stringify(
+            createPermissionResponseMessage({
+              request_id: requestId,
+              subtype: 'success',
+            }),
+          ),
         ),
-      ),
-      PARENT_TEAM,
-    )
-    // ...and DMs it as well, so the next round proves the drain really ran.
+        PARENT_TEAM,
+      )
+      // ...and DMs it as well, so the next round proves the drain really ran.
+      await writeToMailbox(
+        SUB_LEAD,
+        mail(PLAIN, 'build is red on main'),
+        PARENT_TEAM,
+      )
+    }
+
+    harness.afterDrain = async () => {
+      inboxAfterDrain = (await readMailbox(SUB_LEAD, PARENT_TEAM)).map(m => ({
+        from: m.from,
+        read: m.read,
+      }))
+      // The drain is done and the evidence is taken: let the poll have its
+      // answer.
+      harness.blockingPermissionPoll = false
+      // Hold the turn open while the poll runs — the real shape of the wait: the
+      // tool call is blocked on the response, so the idle loop (which would
+      // otherwise take the response as the next prompt) is not running. The
+      // timeout is a diagnostic bound, not a margin: nothing is asserted on
+      // whether it wins, and the decision is awaited again below.
+      await Promise.race([
+        decision!.then(d => {
+          decided = d
+        }),
+        new Promise<void>(resolve => setTimeout(resolve, 3000)),
+      ])
+    }
+
     await writeToMailbox(
       SUB_LEAD,
-      mail(PLAIN, 'build is red on main'),
+      mail(TEAM_LEAD_NAME, 'start on the release'),
       PARENT_TEAM,
     )
-  }
 
-  harness.afterDrain = async () => {
-    inboxAfterDrain = (await readMailbox(SUB_LEAD, PARENT_TEAM)).map(m => ({
-      from: m.from,
-      read: m.read,
-    }))
-    // Hold the turn open while the poll runs — the real shape of the wait: the
-    // tool call is blocked on the response, so the idle loop (which would
-    // otherwise take the response as the next prompt) is not running.
-    await Promise.race([
-      decision!.then(d => {
-        decided = d
-      }),
-      new Promise<void>(resolve => setTimeout(resolve, 3000)),
+    await waitFor(() => harness.roundInputs.length >= 2, 'two rounds to run')
+    await waitFor(
+      () => inboxAfterDrain !== undefined,
+      'the inbox snapshot taken right after the drain',
+    )
+
+    // The drain ran in that round and took the ordinary DM...
+    expect(harness.roundInputs[1]).toContain(
+      '<teammate-message teammate_id="worker">\nbuild is red on main\n</teammate-message>',
+    )
+    // ...and left the permission response for its own poll: not in the round's
+    // input, and still unread on disk at the moment the drain finished — the
+    // only other reader of that entry was held until this snapshot.
+    expect(harness.roundInputs[1]).not.toContain('permission_response')
+    expect(inboxAfterDrain).toEqual([
+      { from: TEAM_LEAD_NAME, read: true }, // 'start on the release', turn 1
+      { from: TEAM_LEAD_NAME, read: false }, // the permission response
+      { from: PLAIN, read: true }, // the DM the drain delivered
     ])
+
+    // And the poll does get it: the blocked tool call is answered, and only now
+    // is the response read.
+    await waitFor(
+      () => decided !== undefined,
+      'the permission poll to answer the tool call',
+    )
+    expect(decided).toMatchObject({ behavior: 'allow' })
+    expect((await readMailbox(SUB_LEAD, PARENT_TEAM)).map(m => m.read)).toEqual([
+      true,
+      true,
+      true,
+    ])
+
+    // Nothing became a second turn on the way.
+    await letThePollLoopRun(harness)
+    expect(harness.turns).toBe(1)
+  } finally {
+    await stopTeammate(subLead)
   }
-
-  await writeToMailbox(
-    SUB_LEAD,
-    mail(TEAM_LEAD_NAME, 'start on the release'),
-    PARENT_TEAM,
-  )
-
-  await waitFor(() => harness.roundInputs.length >= 2, 'two rounds to run')
-  await waitFor(
-    () => inboxAfterDrain !== undefined,
-    'the inbox snapshot taken right after the drain',
-  )
-
-  // The drain ran in that round and took the ordinary DM...
-  expect(harness.roundInputs[1]).toContain(
-    '<teammate-message teammate_id="worker">\nbuild is red on main\n</teammate-message>',
-  )
-  // ...and left the permission response for its own poll: not in the round's
-  // input, and still unread on disk at the moment the drain finished.
-  expect(harness.roundInputs[1]).not.toContain('permission_response')
-  expect(inboxAfterDrain).toEqual([
-    { from: TEAM_LEAD_NAME, read: true }, // 'start on the release', turn 1
-    { from: TEAM_LEAD_NAME, read: false }, // the permission response
-    { from: PLAIN, read: true }, // the DM the drain delivered
-  ])
-
-  // And the poll does get it: the blocked tool call is answered, and only now
-  // is the response read.
-  await waitFor(
-    () => decided !== undefined,
-    'the permission poll to answer the tool call',
-  )
-  expect(decided).toMatchObject({ behavior: 'allow' })
-  expect((await readMailbox(SUB_LEAD, PARENT_TEAM)).map(m => m.read)).toEqual([
-    true,
-    true,
-    true,
-  ])
-
-  // Nothing became a second turn on the way.
-  await letThePollLoopRun(harness)
-  expect(harness.turns).toBe(1)
-
-  await stopTeammate(subLead)
 })

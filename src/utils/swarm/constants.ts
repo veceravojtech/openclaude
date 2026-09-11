@@ -5,6 +5,20 @@ export const TMUX_COMMAND = 'tmux'
 export const HIDDEN_SESSION_NAME = 'claude-hidden'
 
 /**
+ * How long a resolved answer to "do I lead a sub-team?" is trusted before the
+ * team file is read again.
+ *
+ * Shared by the two places that ask: the runner's idle poll loop
+ * (`createSubTeamInboxResolver`, inProcessRunner.ts) and the per-tool-round
+ * mid-turn drain (`resolveLedSubTeamName`, attachments.ts). The answer has to
+ * be re-read at all because a sub-team may be created after the teammate
+ * started; it is cached at all because a team-file read on every 500ms poll
+ * and every tool round of every teammate is not worth the answer. One constant
+ * so the two cannot drift apart.
+ */
+export const SUB_TEAM_RECHECK_INTERVAL_MS = 5_000
+
+/**
  * Gets the socket name for external swarm sessions (when user is not in tmux).
  * Uses a separate socket to isolate swarm operations from user's tmux sessions.
  * Includes PID to ensure multiple Claude instances don't conflict.

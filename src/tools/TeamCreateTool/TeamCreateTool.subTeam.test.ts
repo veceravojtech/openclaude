@@ -16,8 +16,11 @@ import {
 } from '../../test/sharedMutationLock.js'
 import type { ToolUseContext } from '../../Tool.js'
 import { asAgentId } from '../../types/ids.js'
+import { __test as attachmentsTest } from '../../utils/attachments.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
+import { TEAM_LEAD_NAME } from '../../utils/swarm/constants.js'
 import { readTeamFileAsync } from '../../utils/swarm/teamHelpers.js'
+import { writeToMailbox } from '../../utils/teammateMailbox.js'
 import {
   clearDynamicTeamContext,
   setDynamicTeamContext,
@@ -37,9 +40,11 @@ import { TeamCreateTool } from './TeamCreateTool.js'
 // team per agent, at the derived name, and at the depth cap.
 
 const MAX_DEPTH_ENV = 'CLAUDE_CODE_MAX_TEAM_DEPTH'
+const DISABLE_TEAMS_ENV = 'CLAUDE_CODE_DISABLE_AGENT_TEAMS'
 
 let configDir: string | undefined
 let savedMaxDepth: string | undefined
+let savedDisableTeams: string | undefined
 
 beforeEach(async () => {
   await acquireSharedMutationLock(
@@ -47,16 +52,25 @@ beforeEach(async () => {
   )
   savedMaxDepth = process.env[MAX_DEPTH_ENV]
   delete process.env[MAX_DEPTH_ENV]
+  savedDisableTeams = process.env[DISABLE_TEAMS_ENV]
+  delete process.env[DISABLE_TEAMS_ENV]
   configDir = mkdtempSync(join(tmpdir(), 'openclaude-subteam-create-'))
   setClaudeConfigHomeDirForTesting(configDir)
+  attachmentsTest.resetSubTeamLeadershipCache()
 })
 
 afterEach(() => {
   try {
+    attachmentsTest.resetSubTeamLeadershipCache()
     if (savedMaxDepth === undefined) {
       delete process.env[MAX_DEPTH_ENV]
     } else {
       process.env[MAX_DEPTH_ENV] = savedMaxDepth
+    }
+    if (savedDisableTeams === undefined) {
+      delete process.env[DISABLE_TEAMS_ENV]
+    } else {
+      process.env[DISABLE_TEAMS_ENV] = savedDisableTeams
     }
     // The lead path sets a process-wide leader team name; keep it out of the
     // next test, and so is the pane-teammate identity one case installs.
@@ -338,4 +352,47 @@ test('a pane teammate is refused a sub-team, and leaves no team file behind', as
     createTeam(makeContext({ teamName: 'email' }).context, 'email/supervisor'),
   )
   expect(inProcess.data.team_name).toBe('email/supervisor')
+})
+
+type DrainedAttachments = Awaited<
+  ReturnType<typeof attachmentsTest.getTeammateMailboxAttachments>
+>
+
+/** The texts one mid-turn drain handed the model, in order. */
+function drainedTexts(attachments: DrainedAttachments): string[] {
+  const first = attachments[0]
+  if (!first || first.type !== 'teammate_mailbox') return []
+  return first.messages.map(m => m.text)
+}
+
+test('the sub-team it just created is drained on its next tool round', async () => {
+  // T5/F4. "Do I lead a sub-team?" is cached for SUB_TEAM_RECHECK_INTERVAL_MS,
+  // and the first round of the turn answers "nothing" — then TeamCreate and
+  // the member spawns run in that SAME turn, so without an eviction the new
+  // sub-team's `team-lead` inbox would stay undrained for the rest of the TTL,
+  // exactly while the sub-lead waits for its first member to report.
+  const { context } = makeContext({ teamName: 'email' })
+
+  const before = await asTeammate('supervisor', 'email', () =>
+    attachmentsTest.getTeammateMailboxAttachments(context),
+  )
+  expect(before).toEqual([])
+
+  await asTeammate('supervisor', 'email', () =>
+    createTeam(context, 'email/supervisor'),
+  )
+  await writeToMailbox(
+    TEAM_LEAD_NAME,
+    {
+      from: 'worker',
+      text: 'task 3 is done',
+      timestamp: new Date().toISOString(),
+    },
+    'email/supervisor',
+  )
+
+  const after = await asTeammate('supervisor', 'email', () =>
+    attachmentsTest.getTeammateMailboxAttachments(context),
+  )
+  expect(drainedTexts(after)).toEqual(['task 3 is done'])
 })

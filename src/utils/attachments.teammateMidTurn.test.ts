@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
@@ -21,7 +21,6 @@ import {
   createPermissionResponseMessage,
   createShutdownRejectedMessage,
   createShutdownRequestMessage,
-  formatTeammateMessages,
   readMailbox,
   writeToMailbox,
 } from './teammateMailbox.js'
@@ -41,7 +40,11 @@ const SUB_LEAD = 'supervisor'
 const SUB_LEAD_AGENT_ID = `${SUB_LEAD}@${TEAM}`
 const SUB_TEAM = `${TEAM}/${SUB_LEAD}`
 
+type MailboxModule = typeof import('./teammateMailbox.js')
+
 let configDir: string | undefined
+/** The real mailbox module, captured before the one test that mocks it. */
+let actualMailbox: MailboxModule | undefined
 const savedUserType = process.env.USER_TYPE
 const savedDisable = process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS
 
@@ -56,6 +59,10 @@ beforeEach(async () => {
 
 afterEach(() => {
   try {
+    if (actualMailbox) {
+      mock.restore()
+      mock.module('./teammateMailbox.js', () => actualMailbox!)
+    }
     __test.resetSubTeamLeadershipCache()
     setClaudeConfigHomeDirForTesting(undefined)
     if (configDir) {
@@ -202,21 +209,12 @@ test('the model sees the same <teammate-message> shape the idle loop emits', asy
     .map(m => m.message.content)
     .join('')
 
-  // inProcessRunner.formatAsTeammateMessage emits exactly this for the same
-  // message; formatTeammateMessages is the shared spelling of it.
+  // The literal the runner's formatAsTeammateMessage emits for the same
+  // message (inProcessRunner.ts) — spelled out rather than compared against
+  // formatTeammateMessages, which is the very function this path renders
+  // through and would agree with itself whatever it emitted.
   expect(rendered).toContain(
     '<teammate-message teammate_id="worker" color="red" summary="ci status">\nbuild is red\n</teammate-message>',
-  )
-  expect(rendered).toContain(
-    formatTeammateMessages([
-      {
-        from: 'worker',
-        text: 'build is red',
-        timestamp: 'ignored',
-        color: 'red',
-        summary: 'ci status',
-      },
-    ]),
   )
 })
 
@@ -345,6 +343,27 @@ test('a subagent spawned inside the turn does not steal the teammate inbox', asy
   expect((await readMailbox(SUB_LEAD, TEAM)).map(m => m.read)).toEqual([false])
 })
 
+test('nor does it under `ant`, where the lead path below would run', async () => {
+  // The twin above passes for every user type EXCEPT the one the lead path is
+  // gated on, which `beforeEach` deletes. Under `ant` a `undefined` answer
+  // here falls through to that path, which resolves its agent name from
+  // `getAgentName()` — the ambient identity the subagent INHERITED from the
+  // teammate that spawned it — and would hand the subagent its spawner's mail
+  // and mark it read on disk.
+  process.env.USER_TYPE = 'ant'
+  const turnAgentId = createAgentId()
+  const subagentId = createAgentId()
+  const harness = createHarness(subagentId)
+  await writeToMailbox(SUB_LEAD, mail('worker', 'for the teammate'), TEAM)
+
+  const attachments = await runAsTeammate(turnAgentId, SUB_LEAD, TEAM, () =>
+    drain(harness),
+  )
+
+  expect(attachments).toEqual([])
+  expect((await readMailbox(SUB_LEAD, TEAM)).map(m => m.read)).toEqual([false])
+})
+
 /**
  * The AppState a LEAD has while a teammate's transcript is open.
  *
@@ -452,4 +471,69 @@ test("an `ant` teammate's turn takes its own inbox, not the viewed one", async (
   // unread. The non-`ant` twin above cannot see that — the gate stops it.
   expect(textsOf(attachments)).toEqual(['mine'])
   expect((await readMailbox('other', TEAM)).map(m => m.read)).toEqual([false])
+})
+
+test('a duplicate that lands between the read and the mark stays unread', async () => {
+  // F5. Two identical messages from one sender in one millisecond are one
+  // (from, timestamp, text): keyed marking could not tell them apart, so a
+  // twin that landed after the read and before the mark was marked read
+  // without ever being delivered. The mark is by index now, and this drops the
+  // twin into exactly that window — the mark call itself — through both mark
+  // paths, so the same test is red against either spelling of the old code.
+  const stamp = `${Date.now()}-${Math.random()}`
+  actualMailbox ??= await import(`./teammateMailbox.ts?markWindowActual=${stamp}`)
+  const message = mail('worker', 'build is red')
+  let injected = false
+  const injectTwin = async (): Promise<void> => {
+    if (injected) return
+    injected = true
+    await actualMailbox!.writeToMailbox(SUB_LEAD, message, TEAM)
+  }
+  mock.module('./teammateMailbox.js', () => ({
+    ...actualMailbox!,
+    markMessageAsReadByIndex: async (
+      agentName: string,
+      teamName: string | undefined,
+      index: number,
+    ) => {
+      await injectTwin()
+      return actualMailbox!.markMessageAsReadByIndex(agentName, teamName, index)
+    },
+    markMessagesAsReadByPredicate: async (
+      agentName: string,
+      predicate: Parameters<MailboxModule['markMessagesAsReadByPredicate']>[1],
+      teamName?: string,
+    ) => {
+      await injectTwin()
+      return actualMailbox!.markMessagesAsReadByPredicate(
+        agentName,
+        predicate,
+        teamName,
+      )
+    },
+  }))
+  const freshAttachments = (await import(
+    `./attachments.ts?markWindow=${stamp}`
+  )) as typeof import('./attachments.js')
+
+  const turnAgentId = createAgentId()
+  const harness = createHarness(turnAgentId)
+  await writeToMailbox(SUB_LEAD, message, TEAM)
+
+  const attachments = await runAsTeammate(turnAgentId, SUB_LEAD, TEAM, () =>
+    freshAttachments.__test.getTeammateMailboxAttachments(harness.context),
+  )
+
+  expect(injected).toBe(true)
+  expect(textsOf(attachments)).toEqual(['build is red'])
+  // The twin is still unread, so the next tool round delivers it.
+  expect(
+    (await readMailbox(SUB_LEAD, TEAM)).map(m => ({
+      text: m.text,
+      read: m.read,
+    })),
+  ).toEqual([
+    { text: 'build is red', read: true },
+    { text: 'build is red', read: false },
+  ])
 })

@@ -10,6 +10,7 @@ import {
   resolveCallerIdentity,
 } from '../../utils/agentIdentity.js'
 import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js'
+import { invalidateSubTeamLeadership } from '../../utils/attachments.js'
 import { getCwd } from '../../utils/cwd.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import {
@@ -201,6 +202,11 @@ async function createSubTeam(
   }
 
   await writeTeamFileAsync(subTeamName, teamFile)
+  // This caller's mid-turn drain has already answered "I lead no sub-team" on
+  // an earlier round of this very turn, and caches that for
+  // SUB_TEAM_RECHECK_INTERVAL_MS. Drop it now the file exists, so the rounds
+  // that spawn this team's members also drain its `team-lead` inbox.
+  invalidateSubTeamLeadership(caller.agentId)
   registerTeamForSessionCleanup(subTeamName)
 
   logEvent('tengu_team_created', {

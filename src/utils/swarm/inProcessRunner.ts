@@ -142,7 +142,7 @@ import {
 import { unregisterAgent as unregisterPerfettoAgent } from '../telemetry/perfettoTracing.js'
 import { createContentReplacementState } from '../toolResultStorage.js'
 import { createAgentId } from '../uuid.js'
-import { TEAM_LEAD_NAME } from './constants.js'
+import { SUB_TEAM_RECHECK_INTERVAL_MS, TEAM_LEAD_NAME } from './constants.js'
 import {
   getLeaderSetToolPermissionContext,
   getLeaderToolUseConfirmQueue,
@@ -828,12 +828,6 @@ function resolveTeammateTaskListId(identity: TeammateIdentity): string {
     ? getSubTeamTaskListId(identity.teamName)
     : identity.parentSessionId
 }
-
-/**
- * How long a resolved answer to "do I lead a sub-team?" is trusted before the
- * team file is read again.
- */
-const SUB_TEAM_RECHECK_INTERVAL_MS = 5_000
 
 /**
  * Resolves, and caches, the sub-team this teammate leads so the poll loop can
