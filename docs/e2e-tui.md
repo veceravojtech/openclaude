@@ -166,8 +166,10 @@ The fake must never outlive its run. Each of those scenarios boots the CLI
 *inside* its own `try`, so a boot timeout still reaches the `finally` that calls
 `api.stop()`, and `startFakeAnthropicApi` additionally `unref`s the server: a
 listening `Bun.serve` is a live handle, and either hole alone would leave the
-harness printing its whole report and then hanging instead of exiting with the
-code it had already set.
+harness hanging with the exit code already set. The run report is not what such
+a run prints — `report()` is called inside `main()`, after the results array a
+boot timeout abandons, so the only output is the error the top-level rejection
+handler writes before setting that code.
 
 Each scenario hands the fake ONE script — a list of steps per role, each step a
 single content block plus its `stop_reason`:
@@ -250,20 +252,28 @@ the *scenarios* — scenario 1 needs the preselected row plus two more, and fewe
 rendered rows is a hard failure with the parsed rows dumped), and the UI strings
 the scenarios key on. The picker scenarios key on `Select model`, `Set model to`,
 `Kept model as` and `? for shortcuts`; the teammate scenarios add their own,
-each declared as a named constant near the top of the teammate half of
-`tui-keys.ts` and spelled with `\uXXXX` escapes, because a box-drawing glyph or
-a `›` is one editor round-trip away from an ASCII lookalike and a degraded
-literal would cost a 15-second timeout with no clue why. They are: the panel's
+each declared as a named constant in `tui-keys.ts` and spelled with `\uXXXX`
+escapes, because a box-drawing glyph or a `›` is one editor round-trip away
+from an ASCII lookalike and a degraded literal would cost a 15-second timeout
+with no clue why. Most are grouped at the top of the teammate half;
+`E2E_SUB_LEAD_HEADER` and `E2E_SUB_WORKER_HEADER` are declared in scenario 5's
+own block and `E2E_TREE_KILLED_SELECTED_ROW` in scenario 6's, and
+`SELECTION_MARKER` sits higher still — in the shared section at the top of the
+file, because the picker half is built from it too. They are: the panel's
 two zero-teammate rows (`E2E_TREE_LEADER_ROW`, `E2E_TREE_EMPTY_ROW`), the three
 view headers (`E2E_TEAMMATE_HEADER`, `E2E_SUB_LEAD_HEADER`,
 `E2E_SUB_WORKER_HEADER`), the selection pointer and the tree glyphs that may
 follow it (`SELECTION_MARKER`, aliased as `E2E_TREE_POINTER`, plus
 `TREE_GLYPH_AFTER_POINTER` and the row pattern inside `treeRowColumn`), the
 killed row (`E2E_TREE_KILLED_SELECTED_ROW`) and the prompt box rule
-(`PROMPT_BOX_RULE`). Those strings are what a timeout now reports: `waitForPane`
-takes a label and, on timeout, prints the step that was waiting plus the last
-captured pane, so a renamed string yields a readable diff instead of a silent
-15-second wait.
+(`PROMPT_BOX_RULE`). That list is the named constants, not everything the
+scenarios key on: the selected teammate row each of scenarios 4-6 gates on is
+built inline as `` `\u255E\u2550 @${name}:` `` — escaped the same way, and
+stopping at the colon on purpose, which the comment above scenario 6's copy
+explains. Those strings are what a timeout now reports: `waitForPane` takes a
+label and, on timeout, prints the step that was waiting plus the last captured
+pane, so a renamed string yields a readable diff instead of a silent 15-second
+wait.
 
 ## Log hygiene
 

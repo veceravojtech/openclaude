@@ -156,10 +156,11 @@ const SOCKET_PATH_LIMIT_BYTES = 100
  * `E2E_TREE_POINTER` is an alias of this, `PICKER_ROW_RE` is built from it, and
  * scenario 3's prompt-line finder uses it rather than repeating the character.
  *
- * Spelled as an escape, like every other glyph this harness compares against
- * real pane text: a raw glyph is one editor round-trip away from an ASCII
- * lookalike, and a silently degraded literal here would stop every picker row
- * parsing at once.
+ * Spelled as an escape, like the other glyphs this harness compares against
+ * real pane text - with one exception, the `✔` active-model badge that
+ * `pickerLabel` strips, which is still written raw. A raw glyph is one editor
+ * round-trip away from an ASCII lookalike, and a silently degraded literal here
+ * would stop every picker row parsing at once.
  */
 const SELECTION_MARKER = '\u276F'
 
@@ -1512,13 +1513,16 @@ function startFakeAnthropicApi(script: FakeScript): FakeAnthropicApi {
   // A listening server is a LIVE HANDLE, and this one must never be what keeps
   // the harness alive: a throw on any path that misses `api.stop()` would
   // otherwise leave the process running long after `process.exitCode = 1` was
-  // set - printing the whole run report and then hanging, which is exactly what
-  // the "nothing outlives main()" note at the bottom of this file promises
-  // cannot happen. Belt and braces with booting each scenario INSIDE its `try`:
-  // that closes the one hole we found (a boot timeout), this closes the next
-  // one. `unref` does not stop the server answering - every request of every
-  // scenario is served exactly as before; it only stops an idle server from
-  // being a reason to stay alive.
+  // set - hanging with the error printed and nothing after it, which is exactly
+  // what the "nothing outlives main()" note at the bottom of this file promises
+  // cannot happen. The run REPORT is not what such a run prints: `report()` is
+  // called inside `main()`, after the `results` array the throw abandons, so
+  // the only output is the top-level rejection handler's `console.error`. Belt
+  // and braces with booting each scenario INSIDE its `try`: that closes the one
+  // hole we found (a boot timeout), this closes the next one. `unref` does not
+  // stop the server answering - every request of every scenario is served
+  // exactly as before; it only stops an idle server from being a reason to
+  // stay alive.
   server.unref()
   return {
     baseUrl: `http://127.0.0.1:${server.port}`,
@@ -1859,11 +1863,15 @@ async function scenarioNestedTeamTree(): Promise<ScenarioResult> {
         customApiKeyResponses: { approved: [FAKE_API_KEY, FAKE_API_KEY.slice(-20)], rejected: [] },
         // The one seed this scenario needs, and it does not touch the panel.
         // The harness runs the CLI INSIDE a tmux pane, where `auto` routes a
-        // PROMPTED spawn to the pane backend (`backends/registry.ts:380-382`) -
-        // and a pane teammate is refused a sub-team outright, because nothing
-        // would deliver its sub-team's messages or hand out its task list
-        // (`TeamCreateTool.ts:136-140`). Without this the scenario would not be
-        // testing the nested tree at all; it would be testing that refusal.
+        // PROMPTED spawn to the pane backend (`isInProcessEnabled`,
+        // `src/utils/swarm/backends/registry.ts`) - and a pane teammate is
+        // refused a sub-team outright, because nothing would deliver its
+        // sub-team's messages or hand out its task list (the
+        // `isInProcessTeammate()` guard in `createSubTeam`,
+        // `src/tools/TeamCreateTool/TeamCreateTool.ts`). Cited by symbol, not
+        // by line, for the same reason `E2E_TREE_KILLED_SELECTED_ROW` is.
+        // Without this the scenario would not be testing the nested tree at
+        // all; it would be testing that refusal.
         teammateMode: 'in-process',
       },
     })
@@ -2507,10 +2515,13 @@ async function main(): Promise<number> {
 // `sleep` timer has already resolved (they are all awaited, none is fired and
 // forgotten), every tmux call is `spawnSync` so no child handle is held here,
 // the scratch window's `sh` loop is a child of the tmux SERVER rather than of
-// this process (and that server is dead by now), the harness never opens stdin,
-// and `main()`'s `finally` has already removed the SIGINT listener. `onSigint`
-// keeps its own `process.exit(130)`: it fires from a signal callback with an
-// interrupted scenario still pending, so it must not hand control back.
+// this process (and that server is dead by now), the fake Messages API that
+// scenarios 4-6 start is `unref`'d at creation (see `startFakeAnthropicApi`),
+// so even a path that skipped `api.stop()` leaves a handle the loop does not
+// wait on, the harness never opens stdin, and `main()`'s `finally` has already
+// removed the SIGINT listener. `onSigint` keeps its own `process.exit(130)`: it
+// fires from a signal callback with an interrupted scenario still pending, so
+// it must not hand control back.
 main().then(
   code => {
     process.exitCode = code
