@@ -123,15 +123,13 @@ type Harness = {
 }
 
 /**
- * A tool-use context as runAgent builds it for a teammate's own turn, or for a
- * fork that SHARES its spawner's setAppState — a sync subagent; a background
- * one gets a no-op instead (forkedAgent.ts:420-422).
+ * The tool-use context the drain under test reads: an `agentId`, and
+ * getAppState/setAppState over one local AppState.
  *
  * `turnAgentId` is `undefined` for a MAIN LOOP — the lead's own turn, or a
- * tmux teammate's. Neither REPL.tsx's getToolUseContext (:2749) nor
- * QueryEngine.ts's processUserInputContext (:401) puts an `agentId` on the
- * context it builds; the forks do — createSubagentContext (forkedAgent.ts:459)
- * and execAgentHook.ts:127.
+ * tmux teammate's. Neither REPL.tsx's getToolUseContext nor QueryEngine.ts's
+ * processUserInputContext puts an `agentId` on the context it builds; the
+ * forks do — createSubagentContext and execAgentHook.
  */
 function createHarness(
   turnAgentId: string | undefined,
@@ -383,7 +381,7 @@ test('nor does it under `ant`, where the lead path below would run', async () =>
  * about the viewed teammate's inbox would then hold whatever that path did.
  *
  * `turnAgentId` defaults to absent, which is what a lead's own turn has: an
- * `agentId` on the context means a subagent (Tool.ts:266), and the callers
+ * `agentId` on the context means a subagent (Tool.ts), and the callers
  * below that DO want one — a teammate's turn, a lead-spawned subagent — pass
  * it explicitly.
  */
@@ -446,8 +444,8 @@ test("an `ant` lead's own turn still drains the viewed teammate's inbox", async 
  *
  * The second thing the lead path can drain: with no `viewedTeammate`,
  * `agentName` falls back to the lead's own name — `isTeamLead(teamContext)` is
- * true for a context with no ambient agent id (teammate.ts:191-195), and the
- * name then resolves `teammates[leadAgentId]?.name || 'team-lead'`. `teammates`
+ * true for a context with no ambient agent id, and the name then resolves
+ * `teammates[leadAgentId]?.name || 'team-lead'`. `teammates`
  * maps the LEAD's teammates, so it holds no entry for `leadAgentId` and the
  * fallback is what a real lead takes — hence TEAM_LEAD_NAME's inbox below.
  */
@@ -552,10 +550,9 @@ test('a lead-spawned subagent takes nothing from AppState.inbox', async () => {
   // T9, the lead path's third mail source. `appState.inbox` holds the messages
   // queued FOR THE LEAD, and a fork reads the same AppState its spawner does —
   // so without the guard it was handed them. The `processed` flip lands only
-  // where setAppState is shared (`shareSetAppState: !isAsync`,
-  // runAgent.ts:758) — a SYNC subagent like this one, the forked skill or
-  // slash command, the stop-hook agent. A background subagent's setAppState is
-  // a no-op, so for it the leak is the read alone.
+  // where setAppState is shared — a SYNC subagent like this one, not a
+  // background one, whose setAppState is a no-op. For that one the leak is the
+  // read alone.
   process.env.USER_TYPE = 'ant'
   const harness = createLeadHarness(
     createAgentId(),

@@ -4124,9 +4124,8 @@ async function resolveLedSubTeamName(
  * formatAsTeammateMessage emits).
  *
  * Returns undefined — rather than [] — for exactly one case: there is no
- * ambient in-process teammate context at all. That set is a lead's own turn, a
- * tmux teammate's own main loop, and every fork a main loop spawned — T9's
- * guard below separates the last from the first two. Anything running INSIDE a
+ * ambient in-process teammate context at all. T9's guard below then separates
+ * the forks in that set from the main loops. Anything running INSIDE a
  * teammate's context gets an array and therefore stops here, including a
  * subagent the teammate spawned: the lead path would resolve `getAgentName()`
  * from the inherited ambient context and hand the subagent its spawner's mail.
@@ -4192,12 +4191,10 @@ async function getInProcessTeammateMailboxMessages(
  *    stop-hook agent — has no ambient teammate context, so it reaches this
  *    point rather than path 1. It gets nothing: the mail the lead path below
  *    reads belongs to its spawner, not to it.
- * 3. The `ant` lead path, which reads TWO mail sources unconditionally and
- *    merges them into one attachment: the file-based mailbox — the lead's own
- *    inbox, the inbox of the teammate whose transcript the lead is viewing, or
- *    a tmux teammate's OWN inbox via dynamicTeamContext — and AppState.inbox
- *    (messages queued mid-turn by useInboxPoller), so the lead receives those
- *    without waiting for the turn to end.
+ * 3. The `ant` lead path, which merges TWO mail sources into one attachment:
+ *    the file-based mailbox — the lead's own inbox, a viewed teammate's, or a
+ *    tmux teammate's own — and, when the lead is NOT viewing a teammate,
+ *    AppState.inbox (messages queued mid-turn by useInboxPoller).
  */
 async function getTeammateMailboxAttachments(
   toolUseContext: ToolUseContext,
@@ -4230,28 +4227,26 @@ async function getTeammateMailboxAttachments(
   // three resolvers there can hand it to a fork instead. On the headline run —
   // a root lead not viewing a teammate — the two named below BOTH return
   // undefined and it is `isTeamLead(appState.teamContext)`, true via its
-  // `!myAgentId` branch (teammate.ts:193-195), that reaches the
+  // `!myAgentId` branch in teammate.ts, that reaches the
   // `teammates[leadAgentId]?.name || 'team-lead'` fallback below and resolves
   // the LEAD's own inbox. `getViewedTeammateTask(appState)` resolves the viewed
   // teammate's inbox off the AppState the fork shares with its spawner.
-  // `getAgentName()` resolves an identity INHERITED through ALS or
-  // dynamicTeamContext — how a tmux teammate's fork reaches its spawner's
-  // inbox. Each is marked read on delivery, destroying it for the lead.
+  // `getAgentName()` resolves an identity inherited through dynamicTeamContext
+  // — how a tmux teammate's fork reaches its spawner's inbox. Each is marked
+  // read on delivery, destroying it for its owner.
   //
-  // `agentId` is never on a MAIN-LOOP context: neither REPL.tsx:2749's
-  // getToolUseContext nor QueryEngine.ts:401's processUserInputContext has the
+  // `agentId` is never on a MAIN-LOOP context: neither REPL.tsx's
+  // getToolUseContext nor QueryEngine.ts's processUserInputContext has the
   // key, and those two are the only contexts `query()` is ever entered with
-  // that are not a fork. Every fork sets one — createSubagentContext
-  // (forkedAgent.ts:459) for runAgent and runForkedAgent, and
-  // execAgentHook.ts:127 for the stop-hook agent, which builds its own context
-  // rather than going through createSubagentContext. An in-process teammate's
-  // OWN turn also carries one — its runner mints it at inProcessRunner.ts:2336
-  // — but it has an ambient teammate context and so returned above; it never
-  // reaches this line.
+  // that are not a fork. Every fork sets one — createSubagentContext for
+  // runAgent and runForkedAgent, and execAgentHook for the stop-hook agent,
+  // which builds its own context instead. An in-process teammate's OWN turn
+  // also carries one, minted by its runner — but it has an ambient teammate
+  // context and so returned above; it never reaches this line.
   //
   // Spelled `!== undefined` rather than `!toolUseContext.agentId` (the
-  // isMainThread idiom at :825) on purpose: the two differ only on '', which
-  // no producer emits, and if one ever appeared this spelling withholds
+  // isMainThread idiom in getAttachments) on purpose: they differ only on '',
+  // which no producer emits, and if one ever appeared this spelling withholds
   // someone else's mail instead of handing it over.
   if (toolUseContext.agentId !== undefined) {
     return []
