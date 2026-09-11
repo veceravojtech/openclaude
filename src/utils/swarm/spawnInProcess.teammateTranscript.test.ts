@@ -177,13 +177,18 @@ test('a teammate killed with nothing to show is opened onto nothing', () => {
   expect(s.task().messages).toEqual([])
 })
 
-test('a teammate task id is not an AgentId, so there is no transcript file to bootstrap from', () => {
-  // Why the reader is served from AppState at all: the local_agent bootstrap
-  // reads `agent-<id>.jsonl` keyed on the task id, and a teammate's id cannot
-  // name one. Each teammate TURN writes under its own `createAgentId()`
-  // instead, and the task records none of them.
+test('a teammate task carries no agent id a transcript could be read by', () => {
+  // Why the reader is served from AppState: reading a transcript takes an
+  // AgentId, and a teammate has none to hand over — each TURN writes under its
+  // own `createAgentId()`, which is never written back to the task. This goes
+  // red if one ever is.
+  expect(
+    [
+      ...Object.values(teammate(undefined)),
+      ...Object.values(teammate(undefined).identity),
+    ].filter(v => typeof v === 'string' && toAgentId(v) !== null),
+  ).toEqual([])
   for (let i = 0; i < 32; i++) {
     expect(toAgentId(generateTaskId('in_process_teammate'))).toBeNull()
   }
-  expect(toAgentId('researcher@email')).toBeNull()
 })
