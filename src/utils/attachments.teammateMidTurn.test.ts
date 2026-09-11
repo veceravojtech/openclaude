@@ -345,29 +345,66 @@ test('a subagent spawned inside the turn does not steal the teammate inbox', asy
   expect((await readMailbox(SUB_LEAD, TEAM)).map(m => m.read)).toEqual([false])
 })
 
-test("the lead's own turn takes nothing from a viewed teammate's inbox", async () => {
+/**
+ * The AppState a LEAD has while a teammate's transcript is open.
+ *
+ * The `teamContext` is load-bearing rather than scenery: the lead path takes
+ * its team name from `getTeamName(appState.teamContext)`, so without one it
+ * opens the NON-team inbox, which nothing here writes to — and every assertion
+ * about the viewed teammate's inbox would then hold whatever that path did.
+ */
+function createViewingHarness(
+  viewedName: string,
+  turnAgentId: string = createAgentId(),
+): Harness {
   const viewedTask = {
     type: 'in_process_teammate',
     identity: {
-      agentId: SUB_LEAD_AGENT_ID,
-      agentName: SUB_LEAD,
+      agentId: `${viewedName}@${TEAM}`,
+      agentName: viewedName,
       teamName: TEAM,
       planModeRequired: false,
       parentSessionId: 'session-1',
     },
   } as unknown as InProcessTeammateTaskState
-  const harness = createHarness(createAgentId(), prev => ({
+  return createHarness(turnAgentId, prev => ({
     ...prev,
-    viewingAgentTaskId: 'task-1',
-    tasks: { ...prev.tasks, 'task-1': viewedTask },
+    viewingAgentTaskId: 'task-viewed',
+    tasks: { ...prev.tasks, 'task-viewed': viewedTask },
+    teamContext: {
+      teamName: TEAM,
+      teamFilePath: getTeamFilePath(TEAM),
+      leadAgentId: 'lead-id',
+      teammates: {},
+    },
   }))
+}
+
+test("the lead's own turn takes nothing from a viewed teammate's inbox", async () => {
+  const harness = createViewingHarness(SUB_LEAD)
   await writeToMailbox(SUB_LEAD, mail('worker', 'for the teammate'), TEAM)
 
-  // No ambient teammate context: this is the lead's own turn.
+  // No ambient teammate context: this is the lead's own turn, and for a
+  // non-`ant` user the lead path below the gate never runs at all.
   const attachments = await drain(harness)
 
   expect(attachments).toEqual([])
   expect((await readMailbox(SUB_LEAD, TEAM)).map(m => m.read)).toEqual([false])
+})
+
+test("an `ant` lead's own turn still drains the viewed teammate's inbox", async () => {
+  // Deleted for every other case in beforeEach, restored in afterEach.
+  process.env.USER_TYPE = 'ant'
+  const harness = createViewingHarness(SUB_LEAD)
+  await writeToMailbox(SUB_LEAD, mail('worker', 'for the teammate'), TEAM)
+
+  const attachments = await drain(harness)
+
+  // Exactly what `128f26cc` did, and the one thing this change could have
+  // broken: the teammate path returns `undefined` — not `[]` — on a lead's
+  // turn precisely so the lead path still runs here.
+  expect(textsOf(attachments)).toEqual(['for the teammate'])
+  expect((await readMailbox(SUB_LEAD, TEAM)).map(m => m.read)).toEqual([true])
 })
 
 test("a teammate's turn ignores whichever teammate the lead is viewing", async () => {
@@ -394,6 +431,25 @@ test("a teammate's turn ignores whichever teammate the lead is viewing", async (
     drain(harness),
   )
 
+  expect(textsOf(attachments)).toEqual(['mine'])
+  expect((await readMailbox('other', TEAM)).map(m => m.read)).toEqual([false])
+})
+
+test("an `ant` teammate's turn takes its own inbox, not the viewed one", async () => {
+  process.env.USER_TYPE = 'ant'
+  const turnAgentId = createAgentId()
+  const harness = createViewingHarness('other', turnAgentId)
+  await writeToMailbox(SUB_LEAD, mail('worker', 'mine'), TEAM)
+  await writeToMailbox('other', mail('worker', 'theirs'), TEAM)
+
+  const attachments = await runAsTeammate(turnAgentId, SUB_LEAD, TEAM, () =>
+    drain(harness),
+  )
+
+  // The case the `ant` lead path gets wrong on a teammate's round: there
+  // `viewedTeammate` outranks the ambient identity, so without the early
+  // return this teammate would be handed `other`'s mail and have its own left
+  // unread. The non-`ant` twin above cannot see that — the gate stops it.
   expect(textsOf(attachments)).toEqual(['mine'])
   expect((await readMailbox('other', TEAM)).map(m => m.read)).toEqual([false])
 })
