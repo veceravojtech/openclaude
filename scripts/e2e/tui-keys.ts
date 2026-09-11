@@ -968,16 +968,249 @@ const E2E_TEAMMATE_HEADER = `Viewing team-lead \u203A ${E2E_TEAMMATE}`
 const E2E_TREE_LEADER_ROW = `\u2552\u2550 team-lead \u00B7 shift + \u2191/\u2193 to select`
 const E2E_TREE_EMPTY_ROW = `no teammates \u00B7 Agent(name: "\u2026") spawns one`
 
+/**
+ * The selection pointer the tree draws on the row the cursor is on
+ * (`figures.pointer`, `TeammateSpinnerTree.tsx:71` for the leader row and the
+ * `hide` row, `TeammateSpinnerLine.tsx:232` for a teammate row).
+ *
+ * This - NOT the leader row's `╒═` - is the only mark that says "selected".
+ * `isLeaderHighlighted = isLeaderForegrounded || isLeaderSelected`
+ * (`TeammateSpinnerTree.tsx:63-65`) and `isLeaderForegrounded` is true whenever
+ * no teammate transcript is open, so `E2E_TREE_LEADER_ROW` is drawn at boot
+ * too, selection or no selection.
+ *
+ * Spelled as an escape and derived from a real capture, not from the JSX: see
+ * `selectedTreeRows`.
+ */
+const E2E_TREE_POINTER = '❯'
+
+/**
+ * The tree glyph that follows the pointer on a highlighted row: `╒═` on the
+ * leader row, `╞═`/`╘═` on a teammate row, `╘═` on the `hide` row. The
+ * un-highlighted `┌─`/`├─`/`└─` are accepted too, so a row that ever renders
+ * the pointer without the highlight would still be found rather than silently
+ * missed.
+ */
+const TREE_GLYPH_AFTER_POINTER =
+  /^[╒╞╘┌├└][═─]/
+
+/**
+ * Every tree row the selection pointer sits on, each from its glyph onwards
+ * (so the panel's left padding cannot break a comparison).
+ *
+ * Requiring a tree glyph immediately after the pointer is what keeps the
+ * prompt's own `❯` - and any `❯` inside rendered text - out of the result. A
+ * healthy tree in selection mode returns EXACTLY one row, which is how a
+ * scenario tells "the highlight is still on the row I killed" apart from both
+ * "it jumped to another row" and "it dangles on none at all".
+ */
+function selectedTreeRows(pane: string): string[] {
+  const rows: string[] = []
+  for (const line of pane.split('\n')) {
+    const at = line.indexOf(E2E_TREE_POINTER)
+    if (at < 0) continue
+    const fromGlyph = line.slice(at + E2E_TREE_POINTER.length)
+    if (!TREE_GLYPH_AFTER_POINTER.test(fromGlyph)) continue
+    rows.push(fromGlyph.trimEnd())
+  }
+  return rows
+}
+
+/** The one selected tree row, or null when none or more than one is marked. */
+function selectedTreeRow(pane: string): string | null {
+  const rows = selectedTreeRows(pane)
+  return rows.length === 1 ? rows[0]! : null
+}
+
+/**
+ * Column at which a teammate's TREE row starts - the tree glyph, past the
+ * panel's padding and the selection cell - or -1 when the row is not drawn.
+ *
+ * The column IS the nesting: `TeammateSpinnerTree` wraps a row of a sub-team in
+ * `paddingLeft={(getTeamDepth(team) - 1) * 2}`, so a sub-team member's glyph
+ * sits strictly right of its sub-lead's. Read from the pane rather than
+ * compared against a hard-coded prefix, so the indent WIDTH is free to change
+ * and only the nesting is asserted.
+ *
+ * Keyed on `@name:` - the row draws `@{agentName}: {status}` - which is what
+ * keeps a footer pill (`@name`, no colon) and the view header from matching.
+ */
+function treeRowColumn(pane: string, agentName: string): number {
+  const row = new RegExp(
+    `[\\u2552\\u255E\\u2558\\u250C\\u251C\\u2514][\\u2550\\u2500] @${agentName}:`,
+  )
+  for (const line of pane.split('\n')) {
+    const found = row.exec(line)
+    if (found) return found.index
+  }
+  return -1
+}
+
 type FakeAnthropicApi = {
   baseUrl: string
   /** Main-loop turns served (the tool_use turn and the tool_result turn). */
   mainTurns: () => number
+  /**
+   * Every `/v1/messages` request served, in order.
+   *
+   * This is what a scenario asserts its script on ("the per-role counters match
+   * the script") and what a failing scenario prints into its `actual`, so a red
+   * run says WHICH request went where instead of needing a second run to find
+   * out.
+   */
+  requests: () => readonly FakeRequest[]
   stop: () => void
 }
 
 type FakeContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
+
+/**
+ * Which conversation a request came from: the lead's main loop, or an
+ * in-process teammate's own turn. Both hit this ONE fake - a teammate runs in
+ * the same process against the same client and the same ANTHROPIC_BASE_URL - so
+ * a scenario that scripts both has to tell them apart (see `classifyRole`).
+ */
+type FakeRole = 'lead' | 'teammate'
+
+/** One scripted response: the single content block to answer with, and how that turn ends. */
+type FakeStep = { block: FakeContentBlock; stopReason: 'tool_use' | 'end_turn' }
+
+/**
+ * What the fake answers for ONE scenario, per role.
+ *
+ * A request that carries the main tool set consumes its role's NEXT step; past
+ * the end of a role's script the default `text: 'ok'` answers instead, so a
+ * late housekeeping turn ends a conversation rather than failing a scenario.
+ * The two roles advance independently, which is what makes a lead turn and a
+ * teammate turn interleaving in wall-clock order harmless.
+ */
+type FakeScript = { lead: FakeStep[]; teammate?: FakeStep[] }
+
+/**
+ * One served request, as the log records it.
+ *
+ * `step` is the 1-based script step the request consumed. On a `skipped`
+ * request - one carrying no main tool set, or arriving after its role's script
+ * ran out - it is instead how many steps that role had consumed by then, and
+ * nothing advanced.
+ */
+type FakeRequest = {
+  role: FakeRole
+  step: number
+  kind: 'tool_use' | 'text' | 'skipped'
+  name?: string
+}
+
+/**
+ * The half of a `/v1/messages` body this fake reads.
+ *
+ * `system` is the array of blocks the client sends (src/services/api sends
+ * `system: [{type:'text', text}]`) and is what tells the two roles apart. A
+ * message's `content` is either a plain string - which is what the CLI's side
+ * calls send - or an array of blocks; the type carries both so a future
+ * assertion on message content cannot be written against the wrong one.
+ */
+type FakeRequestBody = {
+  model?: string
+  stream?: boolean
+  system?: Array<{ type: string; text: string }>
+  messages?: Array<{
+    role: string
+    content: string | Array<{ type?: string; text?: string }>
+  }>
+  tools?: Array<{ name: string }>
+}
+
+/**
+ * The heading of the teammate system-prompt addendum
+ * (`src/utils/swarm/teammatePromptAddendum.ts:9`), appended to a teammate's
+ * system prompt and to nothing else.
+ */
+const TEAMMATE_SYSTEM_MARKER = '# Agent Teammate Communication'
+/**
+ * Lead or teammate, decided from the request body alone.
+ *
+ * Named and pure so the rule is one readable thing rather than a condition
+ * buried in the handler: a request is a TEAMMATE's iff its system prompt
+ * carries the teammate addendum. Everything else - the main loop, and every
+ * side call the CLI makes - is the lead's.
+ *
+ * A second signal was tried and REJECTED on evidence: "the last user message
+ * contains `<teammate-message`". It misclassifies the LEAD, because
+ * `formatAsTeammateMessage` (`src/utils/swarm/inProcessRunner.ts:589`) wraps a
+ * message in that tag for whoever RECEIVES it - and a teammate's idle
+ * notification is delivered to the lead. Observed directly while building
+ * scenario 5: a request with 34 tools, the lead's model and NO addendum,
+ * carrying `<teammate-message teammate_id="supervisor-one">`. Reading that as a
+ * teammate turn would serve the lead a teammate's script step. The addendum is
+ * appended to every in-process teammate's system prompt
+ * (`inProcessRunner.ts:2124`) except one this harness never uses
+ * (`systemPromptMode: 'replace'`), so it is both sufficient and safe here.
+ */
+function classifyRole(body: FakeRequestBody): FakeRole {
+  for (const block of body.system ?? []) {
+    if (block?.text?.includes(TEAMMATE_SYSTEM_MARKER) === true) return 'teammate'
+  }
+  return 'lead'
+}
+
+/** The tool whose presence marks the MAIN tool set. Also the tool the scripts spawn with. */
+const E2E_AGENT_TOOL = 'Agent'
+
+/**
+ * Does this request carry the main tool set - i.e. is it a turn of a
+ * conversation, rather than a side call?
+ *
+ * The guard that keeps the step counters honest. The old rule was stateless
+ * (`last message has a tool_result`), so any extra `/v1/messages` call the CLI
+ * makes - a topic or title classifier, a quota probe, a haiku-model helper -
+ * fell harmlessly into the `text: 'ok'` default. A step counter without this
+ * guard would let such a call EAT a scripted step and desynchronise the rest of
+ * the scenario. The main loop and a teammate's turn both ship the Agent tool; a
+ * classifier ships no tools at all.
+ */
+function carriesMainToolSet(body: FakeRequestBody): boolean {
+  return body.tools?.some(tool => tool.name === E2E_AGENT_TOOL) === true
+}
+
+/**
+ * The steps one role actually consumed, as `<step>:<kind>[:<tool>]`.
+ *
+ * Skipped requests are left out on purpose: they advance nothing, and how many
+ * of them the CLI makes is not something a scenario should pin.
+ */
+function consumedSteps(api: FakeAnthropicApi, role: FakeRole): string[] {
+  return api
+    .requests()
+    .filter(entry => entry.role === role && entry.kind !== 'skipped')
+    .map(entry => `${entry.step}:${entry.kind}${entry.name === undefined ? '' : `:${entry.name}`}`)
+}
+
+/**
+ * The same shape derived from the SCRIPT, so the expectation cannot drift from
+ * what the scenario actually scripted.
+ *
+ * A role can never consume more than its script holds (past the end every
+ * request is `skipped`), so comparing the two is exactly "the whole script was
+ * consumed, in order".
+ */
+function scriptedSteps(steps: FakeStep[]): string[] {
+  return steps.map(
+    (step, index) =>
+      `${index + 1}:${step.block.type}${step.block.type === 'tool_use' ? `:${step.block.name}` : ''}`,
+  )
+}
+
+/** The whole request log on one line, for a failing scenario's `actual`. */
+function formatRequestLog(api: FakeAnthropicApi): string {
+  const served = api
+    .requests()
+    .map(entry => `${entry.role}#${entry.step}:${entry.kind}${entry.name === undefined ? '' : `:${entry.name}`}`)
+    .join(' ')
+  return served === '' ? 'the fake served no /v1/messages request at all' : `fake saw: ${served}`
+}
 
 function sseEvent(type: string, data: Record<string, unknown>): string {
   return `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`
@@ -1033,10 +1266,21 @@ function fakeMessageStream(
   )
 }
 
-function startFakeAnthropicApi(): FakeAnthropicApi {
+/**
+ * The fake Messages API, driven by one scenario's per-role script.
+ *
+ * Statelessness was the old design: "the last message has a tool_result" and a
+ * single `spawnIssued` flag were enough while exactly one conversation (the
+ * lead's) ever reached it. A teammate that takes a turn of its own hits the
+ * SAME server, so the fake now keeps one step counter per ROLE and answers
+ * whatever that role's script says next - which is what lets scenario 5 script
+ * a lead spawning a sub-lead and that sub-lead building its own sub-team.
+ */
+function startFakeAnthropicApi(script: FakeScript): FakeAnthropicApi {
   let mainTurns = 0
-  let spawnIssued = false
   let nextId = 1
+  const consumed: Record<FakeRole, number> = { lead: 0, teammate: 0 }
+  const log: FakeRequest[] = []
   const server = Bun.serve({
     hostname: '127.0.0.1',
     port: 0,
@@ -1046,35 +1290,31 @@ function startFakeAnthropicApi(): FakeAnthropicApi {
         return Response.json({ input_tokens: 10 })
       }
       if (request.method === 'POST' && url.pathname.endsWith('/v1/messages')) {
-        const body = (await request.json()) as {
-          model?: string
-          stream?: boolean
-          messages?: Array<{ role: string; content: unknown }>
-          tools?: Array<{ name: string }>
-        }
-        const last = body.messages?.at(-1)
-        const lastHasToolResult =
-          Array.isArray(last?.content) &&
-          (last!.content as Array<{ type?: string }>).some(b => b?.type === 'tool_result')
-        const agentTool = body.tools?.find(tool => tool.name === 'Agent')
+        const body = (await request.json()) as FakeRequestBody
+        const role = classifyRole(body)
+        // Only a real turn may advance a counter (see `carriesMainToolSet`):
+        // a side call is served the default text and logged as `skipped`.
+        const roleScript = role === 'lead' ? script.lead : script.teammate ?? []
+        const step = carriesMainToolSet(body) ? roleScript[consumed[role]] : undefined
         let block: FakeContentBlock
         let stopReason: 'tool_use' | 'end_turn' = 'end_turn'
-        if (lastHasToolResult) {
-          mainTurns++
-          block = { type: 'text', text: `Spawned ${E2E_TEAMMATE}; it is idle and waiting for work.` }
-        } else if (agentTool && !spawnIssued) {
-          spawnIssued = true
-          mainTurns++
-          stopReason = 'tool_use'
-          block = {
-            type: 'tool_use',
-            id: 'toolu_e2e_spawn',
-            name: agentTool.name,
-            // No `prompt`: an idle spawn, routed in-process by the Agent tool.
-            input: { description: 'idle supervisor', name: E2E_TEAMMATE, team_name: E2E_TEAM },
-          }
+        if (step) {
+          consumed[role] += 1
+          // The lead's conversation IS the main loop, so its scripted steps are
+          // the main turns scenario 4 counts - the same arithmetic the
+          // tool_use/tool_result pair produced before there were roles.
+          if (role === 'lead') mainTurns++
+          block = step.block
+          stopReason = step.stopReason
+          log.push({
+            role,
+            step: consumed[role],
+            kind: block.type,
+            ...(block.type === 'tool_use' && { name: block.name }),
+          })
         } else {
           block = { type: 'text', text: 'ok' }
+          log.push({ role, step: consumed[role], kind: 'skipped' })
         }
         const id = `msg_e2e_${nextId++}`
         const model = body.model ?? 'e2e-model'
@@ -1110,10 +1350,38 @@ function startFakeAnthropicApi(): FakeAnthropicApi {
   return {
     baseUrl: `http://127.0.0.1:${server.port}`,
     mainTurns: () => mainTurns,
+    requests: () => log,
     stop: () => {
       server.stop(true)
     },
   }
+}
+
+/**
+ * Scenario 4's script, unchanged in every byte the CLI can see: the first main
+ * turn spawns `supervisor` into `e2e-team` with NO prompt - an idle spawn, so
+ * the Agent tool routes it in-process - and the turn carrying that tool's
+ * tool_result ends with a short text. Same tool_use id, same strings, same two
+ * main turns as before roles existed; only the mechanism that picks them moved
+ * out of the handler and into this table.
+ */
+const E2E_IDLE_SPAWN_SCRIPT: FakeScript = {
+  lead: [
+    {
+      block: {
+        type: 'tool_use',
+        id: 'toolu_e2e_spawn',
+        name: E2E_AGENT_TOOL,
+        // No `prompt`: an idle spawn, routed in-process by the Agent tool.
+        input: { description: 'idle supervisor', name: E2E_TEAMMATE, team_name: E2E_TEAM },
+      },
+      stopReason: 'tool_use',
+    },
+    {
+      block: { type: 'text', text: `Spawned ${E2E_TEAMMATE}; it is idle and waiting for work.` },
+      stopReason: 'end_turn',
+    },
+  ],
 }
 
 async function scenarioTeammateViewEscape(): Promise<ScenarioResult> {
@@ -1128,7 +1396,7 @@ async function scenarioTeammateViewEscape(): Promise<ScenarioResult> {
     rows: [],
     pane,
   })
-  const api = startFakeAnthropicApi()
+  const api = startFakeAnthropicApi(E2E_IDLE_SPAWN_SCRIPT)
   await startCliSession({
     // No teams flag: Agent Teams are on by default, and this scenario is
     // also the check that the default path really exposes the Agent tool's
@@ -1208,6 +1476,506 @@ async function scenarioTeammateViewEscape(): Promise<ScenarioResult> {
         ? 'the panel was visible with zero teammates before the spawn; returned to the leader view, and the teammate row/pill is still shown'
         : 'returned to the leader view, but the teammate row/pill is gone (Escape killed it)'
     return { name, passed: returned.ok && stillAlive, expected, actual, rows: [], pane: returned.pane }
+  } finally {
+    await stopCliSession()
+    api.stop()
+  }
+}
+
+/** The sub-lead the lead spawns, and the worker that sub-lead spawns into its own sub-team. */
+const E2E_SUB_LEAD = 'supervisor-one'
+const E2E_SUB_WORKER = 'worker-one'
+/**
+ * The team a teammate may create for itself: `<its team>/<its name>`, the only
+ * name TeamCreate accepts from a teammate (`TeamCreateTool.ts:143-156`).
+ */
+const E2E_SUB_TEAM = `${E2E_TEAM}/${E2E_SUB_LEAD}`
+/** The view header names a teammate by its path down the tree, one `›` per level. */
+const E2E_SUB_LEAD_HEADER = `Viewing team-lead › ${E2E_SUB_LEAD}`
+const E2E_SUB_WORKER_HEADER = `${E2E_SUB_LEAD_HEADER} › ${E2E_SUB_WORKER}`
+
+/**
+ * Scenario 5's script - the first one that answers BOTH roles.
+ *
+ * The lead spawns `supervisor-one` WITH a prompt, so it takes a turn at once
+ * instead of parking idle, and that turn creates its own sub-team. The member
+ * of that sub-team is then spawned by the LEAD, on a second prompt, with an
+ * explicit `team_name`.
+ *
+ * WHY THE LEAD AND NOT THE SUB-LEAD. The shape this scenario was written for -
+ * `supervisor-one` spawning `worker-one` itself - runs to completion but draws
+ * NOTHING: the teammate really is spawned and really does start (it reports
+ * itself idle over the team mailbox), yet it never gets a row, a pill, or a
+ * selectable entry, because a tool running inside a teammate's turn is handed
+ * an isolated no-op `setAppState` and that is the callback the spawn registers
+ * its task through. Chain, verified at this commit:
+ * `inProcessRunner.ts:2500` runs the turn with `isAsync: true` →
+ * `runAgent.ts:758` passes `shareSetAppState: !isAsync` →
+ * `forkedAgent.ts:421-423` substitutes `() => {}` →
+ * `spawnInProcess.ts:124,:224` registers through it. The escape hatch that
+ * exists for exactly this (`setAppStateForTasks`, `forkedAgent.ts:426-428` -
+ * "Task registration/kill must always reach the root store, even when
+ * setAppState is a no-op") is not on `SpawnContext` (`spawnInProcess.ts:66`).
+ * The tree is not at fault and this scenario proves it: spawned by the lead,
+ * the very same sub-team member is drawn indented under its sub-lead. Restoring
+ * the intended shape is a two-step script edit once that gap is fixed - drop
+ * the lead's steps 3-4 and give the teammate `Agent { name: worker-one }` with
+ * no `team_name`.
+ */
+const E2E_NESTED_TREE_SCRIPT: FakeScript = {
+  lead: [
+    {
+      block: {
+        type: 'tool_use',
+        id: 'toolu_e2e_spawn_sub_lead',
+        name: E2E_AGENT_TOOL,
+        input: {
+          description: 'lead a sub-team',
+          name: E2E_SUB_LEAD,
+          team_name: E2E_TEAM,
+          prompt: 'Create your sub-team',
+        },
+      },
+      stopReason: 'tool_use',
+    },
+    { block: { type: 'text', text: `Spawned ${E2E_SUB_LEAD}` }, stopReason: 'end_turn' },
+    {
+      block: {
+        type: 'tool_use',
+        id: 'toolu_e2e_spawn_worker',
+        name: E2E_AGENT_TOOL,
+        // No prompt: an idle spawn. `team_name` is the sub-team the teammate
+        // created in its own turn, which is what puts this row one level down.
+        input: { description: 'idle worker', name: E2E_SUB_WORKER, team_name: E2E_SUB_TEAM },
+      },
+      stopReason: 'tool_use',
+    },
+    { block: { type: 'text', text: `Spawned ${E2E_SUB_WORKER}` }, stopReason: 'end_turn' },
+  ],
+  teammate: [
+    {
+      block: {
+        type: 'tool_use',
+        id: 'toolu_e2e_sub_team',
+        name: 'TeamCreate',
+        // The only name TeamCreate accepts from a teammate: its own
+        // `<its team>/<its name>` (`TeamCreateTool.ts:143-156`).
+        input: { team_name: E2E_SUB_TEAM },
+      },
+      stopReason: 'tool_use',
+    },
+    { block: { type: 'text', text: 'sub-team ready' }, stopReason: 'end_turn' },
+  ],
+}
+
+/**
+ * Scenario 5 - the nested teammates tree: a sub-team member is drawn INDENTED
+ * under the sub-lead whose team it belongs to, and both rows are reachable by
+ * key, the deeper one naming its whole path in the view header.
+ *
+ * It is the first scenario in which a TEAMMATE takes a turn, which is the whole
+ * reason the fake grew per-role scripts: `supervisor-one` runs in this same
+ * process against the same client and the same ANTHROPIC_BASE_URL, so its
+ * requests and the lead's arrive at one server and are told apart by
+ * `classifyRole`.
+ *
+ * It walks DOWN only. Shift+Up is bound to `chat:messageActions` in the Chat
+ * context (`src/keybindings/defaultBindings.ts:88-90`) and never reaches
+ * `useBackgroundTaskNavigation`, so in a real terminal today the leader row's
+ * own `shift + ↑/↓ to select` hint is half true: Shift+Down steps, Shift+Up
+ * does nothing. Measured three times in three different selection states while
+ * building this scenario. Asserting the walk up would pin that defect as
+ * correct, so the scenario reaches both rows the way a user actually can - one
+ * Shift+Down at a time, Escape between them (Escape leaves the view but keeps
+ * the selection, so the next Shift+Down carries on from where the last one
+ * stopped).
+ */
+async function scenarioNestedTeamTree(): Promise<ScenarioResult> {
+  const name =
+    'Scenario 5 (nested tree): a sub-team member is drawn indented under its sub-lead, and Shift+Down + Enter opens first the sub-lead and then the deeper row, whose header names the whole path'
+  const expected = `one capture holding "${E2E_TREE_LEADER_ROW}", @${E2E_SUB_LEAD} and @${E2E_SUB_WORKER} indented under it, then "${E2E_SUB_LEAD_HEADER}" and "${E2E_SUB_WORKER_HEADER}" opened by Shift+Down + Enter, with the fake's per-role counters matching the script`
+  const fail = (actual: string, pane: string): ScenarioResult => ({
+    name,
+    passed: false,
+    expected,
+    actual,
+    rows: [],
+    pane,
+  })
+  const api = startFakeAnthropicApi(E2E_NESTED_TREE_SCRIPT)
+  await startCliSession({
+    extraEnv: {
+      ANTHROPIC_BASE_URL: api.baseUrl,
+      ANTHROPIC_API_KEY: FAKE_API_KEY,
+    },
+    extraGlobalConfig: {
+      customApiKeyResponses: { approved: [FAKE_API_KEY, FAKE_API_KEY.slice(-20)], rejected: [] },
+      // The one seed this scenario needs, and it does not touch the panel.
+      // The harness runs the CLI INSIDE a tmux pane, where `auto` routes a
+      // PROMPTED spawn to the pane backend (`backends/registry.ts:380-382`) -
+      // and a pane teammate is refused a sub-team outright, because nothing
+      // would deliver its sub-team's messages or hand out its task list
+      // (`TeamCreateTool.ts:136-140`). Without this the scenario would not be
+      // testing the nested tree at all; it would be testing that refusal.
+      teammateMode: 'in-process',
+    },
+  })
+  try {
+    tmux('send-keys', '-t', CLI_WINDOW, 'spawn supervisor-one to build its own sub-team', 'Enter')
+    // Both turns finished: the sub-lead has a row, its own script is spent (so
+    // TeamCreate has already returned and the sub-team exists), and the prompt
+    // is idle again - which is what makes the second prompt below land in an
+    // empty input rather than being typed on top of the first one.
+    const subTeamReady = await waitForPane(
+      `scenario 5: @${E2E_SUB_LEAD} spawned and its sub-team created`,
+      pane =>
+        treeRowColumn(pane, E2E_SUB_LEAD) >= 0 &&
+        consumedSteps(api, 'teammate').length >= 2 &&
+        !pane.includes('esc to interrupt'),
+      UI_TIMEOUT_MS,
+    )
+    if (!subTeamReady.ok) {
+      return fail(
+        `the sub-lead never created its sub-team (@${E2E_SUB_LEAD} column: ${treeRowColumn(
+          subTeamReady.pane,
+          E2E_SUB_LEAD,
+        )}; ${formatRequestLog(api)})`,
+        subTeamReady.pane,
+      )
+    }
+
+    tmux('send-keys', '-t', CLI_WINDOW, `add ${E2E_SUB_WORKER} to that sub-team`, 'Enter')
+
+    // ONE capture, all three rows: the nesting is a property of a single frame.
+    // @worker-one's glyph must sit strictly right of @supervisor-one's - the
+    // column, not a hard-coded prefix, so the indent width stays free to change
+    // and only the nesting itself is asserted.
+    const tree = await waitForPane(
+      `scenario 5: the nested tree - "${E2E_TREE_LEADER_ROW}" over @${E2E_SUB_LEAD} over an indented @${E2E_SUB_WORKER}`,
+      pane =>
+        pane.includes(E2E_TREE_LEADER_ROW) &&
+        treeRowColumn(pane, E2E_SUB_LEAD) >= 0 &&
+        treeRowColumn(pane, E2E_SUB_WORKER) > treeRowColumn(pane, E2E_SUB_LEAD),
+      UI_TIMEOUT_MS,
+    )
+    if (!tree.ok) {
+      return fail(
+        `the nested tree never rendered (leader row: ${
+          tree.pane.includes(E2E_TREE_LEADER_ROW) ? 'present' : 'MISSING'
+        }, @${E2E_SUB_LEAD} column: ${treeRowColumn(tree.pane, E2E_SUB_LEAD)}, @${E2E_SUB_WORKER} column: ${treeRowColumn(
+          tree.pane,
+          E2E_SUB_WORKER,
+        )}; ${formatRequestLog(api)})`,
+        tree.pane,
+      )
+    }
+
+    // One Shift+Down: the selectable rows are leader → the two teammates in
+    // depth-first order → hide, and an untouched selection steps from the
+    // leader (`stepOver`, `teammateSelection.ts:164-173`), so this lands on the
+    // sub-lead. Its header is a PREFIX of the deeper row's, so it is asserted
+    // together with the deeper one being absent.
+    tmux('send-keys', '-t', CLI_WINDOW, 'S-Down')
+    await sleep(200)
+    tmux('send-keys', '-t', CLI_WINDOW, 'Enter')
+    const viewingSubLead = await waitForPane(
+      `scenario 5: "${E2E_SUB_LEAD_HEADER}" (and not the deeper row's) after Shift+Down, Enter`,
+      pane => pane.includes(E2E_SUB_LEAD_HEADER) && !pane.includes(E2E_SUB_WORKER_HEADER),
+      UI_TIMEOUT_MS,
+    )
+    if (!viewingSubLead.ok) {
+      return fail(
+        `the sub-lead's view never opened (selected row: ${selectedTreeRow(viewingSubLead.pane) ?? 'NONE'})`,
+        viewingSubLead.pane,
+      )
+    }
+
+    tmux('send-keys', '-t', CLI_WINDOW, 'Escape')
+    const leftSubLead = await waitForPane(
+      `scenario 5: the leader view back after Escape from @${E2E_SUB_LEAD}`,
+      pane => !pane.includes(E2E_SUB_LEAD_HEADER),
+      UI_TIMEOUT_MS,
+    )
+    if (!leftSubLead.ok) return fail(`Escape did not leave "${E2E_SUB_LEAD_HEADER}"`, leftSubLead.pane)
+
+    // Escape kept the selection, so this second Shift+Down carries on from the
+    // sub-lead into its sub-team. The header now names the whole path down the
+    // tree, which is the thing a bare handle could not tell apart.
+    tmux('send-keys', '-t', CLI_WINDOW, 'S-Down')
+    await sleep(200)
+    tmux('send-keys', '-t', CLI_WINDOW, 'Enter')
+    const viewingWorker = await waitForPane(
+      `scenario 5: "${E2E_SUB_WORKER_HEADER}" after a second Shift+Down, Enter`,
+      pane => pane.includes(E2E_SUB_WORKER_HEADER),
+      UI_TIMEOUT_MS,
+    )
+    if (!viewingWorker.ok) {
+      return fail(
+        `the sub-team member's view never opened (selected row: ${selectedTreeRow(viewingWorker.pane) ?? 'NONE'})`,
+        viewingWorker.pane,
+      )
+    }
+
+    tmux('send-keys', '-t', CLI_WINDOW, 'Escape')
+    const returned = await waitForPane(
+      `scenario 5: the leader view back after Escape from @${E2E_SUB_WORKER}`,
+      pane => !pane.includes(E2E_SUB_WORKER_HEADER),
+      UI_TIMEOUT_MS,
+    )
+    if (!returned.ok) return fail(`Escape did not leave "${E2E_SUB_WORKER_HEADER}"`, returned.pane)
+
+    // Both scripts consumed in full, in order. A role can never consume more
+    // steps than its script holds, so this is exactly "every scripted step was
+    // served to the role it was written for" - the per-role counters.
+    const leadSteps = consumedSteps(api, 'lead').join(' ')
+    const teammateSteps = consumedSteps(api, 'teammate').join(' ')
+    const wantedLead = scriptedSteps(E2E_NESTED_TREE_SCRIPT.lead).join(' ')
+    const wantedTeammate = scriptedSteps(E2E_NESTED_TREE_SCRIPT.teammate ?? []).join(' ')
+    const countersMatch = leadSteps === wantedLead && teammateSteps === wantedTeammate
+    const actual = countersMatch
+      ? `all three rows in one capture with @${E2E_SUB_WORKER} indented under @${E2E_SUB_LEAD}; both headers opened and left by key; ${formatRequestLog(api)}`
+      : `the tree and both headers were right, but the fake's per-role counters did not match the script (lead: "${leadSteps}" vs "${wantedLead}", teammate: "${teammateSteps}" vs "${wantedTeammate}"; ${formatRequestLog(api)})`
+    return { name, passed: countersMatch, expected, actual, rows: [], pane: returned.pane }
+  } finally {
+    await stopCliSession()
+    api.stop()
+  }
+}
+/**
+ * Scenario 6's two idle teammates. The names are the roles they play, and the
+ * order matters: a team's members are sorted by name
+ * (`orderTeammatesDepthFirst`), so `doomed` is the FIRST row and `survivor` the
+ * second - the shape the nearest-survivor rule is written for.
+ */
+const E2E_KILL_TARGET = 'doomed'
+const E2E_KILL_SURVIVOR = 'survivor'
+
+/**
+ * The selected `doomed` row once it has been killed, as
+ * `TeammateSpinnerLine` draws it: the highlighted tree glyph `╞═`
+ * (`:97` - `╘═` is only for the LAST row, and in selection mode no row is
+ * last), the `@name`, and the terminal word that replaces the activity
+ * (`:196`). Everything from the pointer leftwards is padding, and everything
+ * past `killed` is the stats block, so this is asserted as a prefix.
+ *
+ * Derived from a real capture, like every other literal here, and spelled with
+ * escapes so an editor round-trip cannot quietly turn `╞═` into `|=`.
+ */
+const E2E_TREE_KILLED_SELECTED_ROW = `╞═ @${E2E_KILL_TARGET}: killed`
+
+/** How long a killed row is given to prove it LINGERS rather than merely existing for one frame. */
+const GRACE_PROBE_MS = 2_000
+
+/** Two idle teammates in one turn, so one can be killed while the other stays alive. */
+const E2E_TWO_TEAMMATES_SCRIPT: FakeScript = {
+  lead: [
+    {
+      block: {
+        type: 'tool_use',
+        id: 'toolu_e2e_spawn_doomed',
+        name: E2E_AGENT_TOOL,
+        input: { description: 'idle teammate', name: E2E_KILL_TARGET, team_name: E2E_TEAM },
+      },
+      stopReason: 'tool_use',
+    },
+    {
+      block: {
+        type: 'tool_use',
+        id: 'toolu_e2e_spawn_survivor',
+        name: E2E_AGENT_TOOL,
+        input: { description: 'idle teammate', name: E2E_KILL_SURVIVOR, team_name: E2E_TEAM },
+      },
+      stopReason: 'tool_use',
+    },
+    {
+      block: { type: 'text', text: `Spawned ${E2E_KILL_TARGET} and ${E2E_KILL_SURVIVOR}` },
+      stopReason: 'end_turn',
+    },
+  ],
+}
+
+/**
+ * Scenario 6 - the panel is a PANEL: it is reachable with no teammates at all,
+ * a hidden one stays hidden until the user asks for it, and a row that dies
+ * under the cursor keeps both its place and the cursor.
+ *
+ * This is the only scenario that boots with the toggle OFF, and the seed is
+ * deliberate rather than convenient: the branch under test is
+ * `stepTeammateSelection`'s first-press-expands-a-collapsed-tree
+ * (`useBackgroundTaskNavigation.ts:43-50`), which no scenario can reach from
+ * the shipped default. Every OTHER scenario boots at the default, on.
+ *
+ * The order of the steps is forced by one product rule: Shift+Down is handed to
+ * the tree only when a teammate is alive OR the panel is already expanded
+ * (`useBackgroundTaskNavigation.ts:219-226`), so with a collapsed panel and no
+ * teammates the press belongs to the background-tasks dialog and CANNOT expand
+ * the panel. The empty state is therefore reached the way a user reaches it
+ * with nothing spawned - ctrl+t, which cycles none → tasks → teammates → none
+ * (`nextExpandedView`) - and the expand-from-collapsed press comes later, once
+ * the teammates are alive.
+ */
+async function scenarioTreePersists(): Promise<ScenarioResult> {
+  const name =
+    'Scenario 6 (tree persists): a hidden panel stays hidden, ctrl+t reaches its empty state with no teammates, Shift+Down expands it onto the leader row, and a killed row keeps its place AND the highlight'
+  const expected = `no panel at boot, then "${E2E_TREE_LEADER_ROW}" over "${E2E_TREE_EMPTY_ROW}" on ctrl+t, hidden again, then Shift+Down expanding onto the selected leader row and "${E2E_TREE_KILLED_SELECTED_ROW}" still selected and still on screen ${GRACE_PROBE_MS}ms after the kill, with @${E2E_KILL_SURVIVOR} alive beside it`
+  const fail = (actual: string, pane: string): ScenarioResult => ({
+    name,
+    passed: false,
+    expected,
+    actual,
+    rows: [],
+    pane,
+  })
+  const api = startFakeAnthropicApi(E2E_TWO_TEAMMATES_SCRIPT)
+  await startCliSession({
+    extraEnv: {
+      ANTHROPIC_BASE_URL: api.baseUrl,
+      ANTHROPIC_API_KEY: FAKE_API_KEY,
+    },
+    extraGlobalConfig: {
+      customApiKeyResponses: { approved: [FAKE_API_KEY, FAKE_API_KEY.slice(-20)], rejected: [] },
+      // The ONE scenario that hides the panel, and only to test un-hiding it.
+      // Never in the shared seed (`seedConfigDir`) and never in another
+      // scenario: a seed that turns the feature under test off is how the
+      // panel's own end-to-end coverage was lost once already.
+      showSpinnerTree: false,
+    },
+  })
+  try {
+    // `startCliSession` has already waited for the prompt, so this capture is a
+    // decided state rather than a race: an explicit hide survived startup.
+    const atBoot = capturePane()
+    if (atBoot.includes(E2E_TREE_LEADER_ROW)) {
+      return fail('the panel was drawn at boot even though the config hid it', atBoot)
+    }
+
+    // Two presses: none → tasks → teammates. The panel draws its own empty
+    // state, so this is reachable with nothing spawned - which is exactly the
+    // state no other scenario can hold once a teammate is alive.
+    tmux('send-keys', '-t', CLI_WINDOW, 'C-t')
+    await sleep(200)
+    tmux('send-keys', '-t', CLI_WINDOW, 'C-t')
+    const emptyPanel = await waitForPane(
+      `scenario 6: the empty panel after ctrl+t ×2 - "${E2E_TREE_LEADER_ROW}" over "${E2E_TREE_EMPTY_ROW}"`,
+      pane => pane.includes(E2E_TREE_LEADER_ROW) && pane.includes(E2E_TREE_EMPTY_ROW),
+      UI_TIMEOUT_MS,
+    )
+    if (!emptyPanel.ok) {
+      return fail(
+        `ctrl+t did not reach the panel's empty state (leader row: ${
+          emptyPanel.pane.includes(E2E_TREE_LEADER_ROW) ? 'present' : 'MISSING'
+        }, empty state: ${emptyPanel.pane.includes(E2E_TREE_EMPTY_ROW) ? 'present' : 'MISSING'})`,
+        emptyPanel.pane,
+      )
+    }
+
+    // Back to collapsed, so the Shift+Down below is the expand press.
+    tmux('send-keys', '-t', CLI_WINDOW, 'C-t')
+    const collapsed = await waitForPane(
+      'scenario 6: the panel hidden again after a third ctrl+t',
+      pane => !pane.includes(E2E_TREE_LEADER_ROW),
+      UI_TIMEOUT_MS,
+    )
+    if (!collapsed.ok) return fail('ctrl+t did not collapse the panel again', collapsed.pane)
+
+    tmux('send-keys', '-t', CLI_WINDOW, 'spawn two idle teammates', 'Enter')
+    const spawned = await waitForPane(
+      `scenario 6: @${E2E_KILL_TARGET} and @${E2E_KILL_SURVIVOR} spawned with the panel still hidden`,
+      pane =>
+        pane.includes(`Spawned ${E2E_KILL_TARGET} and ${E2E_KILL_SURVIVOR}`) &&
+        api.mainTurns() >= 3 &&
+        !pane.includes('esc to interrupt'),
+      UI_TIMEOUT_MS,
+    )
+    if (!spawned.ok) {
+      return fail(
+        `the two idle teammates were not spawned (fake API served ${api.mainTurns()} main turn(s); ${formatRequestLog(api)})`,
+        spawned.pane,
+      )
+    }
+    if (spawned.pane.includes(E2E_TREE_LEADER_ROW)) {
+      return fail('spawning a teammate re-opened the panel the user had hidden', spawned.pane)
+    }
+
+    // The branch this scenario exists for: from a COLLAPSED panel the first
+    // Shift+Down expands the tree and parks on the leader - it does not step a
+    // row. The pointer is what proves "selected"; `E2E_TREE_LEADER_ROW` alone
+    // cannot, because the leader row is highlighted whenever no teammate
+    // transcript is open and would read the same unselected.
+    tmux('send-keys', '-t', CLI_WINDOW, 'S-Down')
+    const expanded = await waitForPane(
+      'scenario 6: the panel expanded by Shift+Down with the leader row selected',
+      pane => selectedTreeRow(pane)?.startsWith(E2E_TREE_LEADER_ROW) === true,
+      UI_TIMEOUT_MS,
+    )
+    if (!expanded.ok) {
+      return fail(
+        `Shift+Down did not expand the panel onto the selected leader row (selected rows: ${JSON.stringify(
+          selectedTreeRows(expanded.pane),
+        )})`,
+        expanded.pane,
+      )
+    }
+
+    // One more press moves onto the FIRST teammate row - the one about to die.
+    tmux('send-keys', '-t', CLI_WINDOW, 'S-Down')
+    const onTarget = await waitForPane(
+      `scenario 6: the selection on @${E2E_KILL_TARGET}, the first teammate row`,
+      pane => selectedTreeRow(pane)?.startsWith(`╞═ @${E2E_KILL_TARGET}:`) === true,
+      UI_TIMEOUT_MS,
+    )
+    if (!onTarget.ok) {
+      return fail(
+        `the selection never reached @${E2E_KILL_TARGET} (selected rows: ${JSON.stringify(
+          selectedTreeRows(onTarget.pane),
+        )})`,
+        onTarget.pane,
+      )
+    }
+
+    // The half of the survivor rule that is pinnable without sleeping out the
+    // 30s grace: the killed row does not vanish under the cursor. It keeps its
+    // place, reads its terminal word, and the highlight is STILL on it - not
+    // dangling on nothing, and not jumped onto the teammate that is still
+    // alive. (The other half - where the highlight lands once the grace
+    // expires and the row finally leaves - would cost a 30s sleep; see RISKS.)
+    tmux('send-keys', '-t', CLI_WINDOW, 'k')
+    const killed = await waitForPane(
+      `scenario 6: "${E2E_TREE_KILLED_SELECTED_ROW}" still selected, with @${E2E_KILL_SURVIVOR} alive`,
+      pane =>
+        selectedTreeRow(pane)?.startsWith(E2E_TREE_KILLED_SELECTED_ROW) === true &&
+        treeRowColumn(pane, E2E_KILL_SURVIVOR) >= 0,
+      UI_TIMEOUT_MS,
+    )
+    if (!killed.ok) {
+      return fail(
+        `the killed row did not keep its place and its highlight (selected rows: ${JSON.stringify(
+          selectedTreeRows(killed.pane),
+        )}, @${E2E_KILL_SURVIVOR} column: ${treeRowColumn(killed.pane, E2E_KILL_SURVIVOR)})`,
+        killed.pane,
+      )
+    }
+
+    // It LINGERS: the same three facts a couple of seconds later, plus the
+    // panel itself still on screen with its root row. Deliberately not the
+    // full 30s - the grace has no env or config knob to shorten it, and a
+    // half-minute sleep in an e2e run buys one boundary that unit tests
+    // already own with a mocked clock.
+    await sleep(GRACE_PROBE_MS)
+    const lingering = capturePane()
+    const stillSelected = selectedTreeRow(lingering)
+    const passed =
+      stillSelected?.startsWith(E2E_TREE_KILLED_SELECTED_ROW) === true &&
+      treeRowColumn(lingering, E2E_KILL_SURVIVOR) >= 0 &&
+      lingering.includes(E2E_TREE_LEADER_ROW)
+    const actual = passed
+      ? `the panel stayed hidden until asked for, ctrl+t reached its empty state, Shift+Down expanded it onto the selected leader row, and @${E2E_KILL_TARGET} still reads "killed" under the highlight ${GRACE_PROBE_MS}ms later with @${E2E_KILL_SURVIVOR} alive and the root row on screen`
+      : `${GRACE_PROBE_MS}ms after the kill the tree was wrong (selected rows: ${JSON.stringify(
+          selectedTreeRows(lingering),
+        )}, @${E2E_KILL_SURVIVOR} column: ${treeRowColumn(lingering, E2E_KILL_SURVIVOR)}, root row: ${
+          lingering.includes(E2E_TREE_LEADER_ROW) ? 'present' : 'MISSING'
+        })`
+    return { name, passed, expected, actual, rows: [], pane: lingering }
   } finally {
     await stopCliSession()
     api.stop()
@@ -1321,13 +2089,15 @@ async function main(): Promise<number> {
     // scenario, and killing an absent server costs nothing.
     tmux('kill-server')
 
-    // Awaited one at a time, deliberately: all four drive the same session
+    // Awaited one at a time, deliberately: all six drive the same session
     // name on the same server, so they must not overlap.
     const results = [
       await scenarioBatchedKeys(),
       await scenarioWindowSwitch(),
       await scenarioSplitEscape(),
       await scenarioTeammateViewEscape(),
+      await scenarioNestedTeamTree(),
+      await scenarioTreePersists(),
     ]
     report(results)
     return results.every(result => result.passed) ? 0 : 1

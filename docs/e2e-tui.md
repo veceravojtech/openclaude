@@ -57,7 +57,9 @@ collected by the default `bun test`, and therefore by `bun run check` and CI.
 | 1 | `Down Down Enter` in **one** `send-keys` call | the row **two** below the preselected one is confirmed |
 | 2 | `select-window` away and back, then `Down Enter` | the row **one** below the preselected one is confirmed |
 | 3 | `send-keys -H 1b`, 350ms gap, `send-keys -H 5b 42` | picker dismissed by the residual Escape, **no** `[B` in the prompt |
-| 4 | a prompt answered by a **fake** Messages API with an `Agent` tool call, then `S-Down S-Down Enter`, then `Escape` | `Viewing team-lead › supervisor` opens, one Escape returns to the leader, the `@supervisor` pill survives |
+| 4 | a prompt answered by a **fake** Messages API with an `Agent` tool call, then `S-Down Enter`, then `Escape` | the teammates panel is up with **no** teammates before the spawn; `Viewing team-lead › supervisor` opens, one Escape returns to the leader, the `@supervisor` row survives |
+| 5 | two prompts answered by a fake that scripts the **lead and the teammate**, then `S-Down Enter Escape` and `S-Down Enter Escape` | `@worker-one` is drawn **indented** under `@supervisor-one`, and `Viewing team-lead › supervisor-one` then `… › worker-one` open in turn |
+| 6 | boot with the panel hidden, `C-t C-t`, `C-t`, a prompt spawning two idle teammates, then `S-Down`, `S-Down`, `k` | the panel is absent at boot, shows its empty state on ctrl+t, re-appears on Shift+Down with the **leader row selected**, and the killed row keeps its place, its `killed` word and the highlight |
 
 Scenario 1 reproduces the batched-stdin defect: every key of a single
 `send-keys` call reaches the CLI in one stdin read, so `Enter` can act on the
@@ -87,30 +89,131 @@ teammate by its path down the team tree, so the string the harness greps for is
 pre-fix hook it fails with
 `still "Viewing team-lead › supervisor" 15000ms after Escape`.
 
-All four scenarios pass on the current tree, so `bun run e2e:tui` exits 0. It
+Scenario 5 covers the teammates tree's **nesting**: a teammate that creates its
+own sub-team, and a member of that sub-team drawn one level in. The indent is
+asserted by COLUMN — `@worker-one`'s tree glyph must start strictly right of
+`@supervisor-one`'s, in ONE capture — rather than against a hard-coded prefix,
+so the two-columns-per-level width stays free to change. Both rows are then
+opened by key, because the view header is what proves the row's PATH down the
+tree (`Viewing team-lead › supervisor-one › worker-one`) rather than just its
+handle.
+
+Two product limits shape it, and both are worth knowing before editing it:
+
+- The sub-team member is spawned by the **lead**, with an explicit `team_name`,
+  not by `@supervisor-one` itself. A teammate's own `Agent` spawn does start a
+  teammate — it runs and reports itself idle — but the task is never registered
+  in AppState, so it has no row, no pill and no selectable entry. A tool running
+  inside a teammate's turn is handed an isolated no-op `setAppState`
+  (`inProcessRunner.ts` runs the turn with `isAsync: true` → `runAgent.ts`
+  passes `shareSetAppState: !isAsync` → `forkedAgent.ts` substitutes `() => {}`),
+  and that is the callback `spawnInProcess.ts` registers the task through; the
+  `setAppStateForTasks` escape hatch that exists for exactly this case is not on
+  its `SpawnContext`.
+- The scenario walks **down only**. `shift+up` is bound to
+  `chat:messageActions` in the Chat context (`src/keybindings/defaultBindings.ts`)
+  and never reaches `useBackgroundTaskNavigation`, so today `Shift+Down` steps
+  the tree selection and `Shift+Up` does nothing — measured in three different
+  selection states. Asserting the walk up would pin that as correct, so the
+  scenario reaches both rows with `Shift+Down` alone: Escape leaves a transcript
+  view but KEEPS the selection, so the next `Shift+Down` carries on from where
+  the last one stopped.
+
+Scenario 6 covers the panel as a **panel**. It is the only scenario that boots
+with the toggle off (`showSpinnerTree: false` in its OWN config, never in the
+shared seed), because the branch under test — the first `Shift+Down` on a
+collapsed tree expands it and parks on the leader — cannot be reached from the
+shipped default. It then checks that a hidden panel stays hidden across a spawn,
+and that a row killed under the cursor keeps its place, reads the terminal word
+`killed`, and keeps the highlight: never dangling, never jumped onto the
+teammate that is still alive.
+
+Two details of scenario 6 are load-bearing. First, "the leader row is selected"
+is asserted on the **selection pointer**, not on the leader row's text: the
+leader row is drawn highlighted whenever no teammate transcript is open
+(`isLeaderHighlighted = isLeaderForegrounded || isLeaderSelected`), so its `╒═`
+glyph says nothing about selection. The pointer does, and the harness reads the
+one tree row carrying it (`   ❯╒═ team-lead · shift + ↑/↓ to select`, taken
+verbatim from a capture). Second, the empty state is reached with `ctrl+t`
+rather than `Shift+Down`: `Shift+Down` is handed to the tree only when a
+teammate is alive or the panel is already expanded, so on a collapsed panel with
+nothing spawned it belongs to the background-tasks dialog and cannot expand
+anything. The killed row is re-checked 2s later rather than after the full 30s
+grace, which has no env or config knob to shorten — the grace boundary itself is
+a unit test's job, with a mocked clock.
+
+All six scenarios pass on the current tree, so `bun run e2e:tui` exits 0. It
 exits non-zero the moment any of them reproduces again, which is what makes it a
 regression test rather than a one-shot reproducer.
 
-## Scenario 4's fake Messages API
+## The fake Messages API and its per-role scripts
 
-The teammate has to come from the model calling the Agent tool, and the harness
-runs offline, so scenario 4 starts a fake Anthropic Messages API on the loopback
-interface (`Bun.serve`, port 0) and points the CLI at it with
+A teammate has to come from the model calling the Agent tool, and the harness
+runs offline, so scenarios 4-6 start a fake Anthropic Messages API on the
+loopback interface (`Bun.serve`, port 0) and point the CLI at it with
 `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` (a fake key, pre-approved in the
 seeded config's `customApiKeyResponses` so no dialog precedes the prompt). No
-teams flag is passed: Agent Teams are on by default, so the scenario doubles as
-the check that the default path exposes the Agent tool's `name` parameter. The
-fake scripts exactly two main turns: the first
-request that declares the `Agent` tool is answered with a `tool_use` spawning
-`supervisor` in team `e2e-team` with **no prompt** (an idle spawn, always
-in-process), and the request carrying that tool's `tool_result` is answered with
-a short text. Every other request, such as side calls that declare no `Agent`
-tool, gets a one-word text, so nothing else can spawn. Responses are streamed as
-SSE when the client asks for a stream and returned as JSON otherwise;
-`/v1/messages/count_tokens` answers a constant, and any other route is a 404.
+teams flag is passed: Agent Teams are on by default, so scenario 4 doubles as
+the check that the default path exposes the Agent tool's `name` parameter.
+Responses are streamed as SSE when the client asks for a stream and returned as
+JSON otherwise; `/v1/messages/count_tokens` answers a constant, and any other
+route is a 404.
+
+Each scenario hands the fake ONE script — a list of steps per role, each step a
+single content block plus its `stop_reason`:
+
+| Scenario | Role | Step | Answer |
+| --- | --- | --- | --- |
+| 4 | lead | 1 | `tool_use` `Agent { description, name: supervisor, team_name: e2e-team }` (no prompt: an idle spawn) |
+| 4 | lead | 2 | text `Spawned supervisor; it is idle and waiting for work.` |
+| 5 | lead | 1 | `tool_use` `Agent { name: supervisor-one, team_name: e2e-team, prompt: "Create your sub-team" }` |
+| 5 | lead | 2 | text `Spawned supervisor-one` |
+| 5 | lead | 3 | `tool_use` `Agent { name: worker-one, team_name: e2e-team/supervisor-one }` (idle) |
+| 5 | lead | 4 | text `Spawned worker-one` |
+| 5 | teammate | 1 | `tool_use` `TeamCreate { team_name: e2e-team/supervisor-one }` |
+| 5 | teammate | 2 | text `sub-team ready` |
+| 6 | lead | 1 | `tool_use` `Agent { name: doomed, team_name: e2e-team }` (idle) |
+| 6 | lead | 2 | `tool_use` `Agent { name: survivor, team_name: e2e-team }` (idle) |
+| 6 | lead | 3 | text `Spawned doomed and survivor` |
+
+**The discriminator.** A teammate's turn hits the SAME fake — it runs in the
+same process, against the same client and the same `ANTHROPIC_BASE_URL` — so the
+fake has to know whose conversation a request belongs to. `classifyRole` answers
+it from the request body alone: a request is a teammate's iff a `system` block
+carries `# Agent Teammate Communication`, the addendum appended to every
+in-process teammate's system prompt (`teammatePromptAddendum.ts`,
+`inProcessRunner.ts`). A second signal — "the last user message contains
+`<teammate-message`" — was tried and **rejected on evidence**: that tag wraps a
+message for whoever RECEIVES it, so a teammate's idle notification carries it
+into the LEAD's conversation, and the fake would then serve the lead a
+teammate's script step.
+
+**The auxiliary-request guard.** Only a request that carries the main tool set —
+`tools` containing `Agent` — may consume a step. Everything else is answered
+`text: "ok"` and logged as `skipped`. This is not hypothetical: the very first
+request of every scenario is a haiku-model side call with **zero** tools, and
+without the guard it would eat the lead's step 1 and desynchronise everything
+after it. Past the end of a role's script the same default answers, so a late
+housekeeping turn ends a conversation instead of failing a scenario. Every
+served request is recorded, and `requests()` is both what scenario 5 asserts its
+counters on and what a failing scenario prints into its `actual`, e.g.
+`fake saw: lead#0:skipped lead#1:tool_use:Agent lead#2:text
+teammate#1:tool_use:TeamCreate teammate#2:text lead#3:tool_use:Agent lead#4:text`.
+
+**The `teammateMode: 'in-process'` seed (scenario 5 only).** The harness runs
+the CLI inside a tmux pane, and in `auto` mode a PROMPTED spawn is routed to the
+pane backend there (`backends/registry.ts`) — where a teammate is refused a
+sub-team outright, because nothing would deliver its sub-team's messages or hand
+out its task list (`TeamCreateTool.ts`). Without the seed scenario 5 would not
+be testing the nested tree at all; it would be testing that refusal. An IDLE
+spawn needs no seed: it is always routed in-process.
+
+No other scenario seeds anything that touches teammates, and **no seed may hide
+the feature under test** — the one exception is scenario 6's own
+`showSpinnerTree: false`, whose whole purpose is to un-hide the panel by key.
 
 With a teammate alive the footer hint changes from `? for shortcuts` to
-`shift + ↓ to expand`, so the scenario reads the turn's end from the scripted
+`shift + ↓ to expand`, so the scenarios read a turn's end from the scripted
 final text plus the spinner's `esc to interrupt` being gone, not from the hint.
 
 ## Expectations come from the pane, not from a table
