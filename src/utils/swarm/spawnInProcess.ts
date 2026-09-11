@@ -519,9 +519,7 @@ function killOneInProcessTeammate(
           retain: false,
           evictAfter: Date.now() + TEAMMATE_GRACE_MS,
           onIdleCallbacks: [], // Clear callbacks to prevent stale references
-          messages: teammateTask.messages?.length
-            ? [teammateTask.messages[teammateTask.messages.length - 1]!]
-            : undefined,
+          // task.messages is left alone — the grace row above is opened onto it.
           pendingUserMessages: [],
           inProgressToolUseIDs: undefined,
           abortController: undefined,

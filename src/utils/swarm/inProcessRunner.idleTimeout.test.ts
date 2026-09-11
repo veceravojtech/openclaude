@@ -761,3 +761,30 @@ test('a wake message handed over while other work arrives in the same round is n
 
   await stopTeammate(started)
 })
+
+test('a completed teammate keeps the conversation its grace row holds open', async () => {
+  // The completion tail used to collapse `messages` to its last entry in the
+  // same literal that granted the grace window, so the row T6 kept alive opened
+  // onto one message. One turn is run first, because a teammate that completes
+  // with nothing mirrored cannot tell truncation from an empty conversation.
+  process.env.CLAUDE_CODE_TEAMMATE_IDLE_TIMEOUT_MS = '1000'
+  registerIdleTimeoutHook([{ decision: 'block', reason: 'Review PR #7' }])
+  const harness = await importRunnerWithMocks()
+  const started = await startIdleTeammate(harness, 'idle-worker')
+
+  await waitFor(() => harness.runAgentCalls.length === 1, 'hook-driven turn')
+  await waitFor(
+    () => idleNotifications(harness.leadMailbox).length === 2,
+    'post-turn idle notification',
+  )
+  expect(
+    getTeammateTask(started.getState(), started.taskId)?.messages,
+  ).toHaveLength(2)
+
+  await stopTeammate(started)
+
+  const ended = getTeammateTask(started.getState(), started.taskId)
+  expect(ended?.status).toBe('completed')
+  expect(ended?.evictAfter).toBeGreaterThan(Date.now())
+  expect(ended?.messages?.map(m => m.type)).toEqual(['user', 'assistant'])
+})

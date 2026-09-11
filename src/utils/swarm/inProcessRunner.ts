@@ -2675,7 +2675,7 @@ export async function runInProcessTeammate(
           // task once the deadline passes. See types.ts on the pair.
           retain: false,
           evictAfter: Date.now() + TEAMMATE_GRACE_MS,
-          messages: task.messages?.length ? [task.messages.at(-1)!] : undefined,
+          // task.messages is left alone — the grace row above is opened onto it.
           pendingUserMessages: [],
           inProgressToolUseIDs: undefined,
           abortController: undefined,
@@ -2763,7 +2763,7 @@ export async function runInProcessTeammate(
           retain: false,
           evictAfter: Date.now() + TEAMMATE_GRACE_MS,
           onIdleCallbacks: [],
-          messages: task.messages?.length ? [task.messages.at(-1)!] : undefined,
+          // task.messages is left alone — the grace row above is opened onto it.
           pendingUserMessages: [],
           inProgressToolUseIDs: undefined,
           abortController: undefined,

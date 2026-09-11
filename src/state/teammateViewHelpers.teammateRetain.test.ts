@@ -260,3 +260,31 @@ test('a local_agent is retained and released exactly as before', () => {
   // today, and each task type is released against its own.
   expect(released.evictAfter).toBe(NOW + PANEL_GRACE_MS)
 })
+
+test("the local_agent's disk bootstrap still gets the state it keys on", () => {
+  // REPL's bootstrap effect fires on isLocalAgentTask && retain && !diskLoaded,
+  // and it is the reason a local_agent may be released back to a stub at all.
+  // A teammate answers the first conjunct false and carries no diskLoaded, so
+  // the effect never runs for it and task.messages is all its view has.
+  const s = store({
+    'task-agent': localAgent({
+      messages: [{ type: 'assistant' }],
+      diskLoaded: true,
+    } as unknown as Partial<LocalAgentTaskState>),
+    'task-supervisor': inGrace(),
+  })
+
+  enterTeammateView('task-agent', s.setAppState)
+  exitTeammateView(s.setAppState)
+  enterTeammateView('task-agent', s.setAppState)
+
+  const reopened = s.get().tasks['task-agent'] as LocalAgentTaskState
+  expect(reopened.type).toBe('local_agent')
+  expect(reopened.retain).toBe(true)
+  expect(reopened.diskLoaded).toBe(false)
+  expect(reopened.messages).toBeUndefined()
+
+  enterTeammateView('task-supervisor', s.setAppState)
+  expect('diskLoaded' in s.task('task-supervisor')).toBe(false)
+  expect(s.task('task-supervisor').messages).toHaveLength(1)
+})

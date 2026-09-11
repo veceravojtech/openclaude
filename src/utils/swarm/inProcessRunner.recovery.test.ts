@@ -65,6 +65,7 @@ const SUB_TEAM = `${PARENT_TEAM}/${SUB_LEAD}`
 const SUB_LEAD_AGENT_ID = `${SUB_LEAD}@${PARENT_TEAM}`
 const ROOT_LEAD_AGENT_ID = `${TEAM_LEAD_NAME}@${PARENT_TEAM}`
 const WORKER = 'worker'
+const STREAM_DIED = 'boom: the model stream died'
 
 /** Virtual clock: Date.now() is frozen except when the poll loop sleeps. */
 let virtualNow = 1_700_000_000_000
@@ -159,10 +160,12 @@ type Harness = {
  * Imports the runner with the same mocks the U5 sub-team suite uses: a
  * scripted `runAgent`, an in-memory mailbox keyed by team, and a `sleep` that
  * only advances the virtual clock. `failTurns` makes `runAgent` throw, which
- * is the only way into the runner's terminal failure path.
+ * is the only way into the runner's terminal failure path; `yieldBeforeFailure`
+ * streams one assistant message first, so the teammate reaches that path with a
+ * conversation behind it rather than the initial prompt alone.
  */
 async function importRunnerWithMocks(
-  options: { failTurns?: boolean } = {},
+  options: { failTurns?: boolean; yieldBeforeFailure?: boolean } = {},
 ): Promise<Harness> {
   const stamp = `${Date.now()}-${Math.random()}`
   actualPrompts ??= await import(
@@ -201,8 +204,8 @@ async function importRunnerWithMocks(
     ...actualRunAgent!,
     runAgent: async function* (params: RunAgentParams) {
       runAgentCalls.push(params)
-      if (options.failTurns) {
-        throw new Error('boom: the model stream died')
+      if (options.failTurns && !options.yieldBeforeFailure) {
+        throw new Error(STREAM_DIED)
       }
       yield {
         type: 'assistant',
@@ -220,6 +223,9 @@ async function importRunnerWithMocks(
           },
         },
       } as never
+      if (options.failTurns) {
+        throw new Error(STREAM_DIED)
+      }
     },
   }))
   mock.module('../teammateMailbox.js', () => ({
@@ -513,6 +519,34 @@ test('a failed teammate keeps its task and its row for the grace window', async 
       Date.now() + TEAMMATE_GRACE_MS,
     ),
   ).toEqual([])
+})
+
+test('a failed teammate keeps the conversation its grace row holds open', async () => {
+  // The other half of that row: the failure tail collapsed `messages` to its
+  // last entry in the same literal that granted the window, so the row opened
+  // onto one message. The turn streams before it throws, because a teammate
+  // that fails on its first token cannot tell truncation from a short
+  // conversation.
+  const world = createWorld()
+  writeTeam(PARENT_TEAM, [
+    { agentId: ROOT_LEAD_AGENT_ID, name: TEAM_LEAD_NAME },
+    { agentId: `${WORKER}@${PARENT_TEAM}`, name: WORKER },
+  ])
+  const harness = await importRunnerWithMocks({
+    failTurns: true,
+    yieldBeforeFailure: true,
+  })
+  const worker = await startTeammate(harness, world, WORKER, PARENT_TEAM, {
+    prompt: 'work',
+  })
+  expect((await worker.done).success).toBe(false)
+
+  const task = world.getState().tasks[
+    worker.taskId
+  ] as InProcessTeammateTaskState
+  expect(task.status).toBe('failed')
+  expect(task.error).toBe(STREAM_DIED)
+  expect(task.messages?.map(m => m.type)).toEqual(['user', 'assistant'])
 })
 
 test("a member of an adopted sub-team reports into the adopting team's inbox", async () => {
