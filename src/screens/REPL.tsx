@@ -5005,8 +5005,10 @@ export function REPL({
   // Handle shift+down for teammate navigation and background task management.
   // Guard onOpenBackgroundTasks when a local-jsx dialog (e.g. /mcp) is open —
   // otherwise Shift+Down stacks BackgroundTasksDialog on top and deadlocks input.
+  // The typing flag keeps the hook's plain-letter shortcuts (f, k) out of text.
   useBackgroundTaskNavigation({
-    onOpenBackgroundTasks: isShowingLocalJSXCommand ? undefined : () => setShowBashesDialog(true)
+    onOpenBackgroundTasks: isShowingLocalJSXCommand ? undefined : () => setShowBashesDialog(true),
+    promptTypingSuppressionActive
   });
   // Auto-exit viewing mode when teammate completes or errors
   useTeammateViewAutoExit();

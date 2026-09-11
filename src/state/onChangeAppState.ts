@@ -3,6 +3,7 @@ import {
   setSessionBypassPermissionsMode,
   setSessionDangerousPermissionMode,
 } from '../bootstrap/state.js'
+import { isAgentSwarmsEnabled } from '../utils/agentSwarmsEnabled.js'
 import {
   clearApiKeyHelperCache,
   clearAwsCredentialsCache,
@@ -131,18 +132,27 @@ export function onChangeAppState({
     }
   }
 
-  // expandedView → persist as showExpandedTodos + showSpinnerTree for backwards compat
+  // expandedView → persist as showExpandedTodos + showSpinnerTree for backwards compat.
+  //
+  // With Agent Teams off, showSpinnerTree is left out of the payload AND barred
+  // from opening the save: deriveInitialExpandedView ignores the stored value
+  // while the feature is off, so writing it here could only clear what the user
+  // chose while it was on — and because the guard fired on either key, expanding
+  // the todo list was enough to do it. showExpandedTodos is not a teams
+  // preference and is still written.
   if (newState.expandedView !== oldState.expandedView) {
+    const agentTeamsEnabled = isAgentSwarmsEnabled()
     const showExpandedTodos = newState.expandedView === 'tasks'
     const showSpinnerTree = newState.expandedView === 'teammates'
+    const stored = getGlobalConfig()
     if (
-      getGlobalConfig().showExpandedTodos !== showExpandedTodos ||
-      getGlobalConfig().showSpinnerTree !== showSpinnerTree
+      stored.showExpandedTodos !== showExpandedTodos ||
+      (agentTeamsEnabled && stored.showSpinnerTree !== showSpinnerTree)
     ) {
       saveGlobalConfig(current => ({
         ...current,
         showExpandedTodos,
-        showSpinnerTree,
+        ...(agentTeamsEnabled && { showSpinnerTree }),
       }))
     }
   }

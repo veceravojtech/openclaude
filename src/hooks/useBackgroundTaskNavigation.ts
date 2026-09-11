@@ -76,6 +76,12 @@ function stepTeammateSelection(
  */
 export function useBackgroundTaskNavigation(options?: {
   onOpenBackgroundTasks?: () => void
+  /**
+   * REPL's own "the user is typing" flag (isPromptTypingSuppressionActive): the
+   * buffer is non-empty, or was within the last PROMPT_SUPPRESSION_MS. 'f' and
+   * 'k' are ordinary letters, so while it is set they stay text.
+   */
+  promptTypingSuppressionActive?: boolean
 }): { handleKeyDown: (e: KeyboardEvent) => void } {
   const tasks = useAppState(s => s.tasks)
   const viewSelectionMode = useAppState(s => s.viewSelectionMode)
@@ -239,9 +245,11 @@ export function useBackgroundTaskNavigation(options?: {
       return
     }
 
-    // 'f' to view selected teammate's transcript (only in selecting mode)
+    // 'f' to view selected teammate's transcript (only in selecting mode, and
+    // only while the prompt is idle — see the option's doc).
     if (
       e.key === 'f' &&
+      !options?.promptTypingSuppressionActive &&
       viewSelectionMode === 'selecting-agent' &&
       teammateCount > 0
     ) {
@@ -277,14 +285,16 @@ export function useBackgroundTaskNavigation(options?: {
       return
     }
 
-    // k to kill selected teammate (only in selecting mode).
+    // k to kill selected teammate (only in selecting mode, and only while the
+    // prompt is idle — see the option's doc; selection mode itself survives
+    // typing, so without that gate the letter destroys the selected teammate).
     // The outer guard is "a row below the leader is selected" — a teammate or
-    // the hide row, the same population index >= 0 covered — so k stays
-    // swallowed on the hide row instead of reaching the prompt. The kill itself
+    // the hide row, the same population index >= 0 covered. The kill itself
     // needs a listed teammate that is still running, which is what makes k a
     // no-op on a row inside its grace window.
     if (
       e.key === 'k' &&
+      !options?.promptTypingSuppressionActive &&
       viewSelectionMode === 'selecting-agent' &&
       selectedTeammate !== null &&
       selectedTeammate.kind !== 'leader'
@@ -309,6 +319,12 @@ export function useBackgroundTaskNavigation(options?: {
   // Backward-compat bridge: REPL.tsx doesn't yet wire handleKeyDown to
   // <Box onKeyDown>. Subscribe via useInput and adapt InputEvent →
   // KeyboardEvent until the consumer is migrated (separate PR).
+  //
+  // preventDefault() below marks the KeyboardEvent built HERE, which nothing
+  // outside this hook reads — BaseTextInput is a sibling useInput subscriber and
+  // is handed the InputEvent — so on this path a printable key reaches the
+  // prompt whatever this hook decides. That is why f and k ask whether the user
+  // is typing.
   // TODO(onKeyDown-migration): remove once REPL passes handleKeyDown.
   useInput((_input, _key, event) => {
     handleKeyDown(new KeyboardEvent(event.keypress))

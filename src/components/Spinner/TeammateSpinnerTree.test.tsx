@@ -189,6 +189,14 @@ function busy(t: InProcessTeammateTaskState): InProcessTeammateTaskState {
   }
 }
 
+/**
+ * How many rows claim to end the tree: the plain last-connector and the
+ * highlighted form a selected row draws in its place.
+ */
+function lastConnectors(frame: string): number {
+  return (frame.match(/└─|╘═/g) ?? []).length
+}
+
 /** The same line with its ANSI codes removed. */
 function stripped(line: string): string {
   return line.replace(/\u001B\[[0-9;]*m/g, '')
@@ -463,10 +471,24 @@ describe('TeammateSpinnerTree', () => {
     const plain = await renderTree([])
     const lines = plain.split('\n').filter(line => line.trim() !== '')
     expect(lines).toHaveLength(2)
+    // Nothing follows the muted line here, so it is the one row that ends the
+    // tree.
+    expect(lastConnectors(plain)).toBe(1)
+    expect(plain).toContain('└─')
 
     const selecting = await renderTree([], { isInSelectionMode: true, selection: { kind: 'hide' } })
     expect(selecting).toContain('hide')
     expect(selecting).toContain('enter to collapse')
+
+    // Selection mode puts the hide row underneath, so the muted line steps back
+    // to '├─' and the hide row is the only one left ending the tree — here
+    // with the '╘═' it draws while selected. Both rows claimed it before.
+    expect(lastConnectors(selecting)).toBe(1)
+    expect(selecting).toContain('├─')
+
+    const leaderSelected = await renderTree([], { isInSelectionMode: true, selection: { kind: 'leader' } })
+    expect(lastConnectors(leaderSelected)).toBe(1)
+    expect(leaderSelected).toContain('└─')
   })
 
   test('a row inside its grace window keeps its place and reads its terminal word', async () => {

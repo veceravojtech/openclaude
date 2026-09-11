@@ -130,7 +130,7 @@ export function TeammateSpinnerTree(t0) {
       }
       // One placeholder per absent lead, however many members it has.
       const placeholderKeys = new Set<string>();
-      t4 = teammateTasks.length === 0 ? <EmptyTeammatesRow /> : teammateTasks.map((teammate, index) => {
+      t4 = teammateTasks.length === 0 ? <EmptyTeammatesRow isLast={!isInSelectionMode} /> : teammateTasks.map((teammate, index) => {
         // Depth-first order (getRunningTeammatesSorted) already puts a sub-team
         // straight under the teammate that leads it; the indent is what makes
         // that visible. A root-team member renders exactly as before — no
@@ -295,12 +295,20 @@ function AbsentLeadRow({
  * line under the team-lead row, never `null` — the tree is a panel now, and the
  * user's rule is that it is visible every time it is enabled.
  *
- * Hand-written like AbsentLeadRow, with no cache slots and no inputs.
+ * `isLast` is false while selection mode puts the hide row underneath, so the
+ * two rows do not both claim the last-connector. Same glyph pair as
+ * TeammateSpinnerLine.
+ *
+ * Hand-written like AbsentLeadRow, with no cache slots.
  */
-function EmptyTeammatesRow(): React.ReactNode {
+function EmptyTeammatesRow({
+  isLast
+}: {
+  isLast: boolean;
+}): React.ReactNode {
   return <Box paddingLeft={3}>
       <Text dimColor={true}> </Text>
-      <Text dimColor={true}>{"\u2514\u2500"} </Text>
+      <Text dimColor={true}>{isLast ? "\u2514\u2500" : "\u251C\u2500"} </Text>
       <Text dimColor={true}>no teammates · Agent(name: "…") spawns one</Text>
     </Box>;
 }
