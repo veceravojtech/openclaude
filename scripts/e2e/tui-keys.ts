@@ -16,6 +16,18 @@
  *     300ms escape flush arrives as a bare Escape followed by a nameless
  *     `[B` key. Reproduced with `send-keys -H` and a deliberate 350ms gap.
  *
+ * Those two are scenarios 1-3. Scenarios 4-6 cover the teammates panel instead,
+ * and need a real pty for a different reason: the panel, its selection and the
+ * transcript view it opens are driven by keys (Shift+Down, Enter, Escape,
+ * ctrl+t) whose delivery is exactly what a fake stdin cannot reproduce. A
+ * teammate has to come from the model calling the Agent tool and this harness
+ * runs offline, so each of those scenarios points the CLI at
+ * `startFakeAnthropicApi` - a loopback Messages API answering one per-role
+ * script (`FakeScript`) - rather than at anything on the network: scenario 4
+ * spawns one idle teammate and leaves its view with Escape, scenario 5 builds a
+ * nested sub-team and walks down into it, scenario 6 hides the panel, reaches
+ * its empty state by key and kills a row under the cursor.
+ *
  * Safety: this repo is normally worked on from inside tmux, so the harness
  * NEVER touches the default tmux server. Every command goes to a PER-RUN
  * private server whose socket lives inside the run's own temp root
@@ -135,8 +147,21 @@ const RUN_PID_FILE = 'pid'
  */
 const SOCKET_PATH_LIMIT_BYTES = 100
 
-/** The glyph the picker puts in front of the selected row. */
-const SELECTION_MARKER = '❯'
+/**
+ * The glyph a SELECTED row is marked with - `figures.pointer` - and the one
+ * spelling of it in this file.
+ *
+ * The picker puts it in front of the selected model row and the teammates tree
+ * draws it on the row the cursor is on, so one constant serves both:
+ * `E2E_TREE_POINTER` is an alias of this, `PICKER_ROW_RE` is built from it, and
+ * scenario 3's prompt-line finder uses it rather than repeating the character.
+ *
+ * Spelled as an escape, like every other glyph this harness compares against
+ * real pane text: a raw glyph is one editor round-trip away from an ASCII
+ * lookalike, and a silently degraded literal here would stop every picker row
+ * parsing at once.
+ */
+const SELECTION_MARKER = '\u276F'
 
 /**
  * How many rows the picker must render for the scenarios to be meaningful.
@@ -257,11 +282,36 @@ async function waitForPane(
 }
 
 /**
+ * Poll the pane for `predicate` up to `timeoutMs` and answer whether it held -
+ * `waitForPane` without the timeout report.
+ *
+ * For the one case `waitForPane` is wrong for: a step whose EXPECTED answer is
+ * "no". A timeout there is the pass, not the failure, and printing a label and
+ * a whole pane for it would bury the real failures in noise.
+ */
+async function paneShows(
+  predicate: (pane: string) => boolean,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  do {
+    if (predicate(capturePane())) return true
+    await sleep(POLL_INTERVAL_MS)
+  } while (Date.now() < deadline)
+  return false
+}
+
+/**
  * A rendered picker row: an optional selection marker, the 1-based row number,
  * then the label followed by the aligned description column. Anchored at the
  * start of the line so prose that merely mentions "1." cannot match.
+ *
+ * Built from `SELECTION_MARKER` rather than spelling the glyph a second time -
+ * the capture group is what `parsePickerRows` compares against that constant,
+ * so the two must not be able to drift apart. `\u276F` is not a regex
+ * metacharacter, so interpolating it needs no escaping.
  */
-const PICKER_ROW_RE = /^\s*(❯)?\s*(\d+)\.\s+(\S.*)$/
+const PICKER_ROW_RE = new RegExp(`^\\s*(${SELECTION_MARKER})?\\s*(\\d+)\\.\\s+(\\S.*)$`)
 
 /**
  * The label half of a rendered row. The row is two aligned columns - label,
@@ -605,7 +655,11 @@ function seedConfigDir(
  */
 async function startCliSession(
   options: {
-    /** Extra `-e KEY=VALUE` pairs for the CLI's environment (scenario 4). */
+    /**
+     * Extra `-e KEY=VALUE` pairs for the CLI's environment. Scenarios 4, 5 and
+     * 6 all pass the same pair - the fake Messages API's base URL and its fake
+     * key - so the CLI answers its own turns offline.
+     */
     extraEnv?: Record<string, string>
     /** Extra top-level fields merged into the seeded global config. */
     extraGlobalConfig?: Record<string, unknown>
@@ -879,13 +933,14 @@ async function scenarioSplitEscape(): Promise<ScenarioResult> {
       UI_TIMEOUT_MS,
     )
     const tailLeaked = dismissed.pane.includes('[B')
-    // findLast, not find: the FIRST `❯` line is the `❯ /model` transcript echo,
-    // while the prompt input line - the one the leaked tail used to land in -
-    // is the last one.
+    // findLast, not find: the FIRST marked line is the transcript echo of the
+    // `/model` that was typed, while the prompt input line - the one the leaked
+    // tail used to land in - is the last one. Same `SELECTION_MARKER` the
+    // picker's own rows are parsed with; the glyph has one spelling here.
     const promptLine =
       dismissed.pane
         .split('\n')
-        .findLast(line => line.trimStart().startsWith('❯'))
+        .findLast(line => line.trimStart().startsWith(SELECTION_MARKER))
         ?.trim() ?? '(no prompt line)'
     return {
       name: 'Scenario 3 (DEFECT B, ruling b): split ESC + hex "5b 42" dismisses the picker and leaves no bracket-B tail in the prompt',
@@ -955,11 +1010,16 @@ const E2E_TEAMMATE_HEADER = `Viewing team-lead \u203A ${E2E_TEAMMATE}`
  * every time it is enabled, even when no teammates are available").
  *
  * Both come from `src/components/Spinner/TeammateSpinnerTree.tsx`: the root row
- * is assembled from the highlighted-leader glyph, `team-lead` and
- * TEAMMATE_SELECT_HINT (`\u2552\u2550`, :77; `team-lead`, :91; the hint, :128,
- * defined in `Spinner/teammateSelectHint.ts`), and the muted line under it is
- * EmptyTeammatesRow (:329-333). The panel passes no verb, idle text or token
- * count, so nothing else can appear between `team-lead` and the hint.
+ * is assembled from the `isLeaderHighlighted` glyph ternary (`\u2552\u2550`
+ * when highlighted, `\u250C\u2500` when not), the `team-lead` label and
+ * TEAMMATE_SELECT_HINT (defined in `Spinner/teammateSelectHint.ts`), and the
+ * muted line under it is `EmptyTeammatesRow`. The panel passes no verb, idle
+ * text or token count, so nothing else can appear between `team-lead` and the
+ * hint.
+ *
+ * Cited by SYMBOL rather than by line: the numbers this comment used to carry
+ * (`:77` / `:91` / `:128` / `:329-333`) were stale within two commits of being
+ * written, and a confidently wrong citation costs more than none at all.
  *
  * Spelled with escapes on purpose: `\u00B7` and `\u2026` are one editor
  * round-trip away from an ASCII `.` or `...`, and a silently degraded literal
@@ -969,20 +1029,25 @@ const E2E_TREE_LEADER_ROW = `\u2552\u2550 team-lead \u00B7 shift + \u2191/\u2193
 const E2E_TREE_EMPTY_ROW = `no teammates \u00B7 Agent(name: "\u2026") spawns one`
 
 /**
- * The selection pointer the tree draws on the row the cursor is on
- * (`figures.pointer`, `TeammateSpinnerTree.tsx:71` for the leader row and the
- * `hide` row, `TeammateSpinnerLine.tsx:232` for a teammate row).
+ * The selection pointer the tree draws on the row the cursor is on: the
+ * `isLeaderSelected` ternary of `TeammateSpinnerTree.tsx` for the leader row,
+ * `HideRow`'s for the `hide` row, and the selection cell of
+ * `TeammateSpinnerLine.tsx` for a teammate row - `figures.pointer` in all
+ * three.
+ *
+ * An ALIAS of `SELECTION_MARKER`, never a second spelling of it: the picker's
+ * marker and this pointer are the same glyph, and the two names exist only so
+ * each side of the harness reads in its own vocabulary.
  *
  * This - NOT the leader row's `╒═` - is the only mark that says "selected".
  * `isLeaderHighlighted = isLeaderForegrounded || isLeaderSelected`
- * (`TeammateSpinnerTree.tsx:63-65`) and `isLeaderForegrounded` is true whenever
- * no teammate transcript is open, so `E2E_TREE_LEADER_ROW` is drawn at boot
- * too, selection or no selection.
+ * (`TeammateSpinnerTree.tsx`) and `isLeaderForegrounded` is true whenever no
+ * teammate transcript is open, so `E2E_TREE_LEADER_ROW` is drawn at boot too,
+ * selection or no selection.
  *
- * Spelled as an escape and derived from a real capture, not from the JSX: see
- * `selectedTreeRows`.
+ * Derived from a real capture, not from the JSX: see `selectedTreeRows`.
  */
-const E2E_TREE_POINTER = '\u276F'
+const E2E_TREE_POINTER = SELECTION_MARKER
 
 /**
  * The tree glyph that follows the pointer on a highlighted row: `╒═` on the
@@ -1056,6 +1121,48 @@ function promptInputLine(pane: string): string | null {
 }
 
 /**
+ * How many times a scenario will dismiss whatever the last Escape left drawn
+ * over the prompt before it gives up and fails on it, and how long each attempt
+ * lets the view-exit render settle first.
+ */
+const PROMPT_RESTORE_ATTEMPTS = 3
+const PROMPT_RESTORE_SETTLE_MS = 400
+
+/**
+ * Get back to a usable prompt after leaving a teammate view - and PROVE it: the
+ * input box on screen with nothing drawn over it.
+ *
+ * The view header being gone is NOT the prompt being back, and both scenario 4
+ * and scenario 5 used to stop at that gap. The Escape that leaves the view can
+ * reach the prompt as well, and Escape at the prompt opens the Rewind dialog
+ * (`MessageSelector`) - a modal that REPLACES the input box while leaving the
+ * leader view visible behind it, so a bare `!pane.includes(header)` is
+ * satisfied by it. Whether it appears depends on how the view-exit render
+ * interleaves with the keys before it (observed both ways while building
+ * scenario 5), so it is DISMISSED when present rather than asserted: pinning
+ * the stray Escape would make fixing it read as a regression here. The END
+ * STATE is what gets asserted, and the input box is the one thing a dialog
+ * cannot fake.
+ *
+ * The settle comes BEFORE each check on purpose, and is the one place in this
+ * file where that ordering is right: a frame captured too early can still show
+ * the input box the dialog is about to be drawn over, and breaking out on it
+ * would hand the caller a 15s timeout instead of a dismissal. The step still
+ * fails by timeout and never by racing - that is what the `waitForPane` below
+ * is for.
+ */
+async function restorePromptAfterView(
+  label: string,
+): Promise<{ ok: boolean; pane: string }> {
+  for (let attempt = 0; attempt < PROMPT_RESTORE_ATTEMPTS; attempt++) {
+    await sleep(PROMPT_RESTORE_SETTLE_MS)
+    if (promptInputLine(capturePane()) !== null) break
+    tmux('send-keys', '-t', CLI_WINDOW, 'Escape')
+  }
+  return waitForPane(label, pane => promptInputLine(pane) !== null, UI_TIMEOUT_MS)
+}
+
+/**
  * Column at which a teammate's TREE row starts - the tree glyph, past the
  * panel's padding and the selection cell - or -1 when the row is not drawn.
  *
@@ -1081,7 +1188,15 @@ function treeRowColumn(pane: string, agentName: string): number {
 
 type FakeAnthropicApi = {
   baseUrl: string
-  /** Main-loop turns served (the tool_use turn and the tool_result turn). */
+  /**
+   * How many of the LEAD's scripted steps have been served so far.
+   *
+   * The lead's conversation IS the CLI's main loop, so one served step is one
+   * main-loop turn - however many the scenario scripted, not a fixed pair:
+   * scenario 4 waits for its 2 (the `tool_use` turn and the turn carrying that
+   * tool's `tool_result`), scenario 6 for its 3 (two spawns and the closing
+   * text).
+   */
   mainTurns: () => number
   /**
    * Every `/v1/messages` request served, in order.
@@ -1216,6 +1331,18 @@ function carriesMainToolSet(body: FakeRequestBody): boolean {
 }
 
 /**
+ * Did this logged request CONSUME one of `role`'s scripted steps?
+ *
+ * The one rule behind both `consumedSteps` and the fake's own `mainTurns`, so
+ * the count a scenario waits on and the list it reports cannot drift apart: a
+ * `skipped` entry advanced nothing (see `carriesMainToolSet`), and every other
+ * entry advanced exactly one step of the role it is logged under.
+ */
+function consumedStep(entry: FakeRequest, role: FakeRole): boolean {
+  return entry.role === role && entry.kind !== 'skipped'
+}
+
+/**
  * The steps one role actually consumed, as `<step>:<kind>[:<tool>]`.
  *
  * Skipped requests are left out on purpose: they advance nothing, and how many
@@ -1224,7 +1351,7 @@ function carriesMainToolSet(body: FakeRequestBody): boolean {
 function consumedSteps(api: FakeAnthropicApi, role: FakeRole): string[] {
   return api
     .requests()
-    .filter(entry => entry.role === role && entry.kind !== 'skipped')
+    .filter(entry => consumedStep(entry, role))
     .map(entry => `${entry.step}:${entry.kind}${entry.name === undefined ? '' : `:${entry.name}`}`)
 }
 
@@ -1317,7 +1444,6 @@ function fakeMessageStream(
  * a lead spawning a sub-lead and that sub-lead building its own sub-team.
  */
 function startFakeAnthropicApi(script: FakeScript): FakeAnthropicApi {
-  let mainTurns = 0
   let nextId = 1
   const consumed: Record<FakeRole, number> = { lead: 0, teammate: 0 }
   const log: FakeRequest[] = []
@@ -1340,10 +1466,6 @@ function startFakeAnthropicApi(script: FakeScript): FakeAnthropicApi {
         let stopReason: 'tool_use' | 'end_turn' = 'end_turn'
         if (step) {
           consumed[role] += 1
-          // The lead's conversation IS the main loop, so its scripted steps are
-          // the main turns scenario 4 counts - the same arithmetic the
-          // tool_use/tool_result pair produced before there were roles.
-          if (role === 'lead') mainTurns++
           block = step.block
           stopReason = step.stopReason
           log.push({
@@ -1387,9 +1509,29 @@ function startFakeAnthropicApi(script: FakeScript): FakeAnthropicApi {
       )
     },
   })
+  // A listening server is a LIVE HANDLE, and this one must never be what keeps
+  // the harness alive: a throw on any path that misses `api.stop()` would
+  // otherwise leave the process running long after `process.exitCode = 1` was
+  // set - printing the whole run report and then hanging, which is exactly what
+  // the "nothing outlives main()" note at the bottom of this file promises
+  // cannot happen. Belt and braces with booting each scenario INSIDE its `try`:
+  // that closes the one hole we found (a boot timeout), this closes the next
+  // one. `unref` does not stop the server answering - every request of every
+  // scenario is served exactly as before; it only stops an idle server from
+  // being a reason to stay alive.
+  server.unref()
   return {
     baseUrl: `http://127.0.0.1:${server.port}`,
-    mainTurns: () => mainTurns,
+    // DERIVED, never counted a second time. The `if (step)` branch above pushes
+    // exactly one non-`skipped` entry per consumed step and increments nothing
+    // else, so this equals the separate `mainTurns` counter it replaced at
+    // EVERY point of a run - including the paths that counter was easiest to
+    // get wrong: a side call with no tools, a request arriving past the end of
+    // the script, and a TEAMMATE's turn (all three log `skipped`, or log
+    // against the other role, and none of them ever moved the counter). One
+    // source of truth means the number a scenario waits on and the log a
+    // failing scenario prints can no longer disagree.
+    mainTurns: () => log.filter(entry => consumedStep(entry, 'lead')).length,
     requests: () => log,
     stop: () => {
       server.stop(true)
@@ -1427,7 +1569,7 @@ const E2E_IDLE_SPAWN_SCRIPT: FakeScript = {
 async function scenarioTeammateViewEscape(): Promise<ScenarioResult> {
   const name =
     'Scenario 4 (teammate view): the teammates panel is visible with zero teammates, and Escape returns from an idle @supervisor view without killing the teammate'
-  const expected = `the teammates panel visible BEFORE the spawn (its "team-lead" row and its "no teammates" line), then "${E2E_TEAMMATE_HEADER}" gone and the prompt back after one Escape, with the @${E2E_TEAMMATE} row still shown`
+  const expected = `the teammates panel visible BEFORE the spawn (its "team-lead" row and its "no teammates" line), then "${E2E_TEAMMATE_HEADER}" gone after ONE Escape and the prompt input box back with no dialog drawn over it, with the @${E2E_TEAMMATE} row still shown`
   const fail = (actual: string, pane: string): ScenarioResult => ({
     name,
     passed: false,
@@ -1437,22 +1579,28 @@ async function scenarioTeammateViewEscape(): Promise<ScenarioResult> {
     pane,
   })
   const api = startFakeAnthropicApi(E2E_IDLE_SPAWN_SCRIPT)
-  await startCliSession({
-    // No teams flag: Agent Teams are on by default, and this scenario is
-    // also the check that the default path really exposes the Agent tool's
-    // `name` parameter.
-    extraEnv: {
-      ANTHROPIC_BASE_URL: api.baseUrl,
-      ANTHROPIC_API_KEY: FAKE_API_KEY,
-    },
-    // Pre-approve the env key so no "use this API key?" dialog precedes the
-    // prompt. Both the raw key and its 20-char tail are listed so the check
-    // passes whichever normalisation the config layer applies.
-    extraGlobalConfig: {
-      customApiKeyResponses: { approved: [FAKE_API_KEY, FAKE_API_KEY.slice(-20)], rejected: [] },
-    },
-  })
   try {
+    // Inside the `try`, deliberately: a boot timeout throws out of
+    // `startCliSession`, and from OUTSIDE this block that throw would skip the
+    // `finally` and leave the fake API server listening (see `unref` in
+    // `startFakeAnthropicApi` for what that costs). `stopCliSession()` on a
+    // session that was never created is harmless - `kill-session` fails and
+    // `has-session` answers non-zero at once.
+    await startCliSession({
+      // No teams flag: Agent Teams are on by default, and this scenario is
+      // also the check that the default path really exposes the Agent tool's
+      // `name` parameter.
+      extraEnv: {
+        ANTHROPIC_BASE_URL: api.baseUrl,
+        ANTHROPIC_API_KEY: FAKE_API_KEY,
+      },
+      // Pre-approve the env key so no "use this API key?" dialog precedes the
+      // prompt. Both the raw key and its 20-char tail are listed so the check
+      // passes whichever normalisation the config layer applies.
+      extraGlobalConfig: {
+        customApiKeyResponses: { approved: [FAKE_API_KEY, FAKE_API_KEY.slice(-20)], rejected: [] },
+      },
+    })
     // BEFORE anything spawns: the panel is up at its real default with zero
     // teammates. Nothing in the seeded config touches the toggle, so this is
     // the shipped default path - the one behaviour the panel exists for, and
@@ -1489,12 +1637,33 @@ async function scenarioTeammateViewEscape(): Promise<ScenarioResult> {
     }
 
     // ONE Shift+Down, not two. `stepTeammateSelection`
-    // (src/hooks/useBackgroundTaskNavigation.ts:36-43) spends a first press
+    // (`src/hooks/useBackgroundTaskNavigation.ts`) spends a first press
     // expanding a COLLAPSED tree onto the leader row; the panel above is
     // already expanded, so that branch is skipped and this press moves the
     // selection straight to the teammate. Enter opens its transcript view.
+    //
+    // Enter is NOT sent blind after a fixed 200ms: on a slow render it would
+    // open whatever row the selection was still on, and the damage would
+    // surface a step later as a 15s header timeout with nothing pointing at the
+    // cause. The pointer is what says "selected" (see `selectedTreeRows`), so
+    // the press is gated on it - the same gate scenario 6 uses, and a failure
+    // here names the row that WAS selected. `\u255E\u2550` and not
+    // `\u2558\u2550`: in selection mode `isLast` is false for every row, so
+    // even this single teammate carries the mid-tree glyph.
     tmux('send-keys', '-t', CLI_WINDOW, 'S-Down')
-    await sleep(200)
+    const onTeammate = await waitForPane(
+      `scenario 4: the selection on @${E2E_TEAMMATE}, before Enter opens it`,
+      pane => selectedTreeRow(pane)?.startsWith(`\u255E\u2550 @${E2E_TEAMMATE}:`) === true,
+      UI_TIMEOUT_MS,
+    )
+    if (!onTeammate.ok) {
+      return fail(
+        `the selection never reached @${E2E_TEAMMATE} (selected rows: ${JSON.stringify(
+          selectedTreeRows(onTeammate.pane),
+        )})`,
+        onTeammate.pane,
+      )
+    }
     tmux('send-keys', '-t', CLI_WINDOW, 'Enter')
     const viewing = await waitForPane(
       `scenario 4: "${E2E_TEAMMATE_HEADER}" after Shift+Down, Enter`,
@@ -1503,19 +1672,42 @@ async function scenarioTeammateViewEscape(): Promise<ScenarioResult> {
     )
     if (!viewing.ok) return fail('the teammate view never opened', viewing.pane)
 
+    // ONE Escape, and the header must be gone: that is the reported defect, and
+    // it is asserted on its own before anything else is allowed to press a key.
     tmux('send-keys', '-t', CLI_WINDOW, 'Escape')
     const returned = await waitForPane(
       'scenario 4: the leader view back after one Escape',
       pane => !pane.includes(E2E_TEAMMATE_HEADER),
       UI_TIMEOUT_MS,
     )
-    const stillAlive = returned.pane.includes(`@${E2E_TEAMMATE}`)
-    const actual = !returned.ok
-      ? `still "${E2E_TEAMMATE_HEADER}" ${UI_TIMEOUT_MS}ms after Escape (the pre-fix behaviour)`
-      : stillAlive
-        ? 'the panel was visible with zero teammates before the spawn; returned to the leader view, and the teammate row/pill is still shown'
-        : 'returned to the leader view, but the teammate row/pill is gone (Escape killed it)'
-    return { name, passed: returned.ok && stillAlive, expected, actual, rows: [], pane: returned.pane }
+    if (!returned.ok) {
+      return fail(
+        `still "${E2E_TEAMMATE_HEADER}" ${UI_TIMEOUT_MS}ms after Escape (the pre-fix behaviour)`,
+        returned.pane,
+      )
+    }
+
+    // The half this scenario used to CLAIM in its `expected` and never check:
+    // the header being gone is not the prompt being back. Same helper, same end
+    // state as scenario 5 - a Rewind dialog left drawn over the input box now
+    // fails scenario 4 too, instead of passing as "the header is gone".
+    const atPrompt = await restorePromptAfterView(
+      'scenario 4: the prompt input box back after leaving the teammate view',
+    )
+    if (!atPrompt.ok) {
+      return fail(
+        'the teammate view was left, but the prompt never came back - a dialog is still drawn over the input box',
+        atPrompt.pane,
+      )
+    }
+
+    // Read off the SETTLED pane: the teammate has to still be there once the
+    // prompt is back, not merely for the frame the view closed on.
+    const stillAlive = atPrompt.pane.includes(`@${E2E_TEAMMATE}`)
+    const actual = stillAlive
+      ? 'the panel was visible with zero teammates before the spawn; returned to the leader view with the prompt box back, and the teammate row/pill is still shown'
+      : 'returned to the leader view with the prompt box back, but the teammate row/pill is gone (Escape killed it)'
+    return { name, passed: stillAlive, expected, actual, rows: [], pane: atPrompt.pane }
   } finally {
     await stopCliSession()
     api.stop()
@@ -1541,14 +1733,6 @@ const E2E_SUB_TEAM = `${E2E_TEAM}/${E2E_SUB_LEAD}`
  */
 const E2E_SUB_LEAD_HEADER = `Viewing team-lead \u203A ${E2E_SUB_LEAD}`
 const E2E_SUB_WORKER_HEADER = `${E2E_SUB_LEAD_HEADER} \u203A ${E2E_SUB_WORKER}`
-
-/**
- * How many times scenario 5 will dismiss whatever the final Escape left drawn
- * over the prompt before it gives up and fails on it, and how long each attempt
- * lets the view-exit render settle first.
- */
-const PROMPT_RESTORE_ATTEMPTS = 3
-const PROMPT_RESTORE_SETTLE_MS = 400
 
 /**
  * Scenario 5's script - the first one that answers BOTH roles.
@@ -1659,24 +1843,30 @@ async function scenarioNestedTeamTree(): Promise<ScenarioResult> {
     pane,
   })
   const api = startFakeAnthropicApi(E2E_NESTED_TREE_SCRIPT)
-  await startCliSession({
-    extraEnv: {
-      ANTHROPIC_BASE_URL: api.baseUrl,
-      ANTHROPIC_API_KEY: FAKE_API_KEY,
-    },
-    extraGlobalConfig: {
-      customApiKeyResponses: { approved: [FAKE_API_KEY, FAKE_API_KEY.slice(-20)], rejected: [] },
-      // The one seed this scenario needs, and it does not touch the panel.
-      // The harness runs the CLI INSIDE a tmux pane, where `auto` routes a
-      // PROMPTED spawn to the pane backend (`backends/registry.ts:380-382`) -
-      // and a pane teammate is refused a sub-team outright, because nothing
-      // would deliver its sub-team's messages or hand out its task list
-      // (`TeamCreateTool.ts:136-140`). Without this the scenario would not be
-      // testing the nested tree at all; it would be testing that refusal.
-      teammateMode: 'in-process',
-    },
-  })
   try {
+    // Inside the `try`, deliberately: a boot timeout throws out of
+    // `startCliSession`, and from OUTSIDE this block that throw would skip the
+    // `finally` and leave the fake API server listening (see `unref` in
+    // `startFakeAnthropicApi` for what that costs). `stopCliSession()` on a
+    // session that was never created is harmless - `kill-session` fails and
+    // `has-session` answers non-zero at once.
+    await startCliSession({
+      extraEnv: {
+        ANTHROPIC_BASE_URL: api.baseUrl,
+        ANTHROPIC_API_KEY: FAKE_API_KEY,
+      },
+      extraGlobalConfig: {
+        customApiKeyResponses: { approved: [FAKE_API_KEY, FAKE_API_KEY.slice(-20)], rejected: [] },
+        // The one seed this scenario needs, and it does not touch the panel.
+        // The harness runs the CLI INSIDE a tmux pane, where `auto` routes a
+        // PROMPTED spawn to the pane backend (`backends/registry.ts:380-382`) -
+        // and a pane teammate is refused a sub-team outright, because nothing
+        // would deliver its sub-team's messages or hand out its task list
+        // (`TeamCreateTool.ts:136-140`). Without this the scenario would not be
+        // testing the nested tree at all; it would be testing that refusal.
+        teammateMode: 'in-process',
+      },
+    })
     tmux('send-keys', '-t', CLI_WINDOW, 'spawn supervisor-one to build its own sub-team', 'Enter')
     // Both turns finished: the sub-lead has a row, its own script is spent (so
     // TeamCreate has already returned and the sub-team exists), and the prompt
@@ -1754,11 +1944,27 @@ async function scenarioNestedTeamTree(): Promise<ScenarioResult> {
 
     // One Shift+Down: the selectable rows are leader → the two teammates in
     // depth-first order → hide, and an untouched selection steps from the
-    // leader (`stepOver`, `teammateSelection.ts:164-173`), so this lands on the
+    // leader (`stepOver`, `teammateSelection.ts`), so this lands on the
     // sub-lead. Its header is a PREFIX of the deeper row's, so it is asserted
     // together with the deeper one being absent.
+    //
+    // Gated on the selection, not on a sleep: opening the WRONG row here would
+    // be reported as the sub-lead's header never appearing, which says nothing
+    // about why. See scenario 4 for the full argument.
     tmux('send-keys', '-t', CLI_WINDOW, 'S-Down')
-    await sleep(200)
+    const onSubLead = await waitForPane(
+      `scenario 5: the selection on @${E2E_SUB_LEAD}, before Enter opens it`,
+      pane => selectedTreeRow(pane)?.startsWith(`\u255E\u2550 @${E2E_SUB_LEAD}:`) === true,
+      UI_TIMEOUT_MS,
+    )
+    if (!onSubLead.ok) {
+      return fail(
+        `the selection never reached @${E2E_SUB_LEAD} (selected rows: ${JSON.stringify(
+          selectedTreeRows(onSubLead.pane),
+        )})`,
+        onSubLead.pane,
+      )
+    }
     tmux('send-keys', '-t', CLI_WINDOW, 'Enter')
     const viewingSubLead = await waitForPane(
       `scenario 5: "${E2E_SUB_LEAD_HEADER}" (and not the deeper row's) after Shift+Down, Enter`,
@@ -1782,9 +1988,22 @@ async function scenarioNestedTeamTree(): Promise<ScenarioResult> {
 
     // Escape kept the selection, so this second Shift+Down carries on from the
     // sub-lead into its sub-team. The header now names the whole path down the
-    // tree, which is the thing a bare handle could not tell apart.
+    // tree, which is the thing a bare handle could not tell apart. Gated on the
+    // deeper row being the selected one, for the same reason as the first.
     tmux('send-keys', '-t', CLI_WINDOW, 'S-Down')
-    await sleep(200)
+    const onWorker = await waitForPane(
+      `scenario 5: the selection on @${E2E_SUB_WORKER}, before Enter opens it`,
+      pane => selectedTreeRow(pane)?.startsWith(`\u255E\u2550 @${E2E_SUB_WORKER}:`) === true,
+      UI_TIMEOUT_MS,
+    )
+    if (!onWorker.ok) {
+      return fail(
+        `the selection never reached @${E2E_SUB_WORKER} (selected rows: ${JSON.stringify(
+          selectedTreeRows(onWorker.pane),
+        )})`,
+        onWorker.pane,
+      )
+    }
     tmux('send-keys', '-t', CLI_WINDOW, 'Enter')
     const viewingWorker = await waitForPane(
       `scenario 5: "${E2E_SUB_WORKER_HEADER}" after a second Shift+Down, Enter`,
@@ -1806,26 +2025,10 @@ async function scenarioNestedTeamTree(): Promise<ScenarioResult> {
     )
     if (!returned.ok) return fail(`Escape did not leave "${E2E_SUB_WORKER_HEADER}"`, returned.pane)
 
-    // The header being gone is NOT the prompt being back, and this scenario used
-    // to end on exactly that gap: the Escape above can reach the prompt as well
-    // as the view, and Escape at the prompt opens the Rewind dialog
-    // (`MessageSelector.tsx:347`) - a modal that REPLACES the input box while
-    // leaving the leader view visible behind it, so `!includes(header)` is
-    // satisfied by it. Whether it appears depends on how the view-exit render
-    // interleaves with the keys before it (observed both ways while building
-    // this), so it is DISMISSED when present rather than asserted - pinning the
-    // stray Escape would make fixing it read as a regression here. The end state
-    // is what gets asserted, and the input box is the one thing a dialog cannot
-    // fake.
-    for (let attempt = 0; attempt < PROMPT_RESTORE_ATTEMPTS; attempt++) {
-      await sleep(PROMPT_RESTORE_SETTLE_MS)
-      if (promptInputLine(capturePane()) !== null) break
-      tmux('send-keys', '-t', CLI_WINDOW, 'Escape')
-    }
-    const atPrompt = await waitForPane(
+    // The header being gone is NOT the prompt being back; `restorePromptAfterView`
+    // is that second half, shared with scenario 4 and documented there.
+    const atPrompt = await restorePromptAfterView(
       'scenario 5: the prompt input box back, with no dialog drawn over it',
-      pane => promptInputLine(pane) !== null,
-      UI_TIMEOUT_MS,
     )
     if (!atPrompt.ok) {
       return fail('the prompt never came back - a dialog is still drawn over the input box', atPrompt.pane)
@@ -1859,11 +2062,14 @@ const E2E_KILL_SURVIVOR = 'survivor'
 
 /**
  * The selected `doomed` row once it has been killed, as
- * `TeammateSpinnerLine` draws it: the highlighted tree glyph `╞═`
- * (`:97` - `╘═` is only for the LAST row, and in selection mode no row is
- * last), the `@name`, and the terminal word that replaces the activity
- * (`:196`). Everything from the pointer leftwards is padding, and everything
- * past `killed` is the stats block, so this is asserted as a prefix.
+ * `TeammateSpinnerLine` draws it: the highlighted tree glyph `╞═` (its
+ * `treeChar` ternary - `╘═` is only for the LAST row, and in selection mode
+ * `isLast` is false for every row), the `@name`, and the terminal word that
+ * replaces the activity (`renderStatus`'s `isTerminal` branch, which prints
+ * `teammate.status` straight off the task). Everything from the pointer
+ * leftwards is padding, and everything past `killed` is the stats block, so
+ * this is asserted as a prefix. Cited by symbol, not by line: the `:97` this
+ * comment used to carry was already off by one at HEAD.
  *
  * Derived from a real capture, like every other literal here, and spelled with
  * escapes so an editor round-trip cannot quietly turn `╞═` into `|=`.
@@ -1872,6 +2078,17 @@ const E2E_TREE_KILLED_SELECTED_ROW = `\u255E\u2550 @${E2E_KILL_TARGET}: killed`
 
 /** How long a killed row is given to prove it LINGERS rather than merely existing for one frame. */
 const GRACE_PROBE_MS = 2_000
+
+/**
+ * How long scenario 6 watches the pane after its FIRST ctrl+t before pressing
+ * the second.
+ *
+ * Long enough that the second press cannot outrun the first (two presses the
+ * app reads in one state would cycle once, not twice), and spent on the only
+ * observation this step allows - see the press itself for why that observation
+ * has to be a negative one.
+ */
+const PANEL_CYCLE_SETTLE_MS = 1_000
 
 /** Two idle teammates in one turn, so one can be killed while the other stays alive. */
 const E2E_TWO_TEAMMATES_SCRIPT: FakeScript = {
@@ -1934,21 +2151,27 @@ async function scenarioTreePersists(): Promise<ScenarioResult> {
     pane,
   })
   const api = startFakeAnthropicApi(E2E_TWO_TEAMMATES_SCRIPT)
-  await startCliSession({
-    extraEnv: {
-      ANTHROPIC_BASE_URL: api.baseUrl,
-      ANTHROPIC_API_KEY: FAKE_API_KEY,
-    },
-    extraGlobalConfig: {
-      customApiKeyResponses: { approved: [FAKE_API_KEY, FAKE_API_KEY.slice(-20)], rejected: [] },
-      // The ONE scenario that hides the panel, and only to test un-hiding it.
-      // Never in the shared seed (`seedConfigDir`) and never in another
-      // scenario: a seed that turns the feature under test off is how the
-      // panel's own end-to-end coverage was lost once already.
-      showSpinnerTree: false,
-    },
-  })
   try {
+    // Inside the `try`, deliberately: a boot timeout throws out of
+    // `startCliSession`, and from OUTSIDE this block that throw would skip the
+    // `finally` and leave the fake API server listening (see `unref` in
+    // `startFakeAnthropicApi` for what that costs). `stopCliSession()` on a
+    // session that was never created is harmless - `kill-session` fails and
+    // `has-session` answers non-zero at once.
+    await startCliSession({
+      extraEnv: {
+        ANTHROPIC_BASE_URL: api.baseUrl,
+        ANTHROPIC_API_KEY: FAKE_API_KEY,
+      },
+      extraGlobalConfig: {
+        customApiKeyResponses: { approved: [FAKE_API_KEY, FAKE_API_KEY.slice(-20)], rejected: [] },
+        // The ONE scenario that hides the panel, and only to test un-hiding it.
+        // Never in the shared seed (`seedConfigDir`) and never in another
+        // scenario: a seed that turns the feature under test off is how the
+        // panel's own end-to-end coverage was lost once already.
+        showSpinnerTree: false,
+      },
+    })
     // `startCliSession` has already waited for the prompt, so this capture is a
     // decided state rather than a race: an explicit hide survived startup.
     const atBoot = capturePane()
@@ -1959,8 +2182,31 @@ async function scenarioTreePersists(): Promise<ScenarioResult> {
     // Two presses: none → tasks → teammates. The panel draws its own empty
     // state, so this is reachable with nothing spawned - which is exactly the
     // state no other scenario can hold once a teammate is alive.
+    //
+    // The first press is watched rather than slept off, but what it is watched
+    // FOR has to be its non-effect: the intermediate `tasks` view is invisible
+    // in this state - no todos, no task items, and the footer's toggle hint is
+    // suppressed while nothing is spawned - so there is no positive signal to
+    // wait on, and "the pane changed" is not one either (captured directly
+    // while writing this: the only delta the first press leaves behind is an
+    // unrelated status-line rotation, which would make that gate pass without
+    // the key ever being read). So the panel must stay ABSENT for the whole
+    // window: the press gets time to land, and a ctrl+t that ever reaches the
+    // teammates view in ONE step fails here, named, instead of silently
+    // leaving the second press to cycle the panel back off. The cycle's arity
+    // itself is a unit test's job - `useGlobalKeybindings.cycle.test.ts` pins
+    // none → tasks → teammates → none.
     tmux('send-keys', '-t', CLI_WINDOW, 'C-t')
-    await sleep(200)
+    const panelTooEarly = await paneShows(
+      pane => pane.includes(E2E_TREE_LEADER_ROW),
+      PANEL_CYCLE_SETTLE_MS,
+    )
+    if (panelTooEarly) {
+      return fail(
+        'one ctrl+t reached the teammates panel - the none → tasks → teammates cycle has changed',
+        capturePane(),
+      )
+    }
     tmux('send-keys', '-t', CLI_WINDOW, 'C-t')
     const emptyPanel = await waitForPane(
       `scenario 6: the empty panel after ctrl+t ×2 - "${E2E_TREE_LEADER_ROW}" over "${E2E_TREE_EMPTY_ROW}"`,
@@ -2049,8 +2295,14 @@ async function scenarioTreePersists(): Promise<ScenarioResult> {
     // 30s grace: the killed row does not vanish under the cursor. It keeps its
     // place, reads its terminal word, and the highlight is STILL on it - not
     // dangling on nothing, and not jumped onto the teammate that is still
-    // alive. (The other half - where the highlight lands once the grace
-    // expires and the row finally leaves - would cost a 30s sleep; see RISKS.)
+    // alive. (The other half - where the highlight lands once the grace expires
+    // and the row finally leaves - would cost a 30s sleep here, because the
+    // grace has no env or config knob to shorten. It is pinned by a unit test
+    // instead, driven by an injected `now` rather than the wall clock:
+    // `src/tasks/InProcessTeammateTask/teammateSelection.test.ts`, "treats a
+    // grace row leaving at its deadline like any other removal". The same
+    // division of labour is written down in `docs/e2e-tui.md`, under "Two
+    // details of scenario 6 are load-bearing".)
     tmux('send-keys', '-t', CLI_WINDOW, 'k')
     const killed = await waitForPane(
       `scenario 6: "${E2E_TREE_KILLED_SELECTED_ROW}" still selected, with @${E2E_KILL_SURVIVOR} alive`,
@@ -2098,8 +2350,13 @@ function report(results: ScenarioResult[]): void {
   for (const result of results) {
     console.log(`\n${'='.repeat(78)}`)
     console.log(`${result.passed ? 'PASS' : 'FAIL'}  ${result.name}`)
-    console.log('  picker rows parsed from the pane:')
-    console.log(formatRows(result.rows))
+    // Only the picker scenarios parse rows. Printing the block unconditionally
+    // made scenarios 4-6, which never open the picker, report "(no rows
+    // parsed)" - which reads as a failed parse rather than as "not applicable".
+    if (result.rows.length > 0) {
+      console.log('  picker rows parsed from the pane:')
+      console.log(formatRows(result.rows))
+    }
     console.log(`  expected: ${result.expected}`)
     console.log(`  actual:   ${result.actual}`)
     console.log(`${'-'.repeat(78)}\n${result.pane.replace(/\n+$/, '')}`)

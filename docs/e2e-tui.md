@@ -57,7 +57,7 @@ collected by the default `bun test`, and therefore by `bun run check` and CI.
 | 1 | `Down Down Enter` in **one** `send-keys` call | the row **two** below the preselected one is confirmed |
 | 2 | `select-window` away and back, then `Down Enter` | the row **one** below the preselected one is confirmed |
 | 3 | `send-keys -H 1b`, 350ms gap, `send-keys -H 5b 42` | picker dismissed by the residual Escape, **no** `[B` in the prompt |
-| 4 | a prompt answered by a **fake** Messages API with an `Agent` tool call, then `S-Down Enter`, then `Escape` | the teammates panel is up with **no** teammates before the spawn; `Viewing team-lead › supervisor` opens, one Escape returns to the leader, the `@supervisor` row survives |
+| 4 | a prompt answered by a **fake** Messages API with an `Agent` tool call, then `S-Down Enter`, then `Escape` | the teammates panel is up with **no** teammates before the spawn; `Viewing team-lead › supervisor` opens, one Escape returns to the leader, the prompt input box comes back with no dialog over it, the `@supervisor` row survives |
 | 5 | two prompts answered by a fake that scripts the **lead and the teammate**, then `S-Down Enter Escape` and `S-Down Enter Escape` | `@worker-one` is drawn **indented** under `@supervisor-one`, and `Viewing team-lead › supervisor-one` then `… › worker-one` open in turn |
 | 6 | boot with the panel hidden, `C-t C-t`, `C-t`, a prompt spawning two idle teammates, then `S-Down`, `S-Down`, `k` | the panel is absent at boot, shows its empty state on ctrl+t, re-appears on Shift+Down with the **leader row selected**, and the killed row keeps its place, its `killed` word and the highlight |
 
@@ -82,8 +82,11 @@ separate flag), and the Escape handler in `useBackgroundTaskNavigation` used to
 gate on that status alone: it aborted the current turn and returned without
 leaving the view, so for an idle teammate, which has no turn to abort, Escape
 did nothing and the header's `esc return` hint lied. The fix interrupts a busy
-teammate and returns from an idle one; the scenario asserts the return and that
-the teammate is still alive afterwards. Since `b231b071` the header names the
+teammate and returns from an idle one; the scenario asserts the return, that the
+PROMPT is back afterwards - the input box on screen with no dialog drawn over it,
+which is a different fact from the header being gone and shares
+`restorePromptAfterView` with scenario 5 - and that the teammate is still alive
+at that point. Since `b231b071` the header names the
 teammate by its path down the team tree, so the string the harness greps for is
 `Viewing team-lead › supervisor` rather than the bare handle. Run against the
 pre-fix hook it fails with
@@ -158,6 +161,13 @@ the check that the default path exposes the Agent tool's `name` parameter.
 Responses are streamed as SSE when the client asks for a stream and returned as
 JSON otherwise; `/v1/messages/count_tokens` answers a constant, and any other
 route is a 404.
+
+The fake must never outlive its run. Each of those scenarios boots the CLI
+*inside* its own `try`, so a boot timeout still reaches the `finally` that calls
+`api.stop()`, and `startFakeAnthropicApi` additionally `unref`s the server: a
+listening `Bun.serve` is a live handle, and either hole alone would leave the
+harness printing its whole report and then hanging instead of exiting with the
+code it had already set.
 
 Each scenario hands the fake ONE script — a list of steps per role, each step a
 single content block plus its `stop_reason`:
@@ -238,8 +248,19 @@ confirmation. A tie, or no candidate, fails rather than guesses.
 Two things are still constants, on purpose: `MIN_PICKER_ROWS = 3` (a property of
 the *scenarios* — scenario 1 needs the preselected row plus two more, and fewer
 rendered rows is a hard failure with the parsed rows dumped), and the UI strings
-the scenarios key on (`Select model`, `Set model to`, `Kept model as`,
-`? for shortcuts`). Those strings are what a timeout now reports: `waitForPane`
+the scenarios key on. The picker scenarios key on `Select model`, `Set model to`,
+`Kept model as` and `? for shortcuts`; the teammate scenarios add their own,
+each declared as a named constant near the top of the teammate half of
+`tui-keys.ts` and spelled with `\uXXXX` escapes, because a box-drawing glyph or
+a `›` is one editor round-trip away from an ASCII lookalike and a degraded
+literal would cost a 15-second timeout with no clue why. They are: the panel's
+two zero-teammate rows (`E2E_TREE_LEADER_ROW`, `E2E_TREE_EMPTY_ROW`), the three
+view headers (`E2E_TEAMMATE_HEADER`, `E2E_SUB_LEAD_HEADER`,
+`E2E_SUB_WORKER_HEADER`), the selection pointer and the tree glyphs that may
+follow it (`SELECTION_MARKER`, aliased as `E2E_TREE_POINTER`, plus
+`TREE_GLYPH_AFTER_POINTER` and the row pattern inside `treeRowColumn`), the
+killed row (`E2E_TREE_KILLED_SELECTED_ROW`) and the prompt box rule
+(`PROMPT_BOX_RULE`). Those strings are what a timeout now reports: `waitForPane`
 takes a label and, on timeout, prints the step that was waiting plus the last
 captured pane, so a renamed string yields a readable diff instead of a silent
 15-second wait.
