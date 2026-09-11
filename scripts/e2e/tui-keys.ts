@@ -982,7 +982,7 @@ const E2E_TREE_EMPTY_ROW = `no teammates \u00B7 Agent(name: "\u2026") spawns one
  * Spelled as an escape and derived from a real capture, not from the JSX: see
  * `selectedTreeRows`.
  */
-const E2E_TREE_POINTER = '❯'
+const E2E_TREE_POINTER = '\u276F'
 
 /**
  * The tree glyph that follows the pointer on a highlighted row: `╒═` on the
@@ -990,9 +990,14 @@ const E2E_TREE_POINTER = '❯'
  * un-highlighted `┌─`/`├─`/`└─` are accepted too, so a row that ever renders
  * the pointer without the highlight would still be found rather than silently
  * missed.
+ *
+ * Spelled with escapes, like `treeRowColumn` below, which matches the same
+ * glyph class: a box-drawing character is one editor round-trip away from an
+ * ASCII lookalike, and a silently degraded class here would stop matching every
+ * tree row at once.
  */
 const TREE_GLYPH_AFTER_POINTER =
-  /^[╒╞╘┌├└][═─]/
+  /^[\u2552\u255E\u2558\u250C\u251C\u2514][\u2550\u2500]/
 
 /**
  * Every tree row the selection pointer sits on, each from its glyph onwards
@@ -1020,6 +1025,34 @@ function selectedTreeRows(pane: string): string[] {
 function selectedTreeRow(pane: string): string | null {
   const rows = selectedTreeRows(pane)
   return rows.length === 1 ? rows[0]! : null
+}
+
+/**
+ * The prompt's input box rule - the full-width line drawn immediately above and
+ * below the line being typed into.
+ */
+const PROMPT_BOX_RULE = /^\u2500{20,}\s*$/
+
+/**
+ * What the prompt's input line currently holds, or null when the input box is
+ * not on screen at all (a dialog drawn over the prompt replaces it).
+ *
+ * The pointer alone cannot find it: a SUBMITTED user message is drawn with the
+ * same `\u276F` in the transcript above, and a selected tree row draws it too
+ * (see `selectedTreeRows`). The box is what tells them apart - only the live
+ * input line sits directly under the rule - so this reads the pane's structure
+ * rather than the prompt's padding, and an empty input comes back as `''`
+ * instead of being confused with "no input box".
+ */
+function promptInputLine(pane: string): string | null {
+  const lines = pane.split('\n')
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i]!
+    if (!line.startsWith(E2E_TREE_POINTER)) continue
+    if (!PROMPT_BOX_RULE.test(lines[i - 1]!)) continue
+    return line.slice(E2E_TREE_POINTER.length).trim()
+  }
+  return null
 }
 
 /**
@@ -1138,13 +1171,20 @@ const TEAMMATE_SYSTEM_MARKER = '# Agent Teammate Communication'
  * side call the CLI makes - is the lead's.
  *
  * A second signal was tried and REJECTED on evidence: "the last user message
- * contains `<teammate-message`". It misclassifies the LEAD, because
- * `formatAsTeammateMessage` (`src/utils/swarm/inProcessRunner.ts:589`) wraps a
- * message in that tag for whoever RECEIVES it - and a teammate's idle
- * notification is delivered to the lead. Observed directly while building
- * scenario 5: a request with 34 tools, the lead's model and NO addendum,
- * carrying `<teammate-message teammate_id="supervisor-one">`. Reading that as a
- * teammate turn would serve the lead a teammate's script step. The addendum is
+ * contains `<teammate-message`". It misclassifies the LEAD, because the LEAD's
+ * own inbox poller wraps an incoming message in that tag before submitting it
+ * into the lead's turn (`src/hooks/useInboxPoller.ts:866` and `:970`; the same
+ * wrapping in `formatTeammateMessages`, `src/utils/teammateMailbox.ts:386`) -
+ * and a teammate's idle notification is delivered to the lead. The tag is
+ * therefore written for whoever RECEIVES the message, lead included; it is NOT
+ * a teammate marker. (`formatAsTeammateMessage`,
+ * `src/utils/swarm/inProcessRunner.ts:583-592`, is the teammate-side twin: all
+ * three of its call sites - `:1856`, `:1892`, `:2214` - build a TEAMMATE's
+ * prompt, so it is not what puts the tag in front of the lead.) Observed
+ * directly while building scenario 5: a request with 34 tools, the lead's model
+ * and NO addendum, carrying `<teammate-message teammate_id="supervisor-one">`.
+ * Reading that as a teammate turn would serve the lead a teammate's script
+ * step. The addendum is
  * appended to every in-process teammate's system prompt
  * (`inProcessRunner.ts:2124`) except one this harness never uses
  * (`systemPromptMode: 'replace'`), so it is both sufficient and safe here.
@@ -1495,6 +1535,14 @@ const E2E_SUB_LEAD_HEADER = `Viewing team-lead › ${E2E_SUB_LEAD}`
 const E2E_SUB_WORKER_HEADER = `${E2E_SUB_LEAD_HEADER} › ${E2E_SUB_WORKER}`
 
 /**
+ * How many times scenario 5 will dismiss whatever the final Escape left drawn
+ * over the prompt before it gives up and fails on it, and how long each attempt
+ * lets the view-exit render settle first.
+ */
+const PROMPT_RESTORE_ATTEMPTS = 3
+const PROMPT_RESTORE_SETTLE_MS = 400
+
+/**
  * Scenario 5's script - the first one that answers BOTH roles.
  *
  * The lead spawns `supervisor-one` WITH a prompt, so it takes a turn at once
@@ -1624,8 +1672,9 @@ async function scenarioNestedTeamTree(): Promise<ScenarioResult> {
     tmux('send-keys', '-t', CLI_WINDOW, 'spawn supervisor-one to build its own sub-team', 'Enter')
     // Both turns finished: the sub-lead has a row, its own script is spent (so
     // TeamCreate has already returned and the sub-team exists), and the prompt
-    // is idle again - which is what makes the second prompt below land in an
-    // empty input rather than being typed on top of the first one.
+    // is idle again. That is ALL this gate proves. Submitting does not empty the
+    // input box, so being idle is not being empty - the second prompt is given
+    // an empty input explicitly, below.
     const subTeamReady = await waitForPane(
       `scenario 5: @${E2E_SUB_LEAD} spawned and its sub-team created`,
       pane =>
@@ -1641,6 +1690,31 @@ async function scenarioNestedTeamTree(): Promise<ScenarioResult> {
           E2E_SUB_LEAD,
         )}; ${formatRequestLog(api)})`,
         subTeamReady.pane,
+      )
+    }
+
+    // A submitted prompt STAYS in the input box - captured here while building
+    // this scenario, the box still read `spawn supervisor-one to build its own
+    // sub-team` a full turn after that prompt was answered. Typed straight on
+    // top of it, the next prompt would be submitted as the two concatenated
+    // (`...sub-teamadd worker-one...`), which is what this scenario used to do.
+    // Ctrl+U is the input's kill-to-line-start key (`useTextInput.ts:672-680`),
+    // and the wait after it is what makes "the second prompt lands in an EMPTY
+    // input" a property this scenario CHECKS rather than one it assumes.
+    tmux('send-keys', '-t', CLI_WINDOW, 'C-u')
+    const inputCleared = await waitForPane(
+      'scenario 5: an empty prompt input after Ctrl+U, before the second prompt',
+      pane => promptInputLine(pane) === '',
+      UI_TIMEOUT_MS,
+    )
+    if (!inputCleared.ok) {
+      return fail(
+        `Ctrl+U did not clear the input (it holds ${
+          promptInputLine(inputCleared.pane) === null
+            ? 'NO INPUT BOX'
+            : `"${promptInputLine(inputCleared.pane)}"`
+        })`,
+        inputCleared.pane,
       )
     }
 
@@ -1724,6 +1798,31 @@ async function scenarioNestedTeamTree(): Promise<ScenarioResult> {
     )
     if (!returned.ok) return fail(`Escape did not leave "${E2E_SUB_WORKER_HEADER}"`, returned.pane)
 
+    // The header being gone is NOT the prompt being back, and this scenario used
+    // to end on exactly that gap: the Escape above can reach the prompt as well
+    // as the view, and Escape at the prompt opens the Rewind dialog
+    // (`MessageSelector.tsx:347`) - a modal that REPLACES the input box while
+    // leaving the leader view visible behind it, so `!includes(header)` is
+    // satisfied by it. Whether it appears depends on how the view-exit render
+    // interleaves with the keys before it (observed both ways while building
+    // this), so it is DISMISSED when present rather than asserted - pinning the
+    // stray Escape would make fixing it read as a regression here. The end state
+    // is what gets asserted, and the input box is the one thing a dialog cannot
+    // fake.
+    for (let attempt = 0; attempt < PROMPT_RESTORE_ATTEMPTS; attempt++) {
+      await sleep(PROMPT_RESTORE_SETTLE_MS)
+      if (promptInputLine(capturePane()) !== null) break
+      tmux('send-keys', '-t', CLI_WINDOW, 'Escape')
+    }
+    const atPrompt = await waitForPane(
+      'scenario 5: the prompt input box back, with no dialog drawn over it',
+      pane => promptInputLine(pane) !== null,
+      UI_TIMEOUT_MS,
+    )
+    if (!atPrompt.ok) {
+      return fail('the prompt never came back - a dialog is still drawn over the input box', atPrompt.pane)
+    }
+
     // Both scripts consumed in full, in order. A role can never consume more
     // steps than its script holds, so this is exactly "every scripted step was
     // served to the role it was written for" - the per-role counters.
@@ -1735,7 +1834,7 @@ async function scenarioNestedTeamTree(): Promise<ScenarioResult> {
     const actual = countersMatch
       ? `all three rows in one capture with @${E2E_SUB_WORKER} indented under @${E2E_SUB_LEAD}; both headers opened and left by key; ${formatRequestLog(api)}`
       : `the tree and both headers were right, but the fake's per-role counters did not match the script (lead: "${leadSteps}" vs "${wantedLead}", teammate: "${teammateSteps}" vs "${wantedTeammate}"; ${formatRequestLog(api)})`
-    return { name, passed: countersMatch, expected, actual, rows: [], pane: returned.pane }
+    return { name, passed: countersMatch, expected, actual, rows: [], pane: atPrompt.pane }
   } finally {
     await stopCliSession()
     api.stop()
@@ -1761,7 +1860,7 @@ const E2E_KILL_SURVIVOR = 'survivor'
  * Derived from a real capture, like every other literal here, and spelled with
  * escapes so an editor round-trip cannot quietly turn `╞═` into `|=`.
  */
-const E2E_TREE_KILLED_SELECTED_ROW = `╞═ @${E2E_KILL_TARGET}: killed`
+const E2E_TREE_KILLED_SELECTED_ROW = `\u255E\u2550 @${E2E_KILL_TARGET}: killed`
 
 /** How long a killed row is given to prove it LINGERS rather than merely existing for one frame. */
 const GRACE_PROBE_MS = 2_000
