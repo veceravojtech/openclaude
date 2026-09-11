@@ -67,11 +67,19 @@ export function shouldInjectAgentListInMessages(): boolean {
  * What `name`, `team_name` and `mode` mean for a LEAD and for a TEAMMATE —
  * both answers in one text, because only one of them can ever reach the model.
  *
- * The two cases are genuinely different. A lead spawns a teammate into the
- * team it names or the team it is already in; a teammate — in-process or in
- * its own terminal — can only spawn into the sub-team it leads, and only once
- * it has created that sub-team (`AgentTool.tsx:437-457`, whose refusals name
- * `TeamCreate` and the `team_name` equality rule).
+ * The three cases are genuinely different. A lead spawns a teammate into the
+ * team it names or the team it is already in — and with neither, `name` makes
+ * no teammate at all (`resolveTeamName`, `AgentTool.tsx:1773-1782`, returns
+ * undefined, the spawn branch at `:481` is skipped, and `:610-614` runs a
+ * plain subagent or refuses a prompt-less call). A teammate running inside its
+ * lead's session can only spawn into the sub-team it leads, and only once it
+ * has created that sub-team (`AgentTool.tsx:437-457`, whose refusals name
+ * `TeamCreate` and the `team_name` equality rule). A teammate in its own
+ * terminal cannot lead a sub-team at all: `createSubTeam` refuses every caller
+ * that is not an in-process teammate (`TeamCreateTool.ts:130-141`), so
+ * `readSubTeamLedBy` never finds one for it and `:440-450` refuses its named
+ * spawn every time — the only honest thing to tell that reader is to ask its
+ * lead.
  *
  * DO NOT branch this text on the ambient context (an `isInProcessTeammate()`
  * or `isTeammate()` read in the render path, or anything like it). Tool
@@ -96,14 +104,16 @@ export function shouldInjectAgentListInMessages(): boolean {
  * together, and this is NOT the ambient branch the paragraph above forbids.
  */
 const TEAMMATE_SPAWN_RULES = `
-- \`name\` spawns a TEAMMATE, and which team it lands in depends on who you are: as a LEAD, the team you pass in \`team_name\` or the team you are already in; as a TEAMMATE — running inside your lead's session or in your own terminal — the sub-team YOU lead, never your own team. Create that sub-team first with \`${TEAM_CREATE_TOOL_NAME}(team_name: "<your team>/<your name>")\`; until it exists the spawn is refused. \`team_name\` is then optional: omit it and your sub-team is used, and if you do pass it, it must name exactly that sub-team. Omit \`name\` and you get an ordinary subagent either way.
-- \`mode\` applies to such a teammate spawn — \`mode: "plan"\` requires it to get its plan approved by you before it implements. A teammate you spawn works on its own and reports back with ${SEND_MESSAGE_TOOL_NAME}, which states when its messages reach you.`
+- \`name\` spawns a TEAMMATE, and which team it lands in depends on who you are: as a LEAD, the team you pass in \`team_name\` or the team you are already in — with neither, \`name\` makes no teammate at all and the call runs an ordinary subagent, which needs a prompt; as a TEAMMATE running inside your lead's session, the sub-team YOU lead, never your own team; as a TEAMMATE running in your own terminal, none — you cannot lead a sub-team there, so a spawn with \`name\` is refused: ask your team lead to create the team and spawn its members instead. Omit \`name\` and you get an ordinary subagent whoever you are.
+- To lead a sub-team from inside your lead's session, create it first with \`${TEAM_CREATE_TOOL_NAME}(team_name: "<your team>/<your name>")\`; until it exists the spawn is refused. \`team_name\` is then optional: omit it and your sub-team is used, and if you do pass it, it must name exactly that sub-team.
+- \`mode: "plan"\` starts the teammate in plan mode and is the only \`mode\` value a teammate spawn acts on. In a lead's session that plan is approved automatically and reaches you as a message — you see it, you do not gate it. A teammate you spawn works on its own and reports back with ${SEND_MESSAGE_TOOL_NAME}, which states when its messages reach you.`
 
 /**
- * Appended only when `run_in_background` is actually on the schema AND there
- * are teammates to be one — see `backgroundAgentsAvailable` and
- * `teammateSpawnAvailable` in getPrompt(). Same reader-attributed shape as
- * TEAMMATE_SPAWN_RULES, and for the same reason.
+ * Appended only when `run_in_background` is actually on the schema AND Agent
+ * Teams is on, so that being a teammate is a thing that can happen at all —
+ * see `backgroundAgentsAvailable` and `teammateSpawnAvailable` in getPrompt().
+ * Same reader-attributed shape as TEAMMATE_SPAWN_RULES, and for the same
+ * reason.
  */
 const TEAMMATE_BACKGROUND_RULE = `
 - \`run_in_background\` is not available to you when you are a teammate running inside your lead's session — omit it there; a lead, or a teammate running in its own terminal, can use it.`

@@ -41,6 +41,19 @@ function restoreEnv(key: keyof typeof originalEnv): void {
   }
 }
 
+/**
+ * Agent Teams ON for this render, whatever the developer's shell exports.
+ * `isAgentSwarmsEnabled()` checks the opt-out FIRST (agentSwarmsEnabled.ts:21-24
+ * — "Explicit opt-out wins over everything, including ant builds"), so
+ * USER_TYPE='ant' does NOT out-vote an exported CLAUDE_CODE_DISABLE_AGENT_TEAMS:
+ * the opt-out has to be deleted. Both vars are snapshotted at module load and
+ * put back in afterEach, so deleting here is self-cleaning.
+ */
+function forceAgentTeamsOn(): void {
+  delete process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS
+  process.env.USER_TYPE = 'ant'
+}
+
 const agents: AgentDefinition[] = [
   {
     agentType: 'general-purpose',
@@ -52,7 +65,7 @@ const agents: AgentDefinition[] = [
 
 describe('AgentTool prompt isolation contract', () => {
   test('advertises worktree isolation but never remote isolation', async () => {
-    process.env.USER_TYPE = 'ant'
+    forceAgentTeamsOn()
     process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
 
     const prompt = await getPrompt(agents)
@@ -77,8 +90,9 @@ describe('AgentTool prompt isolation contract', () => {
 // change). An in-process teammate shares that process and that Map with its
 // lead, and the lead necessarily renders `Agent` before it can call it to
 // spawn a teammate — so the sub-team rule, gated on isInProcessTeammate(),
-// never reached a teammate at all. ONE text now states the LEAD case and the
-// TEAMMATE case with the reader each belongs to. These pin both clauses in one
+// never reached a teammate at all. ONE text now states all three reader cases
+// — the lead, the teammate inside its lead's session, the teammate in its own
+// terminal — with the reader each belongs to. These pin every clause in one
 // render, that the bytes do not depend on where they are rendered (at
 // getPrompt and through the production toolToAPISchema, in both orders), and
 // that the block still promises nothing about a tree row — a teammate spawned
@@ -111,13 +125,16 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
 
   afterEach(() => {
     // The schema cache is module-level state shared with every other suite in
-    // this process — leave it as we found it.
+    // this process. There is no snapshot/restore for it: clearToolSchemaCache()
+    // EMPTIES the Map, so the next suite starts from an empty cache rather than
+    // the entries that were there before us. Emptying is the safe direction — a
+    // stale entry rendered under this suite's env would outlive it.
     clearToolSchemaCache()
   })
 
   test('states the lead case and the teammate sub-team rule in ONE render', async () => {
     process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
-    process.env.USER_TYPE = 'ant' // Agent Teams on, whatever the killswitch says
+    forceAgentTeamsOn()
 
     const prompt = await getPrompt(agents)
 
@@ -132,9 +149,7 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     expect(prompt).toContain('TeamCreate(team_name: "<your team>/<your name>")')
     expect(prompt).toContain('`team_name` is then optional')
     expect(prompt).toContain('must name exactly that sub-team')
-    expect(prompt).toContain(
-      '`mode: "plan"` requires it to get its plan approved by you',
-    )
+    expect(prompt).toContain('`mode: "plan"` starts the teammate in plan mode')
     // AgentTool.tsx:462-464 — scoped to the in-process teammate, and said so.
     expect(prompt).toContain(
       '`run_in_background` is not available to you when you are a teammate',
@@ -146,9 +161,54 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     )
   })
 
+  // The three clauses the first version of this text got WRONG, each pinned to
+  // the line that makes the corrected wording true at HEAD:
+  //  - A teammate in its own terminal cannot lead a sub-team at all:
+  //    createSubTeam refuses every caller that is not an in-process teammate
+  //    (TeamCreateTool.ts:130-141), so readSubTeamLedBy finds nothing for it and
+  //    AgentTool.tsx:440-450 refuses its named spawn every time. The shipped
+  //    text told that reader to create a sub-team it can never have.
+  //  - A lead in no team that passes no team_name resolves no team at all
+  //    (resolveTeamName, AgentTool.tsx:1773-1782), so the spawn branch at :481
+  //    is skipped and the call runs an ordinary subagent — which :610-614
+  //    refuses when there is no prompt. The shipped text had no clause for it.
+  //  - `mode`: AgentTool.tsx:546 (`plan_mode_required: spawnMode === 'plan'`) is
+  //    the sole consumer, so no other value changes a teammate spawn; and in a
+  //    lead's session useInboxPoller.ts:641-701 writes the approval itself and
+  //    only then passes the request through as a message. The shipped text
+  //    promised the spawner gates the plan.
+  test('states the truth for the own-terminal teammate, the no-team lead and `mode`', async () => {
+    process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
+    forceAgentTeamsOn()
+
+    const prompt = await getPrompt(agents)
+
+    expect(prompt).toContain(
+      'as a TEAMMATE running in your own terminal, none — you cannot lead a sub-team there, so a spawn with `name` is refused',
+    )
+    expect(prompt).toContain(
+      'ask your team lead to create the team and spawn its members instead',
+    )
+    expect(prompt).toContain(
+      'with neither, `name` makes no teammate at all and the call runs an ordinary subagent, which needs a prompt',
+    )
+    expect(prompt).toContain('is the only `mode` value a teammate spawn acts on')
+    expect(prompt).toContain(
+      'that plan is approved automatically and reaches you as a message',
+    )
+    // The sub-team instruction now addresses only the reader that can act on it.
+    expect(prompt).toContain("To lead a sub-team from inside your lead's session")
+    // None of the three over-promises may come back.
+    expect(prompt).not.toContain(
+      "running inside your lead's session or in your own terminal",
+    )
+    expect(prompt).not.toContain('`mode` applies to such a teammate spawn')
+    expect(prompt).not.toContain('requires it to get its plan approved by you')
+  })
+
   test('the rendered text does not depend on where it is rendered', async () => {
     process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
-    process.env.USER_TYPE = 'ant'
+    forceAgentTeamsOn()
 
     expect(await inTeammateContext(() => getPrompt(agents))).toBe(
       await getPrompt(agents),
@@ -157,7 +217,7 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
 
   test('the memoised description carries the sub-team rule in either render order', async () => {
     process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
-    process.env.USER_TYPE = 'ant'
+    forceAgentTeamsOn()
 
     // Lead first — the only order a real session can take.
     clearToolSchemaCache()
@@ -189,7 +249,7 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
 
   test('promises nothing about a tree row for the spawned teammate', async () => {
     process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
-    process.env.USER_TYPE = 'ant'
+    forceAgentTeamsOn()
 
     const prompt = await getPrompt(agents)
     // Only the teammate block: the rest of the prompt says "worktree".
@@ -199,7 +259,7 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     expect(end).toBeGreaterThan(start)
     const teammateBlock = prompt.slice(start, end)
 
-    for (const promise of ['tree', 'row', 'pill', 'visible']) {
+    for (const promise of ['tree', 'row', 'pill', 'visible', 'spinner']) {
       expect(teammateBlock).not.toContain(promise)
     }
   })
@@ -213,7 +273,10 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
   test('offers no teammate parameter that the schema does not carry', async () => {
     process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
     process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS = '1'
-    delete process.env.USER_TYPE // 'ant' forces Agent Teams back on
+    // The opt-out already wins on its own (agentSwarmsEnabled.ts:21-24 checks
+    // it before the ant branch), so this delete is belt-and-braces: it keeps the
+    // render independent of an ambient ant build if that precedence ever moves.
+    delete process.env.USER_TYPE
 
     clearToolSchemaCache()
     const schema = (await toolToAPISchema(AgentTool, {
@@ -230,7 +293,7 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     for (const clause of [
       '`name` spawns a TEAMMATE',
       '`team_name` is then optional',
-      '`mode: "plan"` requires',
+      '`mode: "plan"` starts the teammate in plan mode',
       'TeamCreate(team_name:',
       '`run_in_background` is not available to you when you are a teammate',
     ]) {
