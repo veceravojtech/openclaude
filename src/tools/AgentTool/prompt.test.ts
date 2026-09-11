@@ -402,6 +402,22 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
    */
   const TEAMMATE_SCHEMA_FIELDS = ['name', 'team_name', 'mode', 'replicas']
 
+  // The list IS the content of every assertion that loops over it, and a loop
+  // over a shorter list still passes: trimming one name to match a trimmed
+  // SWARM_FIELDS_BY_TOOL would un-pin that field in all three tests below, and
+  // `carries every teammate parameter when Agent Teams is ON` — which asserts
+  // nothing else — would pass having asserted nothing at all. So the list needs
+  // a pin of its own. The literal is that pin because SWARM_FIELDS_BY_TOOL is
+  // not exported from the api module: an import would not compile.
+  test('pins the teammate parameter list the loops below assert over', () => {
+    expect(TEAMMATE_SCHEMA_FIELDS).toEqual([
+      'name',
+      'team_name',
+      'mode',
+      'replicas',
+    ])
+  })
+
   /** Clauses of TEAMMATE_SPAWN_RULES / TEAMMATE_BACKGROUND_RULE. */
   const TEAMMATE_PARAM_CLAUSES = [
     '`name` spawns a TEAMMATE',
