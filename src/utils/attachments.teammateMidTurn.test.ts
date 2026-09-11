@@ -122,9 +122,17 @@ type Harness = {
   state: () => AppState
 }
 
-/** A tool-use context as runAgent builds it for the teammate's own turn. */
+/**
+ * A tool-use context as runAgent builds it for a teammate's own turn, or for a
+ * background subagent.
+ *
+ * `turnAgentId` is `undefined` for a MAIN LOOP — the lead's own turn, or a
+ * tmux teammate's. Neither REPL.tsx's getToolUseContext (:2749) nor
+ * QueryEngine.ts's processUserInputContext (:401) puts an `agentId` on the
+ * context it builds; only createSubagentContext does (forkedAgent.ts:459).
+ */
 function createHarness(
-  turnAgentId: string,
+  turnAgentId: string | undefined,
   mutate?: (prev: AppState) => AppState,
 ): Harness {
   let state = getDefaultAppState()
@@ -371,10 +379,15 @@ test('nor does it under `ant`, where the lead path below would run', async () =>
  * its team name from `getTeamName(appState.teamContext)`, so without one it
  * opens the NON-team inbox, which nothing here writes to — and every assertion
  * about the viewed teammate's inbox would then hold whatever that path did.
+ *
+ * `turnAgentId` defaults to absent, which is what a lead's own turn has: an
+ * `agentId` on the context means a subagent (Tool.ts:266), and the callers
+ * below that DO want one — a teammate's turn, a lead-spawned subagent — pass
+ * it explicitly.
  */
 function createViewingHarness(
   viewedName: string,
-  turnAgentId: string = createAgentId(),
+  turnAgentId?: string,
 ): Harness {
   const viewedTask = {
     type: 'in_process_teammate',
@@ -424,6 +437,77 @@ test("an `ant` lead's own turn still drains the viewed teammate's inbox", async 
   // turn precisely so the lead path still runs here.
   expect(textsOf(attachments)).toEqual(['for the teammate'])
   expect((await readMailbox(SUB_LEAD, TEAM)).map(m => m.read)).toEqual([true])
+})
+
+/**
+ * The AppState a LEAD has with no teammate transcript open.
+ *
+ * The second thing the lead path can drain: with no `viewedTeammate`,
+ * `agentName` falls back to the lead's own name — `isTeamLead(teamContext)` is
+ * true for a context with no ambient agent id (teammate.ts:191-195), and the
+ * name then resolves `teammates[leadAgentId]?.name || 'team-lead'`. `teammates`
+ * maps the LEAD's teammates, so it holds no entry for `leadAgentId` and the
+ * fallback is what a real lead takes — hence TEAM_LEAD_NAME's inbox below.
+ */
+function createLeadHarness(turnAgentId?: string): Harness {
+  return createHarness(turnAgentId, prev => ({
+    ...prev,
+    teamContext: {
+      teamName: TEAM,
+      teamFilePath: getTeamFilePath(TEAM),
+      leadAgentId: 'lead-id',
+      teammates: {},
+    },
+  }))
+}
+
+test("an `ant` lead's own turn still drains its own inbox", async () => {
+  // The lead path's OTHER mail source, pinned so the T9 guard below cannot
+  // take it with it: the guard must stop a subagent, not the lead.
+  process.env.USER_TYPE = 'ant'
+  const harness = createLeadHarness()
+  await writeToMailbox(TEAM_LEAD_NAME, mail('worker', 'for the lead'), TEAM)
+
+  const attachments = await drain(harness)
+
+  expect(textsOf(attachments)).toEqual(['for the lead'])
+  expect((await readMailbox(TEAM_LEAD_NAME, TEAM)).map(m => m.read)).toEqual([
+    true,
+  ])
+})
+
+test("a lead-spawned subagent takes nothing from the lead's own inbox", async () => {
+  // T9. The twin of the teammate-spawned case above, for the other spawner. A
+  // subagent the LEAD spawned has its own `agentId` but NO ambient teammate
+  // context, so the mid-turn guard returns `undefined` for it and it used to
+  // fall through to the `ant` lead path — which resolved the lead's own name
+  // from `teamContext` and handed the subagent the lead's mail, marking it
+  // read so the lead never saw it.
+  process.env.USER_TYPE = 'ant'
+  const harness = createLeadHarness(createAgentId())
+  await writeToMailbox(TEAM_LEAD_NAME, mail('worker', 'for the lead'), TEAM)
+
+  const attachments = await drain(harness)
+
+  expect(attachments).toEqual([])
+  expect((await readMailbox(TEAM_LEAD_NAME, TEAM)).map(m => m.read)).toEqual([
+    false,
+  ])
+})
+
+test("a lead-spawned subagent takes nothing from the viewed teammate's inbox", async () => {
+  // T9, the lead path's second mail source. `getViewedTeammateTask` resolves
+  // against the AppState the subagent shares with the lead, so whichever
+  // teammate the lead happens to be VIEWING is the one whose inbox the
+  // subagent drained.
+  process.env.USER_TYPE = 'ant'
+  const harness = createViewingHarness(SUB_LEAD, createAgentId())
+  await writeToMailbox(SUB_LEAD, mail('worker', 'for the teammate'), TEAM)
+
+  const attachments = await drain(harness)
+
+  expect(attachments).toEqual([])
+  expect((await readMailbox(SUB_LEAD, TEAM)).map(m => m.read)).toEqual([false])
 })
 
 test("a teammate's turn ignores whichever teammate the lead is viewing", async () => {
