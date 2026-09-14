@@ -1762,7 +1762,7 @@ async function completeSubLeadHandoff(
         planModeRequired,
         model,
       },
-      { setAppState },
+      { setAppState, getAppState: toolUseContext.getAppState },
     )
     if (
       !spawn.success ||

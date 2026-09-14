@@ -181,7 +181,10 @@ export async function respawnSubLead(params: {
       planModeRequired: spawnRecord?.planModeRequired ?? false,
       model: spawnRecord?.model,
     },
-    { setAppState: toolUseContext.setAppState },
+    {
+      setAppState: toolUseContext.setAppState,
+      getAppState: toolUseContext.getAppState,
+    },
   )
   if (
     !spawn.success ||

@@ -18,6 +18,8 @@ import { getSessionId } from '../../bootstrap/state.js'
 import { getSpinnerVerbs } from '../../constants/spinnerVerbs.js'
 import { TURN_COMPLETION_VERBS } from '../../constants/turnCompletionVerbs.js'
 import type { AppState } from '../../state/AppState.js'
+import type { ToolPermissionContext } from '../../Tool.js'
+import type { PermissionMode } from '../permissions/PermissionMode.js'
 import {
   createTaskStateBase,
   generateTaskId,
@@ -65,7 +67,55 @@ export type InProcessTeammateKillTrace = {
  */
 export type SpawnContext = {
   setAppState: SetAppStateFn
+  /**
+   * Reads the leader's live AppState. Used to inherit the leader's CURRENT
+   * permission mode — see resolveTeammatePermissionMode. Optional so callers
+   * that only hold a setter still spawn (they get the safe `default`).
+   */
+  getAppState?: () => AppState
   toolUseId?: string
+}
+
+/**
+ * The permission mode a newly spawned in-process teammate starts in.
+ *
+ * Teammates inherit the leader's mode rather than starting in `default`:
+ * they run in the leader's process, against the leader's cwd, so a leader
+ * that is not being prompted should not have its teammates prompting.
+ *
+ * Two things still override the inheritance:
+ * - `planModeRequired` is explicit caller intent and always wins.
+ * - A dangerous mode is only inherited while the leader's context still says
+ *   `isBypassPermissionsModeAvailable`. The org-policy killswitch
+ *   (checkAndDisableBypassPermissionsIfNeeded) clears that flag and resets the
+ *   mode on the LIVE context, so a teammate spawned after policy revoked
+ *   bypass cannot resurrect it. This is read at spawn time, never captured at
+ *   startup, so the revocation applies to every later spawn.
+ */
+export function resolveTeammatePermissionMode({
+  planModeRequired,
+  leaderPermissionContext,
+}: {
+  planModeRequired: boolean
+  leaderPermissionContext?: Pick<
+    ToolPermissionContext,
+    'mode' | 'isBypassPermissionsModeAvailable'
+  >
+}): PermissionMode {
+  if (planModeRequired) {
+    return 'plan'
+  }
+  if (!leaderPermissionContext) {
+    return 'default'
+  }
+  const { mode, isBypassPermissionsModeAvailable } = leaderPermissionContext
+  if (
+    (mode === 'bypassPermissions' || mode === 'fullAccess') &&
+    !isBypassPermissionsModeAvailable
+  ) {
+    return 'default'
+  }
+  return mode
 }
 
 /**
@@ -121,7 +171,7 @@ export async function spawnInProcessTeammate(
   context: SpawnContext,
 ): Promise<InProcessSpawnOutput> {
   const { name, teamName, prompt, color, planModeRequired, model } = config
-  const { setAppState } = context
+  const { setAppState, getAppState } = context
 
   // Generate deterministic agent ID
   const agentId = formatAgentId(name, teamName)
@@ -130,7 +180,6 @@ export async function spawnInProcessTeammate(
   logForDebugging(
     `[spawnInProcessTeammate] Spawning ${agentId} (taskId: ${taskId})`,
   )
-
   try {
     // Create independent AbortController for this teammate
     // Teammates should not be aborted when the leader's query is interrupted
@@ -198,7 +247,10 @@ export async function spawnInProcessTeammate(
       awaitingPlanApproval: false,
       spinnerVerb: sample(getSpinnerVerbs()),
       pastTenseVerb: sample(TURN_COMPLETION_VERBS),
-      permissionMode: planModeRequired ? 'plan' : 'default',
+      permissionMode: resolveTeammatePermissionMode({
+        planModeRequired,
+        leaderPermissionContext: getAppState?.().toolPermissionContext,
+      }),
       isIdle: isIdleSpawn,
       shutdownRequested: false,
       lastReportedToolCount: 0,
