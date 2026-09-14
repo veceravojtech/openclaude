@@ -91,6 +91,11 @@ import {
   SUBAGENT_SKILL_LISTING_CHAR_BUDGET,
 } from '../tools/SkillTool/prompt.js'
 import { getContextWindowForModel } from './context.js'
+import {
+  consumeDelegationScoreDelta,
+  formatDelegationPoints,
+  shouldShowDelegationScore,
+} from '../services/supervisor/delegationScore.js'
 import type { DiscoverySignal } from '../services/skillSearch/signals.js'
 // Conditional require for DCE. All skill-search string literals that would
 // otherwise leak into external builds live inside these modules. The only
@@ -635,6 +640,10 @@ export type Attachment =
       content: string
     }
   | {
+      type: 'supervisor_score'
+      content: string
+    }
+  | {
       type: 'plan_file_reference'
       planFilePath: string
       planContent: string
@@ -992,6 +1001,9 @@ export async function getAttachments(
     ),
     maybeAttachment('critical_system_reminder', () =>
       Promise.resolve(getCriticalSystemReminderAttachment(toolUseContext)),
+    ),
+    maybeAttachment('supervisor_score', () =>
+      Promise.resolve(getSupervisorScoreAttachment(toolUseContext)),
     ),
     ...(feature('COMPACTION_REMINDERS')
       ? [
@@ -1724,6 +1736,51 @@ function getCriticalSystemReminderAttachment(
     return []
   }
   return [{ type: 'critical_system_reminder', content: reminder }]
+}
+
+/**
+ * The supervisor's running delegation score, handed back to the model each
+ * turn. Soft supervision has no tool filter, so this line — plus the score
+ * section of the supervisor prompt that explains it — is the whole feedback
+ * loop. Skipped for teammates and subagents: only the main thread supervises.
+ *
+ * The delta is consumed when rendered, so a turn that builds attachments twice
+ * shows the change once. The totals are unaffected.
+ */
+function getSupervisorScoreAttachment(
+  toolUseContext: ToolUseContext,
+): Attachment[] {
+  if (!shouldShowDelegationScore(toolUseContext.agentId)) {
+    return []
+  }
+  const score = consumeDelegationScoreDelta()
+  if (
+    score.points === 0 &&
+    score.delegated === 0 &&
+    score.selfWork === 0 &&
+    score.abandoned === 0
+  ) {
+    return []
+  }
+
+  const parts = [
+    `${score.delegated} delegated run${score.delegated === 1 ? '' : 's'} completed`,
+    `${score.selfWork} tool call${score.selfWork === 1 ? '' : 's'} you ran yourself`,
+  ]
+  if (score.abandoned > 0) {
+    parts.push(`${score.abandoned} delegated run(s) failed or stopped`)
+  }
+  const delta =
+    score.lastDelta === 0
+      ? ''
+      : ` (${formatDelegationPoints(score.lastDelta)} since your last turn)`
+
+  return [
+    {
+      type: 'supervisor_score',
+      content: `Delegation score: ${formatDelegationPoints(score.points)}${delta} — ${parts.join(', ')}.`,
+    },
+  ]
 }
 
 function getOutputStyleAttachment(): Attachment[] {

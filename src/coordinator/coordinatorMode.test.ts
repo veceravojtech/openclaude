@@ -127,8 +127,12 @@ describe('getCoordinatorSystemPrompt — supervision', () => {
   it('states the score rule it will be measured by', () => {
     const prompt = getCoordinatorSystemPrompt()
     expect(prompt).toContain('Delegation Score')
-    expect(prompt).toContain('completed and verified')
-    expect(prompt).toContain('rewards *outcomes*, not activity')
+    // The numbers must match delegationScore.ts, or the model is being told a
+    // rule it is not actually scored by.
+    expect(prompt).toContain('**+3**')
+    expect(prompt).toContain('**−1**')
+    expect(prompt).toContain('Reading, searching and asking cost **nothing**')
+    expect(prompt).toContain('a nudge, not a target')
   })
 
   it('keeps per-teammate model routing on the table', () => {

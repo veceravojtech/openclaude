@@ -4,6 +4,7 @@ import { feature } from 'bun:bundle';
 // Dead code elimination: conditional import for COORDINATOR_MODE
 /* eslint-disable @typescript-eslint/no-require-imports */
 const coordinatorModule = feature('COORDINATOR_MODE') ? require('../../coordinator/coordinatorMode.js') as typeof import('../../coordinator/coordinatorMode.js') : undefined;
+const delegationScoreModule = feature('COORDINATOR_MODE') ? require('../../services/supervisor/delegationScore.js') as typeof import('../../services/supervisor/delegationScore.js') : undefined;
 /* eslint-enable @typescript-eslint/no-require-imports */
 import { Box, Text, Link } from '../../ink.js';
 import * as React from 'react';
@@ -374,6 +375,11 @@ function ModeIndicator({
           </Text>}
       </Text> : null;
 
+  // Supervision score label, or '' when supervision is off or nothing has
+  // happened yet — no permanent "0" sitting in the footer.
+  const scoreState = isCoordinator ? delegationScoreModule?.getDelegationScore() : undefined;
+  const supervisorScore = scoreState && (scoreState.delegated > 0 || scoreState.selfWork > 0 || scoreState.abandoned > 0) && delegationScoreModule ? `${delegationScoreModule.formatDelegationPoints(scoreState.points)} delegation` : '';
+
   // Build parts array - exclude BackgroundTaskStatus when we have teammate pills
   // (teammate pills get their own row)
   const parts = [
@@ -384,7 +390,13 @@ function ModeIndicator({
   // BackgroundTaskStatus is NOT in parts — it renders as a Box sibling so
   // its click-target Box isn't nested inside the <Text wrap="truncate">
   // wrapper (reconciler throws on Box-in-Text).
-  ...(isAgentSwarmsEnabled() && hasTeams ? [<TeamStatus key="teams" teamsSelected={teamsSelected} showHint={showHint && !hasBackgroundTasks} />] : []), ...(shouldShowPrStatus ? [<PrBadge key="pr-status" number={prStatus.number!} url={prStatus.url!} reviewState={prStatus.reviewState!} />] : [])];
+  ...(isAgentSwarmsEnabled() && hasTeams ? [<TeamStatus key="teams" teamsSelected={teamsSelected} showHint={showHint && !hasBackgroundTasks} />] : []),
+  // Supervision: the delegation score, once there is one. A plain module read,
+  // not a hook — the footer re-renders on task and mode changes, which is
+  // exactly when the score moves.
+  ...(supervisorScore ? [<Text key="supervisor-score" dimColor>
+            {figures.pointer} {supervisorScore}
+          </Text>] : []), ...(shouldShowPrStatus ? [<PrBadge key="pr-status" number={prStatus.number!} url={prStatus.url!} reviewState={prStatus.reviewState!} />] : [])];
 
   // Check if any in-process teammates exist (for hint text cycling)
   const hasAnyInProcessTeammates = Object.values(tasks).some(t_2 => t_2.type === 'in_process_teammate' && t_2.status === 'running');

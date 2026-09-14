@@ -1,4 +1,5 @@
 import { feature } from 'bun:bundle'
+import { recordSupervisorToolUse } from '../supervisor/delegationScore.js'
 import type {
   ContentBlockParam,
   ToolResultBlockParam,
@@ -1552,6 +1553,11 @@ export async function checkPermissionsAndCallTool(
         )
       }
     }
+
+    // Supervision: a mutating tool the MAIN thread ran itself is work that
+    // was not delegated. Recorded on success only — a blocked or failed call
+    // is not work done.
+    recordSupervisorToolUse(tool.name, toolUseContext.agentId)
 
     logEvent('tengu_tool_use_success', {
       messageID:

@@ -15,6 +15,7 @@ import {
 } from '../../Task.js'
 import type { TaskState } from '../../tasks/types.js'
 import { enqueuePendingNotification } from '../messageQueueManager.js'
+import { recordDelegatedRunFinished } from '../../services/supervisor/delegationScore.js'
 import { enqueueSdkEvent } from '../sdkEventQueue.js'
 import { getTaskOutputDelta, getTaskOutputPath } from './diskOutput.js'
 import { isRetainedOrWithinGrace } from './retention.js'
@@ -310,6 +311,15 @@ function enqueueTaskNotification(attachment: TaskAttachment): void {
 <${STATUS_TAG}>${attachment.status}</${STATUS_TAG}>
 <${SUMMARY_TAG}>Task "${attachment.description}" ${statusText}</${SUMMARY_TAG}>
 </${TASK_NOTIFICATION_TAG}>`
+
+  // Supervision: teammate (and other agent-shaped) tasks are the supervisor's
+  // delegated work. Notifications from this path are session-level, so they
+  // are the main thread's by construction.
+  recordDelegatedRunFinished({
+    taskType: attachment.taskType,
+    status: attachment.status,
+    ownedByMainThread: true,
+  })
 
   enqueuePendingNotification({ value: message, mode: 'task-notification' })
 }

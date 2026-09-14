@@ -1,6 +1,7 @@
 import { getSdkAgentProgressSummariesEnabled } from '../../bootstrap/state.js';
 import { OUTPUT_FILE_TAG, RESUMED_PROMPT_TAG, RESUMED_TAG, STATUS_TAG, SUMMARY_TAG, TASK_ID_TAG, TASK_NOTIFICATION_TAG, TOOL_USE_ID_TAG, WORKTREE_BRANCH_TAG, WORKTREE_PATH_TAG, WORKTREE_TAG } from '../../constants/xml.js';
 import { abortSpeculation } from '../../services/PromptSuggestion/speculation.js';
+import { recordDelegatedRunFinished } from '../../services/supervisor/delegationScore.js';
 import type { AppState } from '../../state/AppState.js';
 import type { SetAppState, Task, TaskStateBase } from '../../Task.js';
 import { createTaskStateBase, isTerminalTaskStatus } from '../../Task.js';
@@ -323,6 +324,14 @@ export function enqueueAgentNotification({
 <${STATUS_TAG}>${status}</${STATUS_TAG}>${resumedLine}${resumedPromptLine}
 <${SUMMARY_TAG}>${summary}</${SUMMARY_TAG}>${resultSection}${usageSection}${worktreeSection}
 </${TASK_NOTIFICATION_TAG}>`;
+  // Supervision: work the supervisor delegated has landed. parentAgentId is
+  // undefined exactly when the main thread spawned it — a teammate's own
+  // subagent scores for nobody.
+  recordDelegatedRunFinished({
+    taskType: 'local_agent',
+    status,
+    ownedByMainThread: parentAgentId === undefined
+  });
   enqueuePendingNotification({
     value: message,
     mode: 'task-notification',

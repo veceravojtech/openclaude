@@ -247,6 +247,10 @@ export async function clearConversation({
     } = require('../../coordinator/coordinatorMode.js')
     /* eslint-enable @typescript-eslint/no-require-imports */
     saveMode(isCoordinatorMode() ? 'coordinator' : 'normal')
+    // The delegation score belongs to the conversation that earned it.
+    /* eslint-disable-next-line @typescript-eslint/no-require-imports */
+    const { resetDelegationScore } = require('../../services/supervisor/delegationScore.js')
+    resetDelegationScore()
   }
   const worktreeSession = getCurrentWorktreeSession()
   if (worktreeSession) {
