@@ -689,6 +689,12 @@ async function startCliSession(
     `HOME=${homeDir}`,
     '-e',
     `XDG_CONFIG_HOME=${join(root, 'xdg')}`,
+    // Supervision's yolo-by-default would boot every scenario into the
+    // one-time Bypass Permissions consent screen instead of the prompt: the
+    // seeded config is fresh, so nothing has accepted it. This harness tests
+    // keys and the teammate tree, not permission defaults.
+    '-e',
+    'OPENCLAUDE_DEFAULT_YOLO=0',
     ...extraEnvArgs,
     `node ${CLI_BUNDLE}`,
   )
