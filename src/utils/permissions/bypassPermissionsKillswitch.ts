@@ -17,6 +17,46 @@ import {
 let bypassPermissionsCheckRan = false
 let bypassPermissionsCheckPromise: Promise<void> | null = null
 
+/**
+ * Strips a revoked dangerous mode from teammates that are ALREADY RUNNING.
+ *
+ * Revoking bypass on `toolPermissionContext` alone does not reach them. An
+ * in-process teammate carries its own `permissionMode` on its task state, the
+ * runner re-reads that field every iteration
+ * (`inProcessRunner.ts` "Read current permission mode from task state"), and
+ * `runAgent.ts` writes it back over the live context precisely when the live
+ * mode is no longer dangerous — which is the state revocation produces. So the
+ * stale field does not merely survive the killswitch, it takes over from it,
+ * and the teammate keeps bypass for the rest of its life.
+ *
+ * Only `bypassPermissions` and `fullAccess` are downgraded. Anything else is
+ * left exactly as it is: `plan` is `planModeRequired` intent, and the leader
+ * can cycle a teammate's mode by hand, so this must not flatten per-teammate
+ * modes that policy has no objection to.
+ *
+ * Returns the same reference when nothing changed, so the caller can skip the
+ * state update entirely.
+ */
+export function downgradeLiveTeammateDangerousModes(
+  tasks: AppState['tasks'],
+): AppState['tasks'] {
+  let changed = false
+  const next: Record<string, AppState['tasks'][string]> = {}
+  for (const [taskId, task] of Object.entries(tasks)) {
+    if (
+      task.type === 'in_process_teammate' &&
+      (task.permissionMode === 'bypassPermissions' ||
+        task.permissionMode === 'fullAccess')
+    ) {
+      next[taskId] = { ...task, permissionMode: 'default' }
+      changed = true
+    } else {
+      next[taskId] = task
+    }
+  }
+  return changed ? next : tasks
+}
+
 type BypassPermissionsCheckDeps = {
   createDisabledBypassPermissionsContext: typeof createDisabledBypassPermissionsContext
   shouldDisableBypassPermissions: typeof shouldDisableBypassPermissions
@@ -60,6 +100,11 @@ export async function checkAndDisableBypassPermissionsIfNeeded(
         toolPermissionContext: deps.createDisabledBypassPermissionsContext(
           prev.toolPermissionContext,
         ),
+        // Revoking the leader's context is not enough on its own: teammates
+        // already running carry their own copy of the mode. Sweep them in the
+        // same update, so there is no window in which the leader is downgraded
+        // and its teammates are not.
+        tasks: downgradeLiveTeammateDangerousModes(prev.tasks),
       }
     })
     bypassPermissionsCheckRan = true
