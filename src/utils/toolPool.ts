@@ -69,8 +69,11 @@ export function mergeAndFilterTools(
   const byName = (a: Tool, b: Tool) => a.name.localeCompare(b.name)
   const tools = [...builtIn.sort(byName), ...mcp.sort(byName)]
 
+  // Only STRICT supervision cuts the pool. Soft supervision (the default)
+  // leaves every tool in place and relies on the prompt and the delegation
+  // score to keep the supervisor's hands off the work.
   if (feature('COORDINATOR_MODE') && coordinatorModeModule) {
-    if (coordinatorModeModule.isCoordinatorMode()) {
+    if (coordinatorModeModule.isCoordinatorStrict()) {
       return applyCoordinatorToolFilter(tools)
     }
   }

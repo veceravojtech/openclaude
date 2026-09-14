@@ -8,7 +8,7 @@ import { getQuerySourceForAgent } from 'src/utils/promptCategory.js';
 import { z } from 'zod/v4';
 import { clearInvokedSkillsForAgent, getSdkAgentProgressSummariesEnabled } from '../../bootstrap/state.js';
 import { enhanceSystemPromptWithEnvDetails, getSystemPrompt } from '../../constants/prompts.js';
-import { isCoordinatorMode } from '../../coordinator/coordinatorMode.js';
+import { isCoordinatorMode, isCoordinatorStrict } from '../../coordinator/coordinatorMode.js';
 import { startAgentSummarization } from '../../services/AgentSummary/agentSummary.js';
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../../services/analytics/index.js';
@@ -400,7 +400,11 @@ export const AgentTool = buildTool({
     cwd
   }: AgentToolInput, toolUseContext, canUseTool, assistantMessage, onProgress?) {
     const startTime = Date.now();
-    const model = isCoordinatorMode() ? undefined : modelParam;
+    // The supervisor picks models per teammate on purpose — cheap models for
+    // breadth, strong ones for judgment, and settings-level agentRouting keyed
+    // by teammate name. Only STRICT supervision drops the argument, matching
+    // the strict prompt's "workers need the default model" rule.
+    const model = isCoordinatorStrict() ? undefined : modelParam;
 
     // Get app state for permission mode and agent filtering
     const appState = toolUseContext.getAppState();

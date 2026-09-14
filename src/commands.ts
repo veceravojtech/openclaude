@@ -9,6 +9,7 @@ import issue from './commands/issue/index.js'
 import feedback from './commands/feedback/index.js'
 import clear from './commands/clear/index.js'
 import clearContextWindow from './commands/clear-context-window/index.js'
+import supervisor from './commands/supervisor/index.js'
 import color from './commands/color/index.js'
 import commit from './commands/commit.js'
 import commitMessage from './commands/commit-message/index.js'
@@ -293,6 +294,7 @@ const COMMANDS = memoize((): Command[] => [
   chrome,
   clear,
   clearContextWindow,
+  supervisor,
   color,
   compact,
   commitMessage,

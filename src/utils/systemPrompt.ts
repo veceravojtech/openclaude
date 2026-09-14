@@ -6,7 +6,7 @@ import {
 import type { ToolUseContext } from '../Tool.js'
 import type { AgentDefinition } from '../tools/AgentTool/loadAgentsDir.js'
 import { isBuiltInAgent } from '../tools/AgentTool/loadAgentsDir.js'
-import { isEnvTruthy } from './envUtils.js'
+import { isEnvDefinedFalsy, isEnvTruthy } from './envUtils.js'
 import { asSystemPrompt, type SystemPrompt } from './systemPromptType.js'
 
 export { asSystemPrompt, type SystemPrompt } from './systemPromptType.js'
@@ -56,12 +56,13 @@ export function buildEffectiveSystemPrompt({
   if (overrideSystemPrompt) {
     return asSystemPrompt([overrideSystemPrompt])
   }
-  // Coordinator mode: use coordinator prompt instead of default
-  // Use inline env check instead of coordinatorModule to avoid circular
-  // dependency issues during test module loading.
+  // Supervisor (coordinator) mode: use the supervisor prompt instead of the
+  // default. Inline env check rather than the coordinator module, to avoid
+  // circular dependency issues during test module loading — so it must mirror
+  // isCoordinatorMode()'s default-ON rule, not just read the var as truthy.
   if (
     feature('COORDINATOR_MODE') &&
-    isEnvTruthy(process.env.CLAUDE_CODE_COORDINATOR_MODE) &&
+    !isEnvDefinedFalsy(process.env.CLAUDE_CODE_COORDINATOR_MODE) &&
     !mainThreadAgentDefinition
   ) {
     // Lazy require to avoid circular dependency at module load time
