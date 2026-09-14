@@ -5,8 +5,27 @@ import { linuxSecretStorage } from './linuxSecretStorage.js'
 import { windowsCredentialStorage } from './windowsCredentialStorage.js'
 import { plainTextStorage } from './plainTextStorage.js'
 
+/**
+ * One logged-in Claude account: its OAuth tokens plus an optional label the
+ * user can set to tell two accounts apart in the UI.
+ */
+export type StoredClaudeAccount = OAuthTokens & { label?: string }
+
 export interface SecureStorageData {
+  /**
+   * Tokens of the account currently in use.
+   *
+   * This stays a mirror of `claudeAiOauthAccounts[claudeAiOauthActive]` rather
+   * than being replaced by it. Every writer of this file does a whole-object
+   * read-modify-write, so an older build that knows nothing about the accounts
+   * map still authenticates from this field and preserves the map untouched —
+   * which makes downgrading safe.
+   */
   claudeAiOauth?: OAuthTokens
+  /** Every logged-in Claude account, keyed by account UUID. */
+  claudeAiOauthAccounts?: Record<string, StoredClaudeAccount>
+  /** Key into `claudeAiOauthAccounts` naming the active account. */
+  claudeAiOauthActive?: string
   codex?: {
     apiKey?: string
     accessToken: string
