@@ -8,7 +8,10 @@ import {
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
 import type { Message } from '../types/message.js'
-import { createCompactBoundaryMessage } from '../utils/messages.js'
+import {
+  createCompactBoundaryMessage,
+  createProgressMessage,
+} from '../utils/messages.js'
 import { asSystemPrompt } from '../utils/systemPromptType.js'
 import type { MaxMessagesCompactionThreshold } from '../utils/config.js'
 import type { QueryDeps } from './deps.js'
@@ -141,7 +144,7 @@ function compactedResult() {
   }
 }
 
-function toolUseContext() {
+function toolUseContext(model = 'claude-sonnet-4') {
   const abortController = new AbortController()
   return {
     abortController,
@@ -152,7 +155,7 @@ function toolUseContext() {
       allowedAgentTypes: undefined,
       appendSystemPrompt: undefined,
       isNonInteractiveSession: false,
-      mainLoopModel: 'claude-sonnet-4',
+      mainLoopModel: model,
       mcpClients: [],
       providerOverride: undefined,
       thinkingConfig: undefined,
@@ -163,7 +166,7 @@ function toolUseContext() {
       fastMode: false,
       effortValue: undefined,
       advisorModel: undefined,
-      mainLoopModel: 'claude-sonnet-4',
+      mainLoopModel: model,
       mainLoopModelForSession: undefined,
       mcp: { tools: [], clients: [] },
       toolPermissionContext: { mode: 'default' },
@@ -262,7 +265,10 @@ async function runSuccessfulQuery(
   )
 }
 
-async function runMessageCountHardCapQuery(messages: Message[]) {
+async function runMessageCountHardCapQuery(
+  messages: Message[],
+  model?: string,
+) {
   const seenTracking: Array<AutoCompactTrackingState | undefined> = []
   const callModel = mock(async function* () {
     yield assistantToolUseMessage()
@@ -297,7 +303,7 @@ async function runMessageCountHardCapQuery(messages: Message[]) {
       userContext: {},
       systemContext: {},
       canUseTool,
-      toolUseContext: toolUseContext(),
+      toolUseContext: toolUseContext(model),
       querySource: 'repl_main_thread',
       maxTurns: 1,
       deps,
@@ -375,6 +381,49 @@ test('unset message threshold forces compaction at the 200-message default', asy
   expect(terminal.reason).toBe('max_turns')
   expect(callModel).toHaveBeenCalledTimes(1)
   expect(seenTracking[0]?.forceReason).toBe('message-count')
+})
+
+test('the message-count default scales with a 1M context window', async () => {
+  // Regression: a [1m] session was force-compacted at ~230k tokens because the
+  // 200-message default is window-agnostic (#1949 tuned it for 200k).
+  const under = await runMessageCountHardCapQuery(
+    manySmallMessages(201),
+    'claude-opus-5[1m]',
+  )
+
+  expect(under.terminal.reason).toBe('max_turns')
+  expect(under.callModel).toHaveBeenCalledTimes(1)
+  expect(under.seenTracking[0]?.forceReason).toBeUndefined()
+
+  // The scaled limit (1000) still applies above it.
+  const over = await runMessageCountHardCapQuery(
+    manySmallMessages(1001),
+    'claude-opus-5[1m]',
+  )
+
+  expect(over.seenTracking[0]?.forceReason).toBe('message-count')
+})
+
+test('progress messages never count toward the active-message limit', async () => {
+  // 199 provider-visible messages plus 60 progress ticks: 259 array entries,
+  // but nothing the provider sees is over the 200-message default.
+  const messages: Message[] = [
+    ...manySmallMessages(199),
+    ...Array.from({ length: 60 }, (_, index) =>
+      createProgressMessage({
+        toolUseID: `tool_${index}`,
+        parentToolUseID: 'tool_parent',
+        data: { type: 'agent_progress' },
+      } as never),
+    ),
+  ]
+
+  const { terminal, callModel, seenTracking } =
+    await runMessageCountHardCapQuery(messages)
+
+  expect(terminal.reason).toBe('max_turns')
+  expect(callModel).toHaveBeenCalledTimes(1)
+  expect(seenTracking[0]?.forceReason).toBeUndefined()
 })
 
 test('invalid legacy message threshold keeps the 200-message default', async () => {

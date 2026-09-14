@@ -104,7 +104,10 @@ import {
 import {
   SUBAGENT_REJECT_MESSAGE,
   SUBAGENT_REJECT_MESSAGE_WITH_REASON_PREFIX,
+  countActiveMessages,
 } from '../messages.js'
+import { getContextWindowForModel } from '../context.js'
+import { getSdkBetas } from '../../bootstrap/state.js'
 import type { ModelAlias } from '../model/aliases.js'
 import {
   applyPermissionUpdates,
@@ -2363,21 +2366,36 @@ export async function runInProcessTeammate(
         isAutoCompactEnabled() ||
         hasExplicitMessageCountThreshold ||
         hasLegacyMessageCountThreshold
+      // Same window scaling as the main loop (query.ts): the message-count
+      // defaults were tuned for a 200k window, so a teammate on a larger one
+      // would otherwise compact at a fraction of its budget.
+      const activeMessageContextWindow = getContextWindowForModel(
+        toolUseContext.options.mainLoopModel,
+        getSdkBetas(),
+      )
+      const hasExplicitActiveMessageLimit =
+        hasExplicitMessageCountThreshold || hasLegacyMessageCountThreshold
       const activeMessageLimit = shouldApplyMessageCountThreshold
         ? resolveMaxActiveMessagesLimit(
             configuredMessageThreshold === undefined && legacyMessageThreshold > 0
               ? undefined
               : normalizeMaxMessagesCompactionThreshold(configuredMessageThreshold),
             process.env.OPENCLAUDE_MAX_ACTIVE_MESSAGES,
+            {
+              contextWindow: activeMessageContextWindow,
+              scaleDefault: !hasExplicitActiveMessageLimit,
+            },
           )
-        : getMaxActiveMessagesHardCap()
+        : getMaxActiveMessagesHardCap(process.env, activeMessageContextWindow)
       const tokenThreshold = getAutoCompactThreshold(
         toolUseContext.options.mainLoopModel,
       )
       const shouldCompactForTokens =
         isAutoCompactEnabled() && tokenCount > tokenThreshold
+      // Count only what the provider receives — progress ticks and local-only
+      // records are dropped by normalizeMessagesForAPI.
       const shouldCompactForMessages = isAboveMaxActiveMessagesLimit(
-        allMessages.length,
+        countActiveMessages(allMessages),
         activeMessageLimit,
       )
       if (shouldCompactForTokens || shouldCompactForMessages) {

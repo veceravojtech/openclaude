@@ -4,6 +4,7 @@ import {
   getMaxActiveMessagesHardCap,
   isAboveMaxActiveMessagesLimit,
   resolveMaxActiveMessagesLimit,
+  scaleActiveMessageLimitToContextWindow,
   shouldCompactActiveMessageHistory,
 } from './maxActiveMessages.js'
 
@@ -66,4 +67,61 @@ test('teammate transcript compaction triggers on message count before token pres
       activeMessageLimit: 1000,
     }),
   ).toBe(false)
+})
+
+test('the default message limit scales with the model context window', () => {
+  // The 200-message default was tuned for a 200k window (#1949). A 1M model
+  // must not be compacted at a fifth of its budget.
+  expect(scaleActiveMessageLimitToContextWindow(200, 1_000_000)).toBe(1000)
+  expect(scaleActiveMessageLimitToContextWindow(200, 200_000)).toBe(200)
+  expect(scaleActiveMessageLimitToContextWindow(200, 128_000)).toBe(200)
+  expect(scaleActiveMessageLimitToContextWindow(200, undefined)).toBe(200)
+  // A disabled limit stays disabled.
+  expect(scaleActiveMessageLimitToContextWindow(0, 1_000_000)).toBe(0)
+})
+
+test('scaling applies to the implicit default only, never to a chosen value', () => {
+  const oneM = { contextWindow: 1_000_000 }
+
+  expect(
+    resolveMaxActiveMessagesLimit('200', undefined, {
+      ...oneM,
+      scaleDefault: true,
+    }),
+  ).toBe(1000)
+  // Same '200', but the user picked it in /config: honored as written.
+  expect(resolveMaxActiveMessagesLimit('200', undefined, oneM)).toBe(200)
+  // 'off' leaves only the hard cap, which scales with the window.
+  expect(
+    resolveMaxActiveMessagesLimit('off', undefined, {
+      ...oneM,
+      scaleDefault: true,
+    }),
+  ).toBe(5000)
+  // A 200k model is unchanged by either path.
+  expect(
+    resolveMaxActiveMessagesLimit('200', undefined, {
+      contextWindow: 200_000,
+      scaleDefault: true,
+    }),
+  ).toBe(200)
+})
+
+test('the hard cap scales with the window unless it is set explicitly', () => {
+  expect(getMaxActiveMessagesHardCap({}, 1_000_000)).toBe(5000)
+  expect(getMaxActiveMessagesHardCap({}, 200_000)).toBe(1000)
+  expect(getMaxActiveMessagesHardCap({})).toBe(1000)
+
+  expect(
+    getMaxActiveMessagesHardCap(
+      { OPENCLAUDE_MAX_ACTIVE_MESSAGES_HARD_CAP: '300' },
+      1_000_000,
+    ),
+  ).toBe(300)
+  expect(
+    getMaxActiveMessagesHardCap(
+      { OPENCLAUDE_MAX_ACTIVE_MESSAGES_HARD_CAP: '0' },
+      1_000_000,
+    ),
+  ).toBe(0)
 })

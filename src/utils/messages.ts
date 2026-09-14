@@ -1380,6 +1380,46 @@ function relocateToolReferenceSiblings(
   return result
 }
 
+/**
+ * True when a message becomes part of the provider request.
+ *
+ * Progress ticks (tool/agent/hook/skill), display-only system records, virtual
+ * REPL-inner messages and synthetic API-error messages are all dropped by
+ * normalizeMessagesForAPI below — which consumes this predicate, so the two
+ * cannot drift. Limits that exist to bound request size must count with this,
+ * not with raw array length: a swarm turn appends hundreds of progress
+ * messages that cost the provider nothing.
+ */
+export function isMessageSentToProvider(message: Message): boolean {
+  if (
+    (message.type === 'user' || message.type === 'assistant') &&
+    message.isVirtual
+  ) {
+    return false
+  }
+  return !(
+    message.type === 'progress' ||
+    (message.type === 'system' &&
+      !isSystemLocalCommandMessage(message) &&
+      !isCollapseSummaryMessage(message)) ||
+    isSyntheticApiErrorMessage(message)
+  )
+}
+
+/**
+ * How many of these messages actually reach the provider. Used by the
+ * active-message safety limit (see utils/maxActiveMessages.ts).
+ */
+export function countActiveMessages(messages: Message[]): number {
+  let count = 0
+  for (const message of messages) {
+    if (isMessageSentToProvider(message)) {
+      count++
+    }
+  }
+  return count
+}
+
 export function normalizeMessagesForAPI(
   messages: Message[],
   tools: Tools = [],
@@ -1569,18 +1609,7 @@ export function normalizeMessagesForAPI(
         | AssistantMessage
         | AttachmentMessage
         | SystemLocalCommandMessage
-        | SystemInformationalMessage => {
-        if (
-          _.type === 'progress' ||
-          (_.type === 'system' &&
-            !isSystemLocalCommandMessage(_) &&
-            !isCollapseSummaryMessage(_)) ||
-          isSyntheticApiErrorMessage(_)
-        ) {
-          return false
-        }
-        return true
-      },
+        | SystemInformationalMessage => isMessageSentToProvider(_),
     )
     .forEach(message => {
       switch (message.type) {

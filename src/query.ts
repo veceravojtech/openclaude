@@ -71,6 +71,7 @@ import {
   getMessagesAfterCompactBoundary,
   createToolUseSummaryMessage,
   createMicrocompactBoundaryMessage,
+  countActiveMessages,
 } from './utils/messages.js'
 import { analyzeContinuationIntent } from './utils/continuation.js'
 import { generateToolUseSummary } from './services/toolUseSummary/toolUseSummaryGenerator.js'
@@ -114,7 +115,7 @@ import {
   finalContextTokensFromLastResponse,
   tokenCountWithEstimation,
 } from './utils/tokens.js'
-import { ESCALATED_MAX_TOKENS } from './utils/context.js'
+import { ESCALATED_MAX_TOKENS, getContextWindowForModel } from './utils/context.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from './services/analytics/growthbook.js'
 import { SLEEP_TOOL_NAME } from './tools/SleepTool/prompt.js'
 import { executePostSamplingHooks } from './utils/hooks/postSamplingHooks.js'
@@ -149,6 +150,7 @@ import {
   getTurnOutputTokens,
   incrementBudgetContinuationCount,
   getSessionId,
+  getSdkBetas,
 } from './bootstrap/state.js'
 import { stripThinkingBlocksIfProviderAllows } from './utils/conversationRecovery.js'
 import {
@@ -1059,20 +1061,39 @@ async function* queryLoop(
       ((configuredMaxMessagesCompactionThreshold === undefined ||
         configuredMaxMessagesCompactionThreshold === 'off') &&
         hasValidLegacyActiveMessageLimit)
+    // The message-count defaults were tuned for a 200k window (#1949); on a
+    // larger window they fire long before the token budget is close to full
+    // (a [1m] session compacted at ~230k). Scale the defaults with the model's
+    // window; a limit the user set by hand is honored as written.
+    const activeMessageContextWindow = getContextWindowForModel(
+      toolUseContext.options.mainLoopModel,
+      getSdkBetas(),
+    )
+    const activeMessageHardCap = getMaxActiveMessagesHardCap(
+      process.env,
+      activeMessageContextWindow,
+    )
     const activeMessageLimit = canForceCompact
       ? resolveMaxActiveMessagesLimit(
           maxMessagesLimitSetting,
           process.env.OPENCLAUDE_MAX_ACTIVE_MESSAGES,
+          {
+            contextWindow: activeMessageContextWindow,
+            scaleDefault: !hasActiveMessageLimitOverride,
+          },
         )
       : 0
     if (canForceCompact) {
+      // Count only what the provider actually receives: progress ticks and
+      // local-only records inflate messagesForQuery without costing a token.
+      const activeMessageCount = countActiveMessages(messagesForQuery)
       if (
-        isAboveMaxActiveMessagesLimit(messagesForQuery.length, activeMessageLimit) &&
+        isAboveMaxActiveMessagesLimit(activeMessageCount, activeMessageLimit) &&
         (isAutoCompactEnabled() ||
           hasActiveMessageLimitOverride ||
           isAboveMaxActiveMessagesLimit(
-            messagesForQuery.length,
-            getMaxActiveMessagesHardCap(),
+            activeMessageCount,
+            activeMessageHardCap,
           ))
       ) {
         tracking = {
@@ -1419,9 +1440,12 @@ async function* queryLoop(
     // cooling down or otherwise exhausted and context or message count is still
     // over the safety threshold, block immediately with a clear message instead
     // of burning an oversized API call.
+    // Recounted after compaction: messagesForQuery is replaced above when a
+    // compaction succeeded. Same provider-visible count as the force check.
+    const postCompactActiveMessageCount = countActiveMessages(messagesForQuery)
     const isAboveActiveMessageHardCap = isAboveMaxActiveMessagesLimit(
-      messagesForQuery.length,
-      getMaxActiveMessagesHardCap(),
+      postCompactActiveMessageCount,
+      activeMessageHardCap,
     )
     const shouldEnforceActiveMessageLimit =
       (!collapseOwnsIt && isAutoCompactEnabled()) ||
@@ -1443,7 +1467,7 @@ async function* queryLoop(
       )
       const isAboveActiveMessageSafetyLimit =
         isAboveMaxActiveMessagesLimit(
-          messagesForQuery.length,
+          postCompactActiveMessageCount,
           activeMessageLimit,
         ) && shouldEnforceActiveMessageLimit
       const isAboveBreakerThreshold =
@@ -1475,7 +1499,7 @@ async function* queryLoop(
     if (
       shouldEnforceActiveMessageLimit &&
       isAboveMaxActiveMessagesLimit(
-        messagesForQuery.length,
+        postCompactActiveMessageCount,
         activeMessageLimit,
       )
     ) {
