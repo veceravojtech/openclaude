@@ -12,7 +12,7 @@ import type {
   ToolPermissionRulesBySource,
 } from '../../Tool.js'
 import { getCwd } from '../cwd.js'
-import { isEnvTruthy } from '../envUtils.js'
+import { isEnvDefinedFalsy, isEnvTruthy } from '../envUtils.js'
 import type { SettingSource } from '../settings/constants.js'
 import { SETTING_SOURCES } from '../settings/constants.js'
 import {
@@ -828,6 +828,42 @@ export function getEffectiveDefaultPermissionModeFromSettingsSources(
 }
 
 /**
+ * Whether OpenClaude may fall back to bypassPermissions when nothing else
+ * picked a mode — the `--yolo`-by-default behavior.
+ *
+ * Suppressed where an implicit bypass would be wrong or fatal:
+ * - `OPENCLAUDE_DEFAULT_YOLO=0/false` — the opt-out.
+ * - Remote sessions (CLAUDE_CODE_REMOTE), which already refuse a
+ *   bypassPermissions defaultMode from settings a few lines below.
+ * - root/sudo without a sandbox: setup.ts EXITS the process when a bypass mode
+ *   is active there, so defaulting into it would kill every root session that
+ *   works today. The explicit `--yolo` flag still reaches that error, which is
+ *   the point of it — this only governs the implicit default.
+ *
+ * The one-time BypassPermissionsModeDialog still runs, so the user accepts
+ * bypass mode once before it takes effect; org policy and the Statsig gate
+ * (`disableBypassPermissionsMode`) still veto it in the loop below.
+ */
+export function isImplicitBypassPermissionsAvailable(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (isEnvDefinedFalsy(env.OPENCLAUDE_DEFAULT_YOLO)) {
+    return false
+  }
+  if (isEnvTruthy(env.CLAUDE_CODE_REMOTE)) {
+    return false
+  }
+  const isRoot =
+    process.platform !== 'win32' &&
+    typeof process.getuid === 'function' &&
+    process.getuid() === 0
+  if (isRoot && env.IS_SANDBOX !== '1' && !isEnvTruthy(env.CLAUDE_CODE_BUBBLEWRAP)) {
+    return false
+  }
+  return true
+}
+
+/**
  * Safely convert CLI flags to a PermissionMode
  */
 export function initialPermissionModeFromCLI({
@@ -919,6 +955,11 @@ export function initialPermissionModeFromCLI({
     } else {
       orderedModes.push(settingsMode)
     }
+  }
+  // Implicit `--yolo`: last candidate, so an explicit --permission-mode or a
+  // settings defaultMode always wins. See isImplicitBypassPermissionsAvailable.
+  if (isImplicitBypassPermissionsAvailable()) {
+    orderedModes.push('bypassPermissions')
   }
 
   let result: { mode: PermissionMode; notification?: string } | undefined
