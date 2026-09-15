@@ -870,3 +870,219 @@ describe('persistent retry cap', () => {
     expect(operation).toHaveBeenCalledTimes(expectedCalls)
   })
 })
+
+describe('usage-limit account switch', () => {
+  type AccountSwitchModule = typeof import('../../utils/accountSwitch.js')
+  type AccountSummary = import('../../utils/authAccounts.js').AccountSummary
+  let originalAccountSwitchModule: AccountSwitchModule | undefined
+
+  // The accounts map the mocked accountSwitch module serves. Mutable so a
+  // "switch" can move the active marker, exactly like the real storage
+  // write does.
+  let accounts: AccountSummary[]
+  const events: string[] = []
+  const notices: { switchedAccountTo?: string; resumeAtMs?: number }[] = []
+
+  async function importWithAccountSwitch(
+    provider: 'firstParty' | 'openai' = 'firstParty',
+  ) {
+    const retryModule = await importFreshWithRetryModule(provider)
+    originalAccountSwitchModule ??= await import('../../utils/accountSwitch.js')
+    mock.module('src/utils/accountSwitch.js', () => ({
+      ...originalAccountSwitchModule!,
+      readAccounts: () => accounts,
+      switchAccount: async (key: string) => {
+        events.push(`switch:${key}`)
+        accounts = accounts.map(account => ({
+          ...account,
+          isActive: account.key === key,
+        }))
+        return { success: true }
+      },
+    }))
+    const switchModule = await import('./usageLimitSwitch.js')
+    switchModule.clearAccountSwitchEffects()
+    switchModule.registerAccountSwitchEffects(() => events.push('effects'))
+    return { retryModule, switchModule }
+  }
+
+  afterEach(() => {
+    events.length = 0
+    notices.length = 0
+  })
+
+  async function runWithRetry(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    withRetry: any,
+    operation: () => Promise<string>,
+    overrides: Record<string, unknown> = {},
+  ): Promise<{ result: unknown; threw: unknown }> {
+    const generator = withRetry(
+      async () => ({}) as never,
+      operation,
+      {
+        maxRetries: 2,
+        model: 'claude-sonnet-4-6',
+        thinkingConfig: { type: 'disabled' },
+        querySource: 'repl_main_thread',
+        signal: new AbortController().signal,
+        ...overrides,
+      } as never,
+    )
+    try {
+      while (true) {
+        const step = await generator.next()
+        if (step.done) return { result: step.value, threw: null }
+        if (step.value?.subtype === 'api_error') notices.push(step.value)
+      }
+    } catch (error) {
+      return { result: null, threw: error }
+    }
+  }
+
+  test('switches to the other account, fires session effects, and retries the in-flight request', async () => {
+    accounts = [
+      { key: 'a', emailAddress: 'a@example.com', isActive: true },
+      { key: 'b', emailAddress: 'b@example.com', isActive: false },
+    ]
+    const { retryModule } = await importWithAccountSwitch()
+    const { withRetry } = retryModule
+
+    let calls = 0
+    const operation = mock(async () => {
+      calls++
+      events.push(`operation:${calls}`)
+      if (calls === 1) throw makeError({})
+      return 'recovered'
+    })
+
+    const { result, threw } = await runWithRetry(withRetry, operation as never)
+    expect(threw).toBeNull()
+    expect(result).toBe('recovered')
+    // The request retried and completed under the new account.
+    expect(calls).toBe(2)
+    // Credential write first, session effects immediately after, then the
+    // retried operation — the two halves of the switch stay together.
+    expect(events).toEqual([
+      'operation:1',
+      'switch:b',
+      'effects',
+      'operation:2',
+    ])
+    // Exactly one notice for the whole switch, naming the account.
+    expect(notices).toHaveLength(1)
+    expect(notices[0].switchedAccountTo).toBe('b@example.com')
+  })
+
+  test('all accounts exhausted: each is tried once, never revisited, then the error surfaces', async () => {
+    accounts = [
+      { key: 'a', emailAddress: 'a@example.com', isActive: true },
+      { key: 'b', emailAddress: 'b@example.com', isActive: false },
+      { key: 'c', emailAddress: 'c@example.com', isActive: false },
+    ]
+    const { retryModule } = await importWithAccountSwitch()
+    const { withRetry, CannotRetryError } = retryModule
+
+    const operation = mock(async () => {
+      throw makeError({})
+    })
+    const { threw } = await runWithRetry(withRetry, operation as never)
+    expect(threw).toBeInstanceOf(CannotRetryError)
+    // a is never switched to (it started active), b and c exactly once each,
+    // across every subsequent 429 — the bound.
+    expect(events.filter(e => e.startsWith('switch:'))).toEqual([
+      'switch:b',
+      'switch:c',
+    ])
+    expect(events.filter(e => e === 'effects')).toHaveLength(2)
+    // One notice per switch, no more once the map is exhausted.
+    expect(
+      notices.map(notice => notice.switchedAccountTo),
+    ).toEqual(['b@example.com', 'c@example.com'])
+  })
+
+  test('falls through to the auto-wait once every account is exhausted', async () => {
+    accounts = [
+      { key: 'a', emailAddress: 'a@example.com', isActive: true },
+      { key: 'b', emailAddress: 'b@example.com', isActive: false },
+    ]
+    const { retryModule } = await importWithAccountSwitch()
+    const { withRetry } = retryModule
+
+    const resetAt = Math.floor(Date.now() / 1000) + 60
+    let calls = 0
+    const operation = mock(async () => {
+      calls++
+      if (calls <= 2) {
+        throw makeError({
+          'anthropic-ratelimit-unified-reset': String(resetAt),
+        })
+      }
+      return 'recovered'
+    })
+    const { result, threw } = await runWithRetry(withRetry, operation as never)
+    expect(threw).toBeNull()
+    expect(result).toBe('recovered')
+    // a→b switch first; b's 429 has no candidate left, so the wait takes
+    // over with its own single notice.
+    expect(events).toEqual(['switch:b', 'effects'])
+    expect(notices).toHaveLength(2)
+    expect(notices[0].switchedAccountTo).toBe('b@example.com')
+    expect(notices[1].resumeAtMs).toBeDefined()
+    expect(notices[1].switchedAccountTo).toBeUndefined()
+  })
+
+  test('never switches for a teammate query source', async () => {
+    accounts = [
+      { key: 'a', emailAddress: 'a@example.com', isActive: true },
+      { key: 'b', emailAddress: 'b@example.com', isActive: false },
+    ]
+    const { retryModule } = await importWithAccountSwitch()
+    const { withRetry } = retryModule
+
+    const operation = mock(async () => {
+      throw makeError({})
+    })
+    await runWithRetry(withRetry, operation as never, {
+      querySource: 'agent:custom',
+    })
+    expect(events).toEqual([])
+    expect(notices).toEqual([])
+  })
+
+  test('never switches on a non-Anthropic route, even with Claude accounts stored', async () => {
+    accounts = [
+      { key: 'a', emailAddress: 'a@example.com', isActive: true },
+      { key: 'b', emailAddress: 'b@example.com', isActive: false },
+    ]
+    const { retryModule } = await importWithAccountSwitch('openai')
+    const { withRetry } = retryModule
+
+    const operation = mock(async () => {
+      throw makeError({})
+    })
+    await runWithRetry(withRetry, operation as never)
+    // Claude→Claude only: a GLM/OpenAI-compatible 429 must not touch the
+    // Claude accounts map.
+    expect(events).toEqual([])
+    expect(notices).toEqual([])
+  })
+
+  test('does not switch when no session-effects hook is registered (SDK host)', async () => {
+    accounts = [
+      { key: 'a', emailAddress: 'a@example.com', isActive: true },
+      { key: 'b', emailAddress: 'b@example.com', isActive: false },
+    ]
+    const { retryModule, switchModule } = await importWithAccountSwitch()
+    switchModule.clearAccountSwitchEffects()
+    const { withRetry } = retryModule
+
+    const operation = mock(async () => {
+      throw makeError({})
+    })
+    await runWithRetry(withRetry, operation as never)
+    // Storage-only switching is refused outright.
+    expect(events).toEqual([])
+    expect(notices).toEqual([])
+  })
+})

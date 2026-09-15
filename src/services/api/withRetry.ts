@@ -58,9 +58,12 @@ import {
 } from './openaiErrorClassification.js'
 import {
   decideUsageLimitWait,
-  hasAlternativeAccount,
   noteUsageLimitRecovered,
 } from './usageLimitWait.js'
+import {
+  hasUntriedAlternativeAccount,
+  switchToNextAccountOnUsageLimit,
+} from './usageLimitSwitch.js'
 
 const abortError = () => new APIUserAbortError()
 
@@ -239,6 +242,12 @@ export async function* withRetry<T>(
   // that is reported rather than slept on again — which is what stops this
   // from becoming a sleep loop. See usageLimitWait.ts.
   let autoWaitedForUsageLimit = false
+  let autoSwitchedForUsageLimit = false
+  // Accounts already attempted (or exhausted) for a usage limit in this
+  // request. Each is tried at most once, which is what bounds the
+  // switch-and-retry cycle: N other accounts = at most N switches, then the
+  // wait or the report takes over. See usageLimitSwitch.ts.
+  const accountsTriedOnUsageLimit = new Set<string>()
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (options.signal?.aborted) {
       throw new APIUserAbortError()
@@ -304,12 +313,13 @@ export async function* withRetry<T>(
       }
 
       const result = await operation(client, attempt, retryContext)
-      // A request that succeeds after an auto-wait is the only evidence we
-      // get that the window actually reset. Teammates parked on the
-      // account-wide stop cannot learn it themselves — the ones that hit the
-      // limit mid-turn have exited, and the rest are idle and never run a
-      // turn to clear the marker with.
-      if (autoWaitedForUsageLimit) {
+      // A request that succeeds after an auto-wait or an account switch is
+      // the only evidence we get that the blocker is gone. Teammates parked
+      // on the account-wide stop cannot learn it themselves — the ones that
+      // hit the limit mid-turn have exited, and the rest are idle and never
+      // run a turn to clear the marker with. A switch clears it too: the
+      // fresh account has quota, so parked teammates may resume.
+      if (autoWaitedForUsageLimit || autoSwitchedForUsageLimit) {
         noteUsageLimitRecovered()
       }
       return result
@@ -465,9 +475,10 @@ export async function* withRetry<T>(
       // the rejected request, rather than handing the user an error whose
       // only remedy is to come back later and retype the prompt.
       //
-      // The gates live in usageLimitWait.ts; the three cheap ones are here so
-      // an ordinary 500 or a dropped socket never reaches the secure-storage
-      // read behind `hasAlternativeAccount`. `attempt <= maxRetries` is load
+      // The gates live in usageLimitWait.ts (and usageLimitSwitch.ts for the
+      // switch attempt below); the cheap ones are repeated there so an
+      // ordinary 500 or a dropped socket never reaches the secure-storage
+      // read behind the account enumeration. `attempt <= maxRetries` is load
       // bearing: the `continue` below must have a real attempt left to land
       // on, or we would sleep for hours and then throw anyway.
       if (
@@ -476,6 +487,42 @@ export async function* withRetry<T>(
         error.status === 429 &&
         attempt <= maxRetries
       ) {
+        // Switching beats waiting: another stored Claude account with quota
+        // left unblocks this request now; a reset clock makes the user wait
+        // by construction. Same gates as the wait (usageLimitSwitch.ts),
+        // plus its own bound: one attempt per other account per request.
+        // Claude→Claude only — never crosses providers; wrong-provider 429s
+        // fall through untouched.
+        const switchOutcome = await switchToNextAccountOnUsageLimit({
+          status: error.status,
+          isFirstParty: getAPIProvider() === 'firstParty',
+          querySource: options.querySource,
+          triedKeys: accountsTriedOnUsageLimit,
+        })
+        if (switchOutcome.type === 'switched') {
+          autoSwitchedForUsageLimit = true
+          logEvent('tengu_api_usage_limit_account_switch', {
+            attempt,
+            provider: getAPIProviderForStatsig(),
+          })
+          // One short notice for the whole switch — same single-yield
+          // discipline as the wait below. retryInMs is 0 because the next
+          // attempt starts immediately; `switchedAccountTo` makes the
+          // renderer say so instead of counting down.
+          yield createSystemAPIErrorMessage(
+            error,
+            0,
+            attempt,
+            maxRetries,
+            undefined,
+            switchOutcome.name,
+          )
+          // The switch moved process-global credentials; force the client
+          // rebuild so the next attempt authenticates as the new account.
+          client = null
+          continue
+        }
+
         const waitDecision = decideUsageLimitWait({
           status: error.status,
           isFirstParty: getAPIProvider() === 'firstParty',
@@ -483,7 +530,8 @@ export async function* withRetry<T>(
           hasCancelSignal: options.signal !== undefined,
           resetDelayMs: getRateLimitResetDelayMs(error),
           resetCapMs: PERSISTENT_RESET_CAP_MS,
-          otherAccountAvailable: hasAlternativeAccount,
+          otherAccountAvailable: () =>
+            hasUntriedAlternativeAccount(accountsTriedOnUsageLimit),
           alreadyWaited: autoWaitedForUsageLimit,
           now: Date.now(),
         })

@@ -3804,6 +3804,57 @@ export function stripSignatureBlocks(messages: Message[]): Message[] {
 }
 
 /**
+ * Strip signature-bearing blocks from an already-API-normalized message
+ * list, for a request retrying under a different account.
+ *
+ * Same removal rules as `stripSignatureBlocks` (which the account-switch
+ * effects apply to the REPL's message store), but with one crucial
+ * difference in output shape: this list is already normalized — merge and
+ * the empty-content placeholder pass have already run — so an assistant
+ * message whose blocks were all signature-bearing cannot be left with empty
+ * content the way the store version can. The API rejects empty assistant
+ * content, so it gets the standard placeholder instead.
+ */
+export function stripSignatureBlocksForAPI(
+  messages: (UserMessage | AssistantMessage)[],
+): (UserMessage | AssistantMessage)[] {
+  let changed = false
+  const result = messages.map(msg => {
+    if (msg.type !== 'assistant') return msg
+
+    const content = msg.message.content
+    if (!Array.isArray(content)) return msg
+
+    const filtered = content.filter(block => {
+      if (isThinkingBlock(block)) return false
+      if (feature('CONNECTOR_TEXT')) {
+        if (isConnectorTextBlock(block)) return false
+      }
+      return true
+    })
+    if (filtered.length === content.length) return msg
+
+    changed = true
+    return {
+      ...msg,
+      message: {
+        ...msg.message,
+        content:
+          filtered.length > 0
+            ? filtered
+            : [{
+                type: 'text' as const,
+                text: '[No message content]',
+                citations: [],
+              }],
+      },
+    } as typeof msg
+  })
+
+  return changed ? result : messages
+}
+
+/**
  * Creates a tool use summary message for SDK emission.
  * Tool use summaries provide human-readable progress updates after tool batches complete.
  */

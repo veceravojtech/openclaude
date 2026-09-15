@@ -89,6 +89,7 @@ import {
   normalizeMessagesForAPI,
   stripAdvisorBlocks,
   stripCallerFieldFromAssistantMessage,
+  stripSignatureBlocksForAPI,
   stripToolReferenceBlocksFromUserMessage,
 } from '../../utils/messages.js'
 import {
@@ -249,6 +250,7 @@ import { isToolFromMcpServer } from '../mcp/utils.js'
 import { withStreamingVCR, withVCR } from '../vcr.js'
 import { resolveCurrentAnthropicAttributionPolicy } from './authRouting.js'
 import { CLIENT_REQUEST_ID_HEADER, getAnthropicClient } from './client.js'
+import { getAccountSwitchEpoch } from './usageLimitSwitch.js'
 import {
   API_ERROR_MESSAGE_PREFIX,
   CUSTOM_OFF_SWITCH_MESSAGE,
@@ -1599,6 +1601,25 @@ async function* queryModel(
     }
   }
 
+  // Snapshot the account-switch epoch with the finalized message list. A
+  // usage-limit 429 can switch Claude accounts mid-request (usageLimitSwitch);
+  // signature-bearing blocks in this list were signed by the previous account
+  // and a retry under the new one gets them rejected with a 400. `messages`
+  // here is a closure-captured array, so REPL-side effects cannot fix it for
+  // the in-flight attempt — only this comparison can. Stale epoch → swap in
+  // a stripped copy, computed once (paramsFromContext runs several times per
+  // attempt: logging, retries, the non-streaming fallback).
+  const accountSwitchEpochAtBuild = getAccountSwitchEpoch()
+  let messagesForAPIAfterSwitch: typeof messagesForAPI | undefined
+  const requestMessages = () => {
+    if (accountSwitchEpochAtBuild === getAccountSwitchEpoch()) {
+      return messagesForAPI
+    }
+    return (messagesForAPIAfterSwitch ??= stripSignatureBlocksForAPI(
+      messagesForAPI,
+    ))
+  }
+
   // Chrome tool-search instructions: when the delta attachment is enabled,
   // these are carried as a client-side block in mcp_instructions_delta
   // (attachments.ts) instead of here. This per-request sys-prompt append
@@ -1973,7 +1994,7 @@ async function* queryModel(
       // producing a different system prompt on each request and breaking cache.
       system,
       messages: addCacheBreakpoints(
-        messagesForAPI,
+        requestMessages(),
         enablePromptCaching,
         options.querySource,
         useCachedMC,

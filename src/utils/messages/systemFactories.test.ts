@@ -194,6 +194,25 @@ test('microcompact and API error factories preserve branch-specific fields', () 
   expect(
     createSystemAPIErrorMessage(errorWithoutErrorCause, 200, 1, 3).cause,
   ).toBeUndefined()
+
+  // The usage-limit account switch notice: switchedAccountTo set only when
+  // given, resumeAtMs untouched by it.
+  const switchNotice = createSystemAPIErrorMessage(
+    errorWithoutErrorCause,
+    0,
+    1,
+    10,
+    undefined,
+    'work@example.com',
+  )
+  expect(switchNotice).toMatchObject({
+    retryInMs: 0,
+    retryAttempt: 1,
+    maxRetries: 10,
+    switchedAccountTo: 'work@example.com',
+  })
+  expect(switchNotice.resumeAtMs).toBeUndefined()
+  expect(createSystemAPIErrorMessage(errorWithCause, 100, 2, 5).switchedAccountTo).toBeUndefined()
 })
 
 test('compact boundary helpers find and slice from the latest boundary', () => {

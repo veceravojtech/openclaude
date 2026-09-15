@@ -30,11 +30,22 @@ import { resetUserCache } from '../utils/user.js'
  * half that fell behind would leave the session holding another account's
  * cost totals, entitlements or permission grants.
  *
+ * Also invoked by the usage-limit auto-switch (usageLimitSwitch.ts) through
+ * the hook the REPL registers: a mid-request switch must apply the same
+ * resets or the session diverges from the new credentials. Hence the
+ * deliberately narrow context type — the API layer can supply these four
+ * fields without owning a full command context.
+ *
  * The caller is responsible for the credential write itself; this only deals
  * with the in-process consequences.
  */
+export type AccountSwitchEffectsContext = Pick<
+  LocalJSXCommandContext,
+  'onChangeAPIKey' | 'setMessages' | 'getAppState' | 'setAppState'
+>
+
 export function applyAccountSwitchEffects(
-  context: LocalJSXCommandContext,
+  context: AccountSwitchEffectsContext,
 ): void {
   context.onChangeAPIKey()
   // Signature-bearing blocks (thinking, connector_text) are bound to the

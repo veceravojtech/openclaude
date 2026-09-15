@@ -31,7 +31,6 @@
  */
 
 import type { QuerySource } from 'src/constants/querySource.js'
-import { readAccounts } from '../../utils/accountSwitch.js'
 import { clearCannotProceed } from '../../utils/swarm/usageLimitGuard.js'
 
 /**
@@ -71,7 +70,12 @@ export type UsageLimitWaitSkipReason =
   | 'no-cancel-signal'
   /** Already waited once for this request; a second wait would be a loop. */
   | 'already-waited'
-  /** Another stored account could unblock immediately — switching beats waiting. */
+  /**
+   * Another stored account could unblock immediately — switching beats
+   * waiting. Reached only when the auto-switch declined (no session-effects
+   * hook registered, e.g. an SDK host), so the user is pointed at the
+   * switch rather than parked on a reset clock.
+   */
   | 'other-account-available'
   /** No usable reset time: header absent, unparseable, or already in the past. */
   | 'no-reset-time'
@@ -100,22 +104,6 @@ export function isForegroundUsageLimitSource(
 ): boolean {
   if (typeof querySource !== 'string') return false
   return querySource.startsWith('repl_main_thread') || querySource === 'sdk'
-}
-
-/**
- * Whether the user has an account other than the active one to switch to.
- *
- * A failure to enumerate accounts is reported as "no alternative". If we
- * cannot read the store, neither can the switch the user would be told to
- * perform, so pointing them at `/account` would be advice that does not work;
- * waiting is the remedy that still does.
- */
-export function hasAlternativeAccount(): boolean {
-  try {
-    return readAccounts().length > 1
-  } catch {
-    return false
-  }
 }
 
 /**

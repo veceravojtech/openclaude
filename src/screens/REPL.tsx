@@ -212,6 +212,8 @@ import type { SandboxAskCallback, NetworkHostPattern } from '../utils/sandbox/sa
 import { type IDEExtensionInstallationStatus, closeOpenDiffs, getConnectedIdeClient, type IdeType } from '../utils/ide.js';
 import { useIDEIntegration } from '../hooks/useIDEIntegration.js';
 import exit from '../commands/exit/index.js';
+import { applyAccountSwitchEffects } from '../commands/applyAccountSwitchEffects.js';
+import { clearAccountSwitchEffects, registerAccountSwitchEffects } from '../services/api/usageLimitSwitch.js';
 import { ExitFlow } from '../components/ExitFlow.js';
 import { getCurrentWorktreeSession } from '../utils/worktree.js';
 import { popAllEditable, enqueue, prepend, type SetAppState, getCommandQueue, getCommandQueueLength, removeByFilter } from '../utils/messageQueueManager.js';
@@ -2736,6 +2738,28 @@ export function REPL({
     registerLeaderSetToolPermissionContext(setToolPermissionContext);
     return () => unregisterLeaderSetToolPermissionContext();
   }, [setToolPermissionContext]);
+
+  // Register the session-effects half of the usage-limit auto-switch. When
+  // the API layer (withRetry) switches Claude accounts because the active one
+  // drained its limit, it invokes this hook to bring the session along —
+  // same shared reset path as /login and /account. The registration itself
+  // is the gate: without it the API layer refuses to switch, because a
+  // storage-only switch leaves the status line, caches and signature blocks
+  // naming the old account (see usageLimitSwitch.ts).
+  useEffect(() => {
+    registerAccountSwitchEffects(() =>
+      applyAccountSwitchEffects({
+        onChangeAPIKey: reverify,
+        setMessages,
+        getAppState: () => store.getState(),
+        setAppState,
+      })
+    );
+    return () => clearAccountSwitchEffects();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- all deps are
+    // stable setters; re-running on their identity would churn the registry
+    // for no behavioral change.
+  }, [reverify, setMessages, setAppState, store]);
   const canUseTool = useCanUseTool(setToolUseConfirmQueue, setToolPermissionContext);
   const requestPrompt = useCallback((title: string, toolInputSummary?: string | null) => (request: PromptRequest): Promise<PromptResponse> => new Promise<PromptResponse>((resolve, reject) => {
     setPromptQueue(prev => [...prev, {

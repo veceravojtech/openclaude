@@ -72,6 +72,34 @@ test('attempt 4 renders the full error with retry countdown', async () => {
   expect(frame).toContain('attempt 4/10')
 })
 
+test('account-switch notice names the account instead of counting down', async () => {
+  const frame = await renderToText(
+    makeMessage({
+      retryAttempt: 1,
+      retryInMs: 0,
+      switchedAccountTo: 'work@example.com',
+      error: { message: 'rate limit exceeded', status: 429 } as APIError,
+    }),
+  )
+  expect(frame).toContain('switching to work@example.com')
+  // The retry starts immediately, so a countdown would be noise.
+  expect(frame.toLowerCase()).not.toContain('retrying in')
+  expect(frame).toContain('attempt 1/10')
+})
+
+test('account-switch notice renders the full line on late attempts', async () => {
+  const frame = await renderToText(
+    makeMessage({
+      retryAttempt: 4,
+      retryInMs: 0,
+      switchedAccountTo: 'work@example.com',
+      error: { message: 'rate limit exceeded', status: 429 } as APIError,
+    }),
+  )
+  expect(frame).toContain('Usage limit reached — switching to work@example.com')
+  expect(frame.toLowerCase()).not.toContain('retrying in')
+})
+
 test('briefAPIErrorReason classifies common failures', () => {
   expect(
     briefAPIErrorReason({ message: 'x', status: 429 } as APIError),

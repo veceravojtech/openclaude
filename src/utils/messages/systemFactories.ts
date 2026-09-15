@@ -262,6 +262,12 @@ export function createSystemAPIErrorMessage(
   maxRetries: number,
   /** Set only by the usage-limit auto-wait; see SystemAPIErrorMessage. */
   resumeAtMs?: number,
+  /**
+   * Set only by the usage-limit account switch: the display name of the
+   * account switched to. Renders as "switching to <name>" instead of a
+   * countdown. See SystemAPIErrorMessage.
+   */
+  switchedAccountTo?: string,
 ): SystemAPIErrorMessage {
   return {
     type: 'system',
@@ -273,6 +279,7 @@ export function createSystemAPIErrorMessage(
     retryAttempt,
     maxRetries,
     ...(resumeAtMs !== undefined && { resumeAtMs }),
+    ...(switchedAccountTo !== undefined && { switchedAccountTo }),
     timestamp: new Date().toISOString(),
     uuid: randomUUID(),
   }

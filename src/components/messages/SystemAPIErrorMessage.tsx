@@ -20,7 +20,8 @@ type Props = {
 }
 
 export function SystemAPIErrorMessage({ message, verbose }: Props) {
-  const { retryAttempt, error, retryInMs, maxRetries, resumeAtMs } = message
+  const { retryAttempt, error, retryInMs, maxRetries, resumeAtMs, switchedAccountTo } =
+    message
   const compact = retryAttempt < FULL_ERROR_ATTEMPT_THRESHOLD
   const [countdownMs, setCountdownMs] = useState(0)
   const done = countdownMs >= retryInMs
@@ -33,13 +34,17 @@ export function SystemAPIErrorMessage({ message, verbose }: Props) {
   // A usage-limit auto-wait is measured in hours, and "retrying in 10800
   // seconds" is not something a user can plan around. State the wall-clock
   // instant instead; the ticking countdown above still shows progress.
+  // An account switch has no countdown at all — the retry starts immediately
+  // — so name the account the conversation continues under.
   const resumeLabel =
-    resumeAtMs !== undefined
-      ? `resuming at ${new Date(resumeAtMs).toLocaleTimeString([], {
-          hour: '2-digit',
-          minute: '2-digit',
-        })}`
-      : `retrying in ${retryInSecondsLive}s`
+    switchedAccountTo !== undefined
+      ? `switching to ${switchedAccountTo}`
+      : resumeAtMs !== undefined
+        ? `resuming at ${new Date(resumeAtMs).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+          })}`
+        : `retrying in ${retryInSecondsLive}s`
 
   if (compact) {
     return (
@@ -64,7 +69,7 @@ export function SystemAPIErrorMessage({ message, verbose }: Props) {
         </Text>
         {truncated && <CtrlOToExpand />}
         <Text dimColor>
-          {resumeAtMs !== undefined ? (
+          {resumeAtMs !== undefined || switchedAccountTo !== undefined ? (
             <>
               Usage limit reached — {resumeLabel}
               {'…'} (attempt {retryAttempt}/{maxRetries})

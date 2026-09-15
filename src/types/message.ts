@@ -334,6 +334,15 @@ export interface SystemAPIErrorMessage extends SystemMessageBase {
    * they can plan around.
    */
   resumeAtMs?: number
+  /**
+   * Display name of the account switched to, when this message reports a
+   * usage-limit account switch rather than a wait or backoff.
+   *
+   * Present only on that path. The retry starts immediately (retryInMs is
+   * 0), so a countdown would say nothing; naming the account tells the user
+   * why the conversation continues under a different identity.
+   */
+  switchedAccountTo?: string
 }
 
 /** Snapshot of session files (plan, todos) persisted for remote sessions. */
