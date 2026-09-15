@@ -147,6 +147,14 @@ import { createContentReplacementState } from '../toolResultStorage.js'
 import { createAgentId } from '../uuid.js'
 import { SUB_TEAM_RECHECK_INTERVAL_MS, TEAM_LEAD_NAME } from './constants.js'
 import {
+  clearCannotProceed,
+  endedInApiError,
+  findUsageLimitNotice,
+  isCannotProceed,
+  markCannotProceed,
+  shouldReportUsageLimit,
+} from './usageLimitGuard.js'
+import {
   getLeaderSetToolPermissionContext,
   getLeaderToolUseConfirmQueue,
 } from './leaderPermissionBridge.js'
@@ -185,6 +193,20 @@ import { createInProcessPermissionAbortCompleter } from './inProcessPermissionAb
 type SetAppStateFn = (updater: (prev: AppState) => AppState) => void
 
 const PERMISSION_POLL_INTERVAL_MS = 500
+
+/**
+ * Floor between a turn that ended in an API error and the next one.
+ *
+ * Not a backoff schedule and not a retry policy — just a guarantee that the
+ * failed-turn path contains one awaited delay. A turn rejected from cache
+ * fails without a network round trip, and every step from there back to the
+ * next turn is synchronous (see `pollForNextPromptOrShutdown`, whose
+ * first-poll sleep is deliberately skipped for genuinely fresh idle periods).
+ * Without this, a fast-failing error class spins at CPU speed and each lap
+ * costs the lead a message. The skip stays correct for real idle because this
+ * delay lives on the failure path only, where the two cases stay distinct.
+ */
+const FAILED_TURN_MIN_INTERVAL_MS = 1_000
 
 /**
  * Creates a canUseTool function for in-process teammates that properly resolves
@@ -776,12 +798,25 @@ function formatTaskAsPrompt(task: Task): string {
 
 /**
  * Try to claim an available task from the team's task list.
- * Returns the formatted prompt if a task was claimed, or undefined if none available.
+ * Returns the formatted prompt and the claimed task's id, or undefined if none
+ * available.
+ *
+ * The id is returned, not just the prompt, because a teammate that stops on an
+ * account-wide usage limit has to hand the task BACK (see the limit-stop path
+ * in the runner loop). Without the id there is nothing to release and the task
+ * would be stranded `in_progress` under an owner that has exited.
  */
 async function tryClaimNextTask(
   taskListId: string,
   agentName: string,
-): Promise<string | undefined> {
+): Promise<{ prompt: string; taskId: string } | undefined> {
+  // The account, not this task, is what cannot proceed. Claiming here would
+  // pick up a task only to fail on it instantly, release it, and let the next
+  // teammate repeat that — the cross-teammate form of the same spin.
+  if (isCannotProceed()) {
+    return undefined
+  }
+
   try {
     const tasks = await listTasks(taskListId)
     const availableTask = findAvailableTask(tasks)
@@ -806,10 +841,37 @@ async function tryClaimNextTask(
       `[inProcessRunner] Claimed task #${availableTask.id}: ${availableTask.subject}`,
     )
 
-    return formatTaskAsPrompt(availableTask)
+    return { prompt: formatTaskAsPrompt(availableTask), taskId: availableTask.id }
   } catch (err) {
     logForDebugging(`[inProcessRunner] Error checking task list: ${err}`)
     return undefined
+  }
+}
+
+/**
+ * Releases a task claimed by a teammate that is stopping because the account
+ * cannot make progress, so the work is still there when usage returns.
+ *
+ * Clearing the owner as well as the status is what makes it re-claimable:
+ * `findAvailableTask` rejects anything with a truthy owner, so a status-only
+ * reset would leave the task pending but permanently unclaimable.
+ */
+async function releaseClaimedTask(
+  taskListId: string,
+  claimedTaskId: string,
+): Promise<void> {
+  try {
+    await updateTask(taskListId, claimedTaskId, {
+      status: 'pending',
+      owner: '',
+    })
+    logForDebugging(
+      `[inProcessRunner] Released task #${claimedTaskId} back to pending (account cannot proceed)`,
+    )
+  } catch (err) {
+    logForDebugging(
+      `[inProcessRunner] Failed to release task #${claimedTaskId}: ${err}`,
+    )
   }
 }
 
@@ -896,6 +958,12 @@ type WaitResult =
       from: string
       color?: string
       summary?: string
+      /**
+       * Set only when this prompt came from claiming a task off the team list,
+       * so the runner can hand that task back if it has to stop before
+       * finishing it. Absent for mailbox messages, which own no task.
+       */
+      claimedTaskId?: string
     }
   | {
       type: 'aborted'
@@ -1405,12 +1473,13 @@ async function pollForNextPromptOrShutdown(
     }
 
     // Check the team's task list for unclaimed tasks
-    const taskPrompt = await tryClaimNextTask(taskListId, identity.agentName)
-    if (taskPrompt) {
+    const claimed = await tryClaimNextTask(taskListId, identity.agentName)
+    if (claimed) {
       return {
         type: 'new_message',
-        message: taskPrompt,
+        message: claimed.prompt,
         from: 'task-list',
+        claimedTaskId: claimed.taskId,
       }
     }
 
@@ -1934,7 +2003,7 @@ async function idleUntilNextPrompt(params: {
   /** Notify the lead even if the task is already flagged idle (idle spawn:
    *  the task is registered idle, but the lead has not been told yet). */
   forceIdleNotification?: boolean
-}): Promise<string | undefined> {
+}): Promise<{ prompt: string; claimedTaskId?: string } | undefined> {
   const {
     identity,
     taskId,
@@ -2044,7 +2113,16 @@ async function idleUntilNextPrompt(params: {
     )
   }
 
-  return resolveNextPrompt(identity, taskId, setAppState, waitResult)
+  const prompt = resolveNextPrompt(identity, taskId, setAppState, waitResult)
+  if (prompt === undefined) {
+    return undefined
+  }
+  return {
+    prompt,
+    // Only a task-list claim carries an id; mailbox prompts own no task.
+    claimedTaskId:
+      waitResult.type === 'new_message' ? waitResult.claimedTaskId : undefined,
+  }
 }
 
 /**
@@ -2215,6 +2293,14 @@ export async function runInProcessTeammate(
       : formatAsTeammateMessage('team-lead', prompt, undefined, description)
   let currentPrompt = wrappedInitialPrompt ?? ''
   let shouldExit = false
+  const taskListId = resolveTeammateTaskListId(identity)
+  /**
+   * The task this teammate claimed for the turn now running, if any. Held so
+   * the usage-limit stop below can hand it back: the account, not the task,
+   * is what failed, so leaving it owned and `in_progress` would strand work
+   * nobody is doing.
+   */
+  let currentClaimedTaskId: string | undefined
 
   // Try to claim an available task immediately so the UI can show activity
   // from the very start. The idle loop handles claiming for subsequent tasks.
@@ -2226,12 +2312,13 @@ export async function runInProcessTeammate(
   // task becomes its first turn (see below) — which is exactly why
   // skipInitialClaim exists: a spawn whose first turn is already waiting in
   // its own inbox must not have it pre-empted here.
-  const claimedTaskPrompt = skipInitialClaim
+  const claimedTask = skipInitialClaim
     ? undefined
-    : await tryClaimNextTask(
-        resolveTeammateTaskListId(identity),
-        identity.agentName,
-      )
+    : await tryClaimNextTask(taskListId, identity.agentName)
+  // Owned from here whether or not its text becomes the first prompt: a
+  // prompted spawn runs the lead's prompt but still holds the claim, so the
+  // usage-limit stop must hand this one back too.
+  currentClaimedTaskId = claimedTask?.taskId
 
   try {
     // Add initial prompt to task.messages for display (wrapped with XML)
@@ -2283,28 +2370,35 @@ export async function runInProcessTeammate(
     // was awaiting must not touch the killed task or tell the lead it is
     // available, exactly as a prompted spawn killed in the same window.
     if (wrappedInitialPrompt === undefined && !abortController.signal.aborted) {
-      const firstPrompt =
-        claimedTaskPrompt !== undefined
-          ? resolveNextPrompt(identity, taskId, setAppState, {
-              type: 'new_message',
-              message: claimedTaskPrompt,
-              from: 'task-list',
-            })
-          : await idleUntilNextPrompt({
-              identity,
-              taskId,
-              abortController,
-              toolUseContext,
-              allMessages,
-              workWasAborted: false,
-              // The task is registered idle at spawn, but the lead has not
-              // been told yet.
-              forceIdleNotification: true,
-            })
-      if (firstPrompt === undefined) {
-        shouldExit = true
+      if (claimedTask !== undefined) {
+        const firstPrompt = resolveNextPrompt(identity, taskId, setAppState, {
+          type: 'new_message',
+          message: claimedTask.prompt,
+          from: 'task-list',
+        })
+        if (firstPrompt === undefined) {
+          shouldExit = true
+        } else {
+          currentPrompt = firstPrompt
+        }
       } else {
-        currentPrompt = firstPrompt
+        const firstPrompt = await idleUntilNextPrompt({
+          identity,
+          taskId,
+          abortController,
+          toolUseContext,
+          allMessages,
+          workWasAborted: false,
+          // The task is registered idle at spawn, but the lead has not
+          // been told yet.
+          forceIdleNotification: true,
+        })
+        if (firstPrompt === undefined) {
+          shouldExit = true
+        } else {
+          currentPrompt = firstPrompt.prompt
+          currentClaimedTaskId = firstPrompt.claimedTaskId
+        }
       }
     }
 
@@ -2634,6 +2728,59 @@ export async function runInProcessTeammate(
         break
       }
 
+      // An out-of-usage 429 does not throw: services/api/claude.ts yields an
+      // assistant API-error message and returns, so the turn lands here
+      // reporting success and the terminal catch below never sees it. Left
+      // alone, the teammate parks idle, tells the lead, and claims the next
+      // task with no awaited delay on a fresh idle period's first poll — one
+      // lead-bound message per wasted task, at CPU speed.
+      //
+      // So treat it as what it is: the ACCOUNT cannot proceed, not this task.
+      // Hand the task back, stop the process claiming more, tell the lead
+      // exactly once, and exit rather than re-entering the loop.
+      const usageLimitNotice = findUsageLimitNotice(iterationMessages)
+      if (usageLimitNotice) {
+        logForDebugging(
+          `[inProcessRunner] ${identity.agentId} stopping: ${usageLimitNotice}`,
+        )
+        markCannotProceed(usageLimitNotice)
+
+        if (currentClaimedTaskId) {
+          await releaseClaimedTask(taskListId, currentClaimedTaskId)
+          currentClaimedTaskId = undefined
+        }
+
+        // Once per distinct notice for the whole process: every teammate hits
+        // an account-wide limit at the same moment, and the lead needs to know
+        // once, with the reset time, not once per teammate.
+        if (shouldReportUsageLimit(usageLimitNotice)) {
+          await sendIdleNotification(
+            identity.agentName,
+            identity.color,
+            identity.teamName,
+            {
+              idleReason: 'failed',
+              completedStatus: 'failed',
+              failureReason: usageLimitNotice,
+            },
+          )
+        }
+
+        shouldExit = true
+        break
+      }
+
+      // The turn produced no limit error, so whatever stop we were parked on
+      // has lifted: usage is available again and a later limit is fresh news.
+      clearCannotProceed()
+
+      // Some other error class ended the turn. Not a reason to stop — it may
+      // well be transient — but it is a reason not to sprint into the next
+      // turn, because nothing else on this path awaits anything.
+      if (endedInApiError(iterationMessages)) {
+        await sleep(FAILED_TURN_MIN_INTERVAL_MS)
+      }
+
       // If work was aborted (Escape), log it and add interrupt message, then continue to idle state
       if (workWasAborted) {
         logForDebugging(
@@ -2666,7 +2813,8 @@ export async function runInProcessTeammate(
       if (nextPrompt === undefined) {
         shouldExit = true
       } else {
-        currentPrompt = nextPrompt
+        currentPrompt = nextPrompt.prompt
+        currentClaimedTaskId = nextPrompt.claimedTaskId
       }
     }
 
