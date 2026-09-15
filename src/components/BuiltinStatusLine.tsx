@@ -11,6 +11,7 @@ import { getRawUtilization } from '../services/claudeAiLimits.js';
 import { useClaudeAiLimits } from '../services/claudeAiLimitsHook.js';
 import { useAppState } from '../state/AppState.js';
 import type { Message } from '../types/message.js';
+import { accountDisplayName, readAccounts } from '../utils/accountSwitch.js';
 import { getGlobalConfig } from '../utils/config.js';
 import { calculateContextPercentages, getContextWindowForModel } from '../utils/context.js';
 import { isFullscreenEnvEnabled } from '../utils/fullscreen.js';
@@ -60,6 +61,15 @@ export type BuiltinStatusData = {
     label: string;
     usedPercent: number;
   } | null;
+  /**
+   * Active Claude account, or null when naming it would not be information.
+   *
+   * Null for the single-account user: the identity cannot be wrong, so the
+   * segment would be a permanent redundant column stealing width from context
+   * and cost. It earns its place exactly when a second account exists, because
+   * that is when spending the wrong subscription becomes possible.
+   */
+  account: string | null;
 };
 export function buildBuiltinStatusSegments(data: BuiltinStatusData): StatusSegment[] {
   const segments: StatusSegment[] = [{
@@ -107,6 +117,19 @@ export function buildBuiltinStatusSegments(data: BuiltinStatusData): StatusSegme
       priority: 3,
       text: `${data.rateLimit.label} ${pct}%`,
       color: pct >= 85 ? 'error' : pct >= 60 ? 'warning' : undefined
+    });
+  }
+  if (data.account) {
+    // Lowest priority: it is the first thing dropped as the terminal narrows,
+    // because knowing the model and the context left matters more moment to
+    // moment than re-reading an identity that only changes on a switch.
+    segments.push({
+      key: 'account',
+      priority: 4,
+      text: data.account,
+      // The local part is usually enough to tell two of your own accounts
+      // apart, and the domain is the half that repeats.
+      shortText: data.account.split('@')[0]
     });
   }
   return segments;
@@ -182,6 +205,23 @@ function BuiltinStatusLineInner({
   const permissionMode = useAppState(s => s.toolPermissionContext.mode);
   // AppState-sourced model — same source as API requests (see StatusLine).
   const mainLoopModel = useMainLoopModel();
+  // Resolving the account reads secure storage, which is a subprocess on some
+  // platforms, so it gets its own memo rather than riding along with the
+  // per-message recompute below. `authVersion` is bumped by
+  // applyAccountSwitchEffects, which every credential change routes through —
+  // so this re-resolves on a switch and at no other time.
+  const authVersion = useAppState(s => s.authVersion);
+  const account = useMemo(() => {
+    const accounts = readAccounts();
+    if (accounts.length <= 1) {
+      return null;
+    }
+    const active = accounts.find(a => a.isActive);
+    return active ? accountDisplayName(active) : null;
+    // authVersion is the credential-changed signal; nothing else invalidates this.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // biome-ignore lint/correctness/useExhaustiveDependencies: intentional
+  }, [authVersion]);
   // Subscribe to rate-limit header updates so the segment stays fresh.
   useClaudeAiLimits();
   const {
@@ -215,7 +255,8 @@ function BuiltinStatusLineInner({
   }, [lastAssistantMessageId, permissionMode, mainLoopModel, messagesRef]);
   const segments = fitSegments(buildBuiltinStatusSegments({
     ...computed,
-    rateLimit: getWorstRateLimit()
+    rateLimit: getWorstRateLimit(),
+    account
   }),
   // paddingX from the footer (2 each side) is already outside this Box;
   // keep a 1-col safety margin against the truncate ellipsis. No artificial

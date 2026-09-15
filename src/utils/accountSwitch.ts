@@ -25,6 +25,17 @@ export function readAccounts(): AccountSummary[] {
   return listAccounts(migrateAndReconcile(getSecureStorage().read() ?? {}).data)
 }
 
+/**
+ * How an account is named in UI.
+ *
+ * The email is the only part a user reliably recognises; the label is a local
+ * nickname that may not be set, and the key is a UUID shown only because
+ * naming an account badly beats naming it wrongly.
+ */
+export function accountDisplayName(account: AccountSummary): string {
+  return account.emailAddress ?? account.label ?? account.key
+}
+
 export type AccountResolution =
   | { type: 'ok'; key: string }
   | { type: 'unknown' }

@@ -2,6 +2,7 @@
 
 import {
   clearAuthRelatedCaches,
+  type LogoutOutcome,
   performLogout,
 } from '../../commands/logout/logout.js'
 import {
@@ -27,9 +28,11 @@ import {
   getOauthAccountInfo,
   getSubscriptionType,
   isUsing3PServices,
+  removeApiKey,
   saveOAuthTokensIfNeeded,
   validateForceLoginOrg,
 } from '../../utils/auth.js'
+import { accountDisplayName } from '../../utils/accountSwitch.js'
 import { saveGlobalConfig } from '../../utils/config.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { isRunningOnHomespace } from '../../utils/envUtils.js'
@@ -48,8 +51,14 @@ import {
  * and sets up the local auth state.
  */
 export async function installOAuthTokens(tokens: OAuthTokens): Promise<void> {
-  // Clear old state before saving new credentials
-  await performLogout({ clearOnboarding: false })
+  // An OAuth login supersedes a stored API key, so that one credential does
+  // still go. What must NOT happen here is a logout: this used to call
+  // `performLogout`, which wiped the whole accounts map before
+  // `saveOAuthTokensIfNeeded` below merged the new account into it — so every
+  // login started from an empty map and adding a second account destroyed the
+  // first. `applyTokensToAccounts` already installs and activates the new
+  // account atomically; there is no old state left for this to clear.
+  await removeApiKey()
 
   // Reuse pre-fetched profile if available, otherwise fetch fresh
   const profile =
@@ -319,12 +328,25 @@ export async function authStatus(opts: {
 }
 
 export async function authLogout(): Promise<void> {
+  let outcome: LogoutOutcome
   try {
-    await performLogout({ clearOnboarding: false })
+    outcome = await performLogout({ clearOnboarding: false })
   } catch {
     process.stderr.write('Failed to log out.\n')
     process.exit(1)
   }
-  process.stdout.write('Successfully logged out from your Anthropic account.\n')
+  // Exit either way: this is a one-shot non-interactive invocation, not a live
+  // session, so terminating is the correct end of the command even when other
+  // accounts remain. Exit 0 means "the logout you asked for succeeded" — what
+  // changed is that it no longer signs out accounts nobody asked about.
+  if (outcome.signedOut) {
+    process.stdout.write(
+      'Successfully logged out from your Anthropic account.\n',
+    )
+  } else {
+    process.stdout.write(
+      `Signed out. Now using ${accountDisplayName(outcome.promoted)}.\n`,
+    )
+  }
   process.exit(0)
 }

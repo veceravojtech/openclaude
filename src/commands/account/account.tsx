@@ -7,6 +7,7 @@ import { MessageResponse } from '../../components/MessageResponse.js'
 import { Box, Text } from '../../ink.js'
 import type { LocalJSXCommandOnDone } from '../../types/command.js'
 import {
+  accountDisplayName,
   readAccounts,
   resolveAccountKey,
   switchAccount,
@@ -50,7 +51,7 @@ function AccountMessage({
 }
 
 function describe(account: AccountSummary): string {
-  const name = account.emailAddress ?? account.label ?? account.key
+  const name = accountDisplayName(account)
   return account.label && account.label !== name
     ? `${name} ${chalk.dim(`(${account.label})`)}`
     : name

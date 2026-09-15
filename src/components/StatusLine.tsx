@@ -13,6 +13,7 @@ import { type ReadonlySettings, useSettings } from '../hooks/useSettings.js';
 import { Ansi, Box, Text } from '../ink.js';
 import { getRawUtilization } from '../services/claudeAiLimits.js';
 import type { Message } from '../types/message.js';
+import { getOauthAccountInfo } from '../utils/auth.js';
 import type { StatusLineCommandInput } from '../types/statusLine.js';
 import type { VimMode } from '../types/textInputTypes.js';
 import { checkHasTrustDialogAccepted } from '../utils/config.js';
@@ -110,6 +111,7 @@ export function buildStatusLineCommandInput(permissionMode: PermissionMode, exce
   const resolvedTokenTotals = resolveStatusLineTokenTotals(totalInputTokens, totalOutputTokens, getUnreportedSessionUsage(messages));
   const sessionId = getSessionId();
   const sessionName = getCurrentSessionTitle(sessionId);
+  const accountEmail = getOauthAccountInfo()?.emailAddress;
   const rawUtil = getRawUtilization();
   const rateLimits: StatusLineCommandInput['rate_limits'] = {
     ...(rawUtil.five_hour && {
@@ -171,6 +173,14 @@ export function buildStatusLineCommandInput(permissionMode: PermissionMode, exce
     ...(agentType && {
       agent: {
         name: agentType
+      }
+    }),
+    // Read from the config identity mirror, not secure storage, so this stays
+    // a plain config read on a path that runs on every refresh. `switchAccount`
+    // re-points that mirror, so it follows account switches.
+    ...(accountEmail && {
+      account: {
+        email: accountEmail
       }
     }),
     ...(getIsRemoteMode() && {

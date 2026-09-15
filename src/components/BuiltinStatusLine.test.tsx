@@ -14,6 +14,9 @@ const fullData: BuiltinStatusData = {
   contextWindow: 200000,
   costUSD: 1.234,
   rateLimit: { label: '5h', usedPercent: 42 },
+  // The single-account default: the component resolves this to null unless a
+  // second account is stored, so the rest of the fixtures describe that user.
+  account: null,
 }
 
 describe('buildBuiltinStatusSegments', () => {
@@ -133,6 +136,35 @@ describe('buildBuiltinStatusSegments', () => {
     expect(ctxWithoutFlag?.text).toBe('ctx 74K/200K (37%)')
     expect(ctxWithoutFlag?.shortText).toBe('ctx 74K/200K')
   })
+
+  it('appends the account last when one is worth naming', () => {
+    const segments = buildBuiltinStatusSegments({
+      ...fullData,
+      account: 'me@example.com',
+    })
+    expect(segments.map(s => s.key)).toEqual([
+      'model',
+      'context',
+      'cost',
+      'rateLimit',
+      'account',
+    ])
+    expect(segments.at(-1)?.text).toBe('me@example.com')
+  })
+
+  it('omits the account segment entirely when there is nothing to disambiguate', () => {
+    const segments = buildBuiltinStatusSegments({ ...fullData, account: null })
+    expect(segments.find(s => s.key === 'account')).toBeUndefined()
+  })
+
+  it('degrades the account to its local part', () => {
+    const account = buildBuiltinStatusSegments({
+      ...fullData,
+      account: 'me@example.com',
+    }).find(s => s.key === 'account')
+
+    expect(account?.shortText).toBe('me')
+  })
 })
 
 describe('fitSegments', () => {
@@ -178,6 +210,27 @@ describe('fitSegments', () => {
 
   it('returns empty when even the model does not fit', () => {
     expect(fitSegments(segments, 3)).toEqual([])
+  })
+
+  it('sheds the account first as the terminal narrows', () => {
+    const withAccount = buildBuiltinStatusSegments({
+      ...fullData,
+      account: 'me@example.com',
+    })
+    const keysAt = (width: number) =>
+      fitSegments(withAccount, width).map(s => s.key)
+    const whenRoomy = keysAt(200)
+
+    // Walk the width down one column at a time rather than hard-coding the
+    // threshold: the assertion is the drop ORDER, which must survive anyone
+    // retuning a separator or a short form.
+    let firstDropped: string | undefined
+    for (let width = 200; width >= 1 && firstDropped === undefined; width--) {
+      const keys = keysAt(width)
+      firstDropped = whenRoomy.find(key => !keys.includes(key))
+    }
+
+    expect(firstDropped).toBe('account')
   })
 })
 

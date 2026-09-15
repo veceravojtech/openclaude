@@ -81,6 +81,22 @@ export type StatusLineCommandInput = {
   agent?: {
     name: string
   }
+  /**
+   * The Claude account this session is authenticated as.
+   *
+   * Absent for API-key users and for anyone with no stored account, so treat
+   * it as optional rather than assuming a subscription login. Unlike the
+   * built-in status line — which hides the identity unless more than one
+   * account is stored — this is present whenever it is known, because a
+   * custom statusline decides its own thresholds.
+   *
+   * Deliberately email only: the local nickname lives in secure storage, and
+   * reading that is a subprocess on some platforms, which is too much to
+   * spend on every statusline refresh.
+   */
+  account?: {
+    email: string
+  }
   remote?: {
     session_id: string
   }
