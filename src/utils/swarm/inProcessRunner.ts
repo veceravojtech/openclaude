@@ -2154,8 +2154,12 @@ export async function runInProcessTeammate(
   }
 
   // Resolve agent definition - use full system prompt with teammate addendum
-  // IMPORTANT: Set permissionMode to 'default' so teammates always get full tool
-  // access regardless of the leader's permission mode.
+  // The permissionMode here is only a placeholder: every iteration rebuilds the
+  // definition with the mode read live from the teammate's own task (see
+  // currentPermissionMode below). That task is seeded at spawn from the
+  // leader's mode by resolveTeammatePermissionMode, and is rewritten later by
+  // Shift+Tab cycling and by the org-policy bypass killswitch, so the effective
+  // mode must never be read from this object.
   const fallbackModel = agentDefinition?.model ?? model
   const resolvedAgentDefinition: CustomAgentDefinition = {
     agentType: identity.agentName,

@@ -33,7 +33,7 @@ test('an idle spawn registers an idle task with an idle description and an empty
 
   const result = await spawnInProcessTeammate(
     { name: 'idle-worker', teamName: 'idle-team', planModeRequired: false },
-    { setAppState, toolUseId: 'toolu_idle' },
+    { setAppState, getAppState: getState, toolUseId: 'toolu_idle' },
   )
 
   try {
@@ -62,7 +62,7 @@ test('a prompted spawn still registers a busy task described by its prompt', asy
       prompt: 'Summarize the repository layout',
       planModeRequired: false,
     },
-    { setAppState },
+    { setAppState, getAppState: getState },
   )
 
   try {

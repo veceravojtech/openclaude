@@ -256,7 +256,7 @@ async function startIdleTeammate(harness: Harness): Promise<StartedTeammate> {
       teamName: TEAM_NAME,
       planModeRequired: false,
     },
-    { setAppState },
+    { setAppState, getAppState: () => state },
   )
   if (
     !spawn.success ||

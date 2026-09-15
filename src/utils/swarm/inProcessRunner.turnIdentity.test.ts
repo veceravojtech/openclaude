@@ -249,7 +249,7 @@ async function startIdleTeammate(harness: Harness): Promise<StartedTeammate> {
   }
   const spawn = await spawnInProcessTeammate(
     { name: WORKER, teamName: TEAM_NAME, planModeRequired: false },
-    { setAppState },
+    { setAppState, getAppState: () => state },
   )
   if (
     !spawn.success ||

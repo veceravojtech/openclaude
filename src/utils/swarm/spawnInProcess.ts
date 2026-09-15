@@ -68,11 +68,17 @@ export type InProcessTeammateKillTrace = {
 export type SpawnContext = {
   setAppState: SetAppStateFn
   /**
-   * Reads the leader's live AppState. Used to inherit the leader's CURRENT
-   * permission mode — see resolveTeammatePermissionMode. Optional so callers
-   * that only hold a setter still spawn (they get the safe `default`).
+   * Reads the leader's live AppState, for the permission mode the teammate
+   * inherits — see resolveTeammatePermissionMode.
+   *
+   * Required, deliberately. Every caller in the tree already holds a
+   * `ToolUseContext`, which supplies this structurally; making it optional
+   * meant the inheritance could be switched off at a call site silently, and
+   * meant a later narrowing of a parameter type could disable it with no test
+   * failing. A required field forces that decision to be explicit and
+   * reviewable.
    */
-  getAppState?: () => AppState
+  getAppState: () => AppState
   toolUseId?: string
 }
 
@@ -97,16 +103,13 @@ export function resolveTeammatePermissionMode({
   leaderPermissionContext,
 }: {
   planModeRequired: boolean
-  leaderPermissionContext?: Pick<
+  leaderPermissionContext: Pick<
     ToolPermissionContext,
     'mode' | 'isBypassPermissionsModeAvailable'
   >
 }): PermissionMode {
   if (planModeRequired) {
     return 'plan'
-  }
-  if (!leaderPermissionContext) {
-    return 'default'
   }
   const { mode, isBypassPermissionsModeAvailable } = leaderPermissionContext
   if (
@@ -249,7 +252,7 @@ export async function spawnInProcessTeammate(
       pastTenseVerb: sample(TURN_COMPLETION_VERBS),
       permissionMode: resolveTeammatePermissionMode({
         planModeRequired,
-        leaderPermissionContext: getAppState?.().toolPermissionContext,
+        leaderPermissionContext: getAppState().toolPermissionContext,
       }),
       isIdle: isIdleSpawn,
       shutdownRequested: false,

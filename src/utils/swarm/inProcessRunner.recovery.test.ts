@@ -366,7 +366,7 @@ async function startTeammate(
       planModeRequired: false,
       ...(extra.prompt !== undefined ? { prompt: extra.prompt } : {}),
     },
-    { setAppState: world.setAppState },
+    { setAppState: world.setAppState, getAppState: world.getState },
   )
   if (
     !spawn.success ||
@@ -431,7 +431,7 @@ test('the runner failure path records the orphaned sub-team and tells the lead a
   // has to name — that is the whole reason the orphan matters.
   await spawnInProcessTeammate(
     { name: WORKER, teamName: SUB_TEAM, planModeRequired: false, prompt: 'work' },
-    { setAppState: world.setAppState },
+    { setAppState: world.setAppState, getAppState: world.getState },
   )
 
   const subLead = await startTeammate(harness, world, SUB_LEAD, PARENT_TEAM, {

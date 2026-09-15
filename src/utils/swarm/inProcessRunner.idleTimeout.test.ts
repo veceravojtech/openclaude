@@ -373,7 +373,7 @@ async function startIdleTeammate(
   }
   const spawn = await spawnInProcessTeammate(
     { name, teamName: TEAM_NAME, planModeRequired: false },
-    { setAppState },
+    { setAppState, getAppState: () => state },
   )
   if (
     !spawn.success ||

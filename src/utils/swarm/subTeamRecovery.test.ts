@@ -141,7 +141,7 @@ async function registerTeammate(
 ): Promise<string> {
   const spawn = await spawnInProcessTeammate(
     { name, teamName, planModeRequired: false, prompt: 'work' },
-    { setAppState: world.setAppState },
+    { setAppState: world.setAppState, getAppState: world.getState },
   )
   if (!spawn.success || !spawn.taskId) {
     throw new Error(`spawn failed: ${spawn.error}`)

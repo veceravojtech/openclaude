@@ -356,7 +356,7 @@ async function registerTeammate(
 ): Promise<{ taskId: string; agentId: string }> {
   const spawn = await spawnInProcessTeammate(
     { name, teamName, planModeRequired: false, prompt },
-    { setAppState: world.setAppState },
+    { setAppState: world.setAppState, getAppState: world.getState },
   )
   if (!spawn.success || !spawn.taskId) {
     throw new Error(`spawn failed: ${spawn.error}`)
@@ -373,7 +373,7 @@ async function startIdleTeammate(
 ): Promise<StartedTeammate> {
   const spawn = await spawnInProcessTeammate(
     { name, teamName, planModeRequired: false },
-    { setAppState: world.setAppState },
+    { setAppState: world.setAppState, getAppState: world.getState },
   )
   if (
     !spawn.success ||

@@ -40,11 +40,9 @@ async function spawnAndReadMode(
   {
     leaderContext,
     planModeRequired = false,
-    withoutGetAppState = false,
   }: {
     leaderContext?: ToolPermissionContext
     planModeRequired?: boolean
-    withoutGetAppState?: boolean
   },
 ): Promise<string> {
   let state: AppState = getDefaultAppState()
@@ -58,7 +56,7 @@ async function spawnAndReadMode(
 
   const spawn = await spawnInProcessTeammate(
     { name, teamName: 'perm-team', prompt: 'work', planModeRequired },
-    withoutGetAppState ? { setAppState } : { setAppState, getAppState },
+    { setAppState, getAppState },
   )
   if (!spawn.success || !spawn.taskId) {
     throw new Error(`spawn failed: ${spawn.error}`)
@@ -89,14 +87,6 @@ test('planModeRequired still wins over the leader mode', async () => {
       planModeRequired: true,
     }),
   ).toBe('plan')
-})
-
-test('a caller without getAppState falls back to default', async () => {
-  // respawn/handoff paths that only hold a setter must not silently widen
-  // permissions — absent evidence of the leader's mode, prompt.
-  expect(
-    await spawnAndReadMode('setter-only', { withoutGetAppState: true }),
-  ).toBe('default')
 })
 
 test('the org-policy killswitch is not defeated by spawning a teammate', async () => {

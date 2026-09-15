@@ -215,7 +215,7 @@ test('stopTask on a sub-lead stops its sub-team and removes it before resolving'
   const spawn = async (name: string, teamName: string): Promise<string> => {
     const result = await spawnInProcessTeammate(
       { name, teamName, planModeRequired: false, prompt: 'work' },
-      { setAppState: context.setAppState },
+      { setAppState: context.setAppState, getAppState: context.getAppState },
     )
     if (!result.success || !result.taskId) {
       throw new Error(`spawn failed: ${result.error}`)
