@@ -126,7 +126,10 @@ export function OAuthFlowStep({
       // OAuthFlowStep creates inference-only tokens for GitHub Actions, not a
       // replacement login. Use saveOAuthTokensIfNeeded directly to avoid
       // performLogout which would destroy the user's existing auth session.
-      saveOAuthTokensIfNeeded(result);
+      // Awaited deliberately: the saver takes the credential lock, and leaving
+      // it floating would let the success UI below run against a write that
+      // has not landed yet.
+      await saveOAuthTokensIfNeeded(result);
 
       // For OAuth flow, the access token can be used as an API key
       const timer1 = setTimeout((setOAuthStatus_0, accessToken, onSuccess_0, timersRef_0) => {

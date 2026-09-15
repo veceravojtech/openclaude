@@ -76,7 +76,7 @@ export async function installOAuthTokens(tokens: OAuthTokens): Promise<void> {
     })
   }
 
-  const storageResult = saveOAuthTokensIfNeeded(tokens)
+  const storageResult = await saveOAuthTokensIfNeeded(tokens)
   clearOAuthTokenCache()
 
   if (storageResult.warning) {

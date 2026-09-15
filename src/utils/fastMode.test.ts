@@ -163,7 +163,8 @@ async function installCommonMocks(options?: {
     saveApiKey: async () => {},
     isCustomApiKeyApproved: () => false,
     removeApiKey: async () => {},
-    saveOAuthTokensIfNeeded: () => ({ didSave: false }),
+    saveOAuthTokensIfNeeded: async () => ({ success: true }),
+    saveOAuthTokensUnlocked: () => ({ success: true }),
     getClaudeAIOAuthTokens: () =>
       options?.oauthToken ? { accessToken: options.oauthToken } : null,
     clearOAuthTokenCache: () => {},

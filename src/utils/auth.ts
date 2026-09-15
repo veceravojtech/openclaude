@@ -30,6 +30,13 @@ import {
 import { getOauthProfileFromOauthToken } from '../services/oauth/getOauthProfile.js'
 import type { OAuthTokens, SubscriptionType } from '../services/oauth/types.js'
 import {
+  accountKeyForTokens,
+  addAccount,
+  LEGACY_ACCOUNT_KEY,
+  migrateAndReconcile,
+  withCredentialLock,
+} from './authAccounts.js'
+import {
   getApiKeyFromFileDescriptor,
   getOAuthTokenFromFileDescriptor,
 } from './authFileDescriptor.js'
@@ -63,7 +70,10 @@ import { execSyncWithDefaults_DEPRECATED } from './execFileNoThrow.js'
 import * as lockfile from './lockfile.js'
 import { logError } from './log.js'
 import { memoizeWithTTLAsync } from './memoize.js'
-import { getSecureStorage } from './secureStorage/index.js'
+import {
+  getSecureStorage,
+  type SecureStorageData,
+} from './secureStorage/index.js'
 import {
   clearLegacyApiKeyPrefetch,
   getLegacyApiKeyPrefetchResult,
@@ -1216,19 +1226,76 @@ async function maybeRemoveApiKeyFromMacOSKeychain(): Promise<void> {
   }
 }
 
-// Function to store OAuth tokens in secure storage
-export function saveOAuthTokensIfNeeded(tokens: OAuthTokens): {
-  success: boolean
-  warning?: string
-} {
+/**
+ * Cheap pre-checks shared by both savers. Logs the reason it is skipping, so
+ * whichever saver short-circuits first is the only one that reports it.
+ */
+function shouldPersistTokens(tokens: OAuthTokens): boolean {
   if (!shouldUseClaudeAIAuth(tokens.scopes)) {
     logEvent('tengu_oauth_tokens_not_claude_ai', {})
-    return { success: true }
+    return false
   }
 
   // Skip saving inference-only tokens (they come from env vars)
   if (!tokens.refreshToken || !tokens.expiresAt) {
     logEvent('tengu_oauth_tokens_inference_only', {})
+    return false
+  }
+
+  return true
+}
+
+/**
+ * Merge `tokens` into the stored accounts and return the new blob.
+ *
+ * The account key comes from the incoming tokens when they carry identity and
+ * otherwise from the account that is already active: a refresh response often
+ * has no `tokenAccount`, and keying those as a fresh account would strand the
+ * real entry and point the active slot at a phantom one.
+ */
+function applyTokensToAccounts(
+  data: SecureStorageData,
+  tokens: OAuthTokens,
+): SecureStorageData {
+  const reconciled = migrateAndReconcile(data).data
+  const existingOauth = reconciled.claudeAiOauth
+
+  const merged: OAuthTokens = {
+    accessToken: tokens.accessToken,
+    refreshToken: tokens.refreshToken,
+    expiresAt: tokens.expiresAt,
+    scopes: tokens.scopes,
+    // Profile fetch in refreshOAuthToken swallows errors and returns null on
+    // transient failures (network, 5xx, rate limit). Don't clobber a valid
+    // stored subscription with null — fall back to the existing value.
+    subscriptionType:
+      tokens.subscriptionType ?? existingOauth?.subscriptionType ?? null,
+    rateLimitTier: tokens.rateLimitTier ?? existingOauth?.rateLimitTier ?? null,
+  }
+
+  const key =
+    accountKeyForTokens(tokens) ??
+    reconciled.claudeAiOauthActive ??
+    LEGACY_ACCOUNT_KEY
+
+  return addAccount(reconciled, key, merged, { activate: true })
+}
+
+/**
+ * Store OAuth tokens WITHOUT taking the credential lock. The caller must
+ * already hold it.
+ *
+ * `checkAndRefreshOAuthTokenIfNeededImpl` does: it holds the lock on the config
+ * directory across its entire refresh, and that is the very lock
+ * `withCredentialLock` takes. proper-lockfile is not reentrant, so a saver that
+ * locked here would burn its ELOCKED retries and throw on every token refresh.
+ * Anything not already holding the lock wants `saveOAuthTokensIfNeeded`.
+ */
+export function saveOAuthTokensUnlocked(tokens: OAuthTokens): {
+  success: boolean
+  warning?: string
+} {
+  if (!shouldPersistTokens(tokens)) {
     return { success: true }
   }
 
@@ -1237,24 +1304,9 @@ export function saveOAuthTokensIfNeeded(tokens: OAuthTokens): {
     secureStorage.name as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
 
   try {
-    const storageData = secureStorage.read() || {}
-    const existingOauth = storageData.claudeAiOauth
-
-    storageData.claudeAiOauth = {
-      accessToken: tokens.accessToken,
-      refreshToken: tokens.refreshToken,
-      expiresAt: tokens.expiresAt,
-      scopes: tokens.scopes,
-      // Profile fetch in refreshOAuthToken swallows errors and returns null on
-      // transient failures (network, 5xx, rate limit). Don't clobber a valid
-      // stored subscription with null — fall back to the existing value.
-      subscriptionType:
-        tokens.subscriptionType ?? existingOauth?.subscriptionType ?? null,
-      rateLimitTier:
-        tokens.rateLimitTier ?? existingOauth?.rateLimitTier ?? null,
-    }
-
-    const updateStatus = secureStorage.update(storageData)
+    const updateStatus = secureStorage.update(
+      applyTokensToAccounts(secureStorage.read() || {}, tokens),
+    )
 
     if (updateStatus.success) {
       logEvent('tengu_oauth_tokens_saved', { storageBackend })
@@ -1276,6 +1328,42 @@ export function saveOAuthTokensIfNeeded(tokens: OAuthTokens): {
     })
     return { success: false, warning: 'Failed to save OAuth tokens' }
   }
+}
+
+/**
+ * Store OAuth tokens, taking the credential lock around the read-modify-write.
+ *
+ * This is the entry point for anything that does not already hold the lock —
+ * login and the GitHub App flow. The refresh path holds it and must call
+ * `saveOAuthTokensUnlocked` instead.
+ *
+ * The skip checks run OUTSIDE the lock so the cases that write nothing — most
+ * importantly inference-only tokens — neither serialise on it nor fail with a
+ * `CredentialLockError` when it happens to be contended.
+ */
+export async function saveOAuthTokensIfNeeded(
+  tokens: OAuthTokens,
+): Promise<{ success: boolean; warning?: string }> {
+  if (!shouldPersistTokens(tokens)) {
+    return { success: true }
+  }
+
+  return withCredentialLock(async () => saveOAuthTokensUnlocked(tokens))
+}
+
+/**
+ * The active account's tokens from an already-read credentials blob.
+ *
+ * `claudeAiOauth` is kept as a verbatim mirror of the active account, so it IS
+ * that account's tokens — and when it disagrees with
+ * `claudeAiOauthAccounts[active]` it is the fresher side, because a refresh or
+ * an older build writes the mirror alone. Reading through the map instead would
+ * hand back the previous account's tokens in exactly that window; see the
+ * precedence `migrateAndReconcile` applies.
+ */
+function activeTokensFrom(data: SecureStorageData | null): OAuthTokens | null {
+  const tokens = data?.claudeAiOauth
+  return tokens?.accessToken ? tokens : null
 }
 
 export const getClaudeAIOAuthTokens = memoize((): OAuthTokens | null => {
@@ -1311,14 +1399,7 @@ export const getClaudeAIOAuthTokens = memoize((): OAuthTokens | null => {
 
   try {
     const secureStorage = getSecureStorage()
-    const storageData = secureStorage.read()
-    const oauthData = storageData?.claudeAiOauth
-
-    if (!oauthData?.accessToken) {
-      return null
-    }
-
-    return oauthData
+    return activeTokensFrom(secureStorage.read())
   } catch (error) {
     logError(error)
     return null
@@ -1435,12 +1516,7 @@ export async function getClaudeAIOAuthTokensAsync(): Promise<OAuthTokens | null>
 
   try {
     const secureStorage = getSecureStorage()
-    const storageData = await secureStorage.readAsync()
-    const oauthData = storageData?.claudeAiOauth
-    if (!oauthData?.accessToken) {
-      return null
-    }
-    return oauthData
+    return activeTokensFrom(await secureStorage.readAsync())
   } catch (error) {
     logError(error)
     return null
@@ -1562,7 +1638,9 @@ async function checkAndRefreshOAuthTokenIfNeededImpl(
         ? undefined
         : lockedTokens.scopes,
     })
-    saveOAuthTokensIfNeeded(refreshedTokens)
+    // Unlocked on purpose: the config-directory lock taken above is the same
+    // one the locked saver would take, and it is not reentrant.
+    saveOAuthTokensUnlocked(refreshedTokens)
 
     // Clear the cache after refreshing token
     getClaudeAIOAuthTokens.cache?.clear?.()
