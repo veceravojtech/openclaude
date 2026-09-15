@@ -1,4 +1,5 @@
 // biome-ignore-all assist/source/organizeImports: internal-only import markers must not be reordered
+import account from './commands/account/index.js'
 import addDir from './commands/add-dir/index.js'
 import autofixPr from './commands/autofix-pr/index.js'
 import backfillSessions from './commands/backfill-sessions/index.js'
@@ -383,7 +384,7 @@ const COMMANDS = memoize((): Command[] => [
   hooks,
   exportCommand,
   sandboxToggle,
-  ...(!isUsing3PServices() ? [logout, login()].filter(Boolean) : []),
+  ...(!isUsing3PServices() ? [logout, login(), account].filter(Boolean) : []),
   passes,
   ...(peersCmd ? [peersCmd] : []),
   tasks,
