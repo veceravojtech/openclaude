@@ -324,6 +324,16 @@ export interface SystemAPIErrorMessage extends SystemMessageBase {
   retryInMs: number
   retryAttempt: number
   maxRetries: number
+  /**
+   * Epoch ms the request resumes at, when this retry is a usage-limit
+   * auto-wait rather than ordinary backoff.
+   *
+   * Present only on that path. It exists because the two read completely
+   * differently to a user: "retrying in 3 seconds" is noise to skim past,
+   * while a wait measured in hours is only useful stated as a wall-clock time
+   * they can plan around.
+   */
+  resumeAtMs?: number
 }
 
 /** Snapshot of session files (plan, todos) persisted for remote sessions. */

@@ -56,6 +56,11 @@ import {
   isOpenAIRequestNonReplayable,
   isRetryableOpenAICompatibilityFailureCategory,
 } from './openaiErrorClassification.js'
+import {
+  decideUsageLimitWait,
+  hasAlternativeAccount,
+  noteUsageLimitRecovered,
+} from './usageLimitWait.js'
 
 const abortError = () => new APIUserAbortError()
 
@@ -230,6 +235,10 @@ export async function* withRetry<T>(
   let consecutive529Errors = options.initialConsecutive529Errors ?? 0
   let lastError: unknown
   let persistentAttempt = 0
+  // One auto-wait per request. If the retry after the wait is rejected too,
+  // that is reported rather than slept on again — which is what stops this
+  // from becoming a sleep loop. See usageLimitWait.ts.
+  let autoWaitedForUsageLimit = false
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (options.signal?.aborted) {
       throw new APIUserAbortError()
@@ -294,7 +303,16 @@ export async function* withRetry<T>(
         client = await getClient()
       }
 
-      return await operation(client, attempt, retryContext)
+      const result = await operation(client, attempt, retryContext)
+      // A request that succeeds after an auto-wait is the only evidence we
+      // get that the window actually reset. Teammates parked on the
+      // account-wide stop cannot learn it themselves — the ones that hit the
+      // limit mid-turn have exited, and the rest are idle and never run a
+      // turn to clear the marker with.
+      if (autoWaitedForUsageLimit) {
+        noteUsageLimitRecovered()
+      }
+      return result
     } catch (error) {
       lastError = error
       if (
@@ -441,6 +459,64 @@ export async function* withRetry<T>(
             )
           }
         }
+      }
+
+      // Subscription usage limit with a known reset: wait it out and resume
+      // the rejected request, rather than handing the user an error whose
+      // only remedy is to come back later and retype the prompt.
+      //
+      // The gates live in usageLimitWait.ts; the three cheap ones are here so
+      // an ordinary 500 or a dropped socket never reaches the secure-storage
+      // read behind `hasAlternativeAccount`. `attempt <= maxRetries` is load
+      // bearing: the `continue` below must have a real attempt left to land
+      // on, or we would sleep for hours and then throw anyway.
+      if (
+        !persistentRetryEnabled &&
+        error instanceof APIError &&
+        error.status === 429 &&
+        attempt <= maxRetries
+      ) {
+        const waitDecision = decideUsageLimitWait({
+          status: error.status,
+          isFirstParty: getAPIProvider() === 'firstParty',
+          querySource: options.querySource,
+          hasCancelSignal: options.signal !== undefined,
+          resetDelayMs: getRateLimitResetDelayMs(error),
+          resetCapMs: PERSISTENT_RESET_CAP_MS,
+          otherAccountAvailable: hasAlternativeAccount,
+          alreadyWaited: autoWaitedForUsageLimit,
+          now: Date.now(),
+        })
+
+        if (waitDecision.type === 'wait') {
+          autoWaitedForUsageLimit = true
+          logEvent('tengu_api_usage_limit_auto_wait', {
+            delayMs: waitDecision.delayMs,
+            attempt,
+            provider: getAPIProviderForStatsig(),
+          })
+          // Exactly one message for the whole wait. SystemAPIErrorMessage
+          // renders a live countdown client-side from this single yield, so
+          // the user gets a ticking timer without the API layer emitting
+          // anything further — unlike the persistent-retry path above, which
+          // yields every 30 seconds for the duration.
+          yield createSystemAPIErrorMessage(
+            error,
+            waitDecision.delayMs,
+            attempt,
+            maxRetries,
+            waitDecision.resumeAtMs,
+          )
+          // Cancellable by construction: a wait is only ever decided when a
+          // signal exists, so Escape rejects this sleep with APIUserAbortError
+          // and the abort propagates out of the whole retry chain.
+          await sleep(waitDecision.delayMs, options.signal, { abortError })
+          continue
+        }
+
+        logForDebugging(
+          `Usage-limit auto-wait skipped (${waitDecision.reason})`,
+        )
       }
 
       // Only retry if the error indicates we should

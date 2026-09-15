@@ -20,7 +20,7 @@ type Props = {
 }
 
 export function SystemAPIErrorMessage({ message, verbose }: Props) {
-  const { retryAttempt, error, retryInMs, maxRetries } = message
+  const { retryAttempt, error, retryInMs, maxRetries, resumeAtMs } = message
   const compact = retryAttempt < FULL_ERROR_ATTEMPT_THRESHOLD
   const [countdownMs, setCountdownMs] = useState(0)
   const done = countdownMs >= retryInMs
@@ -30,11 +30,22 @@ export function SystemAPIErrorMessage({ message, verbose }: Props) {
     Math.round((retryInMs - countdownMs) / 1000),
   )
 
+  // A usage-limit auto-wait is measured in hours, and "retrying in 10800
+  // seconds" is not something a user can plan around. State the wall-clock
+  // instant instead; the ticking countdown above still shows progress.
+  const resumeLabel =
+    resumeAtMs !== undefined
+      ? `resuming at ${new Date(resumeAtMs).toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+        })}`
+      : `retrying in ${retryInSecondsLive}s`
+
   if (compact) {
     return (
       <MessageResponse>
         <Text dimColor>
-          {briefAPIErrorReason(error)} — retrying in {retryInSecondsLive}s
+          {briefAPIErrorReason(error)} — {resumeLabel}
           {'…'} (attempt {retryAttempt}/{maxRetries})
         </Text>
       </MessageResponse>
@@ -53,9 +64,18 @@ export function SystemAPIErrorMessage({ message, verbose }: Props) {
         </Text>
         {truncated && <CtrlOToExpand />}
         <Text dimColor>
-          Retrying in {retryInSecondsLive}{' '}
-          {retryInSecondsLive === 1 ? 'second' : 'seconds'}
-          {'…'} (attempt {retryAttempt}/{maxRetries})
+          {resumeAtMs !== undefined ? (
+            <>
+              Usage limit reached — {resumeLabel}
+              {'…'} (attempt {retryAttempt}/{maxRetries})
+            </>
+          ) : (
+            <>
+              Retrying in {retryInSecondsLive}{' '}
+              {retryInSecondsLive === 1 ? 'second' : 'seconds'}
+              {'…'} (attempt {retryAttempt}/{maxRetries})
+            </>
+          )}
           {process.env.API_TIMEOUT_MS
             ? ` · API_TIMEOUT_MS=${process.env.API_TIMEOUT_MS}ms, try increasing it`
             : ''}

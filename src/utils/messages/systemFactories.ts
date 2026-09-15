@@ -260,6 +260,8 @@ export function createSystemAPIErrorMessage(
   retryInMs: number,
   retryAttempt: number,
   maxRetries: number,
+  /** Set only by the usage-limit auto-wait; see SystemAPIErrorMessage. */
+  resumeAtMs?: number,
 ): SystemAPIErrorMessage {
   return {
     type: 'system',
@@ -270,6 +272,7 @@ export function createSystemAPIErrorMessage(
     retryInMs,
     retryAttempt,
     maxRetries,
+    ...(resumeAtMs !== undefined && { resumeAtMs }),
     timestamp: new Date().toISOString(),
     uuid: randomUUID(),
   }
