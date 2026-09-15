@@ -85,7 +85,30 @@ export async function installOAuthTokens(tokens: OAuthTokens): Promise<void> {
     })
   }
 
-  const storageResult = await saveOAuthTokensIfNeeded(tokens)
+  // The profile above was fetched with THESE tokens, so it is this account's
+  // own identity, and it has to reach the writer — not just
+  // `storeOAuthAccountInfo`. A refresh-token login (via
+  // `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`) hands us a blob with no identity on it
+  // at all, and an anonymous blob makes `accountKeyForTokens` return
+  // undefined: the write then keys off `claudeAiOauthActive` and overwrites
+  // whoever was already logged in, destroying that account's refresh token.
+  // `tokenAccount` matters as much as `profile` here, because the writer keeps
+  // the STORED identity when the incoming blob has none — which would file the
+  // new session under its own key while labelling it with the previous
+  // account's email.
+  const identifiedTokens: OAuthTokens = profile
+    ? {
+        ...tokens,
+        profile,
+        tokenAccount: tokens.tokenAccount ?? {
+          uuid: profile.account.uuid,
+          emailAddress: profile.account.email,
+          organizationUuid: profile.organization.uuid,
+        },
+      }
+    : tokens
+
+  const storageResult = await saveOAuthTokensIfNeeded(identifiedTokens)
   clearOAuthTokenCache()
 
   if (storageResult.warning) {
