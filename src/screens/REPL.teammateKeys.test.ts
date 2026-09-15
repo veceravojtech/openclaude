@@ -34,10 +34,27 @@ describe('REPL teammate-navigation key wiring', () => {
 
   test('and it is the flag the rest of the screen already defers on', () => {
     // Same value the deferred-dialog gate reads, computed once from the shared
-    // helper — not a second opinion on whether the user is typing.
+    // helper — not a second opinion on whether the user is typing. The search
+    // state is handed over as the identifier for the same reason the hook
+    // option is: `, true` or `, false` here is a gate stuck open or shut.
     expect(source).toContain(
-      'const promptTypingSuppressionActive = isPromptTypingSuppressionActive(isPromptInputActive, inputValue);',
+      'const promptTypingSuppressionActive = isPromptTypingSuppressionActive(isPromptInputActive, inputValue, isSearchingHistory);',
     )
     expect(source).toContain('if (promptTypingSuppressionActive) return undefined;')
+  })
+
+  test('declares isSearchingHistory above the line that reads it', () => {
+    // A const in the component body read from above its own declaration sits
+    // in the temporal dead zone, so REPL throws on mount — and `tsc` does not
+    // catch it. Scanned rather than commented, so re-separating them goes red.
+    const declaration = source.indexOf(
+      'const [isSearchingHistory, setIsSearchingHistory] = useState(false);',
+    )
+    const use = source.indexOf(
+      'isPromptTypingSuppressionActive(isPromptInputActive, inputValue, isSearchingHistory)',
+    )
+    expect(declaration).toBeGreaterThan(-1)
+    expect(use).toBeGreaterThan(-1)
+    expect(declaration).toBeLessThan(use)
   })
 })

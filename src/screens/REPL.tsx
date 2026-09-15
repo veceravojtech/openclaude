@@ -1494,7 +1494,14 @@ export function REPL({
   const [inputValue, setInputValueRaw] = useState(() => consumeEarlyInput());
   const inputValueRef = useRef(inputValue);
   inputValueRef.current = inputValue;
-  const promptTypingSuppressionActive = isPromptTypingSuppressionActive(isPromptInputActive, inputValue);
+  // Declared here, immediately above promptTypingSuppressionActive, which
+  // reads it: as a const in the component body it would otherwise be in the
+  // temporal dead zone and throw on mount. Keep the two together.
+  const [isSearchingHistory, setIsSearchingHistory] = useState(false);
+  // Ctrl+R search types into HistorySearchInput's own buffer with the prompt
+  // TextInput unfocused, so inputValue/isPromptInputActive alone read it as an
+  // idle prompt and the teammate keys ('f'/'k') would reach the tree mid-query.
+  const promptTypingSuppressionActive = isPromptTypingSuppressionActive(isPromptInputActive, inputValue, isSearchingHistory);
   const insertTextRef = useRef<{
     insert: (text: string) => void;
     setInputWithCursor: (value: string, cursor: number) => void;
@@ -1714,7 +1721,6 @@ export function REPL({
   const [haveShownCostDialog, setHaveShownCostDialog] = useState(getGlobalConfig().hasAcknowledgedCostThreshold);
   const [vimMode, setVimMode] = useState<VimMode>('INSERT');
   const [showBashesDialog, setShowBashesDialog] = useState<string | boolean>(false);
-  const [isSearchingHistory, setIsSearchingHistory] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
 
   // showBashesDialog is REPL-level so it survives PromptInput unmounting.

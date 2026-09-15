@@ -5,9 +5,11 @@
  * Grown from the H7 reproduction harness (task-60) and kept in the tree because
  * every case below was a live trap a user could not get out of with the keyboard:
  *
- * - S1/S1b pin the still-open Ctrl+R gap: history search leaves REPL's prompt
- *   buffer empty, so `isPromptTypingSuppressionActive` reads the search as an
- *   idle prompt and 'k'/'f' reach the teammate tree instead of the query.
+ * - S1/S1b/S1c pin that Ctrl+R history search counts as typing: it leaves
+ *   REPL's prompt buffer empty, so the only reason
+ *   `isPromptTypingSuppressionActive` reads it as typing is REPL passing
+ *   `isSearchingHistory` in as its third argument. S1d/S1e are the negative
+ *   control: with no search and an idle prompt, 'f'/'k' still work.
  * - S2 pins that Escape leaves selecting-agent without collapsing the tree.
  * - S3/S3b/S3c pin the Escape contract in viewing-agent mode: the first press
  *   aborts the current turn and stays, the second returns to the leader, and a
@@ -237,27 +239,82 @@ function viewingState(task: InProcessTeammateTaskState): AppState {
 
 // ---------------------------------------------------------------------------
 // S1 — Ctrl+R history search leaves the PROMPT buffer untouched, so the flag
-// that is supposed to keep 'f'/'k' out of text is false while the user types.
+// that keeps 'f'/'k' out of text has to be told about the search explicitly.
 // ---------------------------------------------------------------------------
-test('S1: the Ctrl+R search state reads as an idle prompt, so k kills the selected teammate', async () => {
+test('S1: k typed into the Ctrl+R search leaves the selected teammate alive', async () => {
   // PromptInput.tsx:2373 unfocuses the prompt TextInput while isSearchingHistory,
   // and HistorySearchInput routes every keystroke to setHistoryQuery (local to
   // useHistorySearch). So REPL's inputValue stays '' and isPromptInputActive
-  // stays false for the whole search.
-  const suppression = isPromptTypingSuppressionActive(false, '')
-  expect(suppression).toBe(false)
+  // stays false for the whole search: the search flag is the only thing that
+  // tells the helper this keystroke is text.
+  const suppression = isPromptTypingSuppressionActive(false, '', true)
+  expect(suppression).toBe(true)
 
   const { task, lifecycleAbortController } = createTeammateTask()
   const mounted = await renderNavigation(selectingState(task), suppression)
   try {
     await mounted.press(key('k')) // user meant: type "k" into "search prompts:"
+    expect(lifecycleAbortController.signal.aborted).toBe(false)
+    // …and the selection survives, for the Escape or Enter that ends it.
+    expect(mounted.state().viewSelectionMode).toBe('selecting-agent')
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+test('S1b: f typed into the Ctrl+R search does not open the transcript', async () => {
+  const { task } = createTeammateTask()
+  const mounted = await renderNavigation(
+    selectingState(task),
+    isPromptTypingSuppressionActive(false, '', true),
+  )
+  try {
+    await mounted.press(key('f'))
+    expect(mounted.state().viewingAgentTaskId).toBeUndefined()
+    expect(mounted.state().viewSelectionMode).toBe('selecting-agent')
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+test('S1c: a whole search query types through without killing the teammate', async () => {
+  // The destructive case, on its own. 'k' aborts the selected teammate
+  // outright — one keystroke loses the work — and a realistic query contains
+  // both letters, so type the word and assert the teammate outlives it.
+  const { task, lifecycleAbortController } = createTeammateTask()
+  const mounted = await renderNavigation(
+    selectingState(task),
+    isPromptTypingSuppressionActive(false, '', true),
+  )
+  try {
+    for (const letter of ['f', 'i', 'k']) {
+      await mounted.press(key(letter))
+    }
+    expect(lifecycleAbortController.signal.aborted).toBe(false)
+    expect(mounted.state().viewingAgentTaskId).toBeUndefined()
+    expect(mounted.state().viewSelectionMode).toBe('selecting-agent')
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+test('S1d: k with no search and an idle prompt still kills the teammate', async () => {
+  // Negative control, through the same helper: widening it must not disable
+  // the shortcuts everywhere. The default third argument keeps them live.
+  const { task, lifecycleAbortController } = createTeammateTask()
+  const mounted = await renderNavigation(
+    selectingState(task),
+    isPromptTypingSuppressionActive(false, ''),
+  )
+  try {
+    await mounted.press(key('k'))
     expect(lifecycleAbortController.signal.aborted).toBe(true)
   } finally {
     await mounted.cleanup()
   }
 })
 
-test('S1b: f in the Ctrl+R search state throws the screen into the transcript', async () => {
+test('S1e: f with no search and an idle prompt still opens the transcript', async () => {
   const { task } = createTeammateTask()
   const mounted = await renderNavigation(
     selectingState(task),
