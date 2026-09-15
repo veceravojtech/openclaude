@@ -226,4 +226,61 @@ describe('a refresh-token login for a second account', () => {
     // The mirror is the active account verbatim, identity included.
     expect(onDisk.claudeAiOauth?.tokenAccount?.uuid).toBe('uuid-b')
   })
+
+  /**
+   * PINS THE RESIDUAL THIS SUITE DOES NOT CLOSE — deliberately GREEN.
+   *
+   * The three tests above all take the branch where the profile endpoint
+   * ANSWERS. `installOAuthTokens` fetches identity at auth.ts:63-65, and
+   * `getOauthProfileFromOauthToken` swallows every error and returns
+   * `undefined` (getOauthProfile.ts:50-52) — so a network blip, a 5xx, a rate
+   * limit, or a `CLAUDE_CODE_OAUTH_SCOPES` value without `user:profile` all
+   * arrive here as "no profile". The ternary at auth.ts:99-111 then falls
+   * through to the raw blob, and the ORIGINAL D3 clobber happens unchanged.
+   *
+   * The handler cannot fix this from what it holds. At that point it has an
+   * access token, a refresh token, and nothing else: no `account` block from
+   * the grant, no `tokenAccount`, and the one call that could name the account
+   * has just failed. Guessing an owner would be worse than the clobber, and
+   * refusing the login is a user-visible behaviour change nobody authorised.
+   *
+   * Closing it is the follow-up wave 1 recommended, IN THIS ORDER: the refresh
+   * path attaches the stored identity before saving (`src/utils/auth.ts:1656`),
+   * and only THEN a writer guard refusing identity-less blobs — the guard LAST,
+   * because landing it first breaks the legitimate identity-less rotation
+   * pinned at `src/utils/auth.accountIdentity.test.ts:177`.
+   *
+   * GREEN means the gap is still open. Red means someone closed it: read the
+   * follow-up above, confirm that is what happened, then delete this pin.
+   */
+  test('PINS RESIDUAL: a login whose profile fetch fails is still identity-less and still clobbers', async () => {
+    // The profile endpoint fails. Production swallows the error and returns
+    // undefined (getOauthProfile.ts:50-52), so undefined is the faithful shape.
+    mock.module('../../services/oauth/getOauthProfile.js', () => ({
+      getOauthProfileFromOauthToken: async () => undefined,
+    }))
+
+    // ...and the grant returned no account block, so the blob names nobody.
+    await loginFromRefreshToken('b')
+
+    const onDisk = readFromDisk()
+
+    // STILL OPEN: B's tokens landed on A's entry, and A's refresh token — the
+    // one thing that cannot be recovered without a fresh login — is gone.
+    expect(onDisk.claudeAiOauthAccounts?.['uuid-a']?.refreshToken).toBe(
+      'fake-refresh-b',
+    )
+    expect(onDisk.claudeAiOauthAccounts?.['uuid-a']?.accessToken).toBe(
+      'fake-access-b',
+    )
+
+    // No entry of B's own was created, so the loss is in place under A's key.
+    expect(Object.keys(onDisk.claudeAiOauthAccounts ?? {})).toEqual(['uuid-a'])
+
+    // And the quieter half survives with it: that entry still announces A
+    // while holding B's session, so `/account a@example.com` switches onto B.
+    expect(
+      onDisk.claudeAiOauthAccounts?.['uuid-a']?.tokenAccount?.emailAddress,
+    ).toBe('a@example.com')
+  })
 })

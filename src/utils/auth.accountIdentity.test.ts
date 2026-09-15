@@ -216,19 +216,37 @@ describe('the writer persists account identity', () => {
   })
 
   /**
-   * D3 — DEFERRED, PINNED HERE.
+   * D3 AT THE WRITER TIER — DEFERRED, PINNED HERE, deliberately GREEN.
    *
    * An identity-less blob (reachable via `CLAUDE_CODE_OAUTH_REFRESH_TOKEN` when
    * the refresh response omits `account`) still keys off `claudeAiOauthActive`
    * and still overwrites that account's tokens, destroying its refresh token.
-   * Preserving identity on write does NOT close that: the blob carries no
-   * identity, so there is no information available to route it anywhere else.
-   * Closing it needs a separate decision (resolve the identity before merging,
-   * or refuse to merge an unidentified blob onto a stored account) and is on
-   * the roadmap, not in this change.
+   * That is TRUE, CURRENT behaviour of `applyTokensToAccounts`, which is the
+   * only thing this test enters — it calls `saveOAuthTokensUnlocked` directly.
    *
-   * This test pins the CURRENT behaviour so the defect has a regression home:
-   * when D3 is fixed this goes red and points straight at the roadmap item.
+   * It did NOT move when D3's login route was closed, and could not: `8cd672c7`
+   * fixed `installOAuthTokens` one tier ABOVE this test
+   * (`src/cli/handlers/auth.ts:99-111` attaches the fetched profile and a
+   * `tokenAccount` derived from it), and this entry point never calls it. The
+   * residual that close leaves — a login whose profile fetch fails, so the blob
+   * is anonymous again — is pinned in
+   * `src/cli/handlers/auth.d3RefreshClobber.test.ts`.
+   *
+   * The other half of the old note, "refuse to merge an unidentified blob onto
+   * a stored account", is REFUTED by execution rather than merely deferred:
+   * prototyped verbatim it breaks the legitimate identity-less rotation
+   * asserted at :177 in this file, whose last assertion requires the rotated
+   * access token to LAND. A routine refresh and a foreign blob reach this
+   * writer byte-shape-identical, so no predicate over its input separates them.
+   *
+   * The sequenced path that lets a writer guard land safely: FIRST make the
+   * refresh path attach the stored identity (`src/utils/auth.ts:1656`), so no
+   * production caller is anonymous any more; THEN the guard is simply
+   * "identity-less blob + existing account -> refuse", needing no `refreshToken`
+   * comparison at all. Guard LAST, never first.
+   *
+   * A red day here therefore does not mean the handler changed — it means
+   * `applyTokensToAccounts` itself changed. Confirm that was deliberate.
    */
   test('PINS DEFERRED D3: an identity-less blob still overwrites the active account tokens', async () => {
     await save(tokensFor('work'))
