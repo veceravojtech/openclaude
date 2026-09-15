@@ -1271,6 +1271,19 @@ function applyTokensToAccounts(
     subscriptionType:
       tokens.subscriptionType ?? existingOauth?.subscriptionType ?? null,
     rateLimitTier: tokens.rateLimitTier ?? existingOauth?.rateLimitTier ?? null,
+    // `tokenAccount` and `profile` are the only carriers of account identity,
+    // and this is the only writer of the accounts map and its mirror — rebuild
+    // the blob without them and identity never reaches disk at all, which
+    // leaves `/account` listing raw UUIDs and the mirror-repair in
+    // `migrateAndReconcile` keying off the active key its comment forbids.
+    //
+    // Same fallback direction as the two fields above: a refresh response
+    // frequently omits `account`, so prefer the incoming identity but keep the
+    // stored one rather than clobbering it with undefined. That also keeps the
+    // blob coherent with the key chosen for it below, which falls back to
+    // `claudeAiOauthActive` — the very account `existingOauth` mirrors.
+    tokenAccount: tokens.tokenAccount ?? existingOauth?.tokenAccount,
+    profile: tokens.profile ?? existingOauth?.profile,
   }
 
   const key =
