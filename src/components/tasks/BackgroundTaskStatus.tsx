@@ -24,7 +24,7 @@ type Props = {
   onOpenDialog?: (taskId?: string) => void;
 };
 export function BackgroundTaskStatus(t0) {
-  const $ = _c(48);
+  const $ = _c(49);
   const {
     tasksSelected,
     isViewingTeammate,
@@ -40,17 +40,22 @@ export function BackgroundTaskStatus(t0) {
   } = useTerminalSize();
   const tasks = useAppState(_temp);
   const viewingAgentTaskId = useAppState(_temp2);
+  const expandedView = useAppState(_temp4);
+  const showSpinnerTree = expandedView === "teammates";
   let t3;
-  if ($[0] !== tasks) {
-    t3 = (Object.values(tasks ?? {}) as TaskState[]).filter(_temp3);
+  // Depends on showSpinnerTree as well as tasks: with the tree expanded the
+  // CoordinatorTaskPanel is unmounted, so a local agent takes its pill back
+  // (isPillTask). Reading it before this memo is what lets that happen — the
+  // useAppState order above is unchanged.
+  if ($[0] !== tasks || $[48] !== showSpinnerTree) {
+    t3 = (Object.values(tasks ?? {}) as TaskState[]).filter(t_pill => isPillTask(t_pill, showSpinnerTree));
     $[0] = tasks;
+    $[48] = showSpinnerTree;
     $[1] = t3;
   } else {
     t3 = $[1];
   }
   const runningTasks = t3;
-  const expandedView = useAppState(_temp4);
-  const showSpinnerTree = expandedView === "teammates";
   let t4;
   // The SAME widened source the navigation hook and the PromptInput footer read
   // (getRunningTeammatesSorted: running plus rows still in their 30s grace
@@ -306,9 +311,6 @@ function _temp5(t_0) {
 }
 function _temp4(s_1) {
   return s_1.expandedView;
-}
-function _temp3(t) {
-  return isPillTask(t);
 }
 function _temp2(s_0) {
   return s_0.viewingAgentTaskId;

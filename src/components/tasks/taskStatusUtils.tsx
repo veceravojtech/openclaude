@@ -99,10 +99,32 @@ export function countVisibleBackgroundTasks(tasks: {
  *
  * The pill and the CoordinatorTaskPanel must never double-list the same agent,
  * so a panel row (isPanelAgentTask + isPanelVisibleAgent) gives up its pill —
- * but only while the panel actually exists. CLAUDE_CODE_DISABLE_AGENT_VIEW
- * leaves the panel unmounted, and an agent excluded from both surfaces would be
- * invisible in the footer entirely, so the exclusion is gated on the opt-out
- * being unset.
+ * but only while the panel actually exists. An agent excluded from BOTH
+ * surfaces is invisible, so `panelActive` must name every way the panel can be
+ * gone FOR A TASK THIS PREDICATE WOULD EXCLUDE. PromptInput.tsx:2453 mounts it
+ * on `coordinatorTaskCount > 0 && !showSpinnerTree`, and an excludable task is
+ * by construction one of the rows that count counts (useCoordinatorTaskCount
+ * and getVisibleAgentTasks score the identical `isPanelAgentTask &&
+ * isPanelVisibleAgent` conjunction, CoordinatorAgentStatus.tsx:38-40, :101-107)
+ * — so the empty-count branch cannot be why the panel is missing, and exactly
+ * two conditions are left:
+ *
+ * 1. `CLAUDE_CODE_DISABLE_AGENT_VIEW` — the opt-out forces that count to 0
+ *    (CoordinatorAgentStatus.tsx:105-106), so the panel never mounts.
+ * 2. `showSpinnerTree` (expandedView === 'teammates') — the teammate tree
+ *    replaces the panel while it is expanded. Teammates keep their own rows in
+ *    that tree (TeammateSpinnerTree.tsx:45 builds them from
+ *    getRunningTeammatesSorted), but a `local_agent` has none, so it must take
+ *    its pill back. Missing this one is what made teamless subagents vanish
+ *    from both surfaces once the tree had been expanded: nothing in a
+ *    subagent's lifecycle clears the flag, so one Shift+Up
+ *    (useBackgroundTaskNavigation.ts:43-51) hid every later subagent until the
+ *    user collapsed the tree again — the Hide row (:271-278) or ctrl+t cycling
+ *    past it (useGlobalKeybindings.tsx:55-64) are the only two keys that do,
+ *    and a todo-tool write is the only non-key path (it sets 'tasks').
+ *
+ * Passed in rather than read here because it is React state owned by
+ * PromptInput; both call sites already hold it.
  *
  * The env read is intentionally at call time, not cached: isAgentViewDisabled
  * documents that contract (src/utils/envUtils.ts), and tests set and unset the
@@ -114,18 +136,18 @@ export function countVisibleBackgroundTasks(tasks: {
  * that bundle rather than guessed. Three differences, all kept on purpose:
  * - upstream folds `in_process_teammate` into its panel-agent set; here
  *   isPanelAgentTask (LocalAgentTask.tsx) matches only `local_agent`, so a
- *   running teammate keeps its pill (BackgroundTaskStatus.test.tsx:76);
+ *   running teammate keeps its pill (BackgroundTaskStatus.test.tsx:79);
  * - upstream has no visible-row narrowing; isPanelVisibleAgent is what hands
  *   the pill back to an agent dismissed from the panel with `x`,
- *   evictAfter === 0 (BackgroundTaskStatus.test.tsx:92);
+ *   evictAfter === 0 (BackgroundTaskStatus.test.tsx:95);
  * - upstream's extra `local_workflow`/ambient-monitor exclusions are not
- *   ported; those pills are wanted here (BackgroundTaskStatus.test.tsx:80).
+ *   ported; those pills are wanted here (BackgroundTaskStatus.test.tsx:83).
  * Upstream's panel gate is a remote feature flag defaulting to true, not an env
  * read; `panelActive` below is the fork-local port of that gate.
  */
-export function isPillTask(t: TaskState): boolean {
+export function isPillTask(t: TaskState, showSpinnerTree = false): boolean {
   if (!isBackgroundTask(t)) return false;
-  const panelActive = !isAgentViewDisabled();
+  const panelActive = !isAgentViewDisabled() && !showSpinnerTree;
   return !(panelActive && isPanelAgentTask(t) && isPanelVisibleAgent(t));
 }
 

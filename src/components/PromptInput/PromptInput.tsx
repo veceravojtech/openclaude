@@ -489,10 +489,12 @@ function PromptInput({
   const coordinatorTaskCount = useCoordinatorTaskCount();
   // The -1 sentinel is the pill's own slot, so it exists iff a pill actually
   // renders: isPillTask is the same predicate BackgroundTaskStatus filters
-  // with, and a local agent keeps its pill whenever the panel is unmounted
-  // (CLAUDE_CODE_DISABLE_AGENT_VIEW). Nothing matches => nothing would be
-  // visually selected at -1, so skip it and treat 0 as the minimum index.
-  const hasBgTaskPill = useMemo(() => Object.values(tasks).some(t => isPillTask(t)), [tasks]);
+  // with, and a local agent keeps its pill whenever the panel is unmounted —
+  // either by CLAUDE_CODE_DISABLE_AGENT_VIEW or by the teammate tree taking
+  // the panel's place (`showSpinnerTree`, the same flag gating the panel
+  // below). Nothing matches => nothing would be visually selected at -1, so
+  // skip it and treat 0 as the minimum index.
+  const hasBgTaskPill = useMemo(() => Object.values(tasks).some(t => isPillTask(t, showSpinnerTree)), [tasks, showSpinnerTree]);
   const minCoordinatorIndex = hasBgTaskPill ? -1 : 0;
   // Last selectable row. The panel lays out as -1 pill / 0 main / 1..N agent
   // rows, so the final agent is index N — exactly what the [index - 1] lookups
