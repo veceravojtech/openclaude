@@ -166,7 +166,10 @@ export function useBackgroundTaskNavigation(options?: {
   const handleKeyDown = (e: KeyboardEvent): void => {
     // Escape in viewing mode:
     // - If the teammate is busy on a turn: abort current work only (stops the
-    //   turn, teammate stays alive). Press Escape again to return.
+    //   turn, teammate stays alive). Press Escape again to return: the second
+    //   press sees the turn controller already aborted and falls through to the
+    //   exit below, so the view always leaves in two presses — one when the
+    //   turn was already interrupted and the runner has not cleared it yet.
     // - Otherwise (idle, between turns, completed/killed/failed, or not a
     //   teammate): exit the view back to the leader.
     // A live in-process teammate keeps status 'running' for its whole life
@@ -181,7 +184,8 @@ export function useBackgroundTaskNavigation(options?: {
           isInProcessTeammateTask(task) &&
           task.status === 'running' &&
           !task.isIdle &&
-          task.currentWorkAbortController
+          task.currentWorkAbortController &&
+          !task.currentWorkAbortController.signal.aborted
         ) {
           // Abort currentWorkAbortController (stops current turn) NOT abortController (kills teammate)
           const causalEventId = traceInterruptionEvent(
