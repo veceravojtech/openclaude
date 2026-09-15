@@ -5578,6 +5578,8 @@ type LiteMetadata = {
   isSidechain: boolean
   projectPath?: string
   teamName?: string
+  /** Set only when this session is a teammate's own; see extractTeammateName. */
+  teammateName?: string
   customTitle?: string
   summary?: string
   tag?: string
@@ -5802,9 +5804,35 @@ async function getLogsWithoutIndex(
 }
 
 /**
+ * Reads the teammate's own name out of a transcript head, or undefined if the
+ * session is not a teammate's.
+ *
+ * A teammate stamps BOTH `teamName` and `agentName` onto every message entry,
+ * because only a teammate's teamContext carries `selfAgentName` (set in
+ * swarm/reconnection.ts; TeamCreateTool leaves it unset for the lead). A lead
+ * session that merely *created* a team stamps `teamName` alone — so it is the
+ * pair, not `teamName` by itself, that identifies a teammate. This mirrors the
+ * runtime rule in teammate.ts:isTeammate(), which likewise requires both.
+ *
+ * The scan is scoped to entries that actually carry `teamName`: an unscoped
+ * head scan would also hit the `{"type":"agent-name"}` entry that saveAgentName
+ * writes for the user-facing session name, so a renamed lead session would be
+ * misread as a teammate. Same class of collision as the tag extraction below.
+ */
+function extractTeammateName(head: string): string | undefined {
+  for (const line of head.split('\n')) {
+    if (!line.includes('"teamName"')) continue
+    const agentName = extractJsonStringField(line, 'agentName')
+    if (agentName) return agentName
+  }
+  return undefined
+}
+
+/**
  * Reads the first and last ~64KB of a JSONL file and extracts lite metadata.
  *
- * Head (first 64KB): isSidechain, projectPath, teamName, firstPrompt.
+ * Head (first 64KB): isSidechain, projectPath, teamName, teammateName,
+ * firstPrompt.
  * Tail (last 64KB): customTitle, tag, PR link, latest gitBranch.
  *
  * Accepts a shared buffer to avoid per-file allocation overhead.
@@ -5825,6 +5853,7 @@ export async function readLiteMetadata(
     head.includes('"isSidechain":true') || head.includes('"isSidechain": true')
   const projectPath = extractJsonStringField(head, 'cwd')
   const teamName = extractJsonStringField(head, 'teamName')
+  const teammateName = teamName ? extractTeammateName(head) : undefined
   const agentSetting = extractJsonStringField(head, 'agentSetting')
 
   // Prefer the last-prompt tail entry — captured by extractFirstPrompt at
@@ -5886,6 +5915,7 @@ export async function readLiteMetadata(
     isSidechain,
     projectPath,
     teamName,
+    teammateName,
     customTitle,
     summary,
     tag,
@@ -6125,6 +6155,7 @@ async function enrichLog(
     gitBranch: meta.gitBranch,
     isSidechain: meta.isSidechain,
     teamName: meta.teamName,
+    isTeammate: meta.teammateName !== undefined,
     customTitle: meta.customTitle,
     summary: meta.summary,
     tag: meta.tag,
@@ -6143,16 +6174,21 @@ async function enrichLog(
   if (!enriched.firstPrompt && !enriched.customTitle) {
     enriched.firstPrompt = '(session)'
   }
-  // Filter: skip sidechains and agent sessions
+  // Filter: skip sidechains and teammates' own sessions. A teammate's
+  // transcript is an implementation detail of someone else's session and only
+  // adds noise to the picker. A LEAD session is NOT filtered: having created a
+  // team is not the same as being a teammate, and the lead's transcript is the
+  // user's own main session — dropping it stranded hours of work behind "No
+  // conversations found to resume".
   if (enriched.isSidechain) {
     logForDebugging(
       `Session ${log.sessionId} filtered from /resume: isSidechain=true`,
     )
     return null
   }
-  if (enriched.teamName) {
+  if (enriched.isTeammate) {
     logForDebugging(
-      `Session ${log.sessionId} filtered from /resume: teamName=${enriched.teamName}`,
+      `Session ${log.sessionId} filtered from /resume: teammate session in team=${enriched.teamName}`,
     )
     return null
   }
