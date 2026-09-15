@@ -285,7 +285,14 @@ export type GlobalConfig = {
   hasSeenUndercoverAutoNotice?: boolean // internal-only: whether the one-time auto-undercover explainer has been shown
   hasSeenUltraplanTerms?: boolean // internal-only: whether the one-time CCR terms notice has been shown in the ultraplan launch dialog
   hasResetAutoModeOptInForDefaultOffer?: boolean // internal-only: one-shot migration guard, re-prompts churned auto-mode users
-  oauthAccount?: AccountInfo
+  oauthAccount?: AccountInfo // Identity of the ACTIVE Claude account; a mirror of oauthAccounts[active]
+  /**
+   * Identity of every stored Claude account, keyed by account uuid — the same
+   * keys `claudeAiOauthAccounts` uses in secure storage. Tokens stay in secure
+   * storage and only the non-secret identity lives here, so listing accounts
+   * never has to unlock the keychain.
+   */
+  oauthAccounts?: Record<string, AccountInfo>
   iterm2KeyBindingInstalled?: boolean // Legacy - keeping for backward compatibility
   editorMode?: EditorMode
   bypassPermissionsModeAccepted?: boolean

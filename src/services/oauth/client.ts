@@ -570,7 +570,7 @@ export function storeOAuthAccountInfo({
   }
   saveGlobalConfig(current => {
     // For oauthAccount we need to compare content since it's an object
-    if (
+    const sameActive =
       current.oauthAccount?.accountUuid === accountInfo.accountUuid &&
       current.oauthAccount?.emailAddress === accountInfo.emailAddress &&
       current.oauthAccount?.organizationUuid === accountInfo.organizationUuid &&
@@ -581,9 +581,23 @@ export function storeOAuthAccountInfo({
       current.oauthAccount?.accountCreatedAt === accountInfo.accountCreatedAt &&
       current.oauthAccount?.subscriptionCreatedAt ===
         accountInfo.subscriptionCreatedAt
-    ) {
+    // The per-account entry can be missing even when the active mirror is
+    // already correct — that is exactly the state an upgrade from a
+    // single-slot config starts in — so it is checked independently.
+    const sameEntry =
+      current.oauthAccounts?.[accountUuid] !== undefined &&
+      JSON.stringify(current.oauthAccounts[accountUuid]) ===
+        JSON.stringify(accountInfo)
+    if (sameActive && sameEntry) {
       return current
     }
-    return { ...current, oauthAccount: accountInfo }
+    return {
+      ...current,
+      oauthAccount: accountInfo,
+      oauthAccounts: {
+        ...current.oauthAccounts,
+        [accountUuid]: accountInfo,
+      },
+    }
   })
 }
