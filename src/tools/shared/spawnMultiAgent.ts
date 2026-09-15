@@ -80,7 +80,7 @@ function getDefaultTeammateModel(leaderModel: string | null): string {
   if (configured !== undefined) {
     return parseUserSpecifiedModel(configured)
   }
-  return getHardcodedTeammateModelFallback()
+  return getHardcodedTeammateModelFallback(leaderModel)
 }
 
 /**

@@ -1075,7 +1075,7 @@ export function Config({
     }, {
       id: 'teammateDefaultModel',
       label: 'Default teammate model',
-      value: teammateModelDisplayString(globalConfig.teammateDefaultModel),
+      value: teammateModelDisplayString(globalConfig.teammateDefaultModel, mainLoopModel),
       type: 'managedEnum' as const,
       onChange() {}
     }];
@@ -1958,9 +1958,9 @@ export function Config({
         </Box>}
     </Box>;
 }
-function teammateModelDisplayString(value: string | null | undefined): string {
+function teammateModelDisplayString(value: string | null | undefined, leaderModel?: string | null): string {
   if (value === undefined) {
-    return modelDisplayString(getHardcodedTeammateModelFallback());
+    return modelDisplayString(getHardcodedTeammateModelFallback(leaderModel));
   }
   if (value === null) return "Default (leader's model)";
   return modelDisplayString(value);
