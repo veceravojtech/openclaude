@@ -110,6 +110,69 @@ test('a header-less response does not erase previously captured values', () => {
   expect(snapshot?.capturedAt).toBe('2026-09-15T10:00:00.000Z')
 })
 
+test('a partial capture keeps the fields the response omitted', () => {
+  captureRateLimitHeaders({
+    providerKey: 'zai',
+    headers: new Headers({
+      'x-ratelimit-remaining-requests': '118',
+      'x-ratelimit-remaining-tokens': '89999',
+      'x-ratelimit-limit-requests': '120',
+      'x-ratelimit-limit-tokens': '100000',
+      'x-ratelimit-reset-requests': '6m0s',
+      'x-ratelimit-reset-tokens': '1h0m0s',
+    }),
+    now: () => FIXED_NOW,
+  })
+
+  // A later response carries only the request-side headers.
+  captureRateLimitHeaders({
+    providerKey: 'zai',
+    headers: new Headers({
+      'x-ratelimit-remaining-requests': '0',
+      'x-ratelimit-reset-requests': '2m30s',
+    }),
+    now: () => FIXED_NOW + 60_000,
+  })
+
+  const snapshot = getProviderRateLimitSnapshot('zai')
+  // A freshly captured 0 is a real value, not an absent field.
+  expect(snapshot?.remainingRequests).toBe(0)
+  expect(snapshot?.resetRequests).toBe('2m30s')
+  // Fields the second response never mentioned keep their captured values.
+  expect(snapshot?.remainingTokens).toBe(89999)
+  expect(snapshot?.limitRequests).toBe(120)
+  expect(snapshot?.limitTokens).toBe(100000)
+  expect(snapshot?.resetTokens).toBe('1h0m0s')
+  expect(snapshot?.capturedAt).toBe('2026-09-15T10:01:00.000Z')
+})
+
+test('a real 0 wins over a stale value and a stored 0 survives an omission', () => {
+  captureRateLimitHeaders({
+    providerKey: 'zero-merge',
+    headers: new Headers({
+      'x-ratelimit-remaining-requests': '118',
+      'x-ratelimit-remaining-tokens': '0',
+    }),
+    now: () => FIXED_NOW,
+  })
+
+  // The next response exhausts the request budget and omits the token headers.
+  captureRateLimitHeaders({
+    providerKey: 'zero-merge',
+    headers: new Headers({ 'x-ratelimit-remaining-requests': '0' }),
+    now: () => FIXED_NOW + 60_000,
+  })
+
+  const snapshot = getProviderRateLimitSnapshot('zero-merge')
+  // A freshly captured 0 is falsy but real: it must overwrite the stale 118.
+  expect(snapshot?.remainingRequests).toBe(0)
+  // A previously captured 0 is a value, not an absent field: carrying the
+  // earlier capture forward must not drop it for being falsy.
+  expect(snapshot?.remainingTokens).toBe(0)
+  // capturedAt always stamps the new response, never the carried-over one.
+  expect(snapshot?.capturedAt).toBe('2026-09-15T10:01:00.000Z')
+})
+
 test('non-integer sentinels are kept as raw strings', () => {
   captureRateLimitHeaders({
     providerKey: 'openrouter',

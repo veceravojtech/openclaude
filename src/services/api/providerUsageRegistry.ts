@@ -114,6 +114,10 @@ export function captureRateLimitHeaders(input: {
 
     const previous = registry.get(input.providerKey)
     registry.set(input.providerKey, {
+      // Fields absent from this response fall through to what we captured
+      // before; `snapshot` only holds keys backed by a real header, so a
+      // freshly captured 0 still wins over a stale value.
+      ...previous,
       providerKey: input.providerKey,
       providerLabel:
         input.providerLabel ?? previous?.providerLabel ?? input.providerKey,
