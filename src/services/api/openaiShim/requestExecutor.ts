@@ -8,6 +8,7 @@ import {
 } from '../../../utils/providerSecrets.js'
 import { parseCustomHeadersEnv } from '../../../utils/providerCustomHeaders.js'
 import { getOpenClaudeUserAgent } from '../../../utils/userAgent.js'
+import { captureRateLimitHeaders } from '../providerUsageRegistry.js'
 
 export function formatRetryAfterHint(response: Response): string {
   const retryAfter = response.headers.get('retry-after')
@@ -38,6 +39,19 @@ function isAbortLikeError(error: unknown): boolean {
       'name' in error &&
       error.name === 'AbortError')
   )
+}
+
+/** Registry key for providers without a route id: the endpoint host. */
+function rateLimitRegistryKey(
+  routeId: string | null,
+  baseUrl: string,
+): string {
+  if (routeId) return routeId
+  try {
+    return `host:${new URL(baseUrl).host}`
+  } catch {
+    return baseUrl
+  }
 }
 
 type GeminiCredential = {
@@ -842,6 +856,17 @@ export async function executeOpenAIRequest(
     if (!response) continue
 
     if (response.ok) {
+      captureRateLimitHeaders({
+        providerKey: rateLimitRegistryKey(
+          runtimeShimContext.routeId,
+          activeBaseUrl,
+        ),
+        providerLabel:
+          runtimeShimContext.descriptor?.label ?? undefined,
+        model: request.resolvedModel,
+        baseUrl: activeBaseUrl,
+        headers: response.headers,
+      })
       credentialPool?.reportSuccess(credentialLease)
       if (useNativeOllamaChat) {
         response = params.stream
@@ -1005,6 +1030,17 @@ export async function executeOpenAIRequest(
         }
 
         if (responsesResponse.ok) {
+          captureRateLimitHeaders({
+            providerKey: rateLimitRegistryKey(
+              runtimeShimContext.routeId,
+              activeBaseUrl,
+            ),
+            providerLabel:
+              runtimeShimContext.descriptor?.label ?? undefined,
+            model: request.resolvedModel,
+            baseUrl: activeBaseUrl,
+            headers: responsesResponse.headers,
+          })
           return responsesResponse
         }
         const responsesErrorBody = await responsesResponse

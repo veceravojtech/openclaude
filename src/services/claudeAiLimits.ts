@@ -157,9 +157,18 @@ type RawUtilization = {
   seven_day?: RawWindowUtilization
 }
 let rawUtilization: RawUtilization = {}
+let rawUtilizationCapturedAt: number | undefined
 
 export function getRawUtilization(): RawUtilization {
   return rawUtilization
+}
+
+/**
+ * When the headers behind getRawUtilization() were last seen, as epoch ms.
+ * Undefined when no utilization headers have been captured this session.
+ */
+export function getRawUtilizationCapturedAt(): number | undefined {
+  return rawUtilizationCapturedAt
 }
 
 function extractRawUtilization(headers: globalThis.Headers): RawUtilization {
@@ -465,6 +474,7 @@ export function extractQuotaStatusFromHeaders(
   if (!shouldProcessRateLimits(isSubscriber)) {
     // If we have any rate limit state, clear it
     rawUtilization = {}
+    rawUtilizationCapturedAt = undefined
     if (currentLimits.status !== 'allowed' || currentLimits.resetsAt) {
       const defaultLimits: ClaudeAILimits = {
         status: 'allowed',
@@ -479,6 +489,7 @@ export function extractQuotaStatusFromHeaders(
   // Process headers (applies mocks from /mock-limits command if active)
   const headersToUse = processRateLimitHeaders(headers)
   rawUtilization = extractRawUtilization(headersToUse)
+  rawUtilizationCapturedAt = Date.now()
   const newLimits = computeNewLimitsFromHeaders(headersToUse)
 
   // Cache extra usage status (persists across sessions)
@@ -503,6 +514,7 @@ export function extractQuotaStatusFromError(error: APIError): void {
       // Process headers (applies mocks from /mock-limits command if active)
       const headersToUse = processRateLimitHeaders(error.headers)
       rawUtilization = extractRawUtilization(headersToUse)
+      rawUtilizationCapturedAt = Date.now()
       newLimits = computeNewLimitsFromHeaders(headersToUse)
 
       // Cache extra usage status (persists across sessions)

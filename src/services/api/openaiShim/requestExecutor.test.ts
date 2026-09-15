@@ -11,6 +11,10 @@ import {
 } from '../errors.ts'
 import { createOpenAIShimClient, hasMistralApiHost } from '../openaiShim.ts'
 import { formatRetryAfterHint, sleepMs } from './requestExecutor.js'
+import {
+  clearProviderUsageRegistry,
+  listProviderRateLimitSnapshots,
+} from '../providerUsageRegistry.js'
 import * as realGithubModelsCredentials from '../../../utils/githubModelsCredentials.js'
 
 type FetchType = typeof globalThis.fetch
@@ -2299,6 +2303,70 @@ test('formats retry guidance from server response headers', () => {
   expect(formatRetryAfterHint(new Response(null, { headers: { 'retry-after': '12' } })))
     .toBe(' (Retry-After: 12)')
   expect(formatRetryAfterHint(new Response())).toBe('')
+})
+
+// --- passive usage capture --------------------------------------------------
+
+test('successful chat completions passively capture x-ratelimit headers', async () => {
+  clearProviderUsageRegistry()
+
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({
+        id: 'chatcmpl-ratelimit',
+        model: 'mimo-v2.5-pro',
+        choices: [
+          { message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' },
+        ],
+      }),
+      {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'x-ratelimit-remaining-requests': '118',
+          'x-ratelimit-limit-requests': '120',
+          'x-ratelimit-remaining-tokens': '89999',
+          'x-ratelimit-reset-requests': '6m0s',
+        },
+      },
+    )) as unknown as FetchType
+
+  const client = createOpenAIShimClient({}) as OpenAIShimClient
+  const result = (await client.beta.messages.create({
+    model: 'mimo-v2.5-pro',
+    messages: [{ role: 'user', content: 'hello' }],
+    max_tokens: 32,
+    stream: false,
+  })) as Record<string, unknown>
+
+  expect(result).toBeDefined()
+
+  const snapshots = listProviderRateLimitSnapshots()
+  expect(snapshots.length).toBe(1)
+  const snapshot = snapshots[0]
+  expect(snapshot.remainingRequests).toBe(118)
+  expect(snapshot.limitRequests).toBe(120)
+  expect(snapshot.remainingTokens).toBe(89999)
+  expect(snapshot.resetRequests).toBe('6m0s')
+  expect(snapshot.capturedAt).toBeTruthy()
+
+  clearProviderUsageRegistry()
+})
+
+test('header-less successful responses leave the usage registry untouched', async () => {
+  clearProviderUsageRegistry()
+
+  globalThis.fetch = (async () => makeChatCompletionResponse('mimo-v2.5-pro')) as unknown as FetchType
+
+  const client = createOpenAIShimClient({}) as OpenAIShimClient
+  await client.beta.messages.create({
+    model: 'mimo-v2.5-pro',
+    messages: [{ role: 'user', content: 'hello' }],
+    max_tokens: 32,
+    stream: false,
+  })
+
+  expect(listProviderRateLimitSnapshots().length).toBe(0)
 })
 
 test('waits for the requested retry delay', async () => {
