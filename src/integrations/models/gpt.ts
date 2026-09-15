@@ -33,11 +33,16 @@ export default [
   // are combined with reasoning_effort — they must use /v1/responses. The
   // openai-vendor catalog carries their reasoning metadata; the responses
   // routing is handled by modelRequiresResponsesApi in providerConfig.
-  // Context: same conservative Codex 272k input cap as gpt-5.5 below (see
-  // that comment), despite the 1.05M API descriptor value.
-  gptModel('gpt-5.6-sol', 'GPT-5.6 Sol', 272_000, 128_000),
-  gptModel('gpt-5.6-terra', 'GPT-5.6 Terra', 272_000, 128_000),
-  gptModel('gpt-5.6-luna', 'GPT-5.6 Luna', 272_000, 128_000),
+  // Context: unlike gpt-5.5 below (whose ~272k Codex input cap is empirically
+  // documented by issue #1118), the gpt-5.6 family serves its full window on
+  // the Codex transport — user-verified on gpt-5.6-sol, where the copied
+  // 272k value reported "ctx 229K/272K (84%)" against a real ~1.05M window
+  // and forced premature auto-compaction. Matches the openai vendor catalog
+  // entry. If the transport ever starts rejecting large inputs, the
+  // CLAUDE_CODE_AUTO_COMPACT_WINDOW env clamp is the escape hatch.
+  gptModel('gpt-5.6-sol', 'GPT-5.6 Sol', 1_050_000, 128_000),
+  gptModel('gpt-5.6-terra', 'GPT-5.6 Terra', 1_050_000, 128_000),
+  gptModel('gpt-5.6-luna', 'GPT-5.6 Luna', 1_050_000, 128_000),
   // gpt-5.5 via Codex transport caps at ~272k effective input tokens; the
   // 1.05M API descriptor value caused /context to under-report usage and
   // auto-compact to fire too late, yielding 500 "input exceeds the context
