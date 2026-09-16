@@ -233,15 +233,53 @@ describe('a refresh-token login for a second account', () => {
   })
 
   /**
+   * BOUNDS THE RESIDUAL BELOW. A failed profile fetch is not on its own enough
+   * to lose an account: the `else if` fallback in `installOAuthTokens` reads
+   * `tokenAccount`, and the ternary that builds `identifiedTokens` passes the
+   * bare blob through untouched — so when the grant DID return an `account`
+   * block, that identity is still on the blob the writer receives and
+   * `accountKeyForTokens` answers with B's real UUID.
+   *
+   * Only the intersection — profile fetch failed AND no `account` block — is
+   * anonymous, which is what the pin below covers.
+   */
+  test('a login whose profile fetch fails still routes by the grant account block', async () => {
+    mock.module('../../services/oauth/getOauthProfile.js', () => ({
+      getOauthProfileFromOauthToken: async () => undefined,
+    }))
+
+    // Same failed fetch as the pin below, but this grant answered with an
+    // `account` block, so `storedTokensFor` is the faithful shape.
+    const { installOAuthTokens } = await import('./auth.js')
+    await installOAuthTokens(storedTokensFor('b'))
+
+    const onDisk = readFromDisk()
+
+    // A keeps the one thing that cannot be recovered without a fresh login.
+    expect(onDisk.claudeAiOauthAccounts?.['uuid-a']?.refreshToken).toBe(
+      'fake-refresh-a',
+    )
+    // And B is filed under its own key, not merged onto the active account.
+    expect(Object.keys(onDisk.claudeAiOauthAccounts ?? {}).sort()).toEqual([
+      'uuid-a',
+      'uuid-b',
+    ])
+    expect(onDisk.claudeAiOauthAccounts?.['uuid-b']?.refreshToken).toBe(
+      'fake-refresh-b',
+    )
+    expect(onDisk.claudeAiOauthActive).toBe('uuid-b')
+  })
+
+  /**
    * PINS THE RESIDUAL THIS SUITE DOES NOT CLOSE — deliberately GREEN.
    *
-   * The three tests above all take the branch where the profile endpoint
-   * ANSWERS. `installOAuthTokens` fetches identity at auth.ts:63-65, and
    * `getOauthProfileFromOauthToken` swallows every error and returns
-   * `undefined` (getOauthProfile.ts:50-52) — so a network blip, a 5xx, a rate
-   * limit, or a `CLAUDE_CODE_OAUTH_SCOPES` value without `user:profile` all
-   * arrive here as "no profile". The ternary at auth.ts:99-111 then falls
-   * through to the raw blob, and the ORIGINAL D3 clobber happens unchanged.
+   * `undefined`, so a network blip, a 5xx, a rate limit, or a
+   * `CLAUDE_CODE_OAUTH_SCOPES` value without `user:profile` all arrive in
+   * `installOAuthTokens` as "no profile". As the test above shows, that alone
+   * is survivable. It is only when the grant ALSO returned no `account` block
+   * that the ternary building `identifiedTokens` falls through to a blob
+   * naming nobody, and the ORIGINAL D3 clobber happens unchanged.
    *
    * The handler cannot fix this from what it holds. At that point it has an
    * access token, a refresh token, and nothing else: no `account` block from
@@ -249,16 +287,29 @@ describe('a refresh-token login for a second account', () => {
    * has just failed. Guessing an owner would be worse than the clobber, and
    * refusing the login is a user-visible behaviour change nobody authorised.
    *
-   * Closing it is the follow-up wave 1 recommended, IN THIS ORDER: the refresh
-   * path attaches the stored identity before saving (`src/utils/auth.ts:1656`),
-   * and only THEN a writer guard refusing identity-less blobs — the guard LAST,
-   * because landing it first breaks the legitimate identity-less rotation
-   * pinned at `src/utils/auth.accountIdentity.test.ts:177`.
+   * A BLANKET writer guard refusing identity-less blobs is REFUTED, not
+   * pending: a legitimate rotation of the active account and a foreign blob
+   * reach `applyTokensToAccounts` carrying the same fields and neither carries
+   * identity, so the guard cannot tell them apart and breaks the rotation
+   * `src/utils/auth.accountIdentity.test.ts` pins as landing.
+   *
+   * What separates them is something only the CALLER knows, so closing this
+   * needs the caller to say it. The deferred change, owned by whoever next
+   * holds `src/utils/auth.ts`: give `saveOAuthTokensIfNeeded` an options
+   * parameter carrying an explicit intent — `'rotate-active'` for
+   * `checkAndRefreshOAuthTokenIfNeededImpl`, `'new-session'` for
+   * `installOAuthTokens` — and have `applyTokensToAccounts` apply its
+   * `claudeAiOauthActive` key fallback ONLY under `'rotate-active'`. Under
+   * `'new-session'` an identity-less blob has no key it may safely take, so
+   * the write must be refused and reported, not merged. Pin it with a test
+   * that seeds an active account A, saves an anonymous blob under
+   * `'new-session'`, and asserts A's `refreshToken` is unchanged and no entry
+   * was added — while the existing rotation test stays green untouched.
    *
    * GREEN means the gap is still open. Red means someone closed it: read the
    * follow-up above, confirm that is what happened, then delete this pin.
    */
-  test('PINS RESIDUAL: a login whose profile fetch fails is still identity-less and still clobbers', async () => {
+  test('PINS RESIDUAL: a login whose profile fetch fails AND whose grant named nobody still clobbers', async () => {
     // The profile endpoint fails. Production swallows the error and returns
     // undefined (getOauthProfile.ts:50-52), so undefined is the faithful shape.
     mock.module('../../services/oauth/getOauthProfile.js', () => ({
