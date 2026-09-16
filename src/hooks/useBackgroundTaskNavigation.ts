@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { useIsModalOverlayActive } from '../context/overlayContext.js'
 import { KeyboardEvent } from '../ink/events/keyboard-event.js'
 // eslint-disable-next-line custom-rules/prefer-use-keybindings -- backward-compat bridge until REPL wires handleKeyDown to <Box onKeyDown>
 import { useInput } from '../ink.js'
@@ -100,6 +101,36 @@ export function useBackgroundTaskNavigation(options?: {
   const expandedView = useAppState(s => s.expandedView)
   const selectedTeammate = useAppState(s => s.selectedTeammate)
   const setAppState = useSetAppState()
+
+  // "A dialog owns the keyboard right now" — the overlay contract's own modal
+  // predicate, and the question the two destructive letters below actually need
+  // answered. The named options above cannot answer it for the surface that
+  // matters most:
+  //
+  // with HISTORY_PICKER on, Ctrl+R renders the MODAL HistorySearchDialog rather
+  // than useHistorySearch's inline search. That dialog keeps its query in its
+  // own state and never writes the prompt, so isPromptInputActive, inputValue
+  // and isSearchingHistory are ALL false while the user types into it — and
+  // isPromptTypingSuppressionActive, which is built from exactly those three,
+  // returns false. FuzzyPicker stops propagation only for up/down/return/tab,
+  // so a query containing 'f' or 'k' still reaches this hook as a plain letter,
+  // and 'k' destroys the selected teammate mid-search.
+  //
+  // Asking the CONTRACT rather than adding a fourth named flag is what makes
+  // this hold for the other dialogs too: every one of them registers itself
+  // through useRegisterOverlay on mount, so QuickOpenDialog and
+  // GlobalSearchDialog are covered by the same question without naming either.
+  //
+  // MODAL, not useIsOverlayActive: NON_MODAL_OVERLAYS holds 'autocomplete', and
+  // during autocomplete the user is typing into the prompt for real, so
+  // promptTypingSuppressionActive already stands these letters down there.
+  // Gating on the wider predicate would only duplicate that.
+  //
+  // Deliberately NOT applied to the Enter branch. Enter is not a character the
+  // dialog swallows the way a letter is, and its stand-down condition is the
+  // narrower historySearchActive — see that option's doc for why widening it
+  // leaves selecting-agent with no Enter behaviour at all.
+  const isModalOverlayActive = useIsModalOverlayActive()
 
   // Running teammates in the one shared depth-first tree order, so Shift+Up/Down
   // walks a sub-lead straight into its own sub-team and the selection names the
@@ -260,11 +291,14 @@ export function useBackgroundTaskNavigation(options?: {
       return
     }
 
-    // 'f' to view selected teammate's transcript (only in selecting mode, and
-    // only while the prompt is idle — see the option's doc).
+    // 'f' to view selected teammate's transcript (only in selecting mode, only
+    // while the prompt is idle — see the option's doc — and only while no modal
+    // overlay owns the keyboard, which is the state an open dialog leaves every
+    // one of those options blind to).
     if (
       e.key === 'f' &&
       !options?.promptTypingSuppressionActive &&
+      !isModalOverlayActive &&
       viewSelectionMode === 'selecting-agent' &&
       teammateCount > 0
     ) {
@@ -309,6 +343,9 @@ export function useBackgroundTaskNavigation(options?: {
     // k to kill selected teammate (only in selecting mode, and only while the
     // prompt is idle — see the option's doc; selection mode itself survives
     // typing, so without that gate the letter destroys the selected teammate).
+    // The overlay check is the same gate for the dialogs that type WITHOUT
+    // touching the prompt: this is the data-loss key, so it stands down
+    // whenever anything modal owns the keyboard.
     // The outer guard is "a row below the leader is selected" — a teammate or
     // the hide row, the same population index >= 0 covered. The kill itself
     // needs a listed teammate that is still running, which is what makes k a
@@ -316,6 +353,7 @@ export function useBackgroundTaskNavigation(options?: {
     if (
       e.key === 'k' &&
       !options?.promptTypingSuppressionActive &&
+      !isModalOverlayActive &&
       viewSelectionMode === 'selecting-agent' &&
       selectedTeammate !== null &&
       selectedTeammate.kind !== 'leader'

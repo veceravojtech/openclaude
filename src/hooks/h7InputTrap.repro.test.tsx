@@ -24,11 +24,20 @@
  *   load-bearing one: Enter must STILL resolve while the prompt merely holds
  *   text, which is why `historySearchActive` is a separate option from
  *   `promptTypingSuppressionActive` rather than a widening of it.
+ * - S6/S6b pin the SHIPPED Ctrl+R surface, which is a different surface from
+ *   the one S1 pins: with `HISTORY_PICKER` on, Ctrl+R renders the modal
+ *   `HistorySearchDialog`, every input `isPromptTypingSuppressionActive` reads
+ *   is false, and the only signal left is the overlay contract. S6c/S6d are
+ *   their negative controls.
  */
 import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import React, { useEffect } from 'react'
 
+import {
+  useIsModalOverlayActive,
+  useRegisterOverlay,
+} from '../context/overlayContext.js'
 import { createRoot } from '../ink.js'
 import { KeyboardEvent } from '../ink/events/keyboard-event.js'
 import {
@@ -58,6 +67,16 @@ type ViewState = {
   viewingAgentTaskId: string | undefined
   viewSelectionMode: string
   expandedView: string
+  // Whether the overlay contract currently reads "something modal owns the
+  // keyboard". S6 asserts on it directly so a run in which the registrar never
+  // took effect fails as a missing overlay rather than as a silently weaker
+  // version of the behavioural assertion.
+  modalOverlayActive: boolean
+  // The ids of the teammates still RUNNING, as a primitive so the selector is
+  // Object.is-stable. 'k' is the data-loss key: the survival assertion has to
+  // be that the task is still there and still running, not that some view flag
+  // kept its value.
+  runningTeammateIds: string
 }
 
 function Harness({
@@ -78,11 +97,42 @@ function Harness({
   const viewingAgentTaskId = useAppState(s => s.viewingAgentTaskId)
   const viewSelectionMode = useAppState(s => s.viewSelectionMode)
   const expandedView = useAppState(s => s.expandedView)
+  const modalOverlayActive = useIsModalOverlayActive()
+  const runningTeammateIds = useAppState(s =>
+    Object.values(s.tasks)
+      .filter(t => t.type === 'in_process_teammate' && t.status === 'running')
+      .map(t => t.id)
+      .join(','),
+  )
   useEffect(() => onReady(handleKeyDown), [handleKeyDown, onReady])
   useEffect(
-    () => onState({ viewingAgentTaskId, viewSelectionMode, expandedView }),
-    [viewingAgentTaskId, viewSelectionMode, expandedView, onState],
+    () =>
+      onState({
+        viewingAgentTaskId,
+        viewSelectionMode,
+        expandedView,
+        modalOverlayActive,
+        runningTeammateIds,
+      }),
+    [
+      viewingAgentTaskId,
+      viewSelectionMode,
+      expandedView,
+      modalOverlayActive,
+      runningTeammateIds,
+      onState,
+    ],
   )
+  return null
+}
+
+// The same call `HistorySearchDialog` makes, mounted as a SIBLING of the hook
+// under test. The S6 series is about a signal that has to cross a component
+// boundary — the dialog registers, the nav hook reads — so the test crosses it
+// too instead of pre-seeding `activeOverlays` into the initial state, which
+// would prove only that the predicate can be spoofed.
+function OverlayRegistrar({ id }: { id: string }): React.ReactNode {
+  useRegisterOverlay(id)
   return null
 }
 
@@ -171,10 +221,18 @@ function fakeIo(): {
 // different states for Enter, so a test has to be able to set one without the
 // other. `historySearchActive` defaults to false so the S1–S4 call sites read
 // exactly as they did before.
+//
+// `overlayId` is the S6 series' equivalent and defaults to NONE for the same
+// reason: mount an `OverlayRegistrar` beside the harness and the run has a live
+// modal overlay, leave it out and S1–S5c read exactly as they do today. It is a
+// registration, not a flag — the helper waits for the registering effect to
+// reach `AppState` before handing back `press`, because the whole claim is that
+// the hook re-reads the contract after the dialog mounts.
 async function renderNavigation(
   initialState: AppState,
   promptTypingSuppressionActive: boolean,
   historySearchActive = false,
+  overlayId?: string,
 ): Promise<{
   press: (event: KeyboardEvent) => Promise<void>
   state: () => ViewState
@@ -191,6 +249,8 @@ async function renderNavigation(
     viewingAgentTaskId: undefined,
     viewSelectionMode: 'none',
     expandedView: 'none',
+    modalOverlayActive: false,
+    runningTeammateIds: '',
   }
   const teardown = async (): Promise<void> => {
     root.unmount()
@@ -211,12 +271,24 @@ async function renderNavigation(
           promptTypingSuppressionActive={promptTypingSuppressionActive}
           historySearchActive={historySearchActive}
         />
+        {overlayId === undefined ? null : <OverlayRegistrar id={overlayId} />}
       </AppStateProvider>,
     )
     for (let attempts = 0; attempts < 100 && !handler; attempts++) {
       await Bun.sleep(10)
     }
     expect(handler).toBeDefined()
+    // `useRegisterOverlay` registers from an effect, so the overlay lands one
+    // commit after the handler does. Settling it here keeps a press from racing
+    // the registration; whether it actually landed is asserted in the tests, not
+    // swallowed by this loop.
+    for (
+      let attempts = 0;
+      attempts < 100 && overlayId !== undefined && !latest.modalOverlayActive;
+      attempts++
+    ) {
+      await Bun.sleep(10)
+    }
     return {
       async press(event) {
         handler!(event)
@@ -531,6 +603,132 @@ test('S5c: enter still resolves the selection while the prompt merely holds text
   )
   try {
     await mounted.press(key('return'))
+    expect(mounted.state().viewingAgentTaskId).toBe(task.id)
+    expect(mounted.state().viewSelectionMode).toBe('viewing-agent')
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// S6 — the Ctrl+R surface the SHIPPED CLI actually opens, which is not the one
+// S1 pins. `HISTORY_PICKER` is true in the build config, so `useHistorySearch`'s
+// inline search is gated off and Ctrl+R renders the modal `HistorySearchDialog`
+// instead. That dialog keeps its query in its own `useState` and never writes
+// the prompt, so all three inputs `isPromptTypingSuppressionActive` reads —
+// `isPromptInputActive`, `inputValue`, `isSearchingHistory` — are FALSE, the
+// helper returns false, and the S1 guard is blind to the surface. `FuzzyPicker`
+// stops propagation only for up/down/return/tab, so a query containing 'k'
+// reaches this hook as a plain letter and kills the selected teammate.
+//
+// What IS true during that dialog is the overlay contract:
+// `HistorySearchDialog` calls `useRegisterOverlay('history-search')` at mount,
+// `'history-search'` is not in `NON_MODAL_OVERLAYS`, and so
+// `useIsModalOverlayActive` reads true — the same predicate `PromptInput`
+// already gates its own Ctrl+R and Ctrl+G bindings on. S6/S6b pin that the two
+// destructive letters stand down on THAT question with every legacy input
+// false.
+//
+// S6c/S6d are the negative controls, in the S1d/S1e idiom, and they are the
+// point: with no overlay registered the letters must still act. A guard that
+// disables them generally is a regression, not a fix. These runs differ from
+// S1d/S1e in exactly one variable — whether an overlay is registered — which is
+// what makes the overlay predicate, and not some incidental change, the thing
+// that moved the outcome.
+//
+// The overlay is registered by mounting the REAL `useRegisterOverlay` hook in
+// the tree rather than by seeding `activeOverlays`, so the executed chain is
+// the shipped one: component mounts → effect registers → `AppState` →
+// `useIsModalOverlayActive` → the branch stands down. (What a unit test here
+// CANNOT execute is the `feature('HISTORY_PICKER')` render branch: `feature()`
+// is rewritten to a literal at bundle time and reads FALSE in an unbundled
+// `bun test` run. That the dialog is the shipped Ctrl+R surface is a source
+// fact about the build config, not something these tests run.)
+// ---------------------------------------------------------------------------
+test('S6: k typed into the modal history search leaves the selected teammate alive', async () => {
+  // The shipped-build reading of REPL's own state during the modal search: the
+  // prompt is unfocused, its buffer is empty, and the inline-search flag is
+  // false because that surface is the one Ctrl+R does NOT open. The helper is
+  // called for real rather than asserted about, so this stays a measurement of
+  // the legacy guard and not a claim about it.
+  const suppression = isPromptTypingSuppressionActive(false, '', false)
+  expect(suppression).toBe(false)
+
+  const { task, lifecycleAbortController } = createTeammateTask()
+  const mounted = await renderNavigation(
+    selectingState(task),
+    suppression,
+    false,
+    'history-search',
+  )
+  try {
+    // The ONE variable that differs from S1d, which kills on this same press.
+    expect(mounted.state().modalOverlayActive).toBe(true)
+
+    await mounted.press(key('k')) // user meant: type "k" into the search box
+
+    expect(lifecycleAbortController.signal.aborted).toBe(false)
+    // Alive, not merely un-aborted: the row is still in the task list and still
+    // running, which is what "the work was not lost" means here.
+    expect(mounted.state().runningTeammateIds).toBe(task.id)
+    // …and the selection survives, for the Escape or Enter that ends it.
+    expect(mounted.state().viewSelectionMode).toBe('selecting-agent')
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+test('S6b: f typed into the modal history search does not open the transcript', async () => {
+  const { task } = createTeammateTask()
+  const mounted = await renderNavigation(
+    selectingState(task),
+    isPromptTypingSuppressionActive(false, '', false),
+    false,
+    'history-search',
+  )
+  try {
+    expect(mounted.state().modalOverlayActive).toBe(true)
+
+    await mounted.press(key('f'))
+
+    expect(mounted.state().viewingAgentTaskId).toBeUndefined()
+    expect(mounted.state().viewSelectionMode).toBe('selecting-agent')
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+test('S6c: k with no overlay and an idle prompt still kills the teammate', async () => {
+  // Negative control for S6: same legacy inputs, same press, no overlay.
+  const { task, lifecycleAbortController } = createTeammateTask()
+  const mounted = await renderNavigation(
+    selectingState(task),
+    isPromptTypingSuppressionActive(false, '', false),
+  )
+  try {
+    expect(mounted.state().modalOverlayActive).toBe(false)
+
+    await mounted.press(key('k'))
+
+    expect(lifecycleAbortController.signal.aborted).toBe(true)
+    // The kill is the one that took the row out of the running set.
+    expect(mounted.state().runningTeammateIds).toBe('')
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+test('S6d: f with no overlay and an idle prompt still opens the transcript', async () => {
+  const { task } = createTeammateTask()
+  const mounted = await renderNavigation(
+    selectingState(task),
+    isPromptTypingSuppressionActive(false, '', false),
+  )
+  try {
+    expect(mounted.state().modalOverlayActive).toBe(false)
+
+    await mounted.press(key('f'))
+
     expect(mounted.state().viewingAgentTaskId).toBe(task.id)
     expect(mounted.state().viewSelectionMode).toBe('viewing-agent')
   } finally {
