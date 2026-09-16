@@ -1,4 +1,9 @@
-import { getRawUtilization, getRawUtilizationCapturedAt } from '../../services/claudeAiLimits.js'
+import {
+  currentAccountUsageKey,
+  listAccountUsageSnapshots,
+  type AccountUsageSnapshot,
+  type RawUtilization,
+} from '../../services/claudeAiLimits.js'
 import { fetchUtilization, type Utilization } from '../../services/api/usage.js'
 import {
   buildCodexUsageRows,
@@ -22,6 +27,7 @@ import {
 import { getTotalCostUSD, getTotalInputTokens, getTotalOutputTokens } from '../../bootstrap/state.js'
 import { getActiveProviderProfile } from '../../utils/providerProfiles.js'
 import { getAPIProvider } from '../../utils/model/providers.js'
+import { accountUsageLabel, readAccounts } from '../../utils/accountSwitch.js'
 import {
   formatRelativeTime,
   formatRelativeTimeAgo,
@@ -78,15 +84,28 @@ export type UsageReport = {
 }
 
 type CachedLiveUsage =
-  | { kind: 'claude'; data: Utilization; fetchedAt: string }
   | { kind: 'codex'; data: CodexUsageData; fetchedAt: string }
   | { kind: 'minimax'; data: MiniMaxUsageData; fetchedAt: string }
 
 const liveUsageCache = new Map<string, CachedLiveUsage>()
 
+/**
+ * Live first-party fetches, keyed by the account they were fetched FOR:
+ * currentAccountUsageKey() read at fetch time, so unattributed API-key traffic
+ * lands on the reserved NO_ACCOUNT_USAGE_KEY slot like everywhere else. One
+ * slot per account rather than one for the whole process, because a second
+ * account's fetch used to overwrite the first's and the user then read one
+ * account's figures under every account's name.
+ */
+const claudeLiveUsageCache = new Map<
+  string,
+  { data: Utilization; fetchedAt: string }
+>()
+
 /** Test-only: drop cached live fetches between cases. */
 export function clearUsageReportCache(): void {
   liveUsageCache.clear()
+  claudeLiveUsageCache.clear()
 }
 
 export type UsageReportFetchers = {
@@ -117,9 +136,8 @@ function isoFromEpochSeconds(epoch: number): string {
   return new Date(epoch * 1000).toISOString()
 }
 
-function claudeHeaderRows(): { rows: UsageRow[]; lastUpdated: string } | undefined {
-  const raw = getRawUtilization()
-  const capturedAt = getRawUtilizationCapturedAt()
+/** The rows one account's captured quota headers describe. */
+function claudeHeaderRows(raw: RawUtilization): UsageRow[] {
   const rows: UsageRow[] = []
   for (const [key, label] of [
     ['five_hour', '5h window'],
@@ -138,8 +156,53 @@ function claudeHeaderRows(): { rows: UsageRow[]; lastUpdated: string } | undefin
       source: 'response headers',
     })
   }
-  if (rows.length === 0 || capturedAt === undefined) return undefined
-  return { rows, lastUpdated: new Date(capturedAt).toISOString() }
+  return rows
+}
+
+/** What one first-party account has to show, and how old it is. */
+type FirstPartyReading = { rows: UsageRow[]; lastUpdated: string }
+
+/**
+ * Captured quota headers by account, first capture first.
+ *
+ * listAccountUsageSnapshots omits an account whose slot exists but has never
+ * been written, so every entry here carries a real capturedAt. An entry can
+ * still describe no window at all (a response that carried the status header
+ * but no utilization), which is why callers go through firstPartyReading.
+ */
+function accountSnapshots(): Map<string, AccountUsageSnapshot> {
+  return new Map(
+    listAccountUsageSnapshots().map(
+      snapshot => [snapshot.accountUuid, snapshot] as const,
+    ),
+  )
+}
+
+/**
+ * What to show for ONE account, or nothing when it has nothing to show.
+ *
+ * Freshest source wins and every row still carries its own source, exactly as
+ * the single-slot version did - the only change is that both sources are now
+ * looked up per account. `snapshot` is passed in rather than looked up here so
+ * a caller can withhold captured headers (see otherFirstPartySections).
+ */
+function firstPartyReading(
+  accountKey: string,
+  snapshot: AccountUsageSnapshot | undefined,
+): FirstPartyReading | undefined {
+  const live = claudeLiveUsageCache.get(accountKey)
+  const headerRows = snapshot ? claudeHeaderRows(snapshot.raw) : []
+  const headers =
+    headerRows.length > 0 && snapshot
+      ? {
+          rows: headerRows,
+          lastUpdated: new Date(snapshot.capturedAt).toISOString(),
+        }
+      : undefined
+  if (live && (!headers || live.fetchedAt > headers.lastUpdated)) {
+    return { rows: claudeLiveRows(live.data), lastUpdated: live.fetchedAt }
+  }
+  return headers
 }
 
 function claudeLiveRows(data: Utilization): UsageRow[] {
@@ -256,7 +319,14 @@ async function tryFetch<T>(
 async function buildActiveSection(options: {
   refresh: boolean
   fetchers: UsageReportFetchers
-}): Promise<{ section: UsageProviderSection; consumedRegistryKey?: string }> {
+}): Promise<{
+  section: UsageProviderSection
+  consumedRegistryKey?: string
+  /** Set only when first-party is the active route: the account this section
+   *  describes, so buildUsageReport can name it and skip it when listing the
+   *  other accounts. */
+  firstPartyAccountKey?: string
+}> {
   const { refresh, fetchers } = options
   const providerCategory = getAPIProvider()
   const activeProfile = getActiveProviderProfile()
@@ -275,31 +345,34 @@ async function buildActiveSection(options: {
   }
 
   if (activeId === 'firstParty') {
+    // Read BEFORE the fetch is awaited: a switch that lands mid-flight must
+    // not file these figures under whichever account happens to be active
+    // when the response comes back. Same build-time rule the quota store
+    // itself applies - see currentAccountUsageKey.
+    const accountKey = currentAccountUsageKey()
     if (refresh) {
       const data = await tryFetch(fetchers.fetchClaudeUtilization, section)
       if (data && Object.keys(data).length > 0) {
-        liveUsageCache.set('firstParty', {
-          kind: 'claude',
+        claudeLiveUsageCache.set(accountKey, {
           data,
           fetchedAt: new Date().toISOString(),
         })
       }
     }
-    const live = liveUsageCache.get('firstParty')
-    const headers = claudeHeaderRows()
     // Freshest source wins; every row carries its source and the section
     // the timestamp of the data actually shown.
-    if (live?.kind === 'claude' && (!headers || live.fetchedAt > headers.lastUpdated)) {
-      section.rows = claudeLiveRows(live.data)
-      section.lastUpdated = live.fetchedAt
-    } else if (headers) {
-      section.rows = headers.rows
-      section.lastUpdated = headers.lastUpdated
+    const reading = firstPartyReading(
+      accountKey,
+      accountSnapshots().get(accountKey),
+    )
+    if (reading) {
+      section.rows = reading.rows
+      section.lastUpdated = reading.lastUpdated
     } else {
       section.note =
         'no utilization headers captured yet this session; call with refresh: true to fetch plan usage'
     }
-    return { section }
+    return { section, firstPartyAccountKey: accountKey }
   }
 
   if (activeId === 'codex') {
@@ -373,19 +446,12 @@ async function buildActiveSection(options: {
   return { section }
 }
 
+/**
+ * Cached live usage for a provider that is not the active one. First-party
+ * lives in otherFirstPartySections instead, because it is keyed by account.
+ */
 function cachedLiveSections(excludeProvider: string): UsageProviderSection[] {
   const sections: UsageProviderSection[] = []
-  const claude = liveUsageCache.get('firstParty')
-  if (claude?.kind === 'claude' && excludeProvider !== 'firstParty') {
-    sections.push({
-      provider: 'firstParty',
-      label: 'Anthropic',
-      isActive: false,
-      capability: 'supported',
-      rows: claudeLiveRows(claude.data),
-      lastUpdated: claude.fetchedAt,
-    })
-  }
   const codex = liveUsageCache.get('codex')
   if (codex?.kind === 'codex' && excludeProvider !== 'codex') {
     sections.push({
@@ -416,6 +482,136 @@ function cachedLiveSections(excludeProvider: string): UsageProviderSection[] {
   return sections
 }
 
+/**
+ * Label every first-party section starts from. Matches both the anthropic
+ * vendor descriptor's label and RUNTIME_USAGE_LABELS.firstParty, which is
+ * what the one cached first-party section printed before this change.
+ */
+const FIRST_PARTY_LABEL = 'Anthropic'
+
+/** A first-party section together with the account it describes. */
+type FirstPartySection = {
+  section: UsageProviderSection
+  accountKey: string
+}
+
+/**
+ * What this file needs in order to NAME an account.
+ *
+ * Deliberately narrower than AccountSummary: emailAddress is not on it, so a
+ * future writer who reaches for the address in this file gets a type error
+ * instead of putting a personal identifier into a transcript.
+ */
+type NameableAccount = { key: string; label?: string; isActive: boolean }
+
+/**
+ * Stored accounts by key, for naming only.
+ *
+ * Read lazily - only a report with more than one first-party account to name
+ * calls this, so a single-account session still touches no credential store -
+ * and defensively: Usage must not fail because that store is locked or
+ * unreadable, so an account that cannot be looked up is still named, by its
+ * key.
+ */
+function storedAccountsByKey(): Map<string, NameableAccount> {
+  try {
+    return new Map(
+      readAccounts().map(account => [account.key, account] as const),
+    )
+  } catch {
+    return new Map()
+  }
+}
+
+/**
+ * A section per first-party account OTHER than the one the active section
+ * already describes.
+ *
+ * includeHeaderCaptures is false when first-party is not the active route,
+ * where only a live fetch ever produced a non-active first-party section:
+ * keeping that gate is what makes a one-account session render exactly what
+ * it rendered before the report grew an account dimension. An account with
+ * nothing to show gets no section - the report never invents one.
+ */
+function otherFirstPartySections(options: {
+  activeAccountKey: string | undefined
+  includeHeaderCaptures: boolean
+}): FirstPartySection[] {
+  const { activeAccountKey, includeHeaderCaptures } = options
+  const snapshots = accountSnapshots()
+  const accountKeys = new Set<string>()
+  if (includeHeaderCaptures) {
+    for (const accountKey of snapshots.keys()) accountKeys.add(accountKey)
+  }
+  for (const accountKey of claudeLiveUsageCache.keys()) {
+    accountKeys.add(accountKey)
+  }
+
+  const sections: FirstPartySection[] = []
+  for (const accountKey of accountKeys) {
+    if (accountKey === activeAccountKey) continue
+    const reading = firstPartyReading(
+      accountKey,
+      includeHeaderCaptures ? snapshots.get(accountKey) : undefined,
+    )
+    if (!reading) continue
+    sections.push({
+      accountKey,
+      section: {
+        provider: 'firstParty',
+        label: FIRST_PARTY_LABEL,
+        isActive: false,
+        capability: 'supported',
+        rows: reading.rows,
+        lastUpdated: reading.lastUpdated,
+      },
+    })
+  }
+  return sections
+}
+
+/**
+ * Name the account on each first-party section - but only once more than one
+ * of them has figures.
+ *
+ * A single-account session, and every API-key session, therefore renders the
+ * section header it has always rendered: the account name appears exactly when
+ * it starts carrying information, which is when a second account has figures
+ * of its own to tell apart.
+ *
+ * accountUsageLabel is the PII-safe naming (never the email address, unlike
+ * accountDisplayName, which names accounts on the user's own screen). Being
+ * per-account and pure it cannot promise that two accounts get two different
+ * names - two UUIDs sharing their first block resolve to one string - so
+ * duplicates are numbered here, where the whole list is in hand, rather than
+ * by feeding more key material into the name.
+ */
+function nameFirstPartyAccounts(sections: FirstPartySection[]): void {
+  if (sections.length < 2) return
+  const stored = storedAccountsByKey()
+  const names = sections.map(entry =>
+    accountUsageLabel(
+      stored.get(entry.accountKey) ?? {
+        key: entry.accountKey,
+        isActive: false,
+      },
+    ),
+  )
+  const totals = new Map<string, number>()
+  for (const name of names) totals.set(name, (totals.get(name) ?? 0) + 1)
+  const numbered = new Map<string, number>()
+  sections.forEach((entry, index) => {
+    const name = names[index]
+    let display = name
+    if ((totals.get(name) ?? 0) > 1) {
+      const ordinal = (numbered.get(name) ?? 0) + 1
+      numbered.set(name, ordinal)
+      display = `${name} #${ordinal}`
+    }
+    entry.section.label = `${entry.section.label} (${display})`
+  })
+}
+
 export async function buildUsageReport(options: {
   providerFilter?: string
   refresh?: boolean
@@ -428,10 +624,27 @@ export async function buildUsageReport(options: {
     ...options.fetchers,
   }
 
-  const { section: activeSection, consumedRegistryKey } = await buildActiveSection({
+  const {
+    section: activeSection,
+    consumedRegistryKey,
+    firstPartyAccountKey,
+  } = await buildActiveSection({
     refresh: options.refresh === true,
     fetchers,
   })
+
+  const firstPartyIsActive = firstPartyAccountKey !== undefined
+  const otherAccounts = otherFirstPartySections({
+    activeAccountKey: firstPartyAccountKey,
+    includeHeaderCaptures: firstPartyIsActive,
+  })
+  nameFirstPartyAccounts([
+    ...(firstPartyAccountKey !== undefined
+      ? [{ section: activeSection, accountKey: firstPartyAccountKey }]
+      : []),
+    ...otherAccounts,
+  ])
+  const otherAccountSections = otherAccounts.map(entry => entry.section)
 
   const registrySections: UsageProviderSection[] = listProviderRateLimitSnapshots()
     .filter(snapshot => snapshot.providerKey !== consumedRegistryKey)
@@ -447,7 +660,13 @@ export async function buildUsageReport(options: {
 
   const providers = [
     activeSection,
+    // Beside the active first-party section when first-party is the active
+    // route, and otherwise in the slot the one cached first-party section
+    // used to occupy (after the registry), so a one-account report keeps its
+    // ordering under either route.
+    ...(firstPartyIsActive ? otherAccountSections : []),
     ...registrySections,
+    ...(firstPartyIsActive ? [] : otherAccountSections),
     ...cachedLiveSections(activeSection.provider),
   ].filter(section => sectionMatchesFilter(section, options.providerFilter))
 
