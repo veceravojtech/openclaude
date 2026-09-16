@@ -30,7 +30,7 @@
  * passed every assertion; otherwise the child's non-zero code, or 1 when the child lied
  * with 0.
  */
-import { spawn } from 'node:child_process'
+import { type SpawnOptions, spawn } from 'node:child_process'
 
 /** One phase of `test:full`: a command, plus optional extra environment. */
 export type StepSpec = {
@@ -322,21 +322,140 @@ export function evaluateStep(step: StepSpec, output: string, outcome: StepOutcom
 }
 
 /**
+ * How long the group gets to honour SIGTERM before it is SIGKILLed.
+ *
+ * The failure this exists for is a pure-userland spin - a `bun test` worker at 98.9% CPU
+ * holding 15.7 GB - which is exactly the shape that never gets around to running a signal
+ * handler. Polite first, then certain.
+ */
+export const GROUP_KILL_GRACE_MS = 2_000
+
+/**
+ * Signal an entire process group, tolerating a group that has already gone.
+ *
+ * `process.kill` reads a NEGATIVE pid as "every process in the group led by that pid" -
+ * that minus sign is the whole point of this helper, and is why the child is spawned
+ * `detached` (below) so that its pid IS a group id.
+ *
+ * Two hazards are deliberately closed off:
+ *   - pids <= 1 are refused. `kill(-0, ...)` signals the CALLER's own group (suicide, and
+ *     it would take the supervisor's shell with it) and `kill(-1, ...)` signals every
+ *     process the user can reach. A missing `child.pid` must never degrade into either.
+ *   - ESRCH is swallowed. The group being gone is the NORMAL path - a step that exited
+ *     cleanly is already reaped - and a throw here would escape into an exit handler and
+ *     corrupt the exit code this script exists to get right.
+ *
+ * @returns whether a signal was actually delivered - false means "nothing was there".
+ */
+export function killProcessGroup(
+  pid: number | undefined,
+  signal: NodeJS.Signals,
+  kill: (target: number, signal: NodeJS.Signals) => void = (target, sig) => {
+    process.kill(target, sig)
+  },
+): boolean {
+  if (pid === undefined || !Number.isInteger(pid) || pid <= 1) {
+    return false
+  }
+  try {
+    kill(-pid, signal)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The spawn options every step runs under.
+ *
+ * `detached: true` is the fix: on POSIX it puts the child through `setsid()`, so the
+ * child leads its own session and process group (pgid == pid) and `killProcessGroup` can
+ * reach the whole tree - the `bun test` worker included - with one negative-pid signal.
+ * Without it, killing this wrapper leaves the grandchild reparented to init and running:
+ * measured once at 98.9% CPU / 15.7 GB resident for 3h36m, taking the box to load 186 and
+ * two OOM kills.
+ *
+ * stdin is `'ignore'`, NOT the `'inherit'` it used to be, and that pairing is not
+ * incidental. A detached child is no longer in the terminal's foreground process group,
+ * so if it ever read the terminal it would take SIGTTIN and STOP - converting a runaway
+ * orphan into a silent hang, which is strictly worse. Both steps are non-interactive
+ * `bun test` invocations (`SWEEP_STEP`, `CONVERSATION_ARC_STEP`) that never read stdin,
+ * so handing them `/dev/null` costs nothing and removes the failure mode by construction.
+ * stdout/stderr stay piped - the run has to remain observable and parseable.
+ */
+export function stepSpawnOptions(step: StepSpec): SpawnOptions {
+  return {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
+    env: step.env ? { ...process.env, ...step.env } : process.env,
+  }
+}
+
+/**
  * Spawn one step, streaming both streams straight through while capturing them.
  *
  * stdout AND stderr are captured into a single buffer on purpose: bun writes its summary
  * block to STDERR, so a stdout-only capture would never see it and would reject every
  * run.
+ *
+ * The step runs as its own process GROUP (see `stepSpawnOptions`), and every path that
+ * ends this wrapper tears that whole group down:
+ *   - SIGINT / SIGTERM reaching the wrapper are forwarded to the group, then escalated to
+ *     SIGKILL after `GROUP_KILL_GRACE_MS`;
+ *   - the wrapper's own `exit` SIGKILLs the group synchronously, because an exit handler
+ *     cannot wait out a grace period and a live orphan is worse than an abrupt child;
+ *   - a step that finishes SIGKILLs its group too, so no straggler the child spawned
+ *     outlives the step that started it.
+ * The listeners are removed once the step settles, so a multi-step run does not leak a
+ * handler set per step.
  */
 export async function runStep(step: StepSpec): Promise<{ output: string; outcome: StepOutcome }> {
   const [command, ...args] = step.command
   const chunks: string[] = []
 
   return await new Promise(resolve => {
-    const child = spawn(command, args, {
-      stdio: ['inherit', 'pipe', 'pipe'],
-      env: step.env ? { ...process.env, ...step.env } : process.env,
-    })
+    const child = spawn(command, args, stepSpawnOptions(step))
+    const groupPid = child.pid
+
+    let escalation: ReturnType<typeof setTimeout> | undefined
+    let settled = false
+
+    /** Forward a wrapper-level signal to the group, then make sure it dies. */
+    const onSignal = (signal: NodeJS.Signals): void => {
+      killProcessGroup(groupPid, signal)
+      escalation ??= setTimeout(() => {
+        killProcessGroup(groupPid, 'SIGKILL')
+      }, GROUP_KILL_GRACE_MS)
+    }
+
+    /** Last resort. `exit` handlers are synchronous, so there is no grace period to give. */
+    const onExit = (): void => {
+      killProcessGroup(groupPid, 'SIGKILL')
+    }
+
+    const cleanup = (): void => {
+      if (escalation !== undefined) {
+        clearTimeout(escalation)
+        escalation = undefined
+      }
+      process.removeListener('SIGINT', onSignal)
+      process.removeListener('SIGTERM', onSignal)
+      process.removeListener('exit', onExit)
+    }
+
+    const settle = (result: { output: string; outcome: StepOutcome }): void => {
+      if (settled) {
+        return
+      }
+      settled = true
+      killProcessGroup(groupPid, 'SIGKILL')
+      cleanup()
+      resolve(result)
+    }
+
+    process.on('SIGINT', onSignal)
+    process.on('SIGTERM', onSignal)
+    process.on('exit', onExit)
 
     child.stdout?.on('data', (chunk: Buffer) => {
       chunks.push(chunk.toString('utf8'))
@@ -348,14 +467,14 @@ export async function runStep(step: StepSpec): Promise<{ output: string; outcome
     })
 
     child.once('error', (error: Error) => {
-      resolve({
+      settle({
         output: chunks.join(''),
         outcome: { exitCode: null, signal: null, spawnError: error.message },
       })
     })
 
     child.once('close', (code: number | null, signal: string | null) => {
-      resolve({ output: chunks.join(''), outcome: { exitCode: code, signal } })
+      settle({ output: chunks.join(''), outcome: { exitCode: code, signal } })
     })
   })
 }

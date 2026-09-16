@@ -1,3 +1,5 @@
+import { spawn } from 'node:child_process'
+
 import { describe, expect, test } from 'bun:test'
 
 import {
@@ -5,7 +7,10 @@ import {
   SWEEP_STEP,
   TEST_FULL_STEPS,
   evaluateStep,
+  killProcessGroup,
   parseBunTestSummary,
+  runStep,
+  stepSpawnOptions,
   stripAnsi,
   toLines,
   type StepOutcome,
@@ -14,7 +19,9 @@ import {
 /**
  * Pure unit tests for the `test:full` guard's summary parser and verdict logic. Nothing
  * here spawns a test run: every fixture is captured output text, so the whole suite is
- * instant and safe to execute from inside the very sweep it guards.
+ * instant and safe to execute from inside the very sweep it guards. (The
+ * process-group block at the bottom does spawn - but only `bash -c sleep`/`true`, never a
+ * test run, and it kills what it starts.)
  *
  * Fixtures are verbatim shapes emitted by bun 1.3.9 on this repo (including the singular
  * `Ran 1 test across 1 file.` form and the stderr-only summary block).
@@ -322,5 +329,99 @@ describe('step specs', () => {
 
   test('test:full keeps its two phases, sweep first', () => {
     expect(TEST_FULL_STEPS).toEqual([SWEEP_STEP, CONVERSATION_ARC_STEP])
+  })
+})
+
+/**
+ * The orphan guard. `runStep` used to spawn without `detached`, so killing this wrapper
+ * left the `bun test` grandchild reparented to init and running - once at 98.9% CPU and
+ * 15.7 GB resident for 3h36m. These cover the two halves of the fix that CAN be asserted
+ * honestly in-process: that the kill helper aims at a process GROUP (and refuses the pids
+ * that would turn that into friendly fire), and that a real child spawned with these
+ * options genuinely leads its own group and dies with it. The end-to-end proof - a real
+ * bounded run killed mid-flight leaving nothing behind - is empirical and lives in the
+ * task report; it cannot be asserted from inside the suite it would have to kill.
+ */
+describe('process-group termination', () => {
+  test('signals the NEGATIVE pid - the group, not just the leader', () => {
+    const calls: Array<[number, NodeJS.Signals]> = []
+    const delivered = killProcessGroup(4321, 'SIGTERM', (target, signal) => {
+      calls.push([target, signal])
+    })
+
+    expect(delivered).toBe(true)
+    expect(calls).toEqual([[-4321, 'SIGTERM']])
+  })
+
+  test('a vanished group is not an error - ESRCH is the normal path', () => {
+    const delivered = killProcessGroup(4321, 'SIGKILL', () => {
+      throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' })
+    })
+
+    expect(delivered).toBe(false)
+  })
+
+  test('refuses the pids that would turn a group kill into friendly fire', () => {
+    const calls: number[] = []
+    const record = (target: number): void => {
+      calls.push(target)
+    }
+
+    // undefined: spawn never produced a pid. 0: signals our OWN group. 1: signals every
+    // process we can reach. Both of the latter would be far worse than the orphan.
+    for (const pid of [undefined, 0, 1, -9, 12.5]) {
+      expect(killProcessGroup(pid, 'SIGKILL', record)).toBe(false)
+    }
+
+    expect(calls).toEqual([])
+  })
+
+  test('steps spawn detached, so the child is a group leader', () => {
+    expect(stepSpawnOptions(SWEEP_STEP).detached).toBe(true)
+  })
+
+  test('stdin is ignored, never inherited - a detached reader would SIGTTIN and stop', () => {
+    expect(stepSpawnOptions(SWEEP_STEP).stdio).toEqual(['ignore', 'pipe', 'pipe'])
+  })
+
+  test('per-step env is still layered over process.env', () => {
+    const layered = stepSpawnOptions({ ...SWEEP_STEP, env: { MARKER: 'yes' } })
+      .env as NodeJS.ProcessEnv
+
+    expect(layered.MARKER).toBe('yes')
+    expect(layered.PATH).toBe(process.env.PATH)
+    expect(stepSpawnOptions(SWEEP_STEP).env).toBe(process.env)
+  })
+
+  test('a child spawned with these options leads a real, killable process group', async () => {
+    const child = spawn('bash', ['-c', 'sleep 30'], stepSpawnOptions(SWEEP_STEP))
+    await new Promise(resolve => child.once('spawn', resolve))
+    const pid = child.pid
+
+    expect(pid).toBeDefined()
+    // The negative pid RESOLVES: a process group led by the child exists. Without
+    // `detached` the child would sit in this process's group and -pid would be ESRCH.
+    expect(() => process.kill(-(pid as number), 0)).not.toThrow()
+
+    expect(killProcessGroup(pid, 'SIGKILL')).toBe(true)
+    await new Promise(resolve => child.once('close', resolve))
+
+    // ...and the group went with it.
+    expect(() => process.kill(-(pid as number), 0)).toThrow()
+  })
+
+  test('a completed step leaves no signal listeners behind', async () => {
+    const before = {
+      sigint: process.listenerCount('SIGINT'),
+      sigterm: process.listenerCount('SIGTERM'),
+      exit: process.listenerCount('exit'),
+    }
+
+    await runStep({ name: 'noop', command: ['bash', '-c', 'true'] })
+    await runStep({ name: 'noop again', command: ['bash', '-c', 'true'] })
+
+    expect(process.listenerCount('SIGINT')).toBe(before.sigint)
+    expect(process.listenerCount('SIGTERM')).toBe(before.sigterm)
+    expect(process.listenerCount('exit')).toBe(before.exit)
   })
 })
