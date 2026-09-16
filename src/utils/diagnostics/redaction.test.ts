@@ -21,6 +21,12 @@ import {
   summarizeSecretEnvPresence,
   _resetRedactionCacheForTesting,
 } from "../redaction.js";
+import * as realProcess from "../process.js";
+
+// Snapshot taken before any mock.module() call. mock.module() mutates the live
+// namespace object in place, so restoring from the namespace (or from a spread
+// of it) would re-install the stub instead of undoing it.
+const pristineRealProcess = { ...realProcess };
 
 const writeToStderrMock = mock((data: string) => {});
 let capturedStderr = "";
@@ -36,7 +42,11 @@ beforeEach(() => {
 // module already resolved process.js without the mock.  We use a cache-busting
 // query param for all debug.ts imports below so that a fresh module instance
 // is created and picks up this mock.
+// The pristine spread is the contamination half: process.js exports five
+// symbols, and a factory returning only writeToStderr made the other four
+// undefined for every file loaded afterwards.
 mock.module("../process.js", () => ({
+  ...pristineRealProcess,
   writeToStderr: writeToStderrMock,
 }));
 
@@ -712,13 +722,9 @@ describe("redactSensitiveInfo", () => {
 describe("logForDebugging", () => {
   afterAll(() => {
     // mock.module is process-global in Bun and mock.restore() does not undo
-    // it.  Restore writeToStderr to its real behavior so downstream test
-    // files don't inherit a mock or no-op.
-    mock.module("../process.js", () => ({
-      writeToStderr: (data: string) => {
-        if (!process.stderr.destroyed) process.stderr.write(data);
-      },
-    }));
+    // it.  Re-register the whole pre-mock namespace so downstream test files
+    // inherit neither the mock nor a hand-rolled re-implementation of it.
+    mock.module("../process.js", () => ({ ...pristineRealProcess }));
   });
 
   beforeAll(async () => {

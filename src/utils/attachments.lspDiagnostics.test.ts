@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from 'bun:test'
 import type { ToolUseContext, Tools } from '../Tool.js'
 import { BASH_TOOL_NAME } from '../tools/BashTool/toolName.js'
 import type { DiagnosticFile } from '../services/diagnosticTracking.js'
@@ -43,6 +51,17 @@ mock.module('../services/lsp/LSPDiagnosticRegistry.js', () => ({
   clearAllLSPDiagnostics: clearAllLSPDiagnosticsMock,
   getNextLSPDiagnosticDeliveryDelay: getNextLSPDiagnosticDeliveryDelayMock,
 }))
+
+afterAll(() => {
+  // mock.restore() does NOT undo mock.module(); re-register both specifiers
+  // from their pristine cache-busted namespaces, under the exact spelling each
+  // was mocked with. Both registrations are module-scope, so they are torn down
+  // once, at the end of the file.
+  mock.module('./debug.js', () => ({ ...realDebugModule }))
+  mock.module('../services/lsp/LSPDiagnosticRegistry.js', () => ({
+    ...realLSPRegistry,
+  }))
+})
 
 const { getAttachmentMessages, __test } = await import(
   `./attachments.ts?test=${Date.now()}-${Math.random()}`

@@ -114,26 +114,20 @@ afterEach(() => {
 // that stub unless we override it. We import the real providers module through
 // a cache-busting URL and re-register it under the bare specifier at MODULE
 // LEVEL (top-level await) so the override is in place before any test code runs.
-// The explicit function references are used instead of spreading the namespace
-// object to avoid potential issues with Bun's mock.module handling — which means
-// the list below MUST stay exhaustive. An export of providers.ts that is missing
-// here becomes `undefined` for every later test file in the same runner process:
-// isFirstPartyAnthropicProvider and isCustomAnthropicProvider used to be missing,
-// which silently defeated the provider-isolation guard in
-// src/test/providerModuleIsolation.ts (it compares all seven provider functions).
+// The factory spreads the cache-busted namespace rather than enumerating its
+// exports. The enumeration it replaces had to stay exhaustive by hand, and any
+// export of providers.ts missing from it became `undefined` for every later
+// test file in the same runner process: isFirstPartyAnthropicProvider and
+// isCustomAnthropicProvider used to be missing, which silently defeated the
+// provider-isolation guard in src/test/providerModuleIsolation.ts (it compares
+// all seven provider functions). Spreading a cache-busted namespace is safe —
+// it is a separate registry entry that mock.module() never mutates, so it
+// cannot recurse into the stub the way spreading the mocked specifier's own
+// live namespace would.
 const _realProvidersModule = await import(
   `./model/providers.js?real=${Date.now()}-${Math.random()}`
 )
-mock.module('./model/providers.js', () => ({
-  getAPIProvider: _realProvidersModule.getAPIProvider,
-  usesAnthropicAccountFlow: _realProvidersModule.usesAnthropicAccountFlow,
-  isFirstPartyAnthropicProvider:
-    _realProvidersModule.isFirstPartyAnthropicProvider,
-  isCustomAnthropicProvider: _realProvidersModule.isCustomAnthropicProvider,
-  isGithubNativeAnthropicMode: _realProvidersModule.isGithubNativeAnthropicMode,
-  getAPIProviderForStatsig: _realProvidersModule.getAPIProviderForStatsig,
-  isFirstPartyAnthropicBaseUrl: _realProvidersModule.isFirstPartyAnthropicBaseUrl,
-}))
+mock.module('./model/providers.js', () => ({ ..._realProvidersModule }))
 
 // Fresh import per test resets the memoize caches inside betas.js so the
 // provider detection (read live from process.env) is re-evaluated cleanly.

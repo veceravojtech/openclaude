@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { getEmptyToolPermissionContext } from '../../Tool.js'
 import { BashTool } from '../../tools/BashTool/BashTool.js'
 import {
@@ -6,16 +6,27 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import { getContentText } from '../messages.js'
+import * as realShellToolUtils from '../shell/shellToolUtils.js'
+import * as realResolveDefaultShell from '../shell/resolveDefaultShell.js'
+
+// Snapshots taken before any mock.module() call. mock.module() mutates the live
+// namespace object in place, so re-importing the specifier later hands back the
+// stub — the previous restore here re-registered the stub as if it were real.
+const pristineRealShellToolUtils = { ...realShellToolUtils }
+const pristineRealResolveDefaultShell = { ...realResolveDefaultShell }
 
 // Force bash routing regardless of platform/env — processBashCommand
 // consults isPowerShellToolEnabled() and resolveDefaultShell() at the
 // top, and may route to PowerShellTool on Windows which defeats our
 // BashTool.call stub.  mock.module is process-global in bun, so this
 // must run BEFORE the import of processBashCommand.
+// The pristine spread keeps SHELL_TOOL_NAMES defined for every later file.
 mock.module('../shell/shellToolUtils.js', () => ({
+  ...pristineRealShellToolUtils,
   isPowerShellToolEnabled: mock(() => false),
 }))
 mock.module('../shell/resolveDefaultShell.js', () => ({
+  ...pristineRealResolveDefaultShell,
   resolveDefaultShell: mock((): 'bash' | 'powershell' => 'bash'),
 }))
 import { processBashCommand } from './processBashCommand.js'
@@ -26,20 +37,24 @@ beforeEach(async () => {
   await acquireSharedMutationLock('utils/processUserInput/processBashCommand.test.tsx')
 })
 
-afterEach(async () => {
+afterEach(() => {
   try {
     BashTool.call = originalCall
-    const realPowerShell = await import('../shell/shellToolUtils.js')
-    const realShell = await import('../shell/resolveDefaultShell.js')
-    mock.module('../shell/shellToolUtils.js', () => ({
-      isPowerShellToolEnabled: realPowerShell.isPowerShellToolEnabled,
-    }))
-    mock.module('../shell/resolveDefaultShell.js', () => ({
-      resolveDefaultShell: realShell.resolveDefaultShell,
-    }))
   } finally {
     releaseSharedMutationLock()
   }
+})
+
+// Both registrations are module-scope, so they are torn down once, at the end
+// of the file — an afterEach teardown would strip the bash pin from every test
+// after the first.
+afterAll(() => {
+  mock.module('../shell/shellToolUtils.js', () => ({
+    ...pristineRealShellToolUtils,
+  }))
+  mock.module('../shell/resolveDefaultShell.js', () => ({
+    ...pristineRealResolveDefaultShell,
+  }))
 })
 
 function makeContext() {
