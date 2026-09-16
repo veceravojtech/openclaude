@@ -179,13 +179,24 @@ export async function call(
     return done(`Removed ${chalk.bold(target)}. No accounts left — /login to add one.`)
   }
 
-  const resolved = resolveOrExplain(accounts, argv)
+  if (verb === 'switch' && !target) {
+    return done('Usage: /account switch <email>')
+  }
+
+  // Spelling the verb out is a reasonable thing to type, so `/account switch
+  // <email>` is the same switch as the bare `/account <email>` the hint line
+  // documents — only the query differs. Without this the literal word `switch`
+  // fell through to account resolution and was reported as an account the user
+  // does not have.
+  const query = verb === 'switch' ? target : argv
+
+  const resolved = resolveOrExplain(accounts, query)
   if ('error' in resolved) {
     return done(resolved.error)
   }
   const { key } = resolved
   if (accounts.find(a => a.key === key)?.isActive) {
-    return done(`Already using ${chalk.bold(argv)}.`)
+    return done(`Already using ${chalk.bold(query)}.`)
   }
 
   const result = await switchAccount(key)
@@ -193,5 +204,5 @@ export async function call(
     return done(result.warning ?? 'Failed to switch account.')
   }
   applyAccountSwitchEffects(context)
-  return done(`Now using ${chalk.bold(argv)}.`)
+  return done(`Now using ${chalk.bold(query)}.`)
 }
