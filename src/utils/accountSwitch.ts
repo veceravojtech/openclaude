@@ -13,6 +13,7 @@ import {
   migrateAndReconcile,
   mutateAccountsLocked,
   setActiveAccount,
+  vouchableAccountKeys,
 } from './authAccounts.js'
 import { clearOAuthTokenCache } from './auth.js'
 import { clearBetasCaches } from './betas.js'
@@ -23,6 +24,25 @@ import { clearToolSchemaCache } from './toolSchemaCache.js'
 /** Every stored account, reconciled, for listing and for resolving a query. */
 export function readAccounts(): AccountSummary[] {
   return listAccounts(migrateAndReconcile(getSecureStorage().read() ?? {}).data)
+}
+
+/**
+ * Keys of every stored account the client can vouch for as an AUTO-switch
+ * target — the subset a usage-limit 429 is allowed to move the user onto.
+ *
+ * The same read and the same reconcile as `readAccounts`, deliberately: an
+ * entry only the other path can see could still be selected. `now` is a
+ * parameter so tests can pin the expiry boundary instead of racing the clock.
+ *
+ * Read-only, like `readAccounts` — nothing here writes, re-keys or deletes a
+ * credential entry. An entry the client cannot vouch for is left on disk
+ * exactly as it is; it just stops being selectable.
+ */
+export function readVouchableAccountKeys(now?: number): Set<string> {
+  return vouchableAccountKeys(
+    migrateAndReconcile(getSecureStorage().read() ?? {}).data,
+    now ?? Date.now(),
+  )
 }
 
 /**

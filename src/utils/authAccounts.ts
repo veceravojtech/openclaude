@@ -189,6 +189,80 @@ export function listAccounts(data: SecureStorageData): AccountSummary[] {
   }))
 }
 
+/** Why the client cannot vouch for a stored account as an auto-switch target. */
+export type AccountVouchFailure = 'no-refresh-token' | 'expired' | 'unnameable'
+
+/**
+ * Whether the client can vouch for `account` as an AUTOMATIC switch target.
+ *
+ * A usage-limit 429 moves the user onto another stored account without asking
+ * them, so the bar is higher than "an entry exists": the client must be able
+ * to obtain a live credential for it and to say whose account it is. An entry
+ * that fails is neither repaired nor pruned here — it stays on disk exactly as
+ * it is and merely stops being selectable.
+ *
+ * Returns the FIRST failing condition, or undefined when the account is
+ * vouchable. The order is fixed and observable, because each condition has a
+ * test built from a fixture that fails exactly one of them:
+ *
+ *   1. 'no-refresh-token' — no credential could be obtained for it.
+ *   2. 'expired'          — see the strictness note below.
+ *   3. 'unnameable'       — no account UUID, so nothing the user would
+ *                           recognise could be printed for it either.
+ *
+ * Both value checks are structural rather than nullish on purpose. Stored
+ * credentials are parsed JSON that these types have never validated, so a
+ * legacy blob can simply omit a field `OAuthTokens` declares required:
+ * `expiresAt` is typed `number | null`, so an `=== null` check typechecks
+ * perfectly clean while letting a blob carrying no `expiresAt` key at all
+ * through as vouchable — the exact silent hole this guard exists to close.
+ */
+export function vouchForAccount(
+  account: StoredClaudeAccount,
+  now: number,
+): AccountVouchFailure | undefined {
+  // undefined, null and '' are all "no refresh token": only a non-empty string
+  // is a credential that could actually be presented. The value is inspected
+  // for emptiness and nothing else — never read, returned or logged.
+  if (typeof account.refreshToken !== 'string' || account.refreshToken === '') {
+    return 'no-refresh-token'
+  }
+  // `<= now` because a token expiring this millisecond is already useless.
+  // Strict on purpose: an idle account with a real refresh token and a stale
+  // access token IS excluded, because presenting a stored refresh token is
+  // itself the suspected trigger of the revocations this guard was written
+  // for. Relaxing it belongs with that investigation, not here.
+  if (typeof account.expiresAt !== 'number' || account.expiresAt <= now) {
+    return 'expired'
+  }
+  // Nameability is the module's own `tokenAccount ?? profile` identity rule —
+  // either identity alone is enough, so this is "neither", not "not both".
+  if (accountKeyForTokens(account) === undefined) {
+    return 'unnameable'
+  }
+  return undefined
+}
+
+/**
+ * Keys of every stored account the client can vouch for as a switch target.
+ *
+ * Pure: no disk, no mutation. `readVouchableAccountKeys` in `accountSwitch.ts`
+ * is the reading counterpart.
+ */
+export function vouchableAccountKeys(
+  data: SecureStorageData,
+  now: number,
+): Set<string> {
+  const accounts = data.claudeAiOauthAccounts ?? {}
+  const vouchable = new Set<string>()
+  for (const [key, account] of Object.entries(accounts)) {
+    if (vouchForAccount(account, now) === undefined) {
+      vouchable.add(key)
+    }
+  }
+  return vouchable
+}
+
 /** The active account, or null when nobody is logged in. */
 export function getActiveAccount(
   data: SecureStorageData,

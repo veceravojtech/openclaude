@@ -900,6 +900,12 @@ describe('usage-limit account switch', () => {
     mock.module('src/utils/accountSwitch.js', () => ({
       ...originalAccountSwitchModule!,
       readAccounts: () => accounts,
+      // The guard reads vouchability through this module too, so the mock has
+      // to serve it from the SAME fixture. Left to the real implementation it
+      // reads the machine's actual store, which can never contain these
+      // fixture keys, and every candidate is filtered out — auto-switching
+      // silently stops instead of being tested.
+      readVouchableAccountKeys: () => new Set(accounts.map(entry => entry.key)),
       switchAccount: async (key: string) => {
         events.push(`switch:${key}`)
         accounts = accounts.map(account => ({
