@@ -1668,7 +1668,16 @@ async function checkAndRefreshOAuthTokenIfNeededImpl(
     }
     // Unlocked on purpose: the config-directory lock taken above is the same
     // one the locked saver would take, and it is not reentrant.
-    saveOAuthTokensUnlocked(identifiedTokens)
+    const saveResult = saveOAuthTokensUnlocked(identifiedTokens)
+    if (!saveResult.success) {
+      // Nothing reached the store, so the refresh did NOT happen: the token the
+      // caller would go on to present is the stale one still on disk. Reporting
+      // success here also cleared the caches below, sending the next read back
+      // to the store that was never updated — so the freshly minted token is
+      // lost and the stale one is handed back as if it were fresh.
+      // `saveOAuthTokensUnlocked` has already logged why the write failed.
+      return false
+    }
 
     // Clear the cache after refreshing token
     getClaudeAIOAuthTokens.cache?.clear?.()

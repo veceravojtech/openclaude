@@ -11,6 +11,12 @@
  * interesting proof is the case where that fallback has nothing to fall back
  * to.
  *
+ * The same call also discarded the writer's `{ success }` and returned `true`
+ * unconditionally, so a refresh whose write never landed told its caller the
+ * token was refreshed while the stale refresh token was still the one on disk,
+ * and cleared the caches on top so the next read re-read the store that was
+ * never updated.
+ *
  * Every fixture credential here is an obviously fake string, and every read and
  * write is confined to a temp config home — the real credential store is never
  * opened.
@@ -26,6 +32,7 @@ import {
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
 import * as realOAuthClient from '../services/oauth/client.js'
+import * as realKeychainHelpers from './secureStorage/macOsKeychainHelpers.js'
 import * as realSecureStorage from './secureStorage/index.js'
 import { setClaudeConfigHomeDirForTesting } from './envUtils.js'
 import type { SecureStorageData } from './secureStorage/index.js'
@@ -35,6 +42,7 @@ import type { SecureStorageData } from './secureStorage/index.js'
 // spread of it) would re-install the stub instead of undoing it.
 const pristineRealSecureStorage = { ...realSecureStorage }
 const pristineRealOAuthClient = { ...realOAuthClient }
+const pristineRealKeychainHelpers = { ...realKeychainHelpers }
 
 const HOUR = 60 * 60 * 1000
 
@@ -67,7 +75,7 @@ function identitylessRefreshResponse(): OAuthTokens {
   }
 }
 
-describe('the refresh path persists identity', () => {
+describe('the refresh path persists identity and reports its own failures', () => {
   let tmpRoot: string
   let configDir: string
   let store: SecureStorageData
@@ -75,6 +83,9 @@ describe('the refresh path persists identity', () => {
   let written: SecureStorageData[]
   /** Flipped by the refresh mock to model a keyring that went away mid-refresh. */
   let syncReadDegraded: boolean
+  let keychainCacheClears: number
+  /** `keychainCacheClears` sampled the instant the token endpoint answered. */
+  let clearsWhenRefreshReturned: number
 
   beforeEach(async () => {
     await acquireSharedMutationLock('utils/auth.refreshPersist.test.ts')
@@ -86,6 +97,8 @@ describe('the refresh path persists identity', () => {
     store = { claudeAiOauth: storedIdentifiedTokens() }
     written = []
     syncReadDegraded = false
+    keychainCacheClears = 0
+    clearsWhenRefreshReturned = -1
   })
 
   afterEach(() => {
@@ -96,6 +109,9 @@ describe('the refresh path persists identity', () => {
       }))
       mock.module('../services/oauth/client.js', () => ({
         ...pristineRealOAuthClient,
+      }))
+      mock.module('./secureStorage/macOsKeychainHelpers.js', () => ({
+        ...pristineRealKeychainHelpers,
       }))
       setClaudeConfigHomeDirForTesting(undefined)
       rmSync(tmpRoot, { recursive: true, force: true })
@@ -135,7 +151,25 @@ describe('the refresh path persists identity', () => {
   function mockRefresh(response: () => OAuthTokens) {
     mock.module('../services/oauth/client.js', () => ({
       ...realOAuthClient,
-      refreshOAuthToken: async () => response(),
+      refreshOAuthToken: async () => {
+        const tokens = response()
+        clearsWhenRefreshReturned = keychainCacheClears
+        return tokens
+      },
+    }))
+  }
+
+  /** Counts `clearKeychainCache`, one of the two clears a failed persist must skip. */
+  function mockKeychainHelpers() {
+    mock.module('./secureStorage/macOsKeychainHelpers.js', () => ({
+      ...realKeychainHelpers,
+      clearKeychainCache: () => {
+        keychainCacheClears++
+        // The PRISTINE snapshot, not the live namespace: mock.module() has
+        // already replaced the namespace's binding with this very function, so
+        // calling through it would recurse.
+        pristineRealKeychainHelpers.clearKeychainCache()
+      },
     }))
   }
 
@@ -225,5 +259,33 @@ describe('the refresh path persists identity', () => {
       'fake-fresh-access',
     )
     expect(store.claudeAiOauthActive).toBe('uuid-work')
+  })
+
+  /**
+   * The writer reported failure, so nothing reached the store: the caller must
+   * be told the refresh did not happen, and the caches must be left alone
+   * rather than cleared onto a store that was never updated.
+   */
+  test('a refresh whose persist failed resolves false and leaves the stored token alone', async () => {
+    mockKeychainHelpers()
+    // A keyring that refuses the write: `update` reports failure and the store
+    // does not move, which is what a failed `secret-tool store` leaves behind.
+    mockStorage(next => {
+      written.push(next)
+      return { success: false, warning: 'Failed to save OAuth tokens' }
+    })
+    mockRefresh(identitylessRefreshResponse)
+
+    const { checkAndRefreshOAuthTokenIfNeeded } = await importAuthFresh()
+
+    expect(await checkAndRefreshOAuthTokenIfNeeded()).toBe(false)
+    // The write was attempted, and the stale credential is still the stored one.
+    expect(written).toHaveLength(1)
+    expect(store.claudeAiOauth?.refreshToken).toBe('fake-stale-refresh')
+    expect(store.claudeAiOauth?.accessToken).toBe('fake-stale-access')
+    // No cache was cleared after the refresh returned: clearing them would send
+    // the next read back to the store that was never updated.
+    expect(clearsWhenRefreshReturned).toBeGreaterThanOrEqual(0)
+    expect(keychainCacheClears).toBe(clearsWhenRefreshReturned)
   })
 })
