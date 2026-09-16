@@ -105,6 +105,7 @@ import {
 import { tokenCountFromLastAPIResponse } from '../../utils/tokens.js'
 import { getDynamicConfig_BLOCKS_ON_INIT } from '../analytics/growthbook.js'
 import {
+  currentAccountUsageKey,
   currentLimits,
   extractQuotaStatusFromError,
   extractQuotaStatusFromHeaders,
@@ -1734,6 +1735,11 @@ async function* queryModel(
   let stream: Stream<BetaRawMessageStreamEvent> | undefined = undefined
   let streamRequestId: string | null | undefined = undefined
   let clientRequestId: string | undefined = undefined
+  // Account this request's quota headers get filed under. Re-snapshotted at
+  // every request build below; seeded here so an error raised before the first
+  // build (client creation, for one) still lands on a real account rather than
+  // on whichever account a switch has made active by the time we parse it.
+  let requestAccountKey = currentAccountUsageKey()
   let activeApiCallKey: string | null = null
   // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins -- Response is available in supported Node runtimes and is used by the SDK
   let streamResponse: Response | undefined = undefined
@@ -2073,6 +2079,11 @@ async function* queryModel(
 
         // Everything below is synchronous until the SDK request is created,
         // so ownership cannot change between this request build and dispatch.
+        // That is exactly why the quota account key is snapshotted HERE and not
+        // where the response is parsed: switchAccount clears the memoized OAuth
+        // token, so an account switch landing while this request is in flight
+        // would otherwise file its response under the account that switched in.
+        requestAccountKey = currentAccountUsageKey()
         const params = paramsFromContext(context)
         captureAPIRequest(params, options.querySource) // Capture for bug reports
         maxOutputTokens = params.max_tokens
@@ -2909,7 +2920,7 @@ async function* queryModel(
       // eslint-disable-next-line eslint-plugin-n/no-unsupported-features/node-builtins
       const resp = streamResponse as unknown as Response | undefined
       if (resp) {
-        extractQuotaStatusFromHeaders(resp.headers)
+        extractQuotaStatusFromHeaders(resp.headers, requestAccountKey)
         // Store headers for gateway detection
         responseHeaders = resp.headers
       }
@@ -3347,7 +3358,7 @@ async function* queryModel(
         }
 
         if (error instanceof APIError) {
-          extractQuotaStatusFromError(error)
+          extractQuotaStatusFromError(error, requestAccountKey)
         }
 
         const requestId =
@@ -3401,7 +3412,7 @@ async function* queryModel(
 
       // Extract quota status from error headers if it's a rate limit error
       if (error instanceof APIError) {
-        extractQuotaStatusFromError(error)
+        extractQuotaStatusFromError(error, requestAccountKey)
       }
 
       // Extract requestId from stream, error header, or error body

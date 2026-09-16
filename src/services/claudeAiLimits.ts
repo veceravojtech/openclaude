@@ -2,7 +2,7 @@ import { APIError } from '@anthropic-ai/sdk'
 import type { MessageParam } from '@anthropic-ai/sdk/resources/index.mjs'
 import isEqual from 'lodash-es/isEqual.js'
 import { getIsNonInteractiveSession } from '../bootstrap/state.js'
-import { isClaudeAISubscriber } from '../utils/auth.js'
+import { getOauthAccountInfo, isClaudeAISubscriber } from '../utils/auth.js'
 import { getModelBetas } from '../utils/betas.js'
 import { getGlobalConfig, saveGlobalConfig } from '../utils/config.js'
 import { logError } from '../utils/log.js'
@@ -136,31 +136,102 @@ export type ClaudeAILimits = {
   surpassedThreshold?: number
 }
 
-// Exported for testing only
-export let currentLimits: ClaudeAILimits = {
+const DEFAULT_LIMITS: ClaudeAILimits = {
   status: 'allowed',
   unifiedRateLimitFallbackAvailable: false,
   isUsingOverage: false,
 }
+
+// Exported for testing only.
+//
+// This is the ACTIVE account's limits view. It is still a plain module binding
+// reassigned by emitStatusChange, so every existing reader (StatusLine,
+// BuiltinStatusLine, useClaudeAILimits, promptSuggestion, cost, queryModel)
+// keeps working untouched. applyLimitsForAccount is what decides whether a
+// given response is allowed to move it: only a response attributed to the
+// account that is active when it lands may do so.
+export let currentLimits: ClaudeAILimits = { ...DEFAULT_LIMITS }
 
 /**
  * Raw per-window utilization from response headers, tracked on every API
  * response (unlike currentLimits.utilization which is only set when a warning
  * threshold fires). Exposed to statusline scripts via getRawUtilization().
  */
-type RawWindowUtilization = {
+export type RawWindowUtilization = {
   utilization: number // 0-1 fraction
   resets_at: number // unix epoch seconds
 }
-type RawUtilization = {
+export type RawUtilization = {
   five_hour?: RawWindowUtilization
   seven_day?: RawWindowUtilization
 }
-let rawUtilization: RawUtilization = {}
-let rawUtilizationCapturedAt: number | undefined
+
+/**
+ * Slot key for first-party traffic that has no OAuth account behind it
+ * (API-key auth, --bare, or a config without an oauthAccount). Reserved and
+ * deliberately not UUID-shaped, so it can never collide with a real
+ * accountUuid. Single-account API-key sessions therefore keep exactly one slot
+ * and behave as they did before the store was keyed.
+ */
+export const NO_ACCOUNT_USAGE_KEY = 'no-oauth-account'
+
+/**
+ * Shared, frozen empty reading handed back for an account whose quota headers
+ * have not been seen yet. Frozen because it is shared across every such
+ * account; the capture path always assigns a fresh object instead of mutating.
+ */
+const EMPTY_RAW_UTILIZATION: RawUtilization = Object.freeze({})
+
+type AccountQuotaSlot = {
+  raw: RawUtilization
+  /** Epoch ms of the last capture; undefined until headers are seen. */
+  capturedAt: number | undefined
+  limits: ClaudeAILimits
+}
+
+/**
+ * Per-account first-party quota state. The unified rate-limit headers carry no
+ * account identifier, so the key is supplied by the caller from the account
+ * that was active when the REQUEST was built - see currentAccountUsageKey and
+ * the accountKey parameter of extractQuotaStatusFromHeaders.
+ *
+ * Map iteration is insertion-ordered, which is the order listAccountUsageSnapshots
+ * reports: first capture first.
+ */
+const accountQuotaSlots = new Map<string, AccountQuotaSlot>()
+
+/**
+ * The slot key for the account that is active right now.
+ *
+ * Reads getOauthAccountInfo().accountUuid, NOT accountKeyForTokens: that helper
+ * derives its key from tokenAccount/profile on an OAuthTokens object, which
+ * read-back tokens routinely come back without, so it returns undefined exactly
+ * when a key is needed. accountUuid is the identity the config round-trips.
+ */
+export function currentAccountUsageKey(): string {
+  return getOauthAccountInfo()?.accountUuid ?? NO_ACCOUNT_USAGE_KEY
+}
+
+/** Slot for a write; creates it on first use. */
+function writableSlot(accountKey: string): AccountQuotaSlot {
+  const existing = accountQuotaSlots.get(accountKey)
+  if (existing) {
+    return existing
+  }
+  const created: AccountQuotaSlot = {
+    raw: EMPTY_RAW_UTILIZATION,
+    capturedAt: undefined,
+    limits: DEFAULT_LIMITS,
+  }
+  accountQuotaSlots.set(accountKey, created)
+  return created
+}
 
 export function getRawUtilization(): RawUtilization {
-  return rawUtilization
+  return (
+    accountQuotaSlots.get(currentAccountUsageKey())?.raw ??
+    EMPTY_RAW_UTILIZATION
+  )
 }
 
 /**
@@ -168,7 +239,36 @@ export function getRawUtilization(): RawUtilization {
  * Undefined when no utilization headers have been captured this session.
  */
 export function getRawUtilizationCapturedAt(): number | undefined {
-  return rawUtilizationCapturedAt
+  return accountQuotaSlots.get(currentAccountUsageKey())?.capturedAt
+}
+
+export type AccountUsageSnapshot = {
+  /** An account UUID, or NO_ACCOUNT_USAGE_KEY for unattributed traffic. */
+  accountUuid: string
+  raw: RawUtilization
+  capturedAt: number
+}
+
+/**
+ * Every account whose first-party quota headers this process has captured.
+ * Insertion-ordered (first capture first). Accounts with a slot but no capture
+ * yet are omitted, so an entry always carries a real capturedAt.
+ */
+export function listAccountUsageSnapshots(): AccountUsageSnapshot[] {
+  const snapshots: AccountUsageSnapshot[] = []
+  for (const [accountUuid, slot] of accountQuotaSlots) {
+    if (slot.capturedAt === undefined) {
+      continue
+    }
+    snapshots.push({ accountUuid, raw: slot.raw, capturedAt: slot.capturedAt })
+  }
+  return snapshots
+}
+
+/** Test-only: drop every per-account slot and reset the active-account view. */
+export function clearAccountUsageForTests(): void {
+  accountQuotaSlots.clear()
+  currentLimits = { ...DEFAULT_LIMITS }
 }
 
 function extractRawUtilization(headers: globalThis.Headers): RawUtilization {
@@ -204,6 +304,30 @@ export function emitStatusChange(limits: ClaudeAILimits) {
     unifiedRateLimitFallbackAvailable: limits.unifiedRateLimitFallbackAvailable,
     hoursTillReset,
   })
+}
+
+/**
+ * Store newLimits against the account the response belongs to, and fan the
+ * change out only when that account is the one the user is looking at.
+ *
+ * A response from an account that has since been switched away from still
+ * updates its own slot - that is what makes listAccountUsageSnapshots complete -
+ * but it must not move currentLimits or wake the statusListeners, or a stale
+ * in-flight response would repaint the new account's status line with the old
+ * account's quota.
+ */
+function applyLimitsForAccount(
+  accountKey: string,
+  newLimits: ClaudeAILimits,
+): void {
+  const slot = writableSlot(accountKey)
+  if (isEqual(slot.limits, newLimits)) {
+    return
+  }
+  slot.limits = newLimits
+  if (accountKey === currentAccountUsageKey()) {
+    emitStatusChange(newLimits)
+  }
 }
 
 async function makeTestQuery() {
@@ -249,15 +373,21 @@ export async function checkQuotaStatus(): Promise<void> {
     return
   }
 
+  // Snapshot the account BEFORE the round trip, for the same reason queryModel
+  // does: an account switch landing while makeTestQuery is in flight clears the
+  // memoized OAuth token, so a key read after the await would file this
+  // response under whichever account happens to be active by then.
+  const accountKey = currentAccountUsageKey()
+
   try {
     // Make a minimal request to check quota
     const raw = await makeTestQuery()
 
     // Update limits based on the response
-    extractQuotaStatusFromHeaders(raw.headers)
+    extractQuotaStatusFromHeaders(raw.headers, accountKey)
   } catch (error) {
     if (error instanceof APIError) {
-      extractQuotaStatusFromError(error)
+      extractQuotaStatusFromError(error, accountKey)
     }
   }
 }
@@ -465,42 +595,51 @@ function cacheExtraUsageDisabledReason(headers: globalThis.Headers): void {
   }
 }
 
+/**
+ * @param accountKey - slot to attribute this response to, from
+ * currentAccountUsageKey() captured when the REQUEST was built. Required on
+ * purpose: an implicit undefined here is precisely the silent misattribution
+ * the per-account store exists to prevent.
+ */
 export function extractQuotaStatusFromHeaders(
   headers: globalThis.Headers,
+  accountKey: string,
 ): void {
   // Check if we need to process rate limits
   const isSubscriber = isClaudeAISubscriber()
 
   if (!shouldProcessRateLimits(isSubscriber)) {
-    // If we have any rate limit state, clear it
-    rawUtilization = {}
-    rawUtilizationCapturedAt = undefined
-    if (currentLimits.status !== 'allowed' || currentLimits.resetsAt) {
-      const defaultLimits: ClaudeAILimits = {
-        status: 'allowed',
-        unifiedRateLimitFallbackAvailable: false,
-        isUsingOverage: false,
-      }
-      emitStatusChange(defaultLimits)
+    // If we have any rate limit state for this account, clear it
+    const slot = writableSlot(accountKey)
+    slot.raw = EMPTY_RAW_UTILIZATION
+    slot.capturedAt = undefined
+    if (slot.limits.status !== 'allowed' || slot.limits.resetsAt) {
+      applyLimitsForAccount(accountKey, { ...DEFAULT_LIMITS })
     }
     return
   }
 
   // Process headers (applies mocks from /mock-limits command if active)
   const headersToUse = processRateLimitHeaders(headers)
-  rawUtilization = extractRawUtilization(headersToUse)
-  rawUtilizationCapturedAt = Date.now()
+  const slot = writableSlot(accountKey)
+  slot.raw = extractRawUtilization(headersToUse)
+  slot.capturedAt = Date.now()
   const newLimits = computeNewLimitsFromHeaders(headersToUse)
 
   // Cache extra usage status (persists across sessions)
   cacheExtraUsageDisabledReason(headersToUse)
 
-  if (!isEqual(currentLimits, newLimits)) {
-    emitStatusChange(newLimits)
-  }
+  applyLimitsForAccount(accountKey, newLimits)
 }
 
-export function extractQuotaStatusFromError(error: APIError): void {
+/**
+ * @param accountKey - slot to attribute this error to, captured when the
+ * REQUEST was built. See extractQuotaStatusFromHeaders.
+ */
+export function extractQuotaStatusFromError(
+  error: APIError,
+  accountKey: string,
+): void {
   if (
     !shouldProcessRateLimits(isClaudeAISubscriber()) ||
     error.status !== 429
@@ -509,12 +648,16 @@ export function extractQuotaStatusFromError(error: APIError): void {
   }
 
   try {
-    let newLimits = { ...currentLimits }
+    const slot = writableSlot(accountKey)
+    // Seed from the limits already stored for THIS account, not from
+    // currentLimits: a headerless 429 for a switched-away account would
+    // otherwise copy the active account's figures into the other slot.
+    let newLimits: ClaudeAILimits = { ...slot.limits }
     if (error.headers) {
       // Process headers (applies mocks from /mock-limits command if active)
       const headersToUse = processRateLimitHeaders(error.headers)
-      rawUtilization = extractRawUtilization(headersToUse)
-      rawUtilizationCapturedAt = Date.now()
+      slot.raw = extractRawUtilization(headersToUse)
+      slot.capturedAt = Date.now()
       newLimits = computeNewLimitsFromHeaders(headersToUse)
 
       // Cache extra usage status (persists across sessions)
@@ -523,9 +666,7 @@ export function extractQuotaStatusFromError(error: APIError): void {
     // For errors, always set status to rejected even if headers are not present.
     newLimits.status = 'rejected'
 
-    if (!isEqual(currentLimits, newLimits)) {
-      emitStatusChange(newLimits)
-    }
+    applyLimitsForAccount(accountKey, newLimits)
   } catch (e) {
     logError(e as Error)
   }
