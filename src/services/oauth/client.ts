@@ -43,6 +43,23 @@ export function parseScopes(scopeString?: string): string[] {
   return scopeString?.split(' ').filter(Boolean) ?? []
 }
 
+/**
+ * Access-token lifetime assumed when a token response omits `expires_in`,
+ * which RFC 6749 §5.1 only RECOMMENDS.
+ *
+ * One hour is what the MCP OAuth paths already assume for the same omission —
+ * `performMCPXaaAuth` and `MCPOAuthProvider.saveTokens` both fall back to 3600
+ * — and it sits far enough past `isOAuthTokenExpired`'s five-minute buffer that
+ * a token stored under it is not immediately due for another refresh, which
+ * would loop: every pass rotates the refresh token again.
+ *
+ * Guessing short is the safe direction. Guess too short and we refresh earlier
+ * than we had to; guess too long and we park a token the server has already
+ * expired on disk for the rest of the guess, which costs a 401 that only the
+ * forced-refresh path recovers from.
+ */
+const ASSUMED_EXPIRES_IN_SECONDS = 3600
+
 export function buildAuthUrl({
   codeChallenge,
   state,
@@ -147,19 +164,23 @@ export async function refreshOAuthToken(
   refreshToken: string,
   { scopes: requestedScopes }: { scopes?: string[] } = {},
 ): Promise<OAuthTokens> {
+  // Request specific scopes, defaulting to the full Claude AI set. The
+  // backend's refresh-token grant allows scope expansion beyond what the
+  // initial authorize granted (see ALLOWED_SCOPE_EXPANSIONS), so this is
+  // safe even for tokens issued before scopes were added to the app's
+  // registered oauth_scope.
+  //
+  // Hoisted out of the request body because it is also the fallback for a
+  // response that omits `scope` — see where `scopes` is derived below.
+  const effectiveScopes: readonly string[] = requestedScopes?.length
+    ? requestedScopes
+    : CLAUDE_AI_OAUTH_SCOPES
+
   const requestBody = {
     grant_type: 'refresh_token',
     refresh_token: refreshToken,
     client_id: getOauthConfig().CLIENT_ID,
-    // Request specific scopes, defaulting to the full Claude AI set. The
-    // backend's refresh-token grant allows scope expansion beyond what the
-    // initial authorize granted (see ALLOWED_SCOPE_EXPANSIONS), so this is
-    // safe even for tokens issued before scopes were added to the app's
-    // registered oauth_scope.
-    scope: (requestedScopes?.length
-      ? requestedScopes
-      : CLAUDE_AI_OAUTH_SCOPES
-    ).join(' '),
+    scope: effectiveScopes.join(' '),
   }
 
   try {
@@ -179,8 +200,28 @@ export async function refreshOAuthToken(
       expires_in: expiresIn,
     } = data
 
-    const expiresAt = Date.now() + expiresIn * 1000
-    const scopes = parseScopes(data.scope)
+    // Both fields are optional on the wire and BOTH are load-bearing for the
+    // write that follows. `shouldPersistTokens` declines an empty scope set
+    // (`shouldUseClaudeAIAuth` needs the inference scope) and a falsy
+    // `expiresAt` (NaN is falsy), and `saveOAuthTokensUnlocked` answers a
+    // decline with success while writing nothing — which would strand the
+    // refresh token this response just rotated away, dead, on disk.
+    //
+    // RFC 6749 §5.1 permits omitting `scope` when the granted scope is the
+    // requested scope, so the requested set is the correct fallback rather
+    // than a wider hardcoded one; `expires_in` is only RECOMMENDED. A
+    // non-numeric or non-positive value gets the same treatment as an absent
+    // one: zero or negative would store an already-expired token and drive an
+    // immediate refresh loop, rotating the token again on every pass.
+    const usableExpiresIn =
+      typeof expiresIn === 'number' &&
+      Number.isFinite(expiresIn) &&
+      expiresIn > 0
+        ? expiresIn
+        : ASSUMED_EXPIRES_IN_SECONDS
+    const expiresAt = Date.now() + usableExpiresIn * 1000
+    const responseScopes = parseScopes(data.scope)
+    const scopes = responseScopes.length ? responseScopes : [...effectiveScopes]
 
     logEvent('tengu_oauth_token_refresh_success', {})
 
