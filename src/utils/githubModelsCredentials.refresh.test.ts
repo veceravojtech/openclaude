@@ -6,6 +6,12 @@ import {
 import * as realDeviceFlow from '../services/github/deviceFlow.js'
 import * as realSecureStorage from './secureStorage/index.js'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealSecureStorage = { ...realSecureStorage }
+const pristineRealDeviceFlow = { ...realDeviceFlow }
+
 async function importFreshModule() {
   mock.restore()
   return import(`./githubModelsCredentials.ts?ts=${Date.now()}-${Math.random()}`)
@@ -31,8 +37,8 @@ describe('refreshGithubModelsTokenIfNeeded', () => {
   afterEach(() => {
     try {
       mock.restore()
-      mock.module('./secureStorage/index.js', () => realSecureStorage)
-      mock.module('../services/github/deviceFlow.js', () => realDeviceFlow)
+      mock.module('./secureStorage/index.js', () => ({ ...pristineRealSecureStorage }))
+      mock.module('../services/github/deviceFlow.js', () => ({ ...pristineRealDeviceFlow }))
       for (const [k, v] of Object.entries(orig)) {
         if (v === undefined) {
           delete process.env[k as keyof typeof orig]

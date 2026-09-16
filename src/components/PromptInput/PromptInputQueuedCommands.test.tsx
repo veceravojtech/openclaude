@@ -8,6 +8,11 @@ import { renderToString } from '../../utils/staticRender.js'
 import * as realCommandQueue from '../../hooks/useCommandQueue.js'
 import { AppStateProvider } from 'src/state/AppState.js'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealCommandQueue = { ...realCommandQueue }
+
 describe('PromptInputQueuedCommands', () => {
   beforeEach(async () => {
     await acquireSharedMutationLock('components/PromptInput/PromptInputQueuedCommands.test.tsx')
@@ -25,7 +30,7 @@ describe('PromptInputQueuedCommands', () => {
   afterEach(() => {
     try {
       mock.restore()
-      mock.module('../../hooks/useCommandQueue.js', () => realCommandQueue)
+      mock.module('../../hooks/useCommandQueue.js', () => ({ ...pristineRealCommandQueue }))
     } finally {
       releaseSharedMutationLock()
     }

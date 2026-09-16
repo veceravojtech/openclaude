@@ -18,6 +18,11 @@ import type { AgentDefinition } from '../../tools/AgentTool/loadAgentsDir.js'
 import * as realUseMergedTools from '../../hooks/useMergedTools.js'
 import type { ModeState } from './types.js'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealUseMergedTools = { ...realUseMergedTools }
+
 const SYNC_START = '\x1B[?2026h'
 const SYNC_END = '\x1B[?2026l'
 
@@ -155,7 +160,7 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
-    mock.module('../../hooks/useMergedTools.js', () => realUseMergedTools)
+    mock.module('../../hooks/useMergedTools.js', () => ({ ...pristineRealUseMergedTools }))
   } finally {
     releaseSharedMutationLock()
   }

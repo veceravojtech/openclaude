@@ -6,6 +6,11 @@ import * as realOs from 'node:os'
 import * as realCodexCredentials from '../../utils/codexCredentials.js'
 import { acquireEnvMutex, releaseEnvMutex } from '../../entrypoints/sdk/shared.js'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealCodexCredentials = { ...realCodexCredentials }
+
 type ProviderConfigModule = typeof import('./providerConfig.js')
 
 function importFreshProviderConfig(
@@ -27,7 +32,7 @@ describe('resolveCodexApiCredentials with secure storage', () => {
   afterEach(() => {
     try {
       mock.restore()
-      mock.module('../../utils/codexCredentials.js', () => realCodexCredentials)
+      mock.module('../../utils/codexCredentials.js', () => ({ ...pristineRealCodexCredentials }))
     } finally {
       releaseEnvMutex()
     }

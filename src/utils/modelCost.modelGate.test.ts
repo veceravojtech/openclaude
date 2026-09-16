@@ -17,6 +17,11 @@ import * as realFastMode from './fastMode.js'
 import * as realModel from './model/model.js'
 import { resetSettingsCache } from './settings/settingsCache.js'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealFastMode = { ...realFastMode }
+
 const realModelSnapshot = { ...realModel }
 
 type PricingOverride = {
@@ -51,7 +56,7 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
-    mock.module('./fastMode.js', () => realFastMode)
+    mock.module('./fastMode.js', () => ({ ...pristineRealFastMode }))
     mock.module('./model/model.js', () => realModelSnapshot)
     setAllowedSettingSources(originalSources)
     setFlagSettingsPath(originalFlagPath)
@@ -223,7 +228,7 @@ test('all-zero exact override is authoritative for unknown and fast-mode known m
 
 test('custom pricing matches exact resolved ids only, including unusual own keys', async () => {
   mock.restore()
-  mock.module('./fastMode.js', () => realFastMode)
+  mock.module('./fastMode.js', () => ({ ...pristineRealFastMode }))
   mock.module('./model/model.js', () => realModelSnapshot)
   const configured = {
     inputTokens: 7,

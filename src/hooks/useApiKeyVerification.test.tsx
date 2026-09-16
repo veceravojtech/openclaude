@@ -11,6 +11,13 @@ import {
 } from '../test/sharedMutationLock.js'
 import * as realAuth from '../utils/auth.js'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealAuth = { ...realAuth }
+const pristineRealState = { ...realState }
+const pristineRealClaudeApi = { ...realClaudeApi }
+
 type AuthState = {
   anthropicAuthEnabled: boolean
   claudeSubscriber: boolean
@@ -67,9 +74,9 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
-    mock.module('../utils/auth.js', () => realAuth)
-    mock.module('../bootstrap/state.js', () => realState)
-    mock.module('../services/api/claude.js', () => realClaudeApi)
+    mock.module('../utils/auth.js', () => ({ ...pristineRealAuth }))
+    mock.module('../bootstrap/state.js', () => ({ ...pristineRealState }))
+    mock.module('../services/api/claude.js', () => ({ ...pristineRealClaudeApi }))
   } finally {
     releaseSharedMutationLock()
   }

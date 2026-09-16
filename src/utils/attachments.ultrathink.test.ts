@@ -5,6 +5,11 @@ import {
 } from '../test/sharedMutationLock.js'
 import * as realThinking from './thinking.js'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealThinking = { ...realThinking }
+
 let getUltrathinkEffortAttachment: typeof import('./attachments.js').getUltrathinkEffortAttachment
 let savedEnv: {
   disableAttachments: string | undefined
@@ -42,7 +47,7 @@ afterEach(() => {
     }
     mock.restore()
     // Bun's mock.restore() does not unregister module mocks.
-    mock.module('./thinking.js', () => realThinking)
+    mock.module('./thinking.js', () => ({ ...pristineRealThinking }))
   } finally {
     releaseSharedMutationLock()
   }

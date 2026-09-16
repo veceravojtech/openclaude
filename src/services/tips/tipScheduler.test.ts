@@ -9,6 +9,14 @@ import * as actualSettings from '../../utils/settings/settings.js'
 import type { Tip } from './types.js'
 import * as actualTipRegistry from './tipRegistry.js'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineActualSettings = { ...actualSettings }
+const pristineActualConfig = { ...actualConfig }
+const pristineActualTipRegistry = { ...actualTipRegistry }
+const pristineActualAnalytics = { ...actualAnalytics }
+
 const settingsRef: {
   value: {
     sponsoredTipsEnabled?: boolean
@@ -53,10 +61,10 @@ mock.module('../analytics/index.js', () => ({
 afterAll(() => {
   try {
     mock.restore()
-    mock.module('../../utils/settings/settings.js', () => actualSettings)
-    mock.module('../../utils/config.js', () => actualConfig)
-    mock.module('./tipRegistry.js', () => actualTipRegistry)
-    mock.module('../analytics/index.js', () => actualAnalytics)
+    mock.module('../../utils/settings/settings.js', () => ({ ...pristineActualSettings }))
+    mock.module('../../utils/config.js', () => ({ ...pristineActualConfig }))
+    mock.module('./tipRegistry.js', () => ({ ...pristineActualTipRegistry }))
+    mock.module('../analytics/index.js', () => ({ ...pristineActualAnalytics }))
   } finally {
     releaseSharedMutationLock()
   }

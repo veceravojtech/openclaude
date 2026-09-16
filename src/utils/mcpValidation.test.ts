@@ -5,6 +5,14 @@ import * as realTokenEstimation from '../services/tokenEstimation.js'
 import * as realImageResizer from './imageResizer.js'
 import * as realLog from './log.js'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealGrowthbook = { ...realGrowthbook }
+const pristineRealTokenEstimation = { ...realTokenEstimation }
+const pristineRealImageResizer = { ...realImageResizer }
+const pristineRealLog = { ...realLog }
+
 // 60_000-char inputs: real roughTokenCountEstimation returns 15_000, which exceeds
 // DEFAULT_MAX_MCP_OUTPUT_TOKENS * MCP_TOKEN_COUNT_THRESHOLD_FACTOR (25_000 * 0.5 = 12_500),
 // so the threshold-check is bypassed and countMessagesTokensWithAPI is exercised —
@@ -35,10 +43,10 @@ function applyMocks() {
 
 function restoreMocks() {
   mock.restore()
-  mock.module('../services/analytics/growthbook.js', () => realGrowthbook)
-  mock.module('../services/tokenEstimation.js', () => realTokenEstimation)
-  mock.module('./imageResizer.js', () => realImageResizer)
-  mock.module('./log.js', () => realLog)
+  mock.module('../services/analytics/growthbook.js', () => ({ ...pristineRealGrowthbook }))
+  mock.module('../services/tokenEstimation.js', () => ({ ...pristineRealTokenEstimation }))
+  mock.module('./imageResizer.js', () => ({ ...pristineRealImageResizer }))
+  mock.module('./log.js', () => ({ ...pristineRealLog }))
 }
 
 // ---------- SEC-04: fail-closed on null ----------

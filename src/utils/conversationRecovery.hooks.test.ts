@@ -14,6 +14,12 @@ import {
 import * as realProviders from './model/providers.js'
 import * as realSessionStart from './sessionStart.js'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealProviders = { ...realProviders }
+const pristineRealSessionStart = { ...realSessionStart }
+
 const tempDirs: string[] = []
 const originalEnv = { ...process.env }
 const sessionId = '00000000-0000-4000-8000-000000001999'
@@ -66,8 +72,8 @@ beforeEach(async () => {
 afterEach(async () => {
   try {
     mock.restore()
-    mock.module('./model/providers.js', () => realProviders)
-    mock.module('./sessionStart.js', () => realSessionStart)
+    mock.module('./model/providers.js', () => ({ ...pristineRealProviders }))
+    mock.module('./sessionStart.js', () => ({ ...pristineRealSessionStart }))
     providerForTest = 'firstParty'
     process.env = { ...originalEnv }
     await Promise.all(tempDirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })))

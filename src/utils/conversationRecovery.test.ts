@@ -14,6 +14,12 @@ import * as realUdsClient from './udsClient.js'
 import * as realProviders from './model/providers.js'
 import type { NormalizedMessage } from '../types/message.js'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealUdsClient = { ...realUdsClient }
+const pristineRealProviders = { ...realProviders }
+
 // Typed fixture for the thinking-strip gate tests. The full NormalizedMessage
 // shape carries fields these tests don't exercise, so the cast is centralized
 // here once rather than re-spelled as `as any` at each call site.
@@ -150,8 +156,8 @@ afterEach(async () => {
     clearInvokedSkills()
     // Bun 1.3.13 can leave restored module instances visible to later test
     // files, so re-register full exports after using partial module mocks.
-    mock.module('./udsClient.js', () => realUdsClient)
-    mock.module('./model/providers.js', () => realProviders)
+    mock.module('./udsClient.js', () => ({ ...pristineRealUdsClient }))
+    mock.module('./model/providers.js', () => ({ ...pristineRealProviders }))
     if (originalSimple === undefined) {
       delete process.env.CLAUDE_CODE_SIMPLE
     } else {

@@ -9,6 +9,12 @@ import {
 } from '../integrations/index.js'
 import * as realAuth from './auth.js'
 import * as realThinking from './thinking.js'
+
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealAuth = { ...realAuth }
+const pristineRealThinking = { ...realThinking }
 const realModelSupportOverridesModule = await import(
   `./model/modelSupportOverrides.js?real=${Date.now()}-${Math.random()}`,
 )
@@ -77,8 +83,8 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
-    mock.module('./auth.js', () => realAuth)
-    mock.module('./thinking.js', () => realThinking)
+    mock.module('./auth.js', () => ({ ...pristineRealAuth }))
+    mock.module('./thinking.js', () => ({ ...pristineRealThinking }))
     mock.module(
       './model/modelSupportOverrides.js',
       () => realModelSupportOverrides,

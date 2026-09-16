@@ -26,6 +26,12 @@ const realDebug = await import('../../utils/debug.js')
 const realLog = await import('../../utils/log.js')
 const realBrowser = await import('../../utils/browser.js')
 const realXaaIdpLogin = await import('./xaaIdpLogin.js')
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealSecureStorage = { ...realSecureStorage }
+const pristineRealKeychainHelpers = { ...realKeychainHelpers }
+const pristineRealXaaIdpLogin = { ...realXaaIdpLogin }
 const originalLock = realLockfile.lock
 const originalSleep = realSleep.sleep
 const originalLogForDebugging = realDebug.logForDebugging
@@ -318,10 +324,10 @@ afterEach(async () => {
 })
 
 afterAll(() => {
-  mock.module('../../utils/secureStorage/index.js', () => realSecureStorage)
+  mock.module('../../utils/secureStorage/index.js', () => ({ ...pristineRealSecureStorage }))
   mock.module(
     '../../utils/secureStorage/macOsKeychainHelpers.js',
-    () => realKeychainHelpers,
+    () => ({ ...pristineRealKeychainHelpers }),
   )
   mock.module('../../utils/lockfile.js', () => ({
     ...realLockfile,
@@ -343,7 +349,7 @@ afterAll(() => {
     ...realBrowser,
     openBrowser: originalOpenBrowser,
   }))
-  mock.module('./xaaIdpLogin.js', () => realXaaIdpLogin)
+  mock.module('./xaaIdpLogin.js', () => ({ ...pristineRealXaaIdpLogin }))
 })
 
 test(

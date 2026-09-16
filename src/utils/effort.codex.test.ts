@@ -15,6 +15,14 @@ import * as actualGrowthbook from 'src/services/analytics/growthbook.js'
 import * as actualModelSupportOverrides from './model/modelSupportOverrides.js'
 import type { APIProvider } from './model/providers.js'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineActualModelSupportOverrides = { ...actualModelSupportOverrides }
+const pristineActualAuth = { ...actualAuth }
+const pristineActualThinking = { ...actualThinking }
+const pristineActualGrowthbook = { ...actualGrowthbook }
+
 type MockedThirdPartyCapability = 'effort' | 'max_effort' | 'xhigh_effort'
 
 const originalEnv = { ...process.env }
@@ -44,10 +52,10 @@ const routingEnvKeys = [
 ] as const
 
 function restoreMockedModulesToActual(): void {
-  mock.module('./model/modelSupportOverrides.js', () => actualModelSupportOverrides)
-  mock.module('./auth.js', () => actualAuth)
-  mock.module('./thinking.js', () => actualThinking)
-  mock.module('src/services/analytics/growthbook.js', () => actualGrowthbook)
+  mock.module('./model/modelSupportOverrides.js', () => ({ ...pristineActualModelSupportOverrides }))
+  mock.module('./auth.js', () => ({ ...pristineActualAuth }))
+  mock.module('./thinking.js', () => ({ ...pristineActualThinking }))
+  mock.module('src/services/analytics/growthbook.js', () => ({ ...pristineActualGrowthbook }))
 }
 
 function restoreProcessEnv(): void {

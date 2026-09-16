@@ -42,6 +42,11 @@ import * as realSecureStorage from '../../utils/secureStorage/index.js'
 import type { SecureStorageData } from '../../utils/secureStorage/index.js'
 import { plainTextStorage } from '../../utils/secureStorage/plainTextStorage.js'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealSecureStorage = { ...realSecureStorage }
+
 const HOUR = 60 * 60 * 1000
 
 function profileFor(who: string): OAuthProfileResponse {
@@ -128,7 +133,7 @@ describe('a refresh-token login for a second account', () => {
   afterEach(() => {
     try {
       mock.restore()
-      mock.module('../../utils/secureStorage/index.js', () => realSecureStorage)
+      mock.module('../../utils/secureStorage/index.js', () => ({ ...pristineRealSecureStorage }))
       setClaudeConfigHomeDirForTesting(undefined)
       rmSync(tmpRoot, { recursive: true, force: true })
     } finally {

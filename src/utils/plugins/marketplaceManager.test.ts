@@ -27,6 +27,11 @@ import type { MarketplaceSource } from './schemas.js'
 // query string as a distinct module id that bypasses other test files' mock.module registrations).
 import { _test, removeMarketplaceSource, getMarketplaceCacheOnly, getPluginByIdCacheOnly } from './marketplaceManager.js?bust=this-test-needs-the-real-module'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealAxios = { ...realAxios }
+
 const { loadAndCacheMarketplace } = _test
 
 /**
@@ -297,7 +302,7 @@ describe('loadAndCacheMarketplace — rename failure fallback (EXDEV)', () => {
   })
 
   afterAll(() => {
-    mock.module('axios', () => realAxios)
+    mock.module('axios', () => ({ ...pristineRealAxios }))
   })
 
   beforeEach(() => {

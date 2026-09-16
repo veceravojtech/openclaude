@@ -11,6 +11,11 @@ import type * as MacOsKeychainHelpers from "./macOsKeychainHelpers.js";
 import type { linuxSecretStorage as LinuxSecretStorage } from "./linuxSecretStorage.js";
 import type { windowsCredentialStorage as WindowsCredentialStorage } from "./windowsCredentialStorage.js";
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealExeca = { ...realExeca }
+
 type MockExecaOptions = {
   input?: string;
   reject?: boolean;
@@ -130,7 +135,7 @@ describe("Secure Storage Platform Implementations", () => {
 
   afterAll(() => {
     try {
-      mock.module("execa", () => realExeca);
+      mock.module("execa", () => ({ ...pristineRealExeca }));
       if (realEnvUtils) {
         mock.module("../envUtils.js", () => realEnvUtils);
       }

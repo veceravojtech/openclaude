@@ -18,6 +18,17 @@ import * as realModalContext from '../../context/modalContext.js'
 import * as realLogSelector from '../../components/LogSelector.js'
 import * as realReplayTimeline from './ReplayTimeline.js'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealGetWorktreePaths = { ...realGetWorktreePaths }
+const pristineRealSessionStorage = { ...realSessionStorage }
+const pristineRealReplayIndex = { ...realReplayIndex }
+const pristineRealUseTerminalSize = { ...realUseTerminalSize }
+const pristineRealModalContext = { ...realModalContext }
+const pristineRealLogSelector = { ...realLogSelector }
+const pristineRealReplayTimeline = { ...realReplayTimeline }
+
 type LogSelectorProps = {
   logs: LogOption[]
   onCancel: () => void
@@ -154,13 +165,13 @@ describe('/replay command', () => {
   afterEach(() => {
     try {
       mock.restore()
-      mock.module('../../utils/getWorktreePaths.js', () => realGetWorktreePaths)
-      mock.module('../../utils/sessionStorage.js', () => realSessionStorage)
-      mock.module('../../utils/replayIndex.js', () => realReplayIndex)
-      mock.module('../../hooks/useTerminalSize.js', () => realUseTerminalSize)
-      mock.module('../../context/modalContext.js', () => realModalContext)
-      mock.module('../../components/LogSelector.js', () => realLogSelector)
-      mock.module('./ReplayTimeline.js', () => realReplayTimeline)
+      mock.module('../../utils/getWorktreePaths.js', () => ({ ...pristineRealGetWorktreePaths }))
+      mock.module('../../utils/sessionStorage.js', () => ({ ...pristineRealSessionStorage }))
+      mock.module('../../utils/replayIndex.js', () => ({ ...pristineRealReplayIndex }))
+      mock.module('../../hooks/useTerminalSize.js', () => ({ ...pristineRealUseTerminalSize }))
+      mock.module('../../context/modalContext.js', () => ({ ...pristineRealModalContext }))
+      mock.module('../../components/LogSelector.js', () => ({ ...pristineRealLogSelector }))
+      mock.module('./ReplayTimeline.js', () => ({ ...pristineRealReplayTimeline }))
     } finally {
       lastLogSelectorProps = null
     }

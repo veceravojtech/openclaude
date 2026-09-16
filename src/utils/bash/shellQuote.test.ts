@@ -5,6 +5,11 @@ import {
 } from '../../test/sharedMutationLock.js'
 import * as realLog from '../log.js'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealLog = { ...realLog }
+
 let importCounter = 0
 
 beforeEach(async () => {
@@ -25,7 +30,7 @@ async function importShellQuoteWithLogSpy(
 afterEach(() => {
   try {
     mock.restore()
-    mock.module('../log.js', () => realLog)
+    mock.module('../log.js', () => ({ ...pristineRealLog }))
   } finally {
     releaseSharedMutationLock()
   }

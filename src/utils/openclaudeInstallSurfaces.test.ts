@@ -13,6 +13,12 @@ import * as realEnvUtils from './envUtils.js'
 import * as realExecFileNoThrow from './execFileNoThrow.js'
 import * as realDownload from './nativeInstaller/download.js'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealEnv = { ...realEnv }
+const pristineRealEnvUtils = { ...realEnvUtils }
+
 const originalEnv = { ...process.env }
 const originalMacro = (globalThis as Record<string, unknown>).MACRO
 
@@ -130,8 +136,8 @@ afterEach(() => {
     npmUninstallPackages.length = 0
     recordedDownloadCalls = null
     mock.restore()
-    mock.module('../utils/env.js', () => realEnv)
-    mock.module('./envUtils.js', () => realEnvUtils)
+    mock.module('../utils/env.js', () => ({ ...pristineRealEnv }))
+    mock.module('./envUtils.js', () => ({ ...pristineRealEnvUtils }))
   } finally {
     releaseSharedMutationLock()
   }

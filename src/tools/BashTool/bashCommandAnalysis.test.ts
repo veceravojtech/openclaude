@@ -8,6 +8,11 @@ import { PARSE_ABORTED } from '../../utils/bash/parser.js'
 import * as realDebug from '../../utils/debug.js'
 import { analyzeBashCommand } from './bashCommandAnalysis.js'
 
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealDebug = { ...realDebug }
+
 let importCounter = 0
 
 beforeEach(async () => {
@@ -30,7 +35,7 @@ async function importAnalysisWithDebugSpy(
 afterEach(() => {
   try {
     mock.restore()
-    mock.module('../../utils/debug.js', () => realDebug)
+    mock.module('../../utils/debug.js', () => ({ ...pristineRealDebug }))
   } finally {
     releaseSharedMutationLock()
   }
