@@ -72,6 +72,7 @@ import { logError } from './log.js'
 import { memoizeWithTTLAsync } from './memoize.js'
 import {
   getSecureStorage,
+  readSecureStorageResult,
   type SecureStorageData,
 } from './secureStorage/index.js'
 import {
@@ -1317,8 +1318,26 @@ export function saveOAuthTokensUnlocked(tokens: OAuthTokens): {
     secureStorage.name as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
 
   try {
+    const stored = readSecureStorageResult(secureStorage)
+    if (stored.status === 'unreadable') {
+      // "I could not be read" is NOT "nothing is stored". This is a whole-blob
+      // read-modify-write, so reconciling onto `{}` here writes one anonymous
+      // account over every account the store still holds — plus `codex`,
+      // `mcpOAuth` and `pluginSecrets` — and returns success while doing it.
+      // A keyring that went away must cost this refresh, never the
+      // credentials; the caches below are deliberately left alone, since
+      // clearing them would send the next read back to a store that nothing
+      // updated.
+      logEvent('tengu_oauth_tokens_save_skipped_unreadable', { storageBackend })
+      return {
+        success: false,
+        warning:
+          'Could not read the existing credentials, so they were left unchanged.',
+      }
+    }
+
     const updateStatus = secureStorage.update(
-      applyTokensToAccounts(secureStorage.read() || {}, tokens),
+      applyTokensToAccounts(stored.status === 'ok' ? stored.data : {}, tokens),
     )
 
     if (updateStatus.success) {

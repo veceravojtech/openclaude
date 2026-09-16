@@ -8,7 +8,11 @@ import {
   jsonStringify,
   writeFileSync_DEPRECATED,
 } from '../slowOperations.js'
-import type { SecureStorage, SecureStorageData } from './index.js'
+import type {
+  SecureStorage,
+  SecureStorageData,
+  SecureStorageReadResult,
+} from './index.js'
 
 function getStoragePath(): { storageDir: string; storagePath: string } {
   const storageDir = getClaudeConfigHomeDir()
@@ -16,20 +20,60 @@ function getStoragePath(): { storageDir: string; storagePath: string } {
   return { storageDir, storagePath: join(storageDir, storageFileName) }
 }
 
+/**
+ * Read the file, reporting WHY it produced nothing.
+ *
+ * ENOENT is the only condition that means "nothing is stored". EACCES, EIO, a
+ * directory where the file should be, and a payload that no longer parses all
+ * mean the credentials may still be there and we could not see them — which is
+ * not something a writer may reconcile over.
+ */
+function readFileResult(): SecureStorageReadResult {
+  // sync IO: called from sync context (SecureStorage interface)
+  const { storagePath } = getStoragePath()
+  let data: string
+  try {
+    data = getFsImplementation().readFileSync(storagePath, {
+      encoding: 'utf8',
+    })
+  } catch (e: unknown) {
+    if (getErrnoCode(e) === 'ENOENT') {
+      return { status: 'absent' }
+    }
+    return {
+      status: 'unreadable',
+      reason: 'the credentials file could not be read',
+    }
+  }
+
+  let parsed: SecureStorageData | null | undefined
+  try {
+    parsed = jsonParse(data)
+  } catch {
+    return {
+      status: 'unreadable',
+      reason: 'the credentials file is not valid JSON',
+    }
+  }
+  if (parsed === null || parsed === undefined) {
+    return {
+      status: 'unreadable',
+      reason: 'the credentials file parsed to nothing',
+    }
+  }
+  return { status: 'ok', data: parsed }
+}
+
 export const plainTextStorage = {
   name: 'plaintext',
+  // Exact projection of `readFileResult`, `null` for a miss AND for a failure;
+  // the distinction lives on `readResult` alone. See the note on
+  // `SecureStorage.readResult` for why this contract is kept lossy.
   read(): SecureStorageData | null {
-    // sync IO: called from sync context (SecureStorage interface)
-    const { storagePath } = getStoragePath()
-    try {
-      const data = getFsImplementation().readFileSync(storagePath, {
-        encoding: 'utf8',
-      })
-      return jsonParse(data)
-    } catch {
-      return null
-    }
+    const result = readFileResult()
+    return result.status === 'ok' ? result.data : null
   },
+  readResult: readFileResult,
   async readAsync(): Promise<SecureStorageData | null> {
     const { storagePath } = getStoragePath()
     try {

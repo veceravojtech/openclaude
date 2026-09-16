@@ -1,5 +1,6 @@
 import type { OAuthTokens } from '../../services/oauth/types.js'
 import { createFallbackStorage } from './fallbackStorage.js'
+export { readSecureStorageResult } from './fallbackStorage.js'
 import { macOsKeychainStorage } from './macOsKeychainStorage.js'
 import { linuxSecretStorage } from './linuxSecretStorage.js'
 import { windowsCredentialStorage } from './windowsCredentialStorage.js'
@@ -61,9 +62,39 @@ export interface SecureStorageData {
   pluginSecrets?: Record<string, Record<string, string>>
 }
 
+/**
+ * The outcome of a synchronous read, with "nothing is stored" and "the store
+ * could not be read" as SEPARATE inhabitants of the type.
+ *
+ * `read` collapses both into `null` and `createFallbackStorage` collapsed them
+ * further into `{}`, so a writer doing a whole-blob read-modify-write could not
+ * tell a first run from a keyring that had just gone away — and reconciling
+ * onto `{}` writes an anonymous blob over every stored account, plus `codex`,
+ * `mcpOAuth` and `pluginSecrets`, while reporting success.
+ */
+export type SecureStorageReadResult =
+  | { status: 'ok'; data: SecureStorageData }
+  | { status: 'absent' }
+  | { status: 'unreadable'; reason: string }
+
 export interface SecureStorage {
   name: string
   read(): SecureStorageData | null
+  /**
+   * The same read as `read`, reporting WHY it produced nothing.
+   *
+   * Additive on purpose. `read` keeps its exact contract — `null` for a miss
+   * AND for a failure — because callers depend on that lossiness: notably
+   * `createFallbackStorage`'s `update`, which decides whether to delete the
+   * primary entry from `primary.read() !== null` and must keep declining that
+   * delete when the primary merely failed to answer. The distinction lives on
+   * this channel alone; anything consuming `read` behaves as it always has.
+   *
+   * Optional because a backend that cannot yet tell a miss from a failure must
+   * not claim it can — `readSecureStorageResult` falls back to `read` for
+   * those, which preserves their pre-existing behaviour exactly.
+   */
+  readResult?(): SecureStorageReadResult
   readAsync(): Promise<SecureStorageData | null>
   update(data: SecureStorageData): { success: boolean; warning?: string }
   delete(): boolean
@@ -72,6 +103,10 @@ export interface SecureStorage {
 const unavailableSecureStorage: SecureStorage = {
   name: 'unavailable-secure-storage',
   read: () => null,
+  // ABSENT rather than unreadable: there is no store here to have failed, and
+  // classifying it as a failure would stop callers ever reaching `update`,
+  // which is the thing that explains the situation to the user.
+  readResult: () => ({ status: 'absent' }),
   readAsync: async () => null,
   update: () => ({
     success: false,
