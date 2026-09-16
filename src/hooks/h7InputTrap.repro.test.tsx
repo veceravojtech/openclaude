@@ -235,6 +235,7 @@ async function renderNavigation(
   overlayId?: string,
 ): Promise<{
   press: (event: KeyboardEvent) => Promise<void>
+  typeRaw: (text: string) => Promise<void>
   state: () => ViewState
   cleanup: () => Promise<void>
 }> {
@@ -293,6 +294,13 @@ async function renderNavigation(
       async press(event) {
         handler!(event)
         await Bun.sleep(30)
+      },
+      // The OTHER delivery path, and the one the running CLI uses: a real
+      // keystroke down ink's stdin pipeline into the hook's own `useInput`
+      // bridge, rather than a `handleKeyDown` a parent kept a reference to.
+      async typeRaw(text) {
+        io.raw.stdin.write(text)
+        await Bun.sleep(60)
       },
       state: () => latest,
       cleanup: teardown,
@@ -731,6 +739,60 @@ test('S6d: f with no overlay and an idle prompt still opens the transcript', asy
 
     expect(mounted.state().viewingAgentTaskId).toBe(task.id)
     expect(mounted.state().viewSelectionMode).toBe('viewing-agent')
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// S6e/S6f — the same guard down the OTHER delivery path. S6–S6d call
+// `handleKeyDown` the way every case above does; the running CLI does not. It
+// reaches this hook through the `useInput` bridge at the bottom of
+// `useBackgroundTaskNavigation`, and that bridge subscribes ONCE on mount while
+// the dialog registers its overlay LATER. So "the branch stands down" is only
+// true of the real path if the bridge dispatches to the current render's
+// closure rather than the one it was mounted with — `useInput` routes through
+// `useEventCallback` precisely so it does. These two pin that end-to-end
+// instead of trusting it: a raw 'k' arrives, the hook consults an overlay that
+// was registered after subscription, and stands down.
+//
+// S6f is S6e's delivery control and is why S6e cannot pass vacuously: the same
+// raw keystroke down the same pipeline, with no overlay, must still kill. If
+// the write never reached the bridge, S6f is the test that fails.
+// ---------------------------------------------------------------------------
+test('S6e: a raw k through the useInput bridge respects an overlay registered after mount', async () => {
+  const { task, lifecycleAbortController } = createTeammateTask()
+  const mounted = await renderNavigation(
+    selectingState(task),
+    isPromptTypingSuppressionActive(false, '', false),
+    false,
+    'history-search',
+  )
+  try {
+    expect(mounted.state().modalOverlayActive).toBe(true)
+
+    await mounted.typeRaw('k')
+
+    expect(lifecycleAbortController.signal.aborted).toBe(false)
+    expect(mounted.state().runningTeammateIds).toBe(task.id)
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+test('S6f: a raw k through the useInput bridge still kills with no overlay', async () => {
+  const { task, lifecycleAbortController } = createTeammateTask()
+  const mounted = await renderNavigation(
+    selectingState(task),
+    isPromptTypingSuppressionActive(false, '', false),
+  )
+  try {
+    expect(mounted.state().modalOverlayActive).toBe(false)
+
+    await mounted.typeRaw('k')
+
+    expect(lifecycleAbortController.signal.aborted).toBe(true)
+    expect(mounted.state().runningTeammateIds).toBe('')
   } finally {
     await mounted.cleanup()
   }
