@@ -1651,9 +1651,24 @@ async function checkAndRefreshOAuthTokenIfNeededImpl(
         ? undefined
         : lockedTokens.scopes,
     })
+    // `refreshOAuthToken` returns no `tokenAccount` when the token endpoint
+    // omits `account`, and no `profile` when the profile round-trip was
+    // skipped — the routine case — so this was the one production caller that
+    // handed the writer a blob carrying no account identity at all.
+    // `applyTokensToAccounts` restores identity from the stored mirror, but
+    // only when its OWN read of the store succeeds; `lockedTokens` is the read
+    // this function already did under the lock, so carrying its identity keeps
+    // the write on the user's own account even when that second read comes
+    // back empty. It also gives `accountKeyForTokens` a real UUID for this
+    // caller, which is what lets a writer-side identity guard land later.
+    const identifiedTokens: OAuthTokens = {
+      ...refreshedTokens,
+      tokenAccount: refreshedTokens.tokenAccount ?? lockedTokens.tokenAccount,
+      profile: refreshedTokens.profile ?? lockedTokens.profile,
+    }
     // Unlocked on purpose: the config-directory lock taken above is the same
     // one the locked saver would take, and it is not reentrant.
-    saveOAuthTokensUnlocked(refreshedTokens)
+    saveOAuthTokensUnlocked(identifiedTokens)
 
     // Clear the cache after refreshing token
     getClaudeAIOAuthTokens.cache?.clear?.()
