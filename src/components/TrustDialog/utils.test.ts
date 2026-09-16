@@ -2,7 +2,9 @@ import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
 import { BASH_TOOL_NAME } from '../../tools/BashTool/toolName.js'
 import type { PermissionRule } from '../../utils/permissions/PermissionRule.js'
+import * as realPermissionsLoader from '../../utils/permissions/permissionsLoader.js'
 import { getRelativeSettingsFilePathForSource as REAL_canonicalPath } from '../../utils/settings/settings.js'
+import * as realSettings from '../../utils/settings/settings.js'
 import type { SettingsJson } from '../../utils/settings/types.js'
 
 // TrustDialog/utils.ts emits file-path strings shown to users in the trust
@@ -20,6 +22,15 @@ import type { SettingsJson } from '../../utils/settings/types.js'
 // assertion (2) fails. No self-reference.
 
 await acquireSharedMutationLock('components/TrustDialog/utils.test.ts')
+
+// Captured at module scope BEFORE any mock.module() call runs, so these hold
+// the REAL exports. Bun mutates a mocked module's live namespace IN PLACE and
+// mock.restore() does not undo mock.module() at all, so a snapshot taken any
+// later — or a spread of the live namespace — would copy the stub rather than
+// the original. These two objects are the only thing that can put the real
+// modules back for every test file the sweep loads after this one.
+const pristineRealSettings = { ...realSettings }
+const pristineRealPermissionsLoader = { ...realPermissionsLoader }
 
 // The fork's canonical project settings paths. Hardcoded expected values —
 // independent of the implementation under test.
@@ -53,15 +64,21 @@ const permissionRulesState: {
 }
 
 mock.module('../../utils/settings/settings.js', () => ({
+  // Spread the pristine namespace FIRST so every other export of settings.js
+  // survives. A partial stub makes the omitted exports undefined for every
+  // file loaded afterwards in the same Bun process, which fabricates failures
+  // in unrelated suites and masks real ones.
+  // getRelativeSettingsFilePathForSource comes through the spread unchanged:
+  // it is pure and must stay REAL, which is what REAL_canonicalPath asserts.
+  ...pristineRealSettings,
   // Stateful — needs mocking to control test inputs.
   getSettingsForSource: (source: 'projectSettings' | 'localSettings') =>
     settingsState[source],
-  // Pure — pass the REAL function through. The mock exists only because
-  // utils.ts imports both names from the same module; we must provide both.
-  getRelativeSettingsFilePathForSource: REAL_canonicalPath,
 }))
 
 mock.module('../../utils/permissions/permissionsLoader.js', () => ({
+  // Same reasoning as the settings stub above: keep the rest of the namespace.
+  ...pristineRealPermissionsLoader,
   getPermissionRulesForSource: (
     source: 'projectSettings' | 'localSettings',
   ): PermissionRule[] => permissionRulesState[source],
@@ -69,7 +86,17 @@ mock.module('../../utils/permissions/permissionsLoader.js', () => ({
 
 afterAll(() => {
   try {
+    // mock.restore() does NOT undo mock.module(), so re-register both
+    // specifiers explicitly from the pristine snapshots — under the EXACT
+    // spellings they were mocked with, since each spelling is its own
+    // registry entry.
     mock.restore()
+    mock.module('../../utils/settings/settings.js', () => ({
+      ...pristineRealSettings,
+    }))
+    mock.module('../../utils/permissions/permissionsLoader.js', () => ({
+      ...pristineRealPermissionsLoader,
+    }))
   } finally {
     releaseSharedMutationLock()
   }
