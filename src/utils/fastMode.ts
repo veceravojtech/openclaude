@@ -10,6 +10,7 @@ import {
   type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
   logEvent,
 } from '../services/analytics/index.js'
+import { isOAuthGrantRevokedMessage } from '../services/api/oauthRevocation.js'
 import {
   getAnthropicApiKey,
   getClaudeAIOAuthTokens,
@@ -474,7 +475,7 @@ export async function prefetchFastModeStatus(): Promise<void> {
           (err.response?.status === 401 ||
             (err.response?.status === 403 &&
               typeof err.response?.data === 'string' &&
-              err.response.data.includes('OAuth token has been revoked')))
+              isOAuthGrantRevokedMessage(err.response.data)))
         if (isAuthError) {
           const failedAccessToken = getClaudeAIOAuthTokens()?.accessToken
           if (failedAccessToken) {

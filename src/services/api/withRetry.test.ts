@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import type Anthropic from '@anthropic-ai/sdk'
-import { APIError, APIUserAbortError } from '@anthropic-ai/sdk'
+import { APIConnectionError, APIError, APIUserAbortError } from '@anthropic-ai/sdk'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
 import * as debugNs from '../../utils/debug.js'
 import { markOpenAIRequestNonReplayable } from './openaiErrorClassification.js'
@@ -80,6 +80,8 @@ async function importFreshWithRetryModule(
   options: {
     logForDebugging?: ReturnType<typeof mock>
     forceFastMode?: boolean
+    /** Partial stub over utils/auth.js, installed before withRetry imports it. */
+    auth?: Record<string, unknown>
   } = {},
 ) {
   mock.restore()
@@ -107,6 +109,13 @@ async function importFreshWithRetryModule(
       ...realFastMode,
       isFastModeEnabled: () => true,
     }))
+  }
+  if (options.auth) {
+    // Spread the real module: withRetry also pulls clearApiKeyHelperCache and
+    // the subscriber predicates from it. Nothing here reaches real credentials
+    // — the stub answers before any keychain or network access would happen.
+    const realAuth = await import('../../utils/auth.js')
+    mock.module('src/utils/auth.js', () => ({ ...realAuth, ...options.auth }))
   }
   return import(`./withRetry.js?ts=${Date.now()}-${Math.random()}`)
 }
@@ -1084,5 +1093,327 @@ describe('usage-limit account switch', () => {
     // Storage-only switching is refused outright.
     expect(events).toEqual([])
     expect(notices).toEqual([])
+  })
+})
+
+describe('revoked OAuth grant is terminal', () => {
+  // The body the gateway actually returned. Its shape is the whole point:
+  // status 401 (not 403) and the word "access" inside the message, which is
+  // what the old 403-only substring predicate missed on both counts.
+  const REVOKED_401_BODY =
+    '{"type":"error","error":{"type":"authentication_error","message":"OAuth access token has been revoked."}}'
+
+  function revoked401(): APIError {
+    return new APIError(
+      401,
+      {
+        type: 'error',
+        error: {
+          type: 'authentication_error',
+          message: 'OAuth access token has been revoked.',
+        },
+      },
+      REVOKED_401_BODY,
+      new Headers(),
+    )
+  }
+
+  function expired401(): APIError {
+    return new APIError(
+      401,
+      {
+        type: 'error',
+        error: { type: 'authentication_error', message: 'OAuth token expired' },
+      },
+      '{"type":"error","error":{"type":"authentication_error","message":"OAuth token expired"}}',
+      new Headers(),
+    )
+  }
+
+  function runOptions(overrides: Record<string, unknown> = {}) {
+    return {
+      maxRetries: 10,
+      model: 'claude-sonnet-4-6',
+      thinkingConfig: { type: 'disabled' },
+      querySource: 'repl_main_thread',
+      ...overrides,
+    }
+  }
+
+  test('a revoked 401 stops on the first response: one attempt, no refresh', async () => {
+    process.env.OPENCLAUDE_RETRY_DELAY_MS = '1'
+    // Fails the test loudly if the terminal path ever reaches the refresh:
+    // an unrefreshable grant must not be re-presented to the auth server.
+    const handleOAuth401Error = mock(async () => false)
+    const { withRetry, CannotRetryError } = await importFreshWithRetryModule(
+      'firstParty',
+      {
+        auth: {
+          handleOAuth401Error,
+          getClaudeAIOAuthTokens: () => ({
+            accessToken: 'mock-access-token-not-a-real-credential',
+          }),
+        },
+      },
+    )
+
+    const operation = mock(async () => {
+      throw revoked401()
+    })
+
+    await expect(
+      drainAsyncGenerator(
+        withRetry(async () => ({}) as Anthropic, operation, runOptions()),
+      ),
+    ).rejects.toBeInstanceOf(CannotRetryError)
+
+    // The whole point of the fix: not "fewer than 10" — exactly one. maxRetries
+    // is 10, so the pre-fix behaviour would be 11 calls across ~8.5 minutes of
+    // exponential backoff (500ms * 2^(n-1), capped at 32s).
+    expect(operation).toHaveBeenCalledTimes(1)
+    expect(handleOAuth401Error).toHaveBeenCalledTimes(0)
+  })
+
+  test('an expired-but-refreshable 401 still refreshes and retries', async () => {
+    process.env.OPENCLAUDE_RETRY_DELAY_MS = '1'
+    // The regression the narrow fix exists to protect: a merely expired token
+    // must keep its refresh-once-and-retry behaviour.
+    const handleOAuth401Error = mock(async () => true)
+    const { withRetry } = await importFreshWithRetryModule('firstParty', {
+      auth: {
+        handleOAuth401Error,
+        getClaudeAIOAuthTokens: () => ({
+          accessToken: 'mock-access-token-not-a-real-credential',
+        }),
+      },
+    })
+
+    let calls = 0
+    const operation = mock(async () => {
+      calls++
+      if (calls === 1) throw expired401()
+      return { ok: true }
+    })
+
+    const result = await drainAsyncGenerator(
+      withRetry(async () => ({}) as Anthropic, operation, runOptions()),
+    )
+
+    expect(result).toEqual({ ok: true })
+    expect(operation).toHaveBeenCalledTimes(2)
+    expect(handleOAuth401Error).toHaveBeenCalledTimes(1)
+  })
+
+  test('a 401 whose forced refresh fails is terminal without a second request', async () => {
+    process.env.OPENCLAUDE_RETRY_DELAY_MS = '1'
+    // The secondary signal: the message shape is unremarkable, but the refresh
+    // came back false, so the grant cannot produce a working token.
+    const handleOAuth401Error = mock(async () => false)
+    const { withRetry, CannotRetryError } = await importFreshWithRetryModule(
+      'firstParty',
+      {
+        auth: {
+          handleOAuth401Error,
+          getClaudeAIOAuthTokens: () => ({
+            accessToken: 'mock-access-token-not-a-real-credential',
+          }),
+        },
+      },
+    )
+
+    const operation = mock(async () => {
+      throw expired401()
+    })
+
+    await expect(
+      drainAsyncGenerator(
+        withRetry(async () => ({}) as Anthropic, operation, runOptions()),
+      ),
+    ).rejects.toBeInstanceOf(CannotRetryError)
+
+    // One failed refresh, and the request is not re-issued against the dead
+    // grant: the second attempt stops before the operation runs.
+    expect(handleOAuth401Error).toHaveBeenCalledTimes(1)
+    expect(operation).toHaveBeenCalledTimes(1)
+  })
+
+  test('transient failures are untouched: a network error still retries', async () => {
+    process.env.OPENCLAUDE_RETRY_DELAY_MS = '1'
+    // The APIConnectionError branch had no coverage at all, so the "transient
+    // paths unchanged" claim had nothing to rest on for the network case.
+    const { withRetry } = await importFreshWithRetryModule('firstParty')
+
+    let calls = 0
+    const operation = mock(async () => {
+      calls++
+      if (calls === 1) {
+        throw new APIConnectionError({ message: 'Connection error.' })
+      }
+      return { ok: true }
+    })
+
+    const result = await drainAsyncGenerator(
+      withRetry(async () => ({}) as Anthropic, operation, runOptions()),
+    )
+
+    expect(result).toEqual({ ok: true })
+    expect(operation).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('revoked-grant user-facing message', () => {
+  // The rendered string is an acceptance criterion in its own right: it must
+  // name the remedy, identify the account, explain a switch the user never
+  // made, and never carry an email address.
+  const EMAIL_PATTERN = /[^\s"']+@[^\s"']+\.[^\s"']+/
+
+  async function importErrorsModule() {
+    return import('./errors.js')
+  }
+
+  afterEach(async () => {
+    const errors = await importErrorsModule()
+    errors.clearUsageLimitAccountSwitch()
+  })
+
+  test('plain revocation keeps the existing wording in both session modes', async () => {
+    const errors = await importErrorsModule()
+    const state = await import('../../bootstrap/state.js')
+    const wasInteractive = state.getIsInteractive()
+    try {
+      state.setIsInteractive(true)
+      expect(errors.getTokenRevokedErrorMessage()).toBe(
+        errors.TOKEN_REVOKED_ERROR_MESSAGE,
+      )
+      state.setIsInteractive(false)
+      expect(errors.getTokenRevokedErrorMessage()).toBe(
+        'Your account does not have access to Claude. Please login again or contact your administrator.',
+      )
+    } finally {
+      state.setIsInteractive(wasInteractive)
+    }
+  })
+
+  test('after a usage-limit auto-switch the message explains the move and names the remedy', async () => {
+    const errors = await importErrorsModule()
+    const state = await import('../../bootstrap/state.js')
+    const wasInteractive = state.getIsInteractive()
+    try {
+      state.setIsInteractive(true)
+      // The account the auto-switch actually landed on: the legacy,
+      // identity-less entry whose key is literally `default`.
+      errors.noteUsageLimitAccountSwitch('default')
+      const message = errors.getTokenRevokedErrorMessage()
+
+      expect(message).toBe(
+        'OAuth token revoked · This session was switched to account "default" automatically after the previous account hit its usage limit, and that account\'s saved credentials have been revoked · Run /login to re-authenticate it, or /account to switch to a different account',
+      )
+      // Reads sensibly for a nameless account, and still carries all three
+      // facts: the automatic move, the dead credentials, the remedy.
+      expect(message).toContain('"default"')
+      expect(message).toContain('automatically')
+      expect(message).toContain('/login')
+
+      state.setIsInteractive(false)
+      expect(errors.getTokenRevokedErrorMessage()).toContain(
+        'contact your administrator',
+      )
+    } finally {
+      state.setIsInteractive(wasInteractive)
+    }
+  })
+
+  test('no email address reaches the message, whatever the account key holds', async () => {
+    const errors = await importErrorsModule()
+    const state = await import('../../bootstrap/state.js')
+    const wasInteractive = state.getIsInteractive()
+    try {
+      state.setIsInteractive(true)
+      for (const key of [
+        'default',
+        '9f3c1a2b-77de-4a10-9c31-2f0e5b8a6d44',
+        'person.name@example.com',
+      ]) {
+        errors.noteUsageLimitAccountSwitch(key)
+        const message = errors.getTokenRevokedErrorMessage()
+        expect(message).not.toMatch(EMAIL_PATTERN)
+        state.setIsInteractive(false)
+        expect(errors.getTokenRevokedErrorMessage()).not.toMatch(EMAIL_PATTERN)
+        state.setIsInteractive(true)
+      }
+      // A UUID key is truncated rather than printed whole.
+      errors.noteUsageLimitAccountSwitch('9f3c1a2b-77de-4a10-9c31-2f0e5b8a6d44')
+      expect(errors.getTokenRevokedErrorMessage()).toContain('"9f3c1a2b…"')
+    } finally {
+      state.setIsInteractive(wasInteractive)
+    }
+  })
+
+  test('the breadcrumb is cleared once a request succeeds under the new account', async () => {
+    const errors = await importErrorsModule()
+    errors.noteUsageLimitAccountSwitch('default')
+    errors.clearUsageLimitAccountSwitch()
+    const state = await import('../../bootstrap/state.js')
+    const wasInteractive = state.getIsInteractive()
+    try {
+      state.setIsInteractive(true)
+      expect(errors.getTokenRevokedErrorMessage()).toBe(
+        errors.TOKEN_REVOKED_ERROR_MESSAGE,
+      )
+    } finally {
+      state.setIsInteractive(wasInteractive)
+    }
+  })
+})
+
+describe('isOAuthGrantRevokedError', () => {
+  test('matches both spellings on both statuses, and nothing unrelated', async () => {
+    const { isOAuthGrantRevokedError, isOAuthGrantRevokedMessage } =
+      await import('./errors.js')
+
+    const make = (status: number, message: string) =>
+      new APIError(status, undefined, message, new Headers())
+
+    // The observed failure, and the legacy 403 the old predicate caught.
+    expect(
+      isOAuthGrantRevokedError(
+        make(401, 'OAuth access token has been revoked.'),
+      ),
+    ).toBe(true)
+    expect(
+      isOAuthGrantRevokedError(make(403, 'OAuth token has been revoked')),
+    ).toBe(true)
+    expect(
+      isOAuthGrantRevokedError(make(401, 'OAuth token has been revoked')),
+    ).toBe(true)
+
+    // Not every 401 is a revocation — that is the over-correction the narrow
+    // predicate exists to avoid.
+    expect(isOAuthGrantRevokedError(make(401, 'Unauthorized'))).toBe(false)
+    // Adjacent OAuth failures are classified elsewhere and must not be eaten.
+    expect(
+      isOAuthGrantRevokedError(
+        make(
+          401,
+          'OAuth authentication is currently not allowed for this organization',
+        ),
+      ),
+    ).toBe(false)
+    // Right message, wrong status: still not this error.
+    expect(
+      isOAuthGrantRevokedError(make(500, 'OAuth token has been revoked')),
+    ).toBe(false)
+    expect(isOAuthGrantRevokedError(new Error('OAuth token has been revoked'))).toBe(
+      false,
+    )
+
+    // The message half is what http.ts and fastMode.ts adopt; it must stay
+    // usable on a raw response body with no status in hand.
+    expect(isOAuthGrantRevokedMessage('OAuth token has been revoked')).toBe(true)
+    expect(isOAuthGrantRevokedMessage('OAuth access token has been revoked.')).toBe(
+      true,
+    )
+    expect(isOAuthGrantRevokedMessage(undefined)).toBe(false)
+    expect(isOAuthGrantRevokedMessage('some other oauth failure')).toBe(false)
   })
 })

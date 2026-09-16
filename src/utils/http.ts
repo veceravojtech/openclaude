@@ -4,6 +4,8 @@
 
 import axios from 'axios'
 import { OAUTH_BETA_HEADER } from '../constants/oauth.js'
+// Leaf module by design — errors.ts would pull config.ts into the SDK bundle.
+import { isOAuthGrantRevokedMessage } from '../services/api/oauthRevocation.js'
 import {
   getAnthropicApiKey,
   getClaudeAIOAuthTokens,
@@ -131,7 +133,7 @@ export async function withOAuth401Retry<T>(
       (opts?.also403Revoked &&
         status === 403 &&
         typeof err.response?.data === 'string' &&
-        err.response.data.includes('OAuth token has been revoked'))
+        isOAuthGrantRevokedMessage(err.response.data))
     if (!isAuthError) throw err
     const failedAccessToken = getClaudeAIOAuthTokens()?.accessToken
     if (!failedAccessToken) throw err

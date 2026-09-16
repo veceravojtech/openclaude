@@ -49,7 +49,13 @@ import {
   checkMockRateLimitError,
   isMockRateLimitError,
 } from '../rateLimitMocking.js'
-import { REPEATED_529_ERROR_MESSAGE, isOpenCodeGoQuotaError } from './errors.js'
+import {
+  clearUsageLimitAccountSwitch,
+  isOAuthGrantRevokedError,
+  isOpenCodeGoQuotaError,
+  noteUsageLimitAccountSwitch,
+  REPEATED_529_ERROR_MESSAGE,
+} from './errors.js'
 import { extractConnectionErrorDetails } from './errorUtils.js'
 import {
   extractOpenAICategoryMarker,
@@ -294,7 +300,7 @@ export async function* withRetry<T>(
       if (
         client === null ||
         (lastError instanceof APIError && lastError.status === 401) ||
-        isOAuthTokenRevokedError(lastError) ||
+        isOAuthGrantRevokedError(lastError) ||
         isBedrockAuthError(lastError) ||
         isVertexAuthError(lastError) ||
         isStaleConnection
@@ -302,11 +308,30 @@ export async function* withRetry<T>(
         // On 401 "token expired" or 403 "token revoked", force a token refresh
         if (
           (lastError instanceof APIError && lastError.status === 401) ||
-          isOAuthTokenRevokedError(lastError)
+          isOAuthGrantRevokedError(lastError)
         ) {
           const failedAccessToken = getClaudeAIOAuthTokens()?.accessToken
           if (failedAccessToken) {
-            await handleOAuth401Error(failedAccessToken)
+            const refreshed = await handleOAuth401Error(failedAccessToken)
+            // Secondary terminal signal. The primary one is the error shape
+            // (see isOAuthGrantRevokedError in shouldRetry); this one catches
+            // the dead grant whose message we do not recognise, because a
+            // forced refresh that came back false means this grant cannot
+            // produce a working access token. Re-issuing the request would
+            // present the same rejected credentials and collect the same 401,
+            // so stop on the response we already have.
+            //
+            // Scoped to the first-party route on purpose: Bedrock and Vertex
+            // carry their own credential handling (handleAwsCredentialError /
+            // handleGcpCredentialError short-circuit shouldRetry for exactly
+            // that reason), and CCR's 401s are blips, not dead grants.
+            if (
+              !refreshed &&
+              !isCCRAuthMode() &&
+              getAPIProvider() === 'firstParty'
+            ) {
+              break
+            }
           }
         }
         client = await getClient()
@@ -321,6 +346,9 @@ export async function* withRetry<T>(
       // fresh account has quota, so parked teammates may resume.
       if (autoWaitedForUsageLimit || autoSwitchedForUsageLimit) {
         noteUsageLimitRecovered()
+        // The account we were moved to works, so a later failure on it is not
+        // the auto-switch's story to tell.
+        clearUsageLimitAccountSwitch()
       }
       return result
     } catch (error) {
@@ -501,6 +529,10 @@ export async function* withRetry<T>(
         })
         if (switchOutcome.type === 'switched') {
           autoSwitchedForUsageLimit = true
+          // The user did not pick this account, so a credential failure on it
+          // needs to say where it came from. The key, never switchOutcome.name
+          // — that one resolves to the email address. See errors.ts.
+          noteUsageLimitAccountSwitch(switchOutcome.key)
           logEvent('tengu_api_usage_limit_account_switch', {
             attempt,
             provider: getAPIProviderForStatsig(),
@@ -902,12 +934,13 @@ export function is529Error(error: unknown): boolean {
   )
 }
 
-function isOAuthTokenRevokedError(error: unknown): boolean {
-  return (
-    error instanceof APIError &&
-    error.status === 403 &&
-    (error.message?.includes('OAuth token has been revoked') ?? false)
-  )
+/**
+ * CCR (Claude Code Remote) authenticates with infrastructure-issued JWTs, so a
+ * 401/403 there is an auth-service flap rather than bad credentials — see the
+ * CCR branch in `shouldRetry`. The terminal auth paths must not pre-empt it.
+ */
+function isCCRAuthMode(): boolean {
+  return isEnvTruthy(process.env.CLAUDE_CODE_REMOTE)
 }
 
 function isBedrockAuthError(error: unknown): boolean {
@@ -1028,6 +1061,20 @@ function shouldRetry(error: APIError, persistentRetryEnabled: boolean): boolean 
     return true
   }
 
+  // A revoked OAuth grant is terminal, like isOpenCodeGoQuotaError above:
+  // every further attempt re-presents the same dead credentials, so the
+  // ten-attempt backoff chain only delays the /login the user has to run
+  // anyway. getAssistantMessageFromError surfaces the actionable message.
+  //
+  // Position is load bearing. It sits below the CCR branch, whose 401/403 is
+  // an infrastructure blip that must keep retrying, and above both the
+  // x-should-retry handling — no header should resurrect a dead grant — and
+  // the catch-all `status === 401` below, which would otherwise return true
+  // for the observed 401 before this check was ever evaluated.
+  if (isOAuthGrantRevokedError(error)) {
+    return false
+  }
+
   // Check for overloaded errors first by examining the message content
   // The SDK sometimes fails to properly pass the 529 status code during streaming,
   // so we need to check the error message directly
@@ -1076,15 +1123,12 @@ function shouldRetry(error: APIError, persistentRetryEnabled: boolean): boolean 
     return !isClaudeAISubscriber() || isEnterpriseSubscriber()
   }
 
-  // Clear API key cache on 401 and allow retry.
-  // OAuth token handling is done in the main retry loop via handleOAuth401Error.
+  // Clear API key cache on 401 and allow retry. A revoked grant already
+  // returned false above; what reaches here is the recoverable case — an
+  // expired access token, which the main retry loop refreshes via
+  // handleOAuth401Error before the next attempt.
   if (error.status === 401) {
     clearApiKeyHelperCache()
-    return true
-  }
-
-  // Retry on 403 "token revoked" (same refresh logic as 401, see above)
-  if (isOAuthTokenRevokedError(error)) {
     return true
   }
 

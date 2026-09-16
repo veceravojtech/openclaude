@@ -56,6 +56,7 @@ import {
 } from '../claudeAiLimits.js'
 import { shouldProcessRateLimits } from '../rateLimitMocking.js' // Used for /mock-limits command
 import { extractConnectionErrorDetails, formatAPIError } from './errorUtils.js'
+import { isOAuthGrantRevokedMessage } from './oauthRevocation.js'
 import {
   extractOpenAICategoryHost,
   extractOpenAICategoryMarker,
@@ -544,10 +545,89 @@ function formatResetDuration(seconds: number): string {
   return parts.join(' ') || 'soon'
 }
 
+export { isOAuthGrantRevokedMessage }
+
+/**
+ * True when the API says this OAuth grant has been revoked.
+ *
+ * Both statuses are real: the gateway answers 403 on some routes and 401 on
+ * others for the same dead grant. Status alone therefore cannot classify it —
+ * a bare 401 is also an ordinary expired access token, which IS recoverable by
+ * a refresh — so the message shape is what decides.
+ */
+export function isOAuthGrantRevokedError(error: unknown): boolean {
+  return (
+    error instanceof APIError &&
+    (error.status === 401 || error.status === 403) &&
+    isOAuthGrantRevokedMessage(error.message)
+  )
+}
+
+/**
+ * The account the usage-limit auto-switch moved this session onto.
+ *
+ * A revoked-grant error on an account the user never picked has to say so:
+ * "re-authenticate <account>" reads as a non-sequitur when the switch was
+ * automatic and the account is an identity-less legacy entry. The switch
+ * notice itself (`SystemAPIErrorMessage.switchedAccountTo`) is per-message and
+ * cannot be read back from here, so `withRetry` leaves this breadcrumb when it
+ * switches and clears it once a request succeeds under the new account.
+ *
+ * The TTL is the backstop for the paths that never reach either hook: a switch
+ * must not colour an unrelated failure minutes later. The sequence this exists
+ * for puts the 401 well under a second after the switch.
+ */
+const USAGE_LIMIT_SWITCH_CONTEXT_TTL_MS = 60_000
+let usageLimitSwitchedAccount: { key: string; atMs: number } | undefined
+
+export function noteUsageLimitAccountSwitch(accountKey: string): void {
+  usageLimitSwitchedAccount = { key: accountKey, atMs: Date.now() }
+}
+
+export function clearUsageLimitAccountSwitch(): void {
+  usageLimitSwitchedAccount = undefined
+}
+
+function getUsageLimitSwitchedAccountKey(): string | undefined {
+  if (!usageLimitSwitchedAccount) {
+    return undefined
+  }
+  const age = Date.now() - usageLimitSwitchedAccount.atMs
+  return age < USAGE_LIMIT_SWITCH_CONTEXT_TTL_MS
+    ? usageLimitSwitchedAccount.key
+    : undefined
+}
+
+/**
+ * How an account is named in error text.
+ *
+ * Deliberately NOT `accountDisplayName`: that resolves to the email address
+ * first, and error text lands in logs and transcripts. The stored key is a
+ * UUID for modern entries and the literal `default` for the legacy
+ * pre-identity entry, so a UUID is truncated to its first block and anything
+ * else is shown as stored — with an email-shaped value truncated as well, in
+ * case a key ever carries one.
+ */
+function formatAccountRef(accountKey: string): string {
+  const isUuidLike = /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(accountKey)
+  return isUuidLike || accountKey.includes('@')
+    ? `${accountKey.slice(0, 8)}…`
+    : accountKey
+}
+
 export function getTokenRevokedErrorMessage(): string {
+  const switchedAccountKey = getUsageLimitSwitchedAccountKey()
+  if (switchedAccountKey === undefined) {
+    return getIsNonInteractiveSession()
+      ? 'Your account does not have access to Claude. Please login again or contact your administrator.'
+      : TOKEN_REVOKED_ERROR_MESSAGE
+  }
+  // The user did not choose this account, so the message has to explain the
+  // move before it names the remedy, or the remedy makes no sense.
+  const account = formatAccountRef(switchedAccountKey)
   return getIsNonInteractiveSession()
-    ? 'Your account does not have access to Claude. Please login again or contact your administrator.'
-    : TOKEN_REVOKED_ERROR_MESSAGE
+    ? `Your account does not have access to Claude. This session was switched to account "${account}" automatically after the previous account hit its usage limit, and that account's saved credentials have been revoked. Please login again to that account or contact your administrator.`
+    : `OAuth token revoked · This session was switched to account "${account}" automatically after the previous account hit its usage limit, and that account's saved credentials have been revoked · Run /login to re-authenticate it, or /account to switch to a different account`
 }
 
 export function getOauthOrgNotAllowedErrorMessage(): string {
@@ -1235,11 +1315,7 @@ export function getAssistantMessageFromError(
   }
 
   // Check for OAuth token revocation error
-  if (
-    error instanceof APIError &&
-    error.status === 403 &&
-    error.message.includes('OAuth token has been revoked')
-  ) {
+  if (isOAuthGrantRevokedError(error)) {
     return createAssistantAPIErrorMessage({
       error: 'authentication_failed',
       content: getTokenRevokedErrorMessage(),
@@ -1548,11 +1624,7 @@ export function classifyAPIError(error: unknown): string {
     return 'invalid_api_key'
   }
 
-  if (
-    error instanceof APIError &&
-    error.status === 403 &&
-    error.message.includes('OAuth token has been revoked')
-  ) {
+  if (isOAuthGrantRevokedError(error)) {
     return 'token_revoked'
   }
 
