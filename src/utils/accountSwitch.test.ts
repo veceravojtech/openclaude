@@ -210,3 +210,145 @@ describe('resolving what the user typed to an account', () => {
     expect(resolveAccountKey(accounts, '   ').type).toBe('unknown')
   })
 })
+
+/**
+ * Naming an account in output that leaves the user's screen.
+ *
+ * These tests exist for the PII property, not for the formatting: `Usage`
+ * output is written into model transcripts and log files, so the assertions
+ * below are deliberately about what is ABSENT from the returned string — the
+ * address, its local part, and the `@` that would mark any address at all.
+ * A test that only checked the happy-path label would pass while
+ * `accountUsageLabel` leaked every address it was written to withhold.
+ */
+describe('naming an account where the naming leaves the screen', () => {
+  const EMAIL = 'work@example.com'
+  const LOCAL_PART = 'work'
+  // Real-shaped UUIDs: distinct in their FIRST block, which is the part that
+  // survives truncation, and sharing no substring with the address above.
+  const KEY_A = '3f2b19ac-7d40-4c1e-9b55-0a8e6d21cf34'
+  const KEY_B = 'c81d5e70-7d40-4c1e-9b55-0a8e6d21cf34'
+
+  /** Every way the address could reach the output, checked in one place. */
+  function expectNoAddress(name: string): void {
+    expect(name).not.toContain(EMAIL)
+    expect(name).not.toContain(LOCAL_PART)
+    expect(name).not.toContain('@')
+    expect(name.length).toBeGreaterThan(0)
+  }
+
+  test('an account known only by its email address is named by its key instead', async () => {
+    const { accountUsageLabel } = await import('./accountSwitch.js')
+
+    const name = accountUsageLabel({
+      key: KEY_A,
+      emailAddress: EMAIL,
+      isActive: true,
+    })
+
+    expectNoAddress(name)
+    expect(name).toBe('3f2b19ac…')
+  })
+
+  test('a labelled account is named by its label, and still not by its email', async () => {
+    const { accountUsageLabel } = await import('./accountSwitch.js')
+
+    const name = accountUsageLabel({
+      key: KEY_A,
+      emailAddress: EMAIL,
+      label: 'day job',
+      isActive: true,
+    })
+
+    expect(name).toBe('day job')
+    expectNoAddress(name)
+  })
+
+  test('accountDisplayName still prefers the email — the on-screen naming is unchanged', async () => {
+    const { accountDisplayName } = await import('./accountSwitch.js')
+
+    // Goes red if someone "hardens" the wrong function: the account-switch UI
+    // shows the user their own accounts on their own screen, where the
+    // address is the only part they reliably recognise.
+    expect(
+      accountDisplayName({ key: KEY_A, emailAddress: EMAIL, isActive: true }),
+    ).toBe(EMAIL)
+    expect(
+      accountDisplayName({
+        key: KEY_A,
+        emailAddress: EMAIL,
+        label: 'day job',
+        isActive: true,
+      }),
+    ).toBe(EMAIL)
+    expect(accountDisplayName({ key: KEY_A, isActive: true })).toBe(KEY_A)
+  })
+
+  test('two unlabelled accounts keep two distinct names', async () => {
+    const { accountUsageLabel } = await import('./accountSwitch.js')
+
+    const a = accountUsageLabel({ key: KEY_A, emailAddress: EMAIL, isActive: true })
+    const b = accountUsageLabel({
+      key: KEY_B,
+      emailAddress: 'personal@example.com',
+      isActive: false,
+    })
+
+    // Truncation that collapsed these would merge two accounts into one
+    // Usage section and silently misreport both their quotas.
+    expect(a).not.toBe(b)
+    expectNoAddress(a)
+    expect(b).not.toContain('@')
+  })
+
+  test('a label that is itself an email address is refused, not truncated', async () => {
+    const { accountUsageLabel } = await import('./accountSwitch.js')
+
+    // Cutting this label short would emit the local part, which is exactly
+    // the disclosure the function exists to prevent — so the key wins.
+    const name = accountUsageLabel({
+      key: KEY_A,
+      emailAddress: EMAIL,
+      label: EMAIL,
+      isActive: true,
+    })
+
+    expect(name).toBe('3f2b19ac…')
+    expectNoAddress(name)
+  })
+
+  test('a blank label names the account by its key rather than by nothing', async () => {
+    const { accountUsageLabel } = await import('./accountSwitch.js')
+
+    expect(
+      accountUsageLabel({ key: KEY_A, label: '', isActive: true }),
+    ).toBe('3f2b19ac…')
+    expect(
+      accountUsageLabel({ key: KEY_A, label: '   ', isActive: true }),
+    ).toBe('3f2b19ac…')
+    expect(
+      accountUsageLabel({ key: KEY_A, label: '  day job  ', isActive: true }),
+    ).toBe('day job')
+  })
+
+  test('a key that is not UUID-shaped is shown as stored', async () => {
+    const { accountUsageLabel } = await import('./accountSwitch.js')
+
+    // The legacy pre-identity entry. Truncating it would add an ellipsis that
+    // promises hidden characters there are none of.
+    expect(
+      accountUsageLabel({
+        key: 'default',
+        emailAddress: EMAIL,
+        isActive: true,
+      }),
+    ).toBe('default')
+  })
+
+  test('the same account always gets the same name', async () => {
+    const { accountUsageLabel } = await import('./accountSwitch.js')
+
+    const account = { key: KEY_A, emailAddress: EMAIL, isActive: true }
+    expect(accountUsageLabel(account)).toBe(accountUsageLabel(account))
+  })
+})

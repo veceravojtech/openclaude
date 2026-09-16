@@ -56,6 +56,46 @@ export function accountDisplayName(account: AccountSummary): string {
   return account.emailAddress ?? account.label ?? account.key
 }
 
+/**
+ * How an account is named where the naming LEAVES the user's screen.
+ *
+ * The same resolution as `accountDisplayName` minus the email address, and
+ * the omission is the whole point rather than an oversight: `Usage` output is
+ * written into model transcripts and log files, where
+ * `AccountSummary.emailAddress` is personal data that the user never chose to
+ * publish. Do not "fix" this back to prefer the email the way
+ * `accountDisplayName` does — that function names accounts on the user's own
+ * screen, which is why the two resolutions differ.
+ *
+ * A label is the user's own nickname, so it is used as stored — except when
+ * it is itself email-shaped. A value containing `@` is indistinguishable from
+ * an address to every downstream reader and to any log scrubber, and cutting
+ * it short would emit the local part, so such a label is skipped in favour of
+ * the key.
+ *
+ * A UUID key is cut to its first block: eight hex characters, 2^32 of address
+ * space, which is the same cut and the same ellipsis that `formatAccountRef`
+ * already makes for error text — so one account reads identically wherever
+ * the CLI has to name it off-screen. A key that is neither UUID- nor
+ * email-shaped (the legacy pre-identity `default` entry) is shown as stored:
+ * it holds nothing personal, and cutting it would only make short keys harder
+ * to tell apart.
+ */
+export function accountUsageLabel(account: AccountSummary): string {
+  // `??` alone would let a blank label through and name the section nothing.
+  const label = account.label?.trim()
+  if (label && !label.includes('@')) {
+    return label
+  }
+
+  const key = account.key.trim()
+  const isUuidLike = /^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(key)
+  if (isUuidLike || key.includes('@')) {
+    return `${key.slice(0, 8)}…`
+  }
+  return key || 'unknown account'
+}
+
 export type AccountResolution =
   | { type: 'ok'; key: string }
   | { type: 'unknown' }
