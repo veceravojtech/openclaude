@@ -29,7 +29,25 @@ let addMarketplaceSourceFn = mock(() => {})
 
 await acquireSharedMutationLock('utils/plugins/lspRecommendation.test.ts')
 
+// Pristine snapshots of every module this file stubs. Cache-busted so the
+// import bypasses this file's own mock.module() registration for the same
+// path (the idiom already used for ../config.js below). mock.module() mutates
+// the live namespace IN PLACE and mock.restore() does not undo it, so these
+// copies are the only way to put the real exports back.
+const realMarketplaceManager = await import(
+  `./marketplaceManager.js?real=${Date.now()}-${Math.random()}`
+)
+const realBinaryCheck = await import(
+  `../binaryCheck.js?real=${Date.now()}-${Math.random()}`
+)
+const realInstalledPluginsManager = await import(
+  `./installedPluginsManager.js?real=${Date.now()}-${Math.random()}`
+)
+
 mock.module('./marketplaceManager.js', () => ({
+  // Spread first: a stub listing only the 9 names this suite drives made the
+  // other 13 exports of marketplaceManager.js undefined process-wide.
+  ...realMarketplaceManager,
   addMarketplaceSource: addMarketplaceSourceFn,
   getMarketplaceCacheOnly: async (name: string) => ({
     plugins: marketplaces[name] ?? [],
@@ -58,10 +76,14 @@ mock.module('./marketplaceManager.js', () => ({
 }))
 
 mock.module('../binaryCheck.js', () => ({
+  // Keeps clearBinaryCache alive for later files.
+  ...realBinaryCheck,
   isBinaryInstalled: async (command: string) => installedBinaries.has(command),
 }))
 
 mock.module('./installedPluginsManager.js', () => ({
+  // Keeps the 9 exports this suite does not override alive for later files.
+  ...realInstalledPluginsManager,
   addInstalledPlugin: mock(() => {}),
   addPluginInstallation: mock(() => {}),
   clearInstalledPluginsCache: mock(() => {}),
@@ -153,7 +175,15 @@ listLspPluginCandidates = mod.listLspPluginCandidates
 
 afterAll(() => {
   try {
+    // mock.restore() does NOT undo mock.module(); re-register every specifier
+    // from its pristine snapshot under the exact spelling it was mocked with.
     mock.restore()
+    mock.module('./marketplaceManager.js', () => ({ ...realMarketplaceManager }))
+    mock.module('../binaryCheck.js', () => ({ ...realBinaryCheck }))
+    mock.module('./installedPluginsManager.js', () => ({
+      ...realInstalledPluginsManager,
+    }))
+    mock.module('../config.js', () => ({ ...realConfig }))
   } finally {
     releaseSharedMutationLock()
   }
