@@ -12,8 +12,15 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import type { Message } from '../../types/message.js'
-import * as realConfig from '../../utils/config.js'
 
+// Cache-busted like the five below, and for the same reason: mock.module()
+// mutates the live namespace in place, so a static `import * as realConfig`
+// would be rewritten by this file's own config stub and the afterEach restore
+// would spread the stub back over itself. A '?real=' specifier is a separate
+// registry entry that mock.module() never touches.
+const realConfig = await import(
+  `../../utils/config.js?real=${Date.now()}-${Math.random()}`
+)
 const realContext = await import(
   `../../utils/context.js?real=${Date.now()}-${Math.random()}`
 )
@@ -45,9 +52,13 @@ async function importAutoCompact(options: ImportAutoCompactOptions = {}) {
   mock.module('../../utils/context.js', () => ({ ...realContext }))
   mock.module('../../utils/errors.js', () => ({ ...realErrors }))
   mock.module('../../utils/tokens.js', () => ({ ...realTokens }))
+  // getGlobalConfig is overridden, not replaced: returning `{ autoCompactEnabled }`
+  // alone dropped the other thirty-eight fields of the global config for every
+  // module that read it while this suite was installed.
   mock.module('../../utils/config.js', () => ({
     ...realConfig,
     getGlobalConfig: () => ({
+      ...realConfig.getGlobalConfig(),
       autoCompactEnabled: options.autoCompactEnabled ?? true,
     }),
   }))
