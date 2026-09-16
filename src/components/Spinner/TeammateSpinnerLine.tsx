@@ -202,6 +202,13 @@ export function TeammateSpinnerLine({
     if (teammate.awaitingPlanApproval) {
       return <Text color="warning">[awaiting approval]</Text>;
     }
+    // Before the idle branch: a parked teammate is idle in the mechanical
+    // sense, so without this the row reads "Idle for 4m" for something that is
+    // blocked on the account, not waiting on work. 'warning' is the colour this
+    // file already uses for alive-but-blocked.
+    if (teammate.parkedNotice) {
+      return <Text color="warning">[usage limit — parked]</Text>;
+    }
     if (teammate.isIdle) {
       if (allIdle) {
         return <Text dimColor>

@@ -366,3 +366,48 @@ describe('getRunningTeammatesSorted — rows inside their grace window', () => {
     expect(names(getRunningTeammatesSorted(tasksOf([live])))).toEqual(['fresh'])
   })
 })
+
+describe('getRunningTeammatesSorted — a teammate parked on a usage limit', () => {
+  /**
+   * The regression detector for the design decision behind `parkedNotice`.
+   *
+   * A teammate parked on an account-wide usage limit is ALIVE and resumable,
+   * and the route that resumes it is a message — which means something has to
+   * be able to find it first. This one array feeds the spinner tree, the
+   * PromptInput footer selector, useBackgroundTaskNavigation and the pill row,
+   * so a parked teammate dropping out of it would vanish from all four at once:
+   * nothing could address it, and it could never be resumed.
+   *
+   * That is why the park is a FIELD and `status` stays 'running'. If a `parked`
+   * TaskStatus member is ever introduced, this test is what fails.
+   */
+  test('stays in the order, because its status is still running', () => {
+    const withParked = [
+      ...TWO_LEVEL,
+      teammate('limited', 'email', {
+        isIdle: true,
+        parkedNotice: "You're out of extra usage · resets 3pm",
+        parkedAt: 1_700_000_000_000,
+      }),
+    ]
+    expect(names(getRunningTeammatesSorted(tasksOf(withParked)))).toContain(
+      'limited',
+    )
+  })
+
+  test('needs no retain/grace marker to stay — it never went terminal', () => {
+    // The grace pair is the TERMINAL transition's, and a park is not one. A
+    // parked row must survive on liveness alone, or it would be collected the
+    // moment the (absent) deadline passed.
+    const parked = teammate('limited', 'email', {
+      isIdle: true,
+      parkedNotice: "You're out of extra usage · resets 3pm",
+      parkedAt: 1_700_000_000_000,
+    })
+    expect(parked.retain).toBeUndefined()
+    expect(parked.evictAfter).toBeUndefined()
+    expect(
+      names(getRunningTeammatesSorted(tasksOf([parked]), Date.now() + 86_400_000)),
+    ).toEqual(['limited'])
+  })
+})

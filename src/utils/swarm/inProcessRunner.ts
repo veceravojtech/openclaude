@@ -750,7 +750,10 @@ async function sendIdleNotification(
   agentColor: string | undefined,
   teamName: string,
   options?: {
-    idleReason?: 'available' | 'interrupted' | 'failed'
+    // Mirrors IdleNotificationMessage['idleReason'] in teammateMailbox.ts —
+    // widening one without the other is a type error at the park call site
+    // below, which is the coupling that keeps the two in step.
+    idleReason?: 'available' | 'interrupted' | 'failed' | 'parked'
     summary?: string
     completedTaskId?: string
     completedStatus?: 'resolved' | 'blocked' | 'failed'
@@ -2736,12 +2739,29 @@ export async function runInProcessTeammate(
       // lead-bound message per wasted task, at CPU speed.
       //
       // So treat it as what it is: the ACCOUNT cannot proceed, not this task.
-      // Hand the task back, stop the process claiming more, tell the lead
-      // exactly once, and exit rather than re-entering the loop.
+      // Hand the task back, stop the process claiming more, and tell the lead
+      // exactly once.
+      //
+      // But do NOT end the teammate. A usage limit is recoverable — it lifts
+      // on a reset clock or on an account switch — and ending a teammate over
+      // it is unrecoverable in a way the limit never was. Breaking out of this
+      // loop returns from runInProcessTeammate, and `allMessages` (the buffer
+      // minted above) is the ONLY complete copy of this teammate's
+      // conversation; `lastTurnAgentId`, the key its per-turn transcripts are
+      // written under, is likewise a local of this function. Returning
+      // destroys both, so anything downstream could offer is a cold respawn,
+      // not a continuation of the work.
+      //
+      // Instead PARK: stay inside the loop and fall through to the idle wait
+      // below with the claim released. The teammate keeps its conversation,
+      // keeps its inbox poll running, claims nothing on its own (the guard is
+      // consulted by tryClaimNextTask), and resumes on the next prompt with
+      // its history intact — the poll hands the prompt back and the next
+      // iteration passes `allMessages` to runAgent as `forkContextMessages`.
       const usageLimitNotice = findUsageLimitNotice(iterationMessages)
       if (usageLimitNotice) {
         logForDebugging(
-          `[inProcessRunner] ${identity.agentId} stopping: ${usageLimitNotice}`,
+          `[inProcessRunner] ${identity.agentId} parking: ${usageLimitNotice}`,
         )
         markCannotProceed(usageLimitNotice)
 
@@ -2759,26 +2779,56 @@ export async function runInProcessTeammate(
             identity.color,
             identity.teamName,
             {
-              idleReason: 'failed',
-              completedStatus: 'failed',
+              // 'parked', not 'failed' — the teammate is alive and resumable,
+              // and the row below stays `running` to match. The old pairing
+              // told the lead 'failed' while the task state said 'completed'
+              // and the truth was neither. completedStatus is dropped for the
+              // same reason: nothing completed, and this send never carried a
+              // completedTaskId for its one reader to key on anyway.
+              idleReason: 'parked',
               failureReason: usageLimitNotice,
             },
           )
         }
 
-        shouldExit = true
-        break
-      }
+        // Mark the row parked. Status deliberately stays 'running' — see the
+        // field's docblock in InProcessTeammateTask/types.ts.
+        updateTaskState(
+          taskId,
+          task => ({
+            ...task,
+            parkedNotice: usageLimitNotice,
+            parkedAt: Date.now(),
+          }),
+          setAppState,
+        )
+      } else {
+        // The turn produced no limit error, so whatever stop we were parked on
+        // has lifted: usage is available again and a later limit is fresh news.
+        clearCannotProceed()
+        // Clear this teammate's own park with it. The identity early-return
+        // matters: updateTaskState skips the AppState spread when the updater
+        // returns the same reference, so an unparked teammate causes no
+        // re-render on every successful turn.
+        updateTaskState(
+          taskId,
+          task =>
+            task.parkedNotice === undefined
+              ? task
+              : { ...task, parkedNotice: undefined, parkedAt: undefined },
+          setAppState,
+        )
 
-      // The turn produced no limit error, so whatever stop we were parked on
-      // has lifted: usage is available again and a later limit is fresh news.
-      clearCannotProceed()
-
-      // Some other error class ended the turn. Not a reason to stop — it may
-      // well be transient — but it is a reason not to sprint into the next
-      // turn, because nothing else on this path awaits anything.
-      if (endedInApiError(iterationMessages)) {
-        await sleep(FAILED_TURN_MIN_INTERVAL_MS)
+        // Some other error class ended the turn. Not a reason to stop — it may
+        // well be transient — but it is a reason not to sprint into the next
+        // turn, because nothing else on this path awaits anything.
+        //
+        // A parked turn skips this: it is about to enter the idle poll, which
+        // waits on its own, and sleeping the floor on top would only delay the
+        // prompt that un-parks it.
+        if (endedInApiError(iterationMessages)) {
+          await sleep(FAILED_TURN_MIN_INTERVAL_MS)
+        }
       }
 
       // If work was aborted (Escape), log it and add interrupt message, then continue to idle state

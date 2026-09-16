@@ -194,12 +194,14 @@ function classifyTeammateDelivery(
     tasks,
   )
   if (!task) return { state: 'untracked' }
-  // A `parked` status (the teammate lifecycle change) belongs HERE, as one
-  // line — above the terminal check, so it lands the same way whether or not
-  // `parked` is made terminal:
-  //   if (task.status === 'parked') return { state: 'undeliverable', status: task.status }
-  // The refusal text below already reads correctly for it: a parked teammate
-  // is not running, and its inbox is read when it comes back.
+  // A teammate parked on an account-wide usage limit is `live` here, and that
+  // is deliberate — do NOT add a refusal for it. Parking does not return from
+  // the runner: the loop falls through to its idle wait, so the inbox poll is
+  // still running and reads this write within one poll interval. The write IS
+  // the resume route, and refusing it would close the only way out of the
+  // park. It needs no branch of its own either — a parked teammate keeps
+  // `status: 'running'` (a `parkedNotice` field carries the park instead, see
+  // InProcessTeammateTask/types.ts), so it reaches this line as live already.
   if (!isTerminalTaskStatus(task.status)) return { state: 'live' }
   return { state: 'undeliverable', status: task.status }
 }

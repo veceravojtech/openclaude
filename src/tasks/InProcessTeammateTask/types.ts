@@ -67,6 +67,34 @@ export type InProcessTeammateTaskState = TaskStateBase & {
   shutdownRequested: boolean
 
   /**
+   * Set while this teammate is parked on an account-wide usage limit: alive,
+   * holding no claimed task, running no turn, waiting for the next prompt.
+   *
+   * A FIELD and not a `TaskStatus` member on purpose. `status` stays 'running',
+   * so every liveness, kill, cascade, spawn-cap and tree predicate keeps
+   * working unchanged — of the readers of `status` only one is exhaustive
+   * enough for the compiler to have caught a new member, and the silent ones
+   * include getRunningTeammatesSorted (InProcessTeammateTask.tsx), which feeds
+   * the teammates tree, the footer selector and background-task navigation at
+   * once. A parked teammate that vanished from those could never be messaged,
+   * and being messaged is exactly how it is resumed. This is the same shape
+   * `awaitingPlanApproval` and `shutdownRequested` above already use for
+   * "alive, but not working".
+   *
+   * Holds the notice TEXT and the time it was set, and deliberately NOTHING
+   * about the account. The active account can change under a parked teammate
+   * with no switchAccount call at all — withAccounts (utils/authAccounts.ts)
+   * promotes keys[0] blind when the active key is missing — so any cached
+   * account key, email or switch epoch would go stale silently. The lead
+   * re-reads the account when it resumes; the teammate caches nothing.
+   *
+   * Written on the usage-limit park path in the runner and cleared there
+   * beside clearCannotProceed() when a later turn succeeds.
+   */
+  parkedNotice?: string
+  parkedAt?: number
+
+  /**
    * Retain/grace pair, written TOGETHER at the terminal transition (the runner's
    * completion and failure tails, and killInProcessTeammate) and never before:
    * `retain: false` plus `evictAfter = Date.now() + TEAMMATE_GRACE_MS`.

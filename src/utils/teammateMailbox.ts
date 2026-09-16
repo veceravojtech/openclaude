@@ -395,8 +395,16 @@ export type IdleNotificationMessage = {
   type: 'idle_notification'
   from: string
   timestamp: string
-  /** Why the agent went idle */
-  idleReason?: 'available' | 'interrupted' | 'failed'
+  /**
+   * Why the agent went idle.
+   *
+   * 'parked' is the one value that does NOT mean the turn is over for good:
+   * the teammate hit an account-wide usage limit, handed its claim back and is
+   * waiting for a prompt. It is alive and resumable — messaging it is what
+   * resumes it — so a lead reading this must not treat it as a finished or
+   * failed agent. `failureReason` carries the notice, including the reset time.
+   */
+  idleReason?: 'available' | 'interrupted' | 'failed' | 'parked'
   /** Brief summary of the last DM sent this turn (if any) */
   summary?: string
   completedTaskId?: string

@@ -517,8 +517,11 @@ export async function* withRetry<T>(
       ) {
         // Switching beats waiting: another stored Claude account with quota
         // left unblocks this request now; a reset clock makes the user wait
-        // by construction. Same gates as the wait (usageLimitSwitch.ts),
-        // plus its own bound: one attempt per other account per request.
+        // by construction. The switch's gate is its OWN and is strictly wider
+        // than the wait's (isSwitchableUsageLimitSource, usageLimitSwitch.ts):
+        // it admits background sources the wait deliberately refuses, so a
+        // teammate can switch even though it may not wait. Plus its own bound:
+        // one attempt per other account per request.
         // Claude→Claude only — never crosses providers; wrong-provider 429s
         // fall through untouched.
         const switchOutcome = await switchToNextAccountOnUsageLimit({

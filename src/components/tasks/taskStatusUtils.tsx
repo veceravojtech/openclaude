@@ -78,6 +78,10 @@ export function getTaskStatusColor(status: TaskStatus, options?: {
 export function describeTeammateActivity(t: DeepImmutable<InProcessTeammateTaskState>): string {
   if (t.shutdownRequested) return 'stopping';
   if (t.awaitingPlanApproval) return 'awaiting approval';
+  // Before 'idle': a parked teammate IS idle, but reading it as ordinary idle
+  // hides the one fact that explains it and the one fact that says what to do
+  // — the account is out of usage, and a prompt resumes it.
+  if (t.parkedNotice) return 'usage limit — parked';
   if (t.isIdle) return 'idle';
   return (t.progress?.recentActivities && summarizeRecentActivities(t.progress.recentActivities)) ?? t.progress?.lastActivity?.activityDescription ?? 'working';
 }

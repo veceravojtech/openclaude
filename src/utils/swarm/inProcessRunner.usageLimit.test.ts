@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import type { AppState } from '../../state/AppState.js'
 import { getDefaultAppState } from '../../state/AppStateStore.js'
+import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js'
 import type { ToolUseContext } from '../../Tool.js'
 import {
   acquireSharedMutationLock,
@@ -24,11 +25,19 @@ import {
 // teammate parks idle, messages the lead, claims the next task with no
 // awaited delay, fails again — one lead-bound message per lap at CPU speed.
 //
-// These tests pin the runner half of the fix end to end: the teammate stops
-// instead of spinning, hands its claim back rather than stranding it, the
-// lead hears the notice exactly once WITH the reset time, a teammate gated by
-// another's stop never claims at all, and the failed-turn floor exists
-// without regressing the deliberate fast path for genuinely fresh idle.
+// These tests pin the runner half of the fix end to end: the teammate PARKS
+// instead of spinning — alive, holding no claim, and resumable with its work
+// intact — hands its claim back rather than stranding it, the lead hears the
+// notice exactly once WITH the reset time and is told 'parked' rather than
+// 'failed', a teammate gated by another's stop never claims at all, and the
+// failed-turn floor exists without regressing the deliberate fast path for
+// genuinely fresh idle.
+//
+// The park replaced an earlier stop-and-exit. Exiting was the wrong shape for
+// a RECOVERABLE failure: returning from runInProcessTeammate destroys the
+// runner-local `allMessages` buffer and `lastTurnAgentId`, which together are
+// the only complete record of the teammate's work, so anything downstream
+// could offer would be a cold respawn rather than a continuation.
 
 const TEAM_NAME = 'limit-team'
 const WORKER = 'limit-worker'
@@ -93,10 +102,21 @@ afterEach(() => {
 
 type RunAgentParams = Parameters<RunAgentModule['runAgent']>[0]
 
+/** What a single model turn should come back as. */
+type TurnOutcome = 'usage-limit' | 'other-api-error' | 'success'
+
+type InboxMessage = { from: string; text: string; read: boolean }
+
 type Harness = {
   runner: RunnerModule
   runAgentCalls: RunAgentParams[]
   leadMailbox: Array<{ from: string; text: string }>
+  /**
+   * The teammate's OWN inbox, served by the readMailbox mock. Pushing to it is
+   * exactly what SendMessageTool does to a live teammate, so it is how a test
+   * resumes a parked one.
+   */
+  workerInbox: InboxMessage[]
   taskList: Task[]
   claimCalls: string[]
   sleepCalls: number[]
@@ -115,10 +135,13 @@ function pendingTask(id: string, subject: string): Task {
 
 /**
  * @param turnOutcome what each turn's assistant message should be — an
- * out-of-usage limit, some other API error, or an ordinary success.
+ * out-of-usage limit, some other API error, or an ordinary success. Pass an
+ * ARRAY to give each successive turn its own outcome (the last entry holds for
+ * any turn beyond the sequence), which is what lets a test drive a teammate
+ * INTO a park on turn 1 and back OUT of it on turn 2.
  */
 async function importRunnerWithMocks(
-  turnOutcome: 'usage-limit' | 'other-api-error' | 'success',
+  turnOutcome: TurnOutcome | TurnOutcome[],
 ): Promise<Harness> {
   const stamp = `${Date.now()}-${Math.random()}`
   actualPrompts ??= await import(
@@ -136,14 +159,19 @@ async function importRunnerWithMocks(
 
   const runAgentCalls: RunAgentParams[] = []
   const leadMailbox: Array<{ from: string; text: string }> = []
+  const workerInbox: InboxMessage[] = []
   const taskList: Task[] = []
   const claimCalls: string[] = []
   const sleepCalls: number[] = []
 
-  const turnText =
-    turnOutcome === 'usage-limit'
+  const outcomes: TurnOutcome[] = Array.isArray(turnOutcome)
+    ? turnOutcome
+    : [turnOutcome]
+
+  const textFor = (outcome: TurnOutcome): string =>
+    outcome === 'usage-limit'
       ? OUT_OF_USAGE
-      : turnOutcome === 'other-api-error'
+      : outcome === 'other-api-error'
         ? 'API Error: 529 Overloaded'
         : 'noted'
 
@@ -155,6 +183,9 @@ async function importRunnerWithMocks(
     ...actualRunAgent!,
     runAgent: async function* (params: RunAgentParams) {
       runAgentCalls.push(params)
+      // This call is already recorded, so it is the LAST entry: index by
+      // length-1, and hold the final outcome for any turn past the sequence.
+      const outcome = outcomes[runAgentCalls.length - 1] ?? outcomes.at(-1)!
       yield {
         type: 'assistant',
         uuid: `assistant-${runAgentCalls.length}`,
@@ -162,11 +193,11 @@ async function importRunnerWithMocks(
         // The keystone: an API error travels as a MESSAGE, so the turn
         // still reports success and the runner's terminal catch never sees
         // it. Anything that only handles throws misses this entirely.
-        ...(turnOutcome === 'success' ? {} : { isApiErrorMessage: true }),
+        ...(outcome === 'success' ? {} : { isApiErrorMessage: true }),
         message: {
           id: `msg-${runAgentCalls.length}`,
           role: 'assistant',
-          content: [{ type: 'text', text: turnText }],
+          content: [{ type: 'text', text: textFor(outcome) }],
           usage: {
             input_tokens: 1,
             output_tokens: 1,
@@ -179,8 +210,19 @@ async function importRunnerWithMocks(
   }))
   mock.module('../teammateMailbox.js', () => ({
     ...actualMailbox!,
-    readMailbox: async () => [],
-    markMessageAsReadByIndex: async () => {},
+    // Only the worker's own inbox is backed; the sub-team `team-lead` inbox the
+    // runner also polls stays empty, as it is for a teammate that leads nobody.
+    readMailbox: async (agentName: string) =>
+      agentName === WORKER ? workerInbox.map(m => ({ ...m })) : [],
+    markMessageAsReadByIndex: async (
+      agentName: string,
+      _teamName: string,
+      index: number,
+    ) => {
+      if (agentName !== WORKER) return
+      const message = workerInbox[index]
+      if (message) message.read = true
+    },
     writeToMailbox: async (
       recipient: string,
       message: { from: string; text: string },
@@ -227,7 +269,15 @@ async function importRunnerWithMocks(
   const runner: RunnerModule = await import(
     `./inProcessRunner.ts?usageLimit=${stamp}`
   )
-  return { runner, runAgentCalls, leadMailbox, taskList, claimCalls, sleepCalls }
+  return {
+    runner,
+    runAgentCalls,
+    leadMailbox,
+    workerInbox,
+    taskList,
+    claimCalls,
+    sleepCalls,
+  }
 }
 
 /** Lead-bound idle notifications carrying the given text. */
@@ -267,9 +317,46 @@ async function settle(ms = 150): Promise<void> {
   await new Promise<void>(resolve => setTimeout(resolve, ms))
 }
 
+/** Waits until the runner has recorded the park on the teammate's row. */
+async function waitForPark(started: StartedTeammate): Promise<void> {
+  await waitFor(
+    () => teammateRow(started)?.parkedNotice !== undefined,
+    'the teammate to park',
+  )
+}
+
+/**
+ * True when `runInProcessTeammate` has NOT returned within `ms`.
+ *
+ * The distinction the whole change rests on: the promise resolving means the
+ * runner unwound and took the conversation buffer with it, so a teammate can
+ * only be continuable if this stays pending.
+ */
+async function stillRunning(
+  started: StartedTeammate,
+  ms = 300,
+): Promise<boolean> {
+  const outcome = await Promise.race([
+    started.done.then(() => 'returned' as const),
+    new Promise<'running'>(resolve => setTimeout(() => resolve('running'), ms)),
+  ])
+  return outcome === 'running'
+}
+
 type StartedTeammate = {
   abortController: AbortController
   done: ReturnType<RunnerModule['runInProcessTeammate']>
+  /** The teammate's row id, and a reader for the AppState the runner writes. */
+  taskId: string
+  getState: () => AppState
+}
+
+/** The teammate's own row, narrowed — the runner is the only writer. */
+function teammateRow(
+  started: StartedTeammate,
+): InProcessTeammateTaskState | undefined {
+  const task = started.getState().tasks[started.taskId]
+  return task && task.type === 'in_process_teammate' ? task : undefined
 }
 
 /** Spawns an idle teammate, which claims from the task list on startup. */
@@ -315,27 +402,34 @@ async function startTeammate(
     toolUseContext,
     abortController: spawn.abortController,
   })
-  return { abortController: spawn.abortController, done }
+  return {
+    abortController: spawn.abortController,
+    done,
+    taskId: spawn.taskId,
+    getState: () => state,
+  }
 }
 
-test('a teammate that hits the limit stops, hands its task back, and tells the lead once', async () => {
+test('a teammate that hits the limit parks alive, hands its task back, and tells the lead once', async () => {
   const harness = await importRunnerWithMocks('usage-limit')
   harness.taskList.push(pendingTask('1', 'first task'))
   harness.taskList.push(pendingTask('2', 'second task'))
 
   const started = await startTeammate(harness)
+  await waitForPark(started)
 
-  // It exits on its own — no abort from the test. Before the fix it would
-  // park idle and come straight back for task #2.
-  const result = await started.done
-  expect(result.success).toBe(true)
+  // It does NOT exit. A usage limit is recoverable; ending the teammate over
+  // it is not, and it would take the runner-local conversation buffer with it.
+  expect(await stillRunning(started)).toBe(true)
 
-  // One turn, not one per remaining task.
+  // One turn, not one per remaining task — it parks instead of coming straight
+  // back for task #2.
   expect(harness.runAgentCalls).toHaveLength(1)
   expect(harness.claimCalls).toEqual(['1'])
 
   // The claim is handed back, owner cleared — findAvailableTask rejects any
-  // truthy owner, so a status-only reset would strand it unclaimable.
+  // truthy owner, so a status-only reset would strand it unclaimable. Parking
+  // must not hold a claimed task hostage.
   const released = harness.taskList.find(t => t.id === '1')!
   expect(released.status).toBe('pending')
   expect(released.owner).toBeFalsy()
@@ -344,9 +438,25 @@ test('a teammate that hits the limit stops, hands its task back, and tells the l
   const reports = notificationsMentioning(harness.leadMailbox, 'out of extra usage')
   expect(reports).toHaveLength(1)
   expect(reports[0]).toContain('resets 3pm')
+  // …and it is told the truth: parked, not failed. The row agrees with it.
+  expect(JSON.parse(reports[0]!).idleReason).toBe('parked')
+  expect(JSON.parse(reports[0]!).completedStatus).toBeUndefined()
+
+  // The row stays alive and running, carrying the park as a field. Anything
+  // else drops it out of getRunningTeammatesSorted and nothing could reach it.
+  const row = teammateRow(started)!
+  expect(row.status).toBe('running')
+  expect(row.parkedNotice).toContain('out of extra usage')
+  expect(row.parkedAt).toBeGreaterThan(0)
+  // Not evicted: the grace pair is the terminal transition's, and no terminal
+  // transition happened.
+  expect(row.evictAfter).toBeUndefined()
 
   // And the stop is recorded so no other teammate picks up where it left off.
   expect(isCannotProceed()).toBe(true)
+
+  started.abortController.abort()
+  await started.done
 })
 
 test('a second teammate on the same limit adds no further lead-bound message', async () => {
@@ -359,14 +469,69 @@ test('a second teammate on the same limit adds no further lead-bound message', a
   expect(shouldReportUsageLimit(OUT_OF_USAGE)).toBe(true)
 
   const started = await startTeammate(harness)
-  const result = await started.done
-  expect(result.success).toBe(true)
+  await waitForPark(started)
 
-  // It still stops and still releases — it just does not re-report.
+  // It still parks and still releases — it just does not re-report.
   expect(harness.taskList.find(t => t.id === '1')!.status).toBe('pending')
   expect(
     notificationsMentioning(harness.leadMailbox, 'out of extra usage'),
   ).toHaveLength(0)
+  expect(teammateRow(started)!.status).toBe('running')
+
+  started.abortController.abort()
+  await started.done
+})
+
+test('a teammate parked by a usage limit resumes on the next prompt with its work intact', async () => {
+  // Turn 1 hits the limit and parks; turn 2 — the one an inbound prompt buys —
+  // succeeds.
+  const harness = await importRunnerWithMocks(['usage-limit', 'success'])
+  harness.taskList.push(pendingTask('1', 'first task'))
+
+  const started = await startTeammate(harness)
+  await waitForPark(started)
+
+  // Parked, not dead: the runner has not returned, so `allMessages` and
+  // `lastTurnAgentId` — both locals of runInProcessTeammate, and the only
+  // complete record of this teammate's work — are still in hand.
+  expect(await stillRunning(started)).toBe(true)
+  expect(isCannotProceed()).toBe(true)
+  expect(teammateRow(started)!.status).toBe('running')
+
+  // Resume it exactly the way SendMessageTool does — a write to its inbox.
+  // Its poll loop never stopped, so this is read within one poll interval.
+  harness.workerInbox.push({
+    from: 'team-lead',
+    text: 'carry on',
+    read: false,
+  })
+
+  await waitFor(() => harness.runAgentCalls.length >= 2, 'the resumed turn')
+
+  // THE CONTINUABILITY ASSERTION. Surviving is not enough: the pre-limit
+  // conversation has to come WITH it. forkContextMessages is the buffer the
+  // runner carries across turns, so a teammate that survived but restarted
+  // cold passes every assertion above and fails this one.
+  const resumed = harness.runAgentCalls[1]!
+  expect(resumed.forkContextMessages).toBeDefined()
+  expect(JSON.stringify(resumed.forkContextMessages)).toContain('first task')
+  // The limit notice itself is part of that history too — the teammate can see
+  // why it was parked.
+  expect(JSON.stringify(resumed.forkContextMessages)).toContain(
+    'out of extra usage',
+  )
+
+  // And the park lifts by itself on the successful turn — no one has to clear
+  // it by hand.
+  await waitFor(
+    () => teammateRow(started)?.parkedNotice === undefined,
+    'the park to lift',
+  )
+  expect(isCannotProceed()).toBe(false)
+  expect(teammateRow(started)!.parkedAt).toBeUndefined()
+
+  started.abortController.abort()
+  await started.done
 })
 
 test('a teammate spawned while the account is stopped never claims a task', async () => {
