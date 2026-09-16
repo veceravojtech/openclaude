@@ -1417,3 +1417,147 @@ describe('isOAuthGrantRevokedError', () => {
     expect(isOAuthGrantRevokedMessage('some other oauth failure')).toBe(false)
   })
 })
+
+describe('revoked-grant message survives on screen', () => {
+  // AMEND-3 / F2b: the api_error slot is transient — messages.ts replaces a
+  // trailing api_error in place and keeps only the last one, so the "switching
+  // to default" notice lived 537-705ms. The wording therefore has to ride the
+  // PERSISTENT assistant message that getAssistantMessageFromError builds, and
+  // the terminal 401 has to actually reach that renderer. This pins the whole
+  // chain rather than asserting it.
+  //
+  // The config home is redirected to a throwaway temp dir for the duration, so
+  // the credential reads on the way to the revoked branch (isClaudeAISubscriber,
+  // getOauthAccountInfo) resolve against an empty store and never touch the
+  // user's real accounts.
+  let tempDir: string
+
+  beforeEach(async () => {
+    const { mkdtempSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { setClaudeConfigHomeDirForTesting } = await import(
+      '../../utils/envUtils.js'
+    )
+    const { clearOAuthTokenCache } = await import('../../utils/auth.js')
+    tempDir = mkdtempSync(join(tmpdir(), 'openclaude-revoked-grant-test-'))
+    setClaudeConfigHomeDirForTesting(tempDir)
+    clearOAuthTokenCache()
+  })
+
+  afterEach(async () => {
+    const { rmSync } = await import('node:fs')
+    const { setClaudeConfigHomeDirForTesting } = await import(
+      '../../utils/envUtils.js'
+    )
+    const { clearOAuthTokenCache } = await import('../../utils/auth.js')
+    const errors = await import('./errors.js')
+    errors.clearUsageLimitAccountSwitch()
+    setClaudeConfigHomeDirForTesting(undefined)
+    clearOAuthTokenCache()
+    try {
+      rmSync(tempDir, { recursive: true, force: true })
+    } catch {
+      // ignore
+    }
+  })
+
+  function firstText(message: { message: { content: unknown } }): string {
+    const content = message.message.content
+    const first = Array.isArray(content) ? content[0] : undefined
+    if (!first || typeof first !== 'object' || !('text' in first)) return ''
+    const { text } = first as { text?: unknown }
+    return typeof text === 'string' ? text : ''
+  }
+
+  function revoked401(): APIError {
+    return new APIError(
+      401,
+      {
+        type: 'error',
+        error: {
+          type: 'authentication_error',
+          message: 'OAuth access token has been revoked.',
+        },
+      },
+      '{"type":"error","error":{"type":"authentication_error","message":"OAuth access token has been revoked."}}',
+      new Headers(),
+    )
+  }
+
+  test('the terminal 401 renders the persistent revoked message, not the generic auth error', async () => {
+    const errors = await import('./errors.js')
+    const state = await import('../../bootstrap/state.js')
+    const wasInteractive = state.getIsInteractive()
+    try {
+      state.setIsInteractive(true)
+      errors.noteUsageLimitAccountSwitch('default')
+
+      const message = errors.getAssistantMessageFromError(
+        revoked401(),
+        'claude-sonnet-4-6',
+      )
+      const text = firstText(message)
+
+      expect(message.isApiErrorMessage).toBe(true)
+      expect(text).toBe(errors.getTokenRevokedErrorMessage())
+      expect(text).toBe(
+        'OAuth token revoked · This session was switched to account "default" automatically after the previous account hit its usage limit, and that account\'s saved credentials have been revoked · Run /login to re-authenticate it, or /account to switch to a different account',
+      )
+      // The terminus the chain used to land on: the generic 401 branch, which
+      // says nothing about the account or the automatic switch.
+      expect(text).not.toContain('Authentication failed (status 401)')
+    } finally {
+      state.setIsInteractive(wasInteractive)
+    }
+  })
+
+  test('the revoked 401 classifies as token_revoked rather than auth_error', async () => {
+    const { classifyAPIError } = await import('./errors.js')
+    expect(classifyAPIError(revoked401())).toBe('token_revoked')
+  })
+
+  test('a CannotRetryError unwraps to the original error the renderer classifies', async () => {
+    // claude.ts:3397 unwraps CannotRetryError.originalError before calling
+    // getAssistantMessageFromError. If that ever stops happening the message
+    // silently degrades to the generic branch, so pin the property here.
+    const { withRetry, CannotRetryError } = await importFreshWithRetryModule(
+      'firstParty',
+      {
+        auth: {
+          handleOAuth401Error: async () => false,
+          getClaudeAIOAuthTokens: () => ({
+            accessToken: 'mock-access-token-not-a-real-credential',
+          }),
+        },
+      },
+    )
+    const errors = await import('./errors.js')
+
+    let thrown: unknown
+    try {
+      await drainAsyncGenerator(
+        withRetry(
+          async () => ({}) as Anthropic,
+          async () => {
+            throw revoked401()
+          },
+          {
+            maxRetries: 10,
+            model: 'claude-sonnet-4-6',
+            thinkingConfig: { type: 'disabled' },
+            querySource: 'repl_main_thread',
+          },
+        ),
+      )
+    } catch (error) {
+      thrown = error
+    }
+
+    expect(thrown).toBeInstanceOf(CannotRetryError)
+    const original = (thrown as InstanceType<typeof CannotRetryError>)
+      .originalError
+    expect(errors.isOAuthGrantRevokedError(original)).toBe(true)
+    expect(errors.classifyAPIError(original)).toBe('token_revoked')
+  })
+})
