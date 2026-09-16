@@ -31,15 +31,27 @@ import {
 } from '../../test/sharedMutationLock.js'
 import type { ThemeSetting } from '../../utils/theme.js'
 import { ThemeProvider, usePreviewTheme } from './ThemeProvider.js'
+import * as realStructuredDiff from '../StructuredDiff.js'
+import * as realColorDiff from '../StructuredDiff/colorDiff.js'
+
+// Snapshots taken before any mock.module() call. mock.module() mutates the
+// live namespace object in place, so restoring from the namespace (or from a
+// spread of it) would re-install the stub instead of undoing it.
+const pristineRealStructuredDiff = { ...realStructuredDiff }
+const pristineRealColorDiff = { ...realColorDiff }
 
 await acquireSharedMutationLock('components/design-system/ThemeProvider.test.tsx')
 
+// Spread the pristine namespaces into the stubs: a partial factory makes every
+// export it omits undefined for every file loaded afterwards.
 mock.module('../StructuredDiff.js', () => ({
+  ...pristineRealStructuredDiff,
   StructuredDiff: function StructuredDiffPreview(): React.ReactNode {
     return <Text>diff</Text>
   },
 }))
 mock.module('../StructuredDiff/colorDiff.js', () => ({
+  ...pristineRealColorDiff,
   getColorModuleUnavailableReason: () => 'env',
   getSyntaxTheme: () => null,
 }))
@@ -107,7 +119,11 @@ async function waitForFrame(
 
 afterAll(() => {
   try {
+    // mock.restore() does NOT undo mock.module(); re-register both specifiers
+    // from their pre-mock snapshots, under the exact spelling used above.
     mock.restore()
+    mock.module('../StructuredDiff.js', () => ({ ...pristineRealStructuredDiff }))
+    mock.module('../StructuredDiff/colorDiff.js', () => ({ ...pristineRealColorDiff }))
   } finally {
     releaseSharedMutationLock()
   }

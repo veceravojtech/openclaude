@@ -11,10 +11,19 @@ import { createRoot } from '../ink.js'
 import { KeybindingSetup } from '../keybindings/KeybindingProviderSetup.js'
 import { AppStateProvider } from '../state/AppState.js'
 import type { ExportFormat } from '../utils/exportFormats.js'
+import * as realOsc from '../ink/termio/osc.js'
+
+// Snapshot taken before any mock.module() call. mock.module() mutates the live
+// namespace object in place, so restoring from the namespace (or from a spread
+// of it) would re-install the stub instead of undoing it.
+const pristineRealOsc = { ...realOsc }
 
 const setClipboard = mock(async (_content: string) => '')
 
+// osc.js exports twenty-one symbols; a factory returning only setClipboard
+// makes the other twenty undefined for every file loaded afterwards.
 mock.module('../ink/termio/osc.js', () => ({
+  ...pristineRealOsc,
   setClipboard,
 }))
 
@@ -89,7 +98,10 @@ afterEach(() => {
 })
 
 afterAll(() => {
+  // mock.restore() does NOT undo mock.module(); re-register the specifier from
+  // its pre-mock snapshot, under the exact spelling used above.
   mock.restore()
+  mock.module('../ink/termio/osc.js', () => ({ ...pristineRealOsc }))
 })
 
 test('shows export format choices before export method choices', async () => {
