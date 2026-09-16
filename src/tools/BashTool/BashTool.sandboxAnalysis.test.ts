@@ -9,6 +9,30 @@ import * as realShell from '../../utils/Shell.js'
 import type { ExecResult, ShellCommand } from '../../utils/ShellCommand.js'
 import { SandboxManager } from '../../utils/sandbox/sandbox-adapter.js'
 
+// Pristine snapshots of the two modules this file stubs, captured at module scope
+// before any test runs. `mock.module()` mutates the LIVE namespace in place, so
+// `realShell`/`realGrowthbook` are themselves rewritten the moment a stub installs:
+// spreading them from inside the install helpers would copy the stub on the second
+// test, and restoring from them would re-install it.
+// Precedent: src/utils/imagePaste.win32.test.ts:16-26.
+const pristineShell = { ...realShell }
+const pristineGrowthbook = { ...realGrowthbook }
+
+// `mock.restore()` only undoes spyOn/function mocks -- it does NOT unregister a
+// `mock.module()` registration, so every specifier stubbed below has to be
+// re-registered from the pristine snapshots or the stubbed `Shell` leaks
+// process-wide and BashTool.errorOutput.test.ts runs against a fake `exec`.
+function restoreMockedModules(): void {
+  mock.module('../../utils/Shell.js', () => ({ ...pristineShell }))
+  mock.module('src/utils/Shell.js', () => ({ ...pristineShell }))
+  mock.module('../../services/analytics/growthbook.js', () => ({
+    ...pristineGrowthbook,
+  }))
+  mock.module('src/services/analytics/growthbook.js', () => ({
+    ...pristineGrowthbook,
+  }))
+}
+
 const originalSandboxMethods = {
   isSandboxingEnabled: SandboxManager.isSandboxingEnabled,
   areUnsandboxedCommandsAllowed: SandboxManager.areUnsandboxedCommandsAllowed,
@@ -29,6 +53,7 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    restoreMockedModules()
     SandboxManager.isSandboxingEnabled =
       originalSandboxMethods.isSandboxingEnabled
     SandboxManager.areUnsandboxedCommandsAllowed =
@@ -107,19 +132,19 @@ async function importBashToolWithExecutionMocks() {
   )
 
   mock.module('../../utils/Shell.js', () => ({
-    ...realShell,
+    ...pristineShell,
     exec: execMock,
   }))
   mock.module('src/utils/Shell.js', () => ({
-    ...realShell,
+    ...pristineShell,
     exec: execMock,
   }))
   mock.module('../../services/analytics/growthbook.js', () => ({
-    ...realGrowthbook,
+    ...pristineGrowthbook,
     getFeatureValue_CACHED_MAY_BE_STALE,
   }))
   mock.module('src/services/analytics/growthbook.js', () => ({
-    ...realGrowthbook,
+    ...pristineGrowthbook,
     getFeatureValue_CACHED_MAY_BE_STALE,
   }))
 
@@ -137,11 +162,11 @@ async function importSandboxPresentationWithMocks() {
   )
 
   mock.module('../../services/analytics/growthbook.js', () => ({
-    ...realGrowthbook,
+    ...pristineGrowthbook,
     getFeatureValue_CACHED_MAY_BE_STALE,
   }))
   mock.module('src/services/analytics/growthbook.js', () => ({
-    ...realGrowthbook,
+    ...pristineGrowthbook,
     getFeatureValue_CACHED_MAY_BE_STALE,
   }))
 
