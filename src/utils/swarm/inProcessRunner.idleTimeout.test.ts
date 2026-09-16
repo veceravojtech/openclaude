@@ -81,26 +81,30 @@ afterEach(() => {
     nowSpy?.mockRestore()
     nowSpy = undefined
     mock.restore()
+    // Each restore must hand `mock.module` a SPREAD COPY. In bun 1.3.9 a
+    // factory returning the module namespace object itself is a silent no-op,
+    // which left the mocks above installed for every later file in the process
+    // (a neutered `sleep` then busy-spun other suites into multi-GB heaps).
     if (actualPrompts) {
-      mock.module('../../constants/prompts.js', () => actualPrompts!)
+      mock.module('../../constants/prompts.js', () => ({ ...actualPrompts! }))
     }
     if (actualRunAgent) {
-      mock.module('../../tools/AgentTool/runAgent.js', () => actualRunAgent!)
+      mock.module('../../tools/AgentTool/runAgent.js', () => ({ ...actualRunAgent! }))
     }
     if (actualMailbox) {
-      mock.module('../teammateMailbox.js', () => actualMailbox!)
+      mock.module('../teammateMailbox.js', () => ({ ...actualMailbox! }))
     }
     if (actualTasks) {
-      mock.module('../tasks.js', () => actualTasks!)
+      mock.module('../tasks.js', () => ({ ...actualTasks! }))
     }
     if (actualSleep) {
-      mock.module('../sleep.js', () => actualSleep!)
+      mock.module('../sleep.js', () => ({ ...actualSleep! }))
     }
     if (actualDiskOutput) {
-      mock.module('../task/diskOutput.js', () => actualDiskOutput!)
+      mock.module('../task/diskOutput.js', () => ({ ...actualDiskOutput! }))
     }
     if (actualSdkEventQueue) {
-      mock.module('../sdkEventQueue.js', () => actualSdkEventQueue!)
+      mock.module('../sdkEventQueue.js', () => ({ ...actualSdkEventQueue! }))
     }
     clearRegisteredHooks()
     if (previousRegisteredHooks) {
@@ -752,8 +756,13 @@ test('a wake message handed over while other work arrives in the same round is n
   const started = await startIdleTeammate(harness, 'idle-worker')
 
   // Both messages are worked on: the DM first, then the persisted wake text
-  // from the teammate's own mailbox on the next idle round.
-  await waitFor(() => harness.runAgentCalls.length === 2, 'two turns')
+  // from the teammate's own mailbox on the next idle round. The hook stays
+  // registered and re-fires on every subsequent idle round, so turns keep
+  // arriving after these two; an `=== 2` predicate polled every 5 ms can miss
+  // the instant the count is exactly 2 (observed overshooting to 101) and then
+  // waits out the whole deadline. Only the first two turns are asserted on, and
+  // those entries never change once written.
+  await waitFor(() => harness.runAgentCalls.length >= 2, 'two turns')
   expect(userContentOf(harness.runAgentCalls[0]!)).toContain('ping from reviewer')
   const second = userContentOf(harness.runAgentCalls[1]!)
   expect(second).toContain('TeammateIdleTimeout hook feedback:\nReview PR #7')

@@ -61,23 +61,27 @@ afterEach(() => {
   try {
     resetCommandQueue()
     mock.restore()
+    // Each restore must hand `mock.module` a SPREAD COPY. In bun 1.3.9 a
+    // factory returning the module namespace object itself is a silent no-op,
+    // which left the mocks above installed for every later file in the process
+    // (a neutered `sleep` then busy-spun other suites into multi-GB heaps).
     if (actualPrompts) {
-      mock.module('../../constants/prompts.js', () => actualPrompts!)
+      mock.module('../../constants/prompts.js', () => ({ ...actualPrompts! }))
     }
     if (actualRunAgent) {
-      mock.module('../../tools/AgentTool/runAgent.js', () => actualRunAgent!)
+      mock.module('../../tools/AgentTool/runAgent.js', () => ({ ...actualRunAgent! }))
     }
     if (actualMailbox) {
-      mock.module('../teammateMailbox.js', () => actualMailbox!)
+      mock.module('../teammateMailbox.js', () => ({ ...actualMailbox! }))
     }
     if (actualTasks) {
-      mock.module('../tasks.js', () => actualTasks!)
+      mock.module('../tasks.js', () => ({ ...actualTasks! }))
     }
     if (actualSleep) {
-      mock.module('../sleep.js', () => actualSleep!)
+      mock.module('../sleep.js', () => ({ ...actualSleep! }))
     }
     if (actualDiskOutput) {
-      mock.module('../task/diskOutput.js', () => actualDiskOutput!)
+      mock.module('../task/diskOutput.js', () => ({ ...actualDiskOutput! }))
     }
   } finally {
     releaseSharedMutationLock()

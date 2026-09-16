@@ -77,11 +77,15 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    // Each restore must hand `mock.module` a SPREAD COPY. In bun 1.3.9 a
+    // factory returning the module namespace object itself is a silent no-op,
+    // which left the mocks above installed for every later file in the process
+    // (a neutered `sleep` then busy-spun other suites into multi-GB heaps).
     if (actualRunner) {
-      mock.module('./inProcessRunner.js', () => actualRunner!)
+      mock.module('./inProcessRunner.js', () => ({ ...actualRunner! }))
     }
     if (actualSessionStorage) {
-      mock.module('../sessionStorage.js', () => actualSessionStorage!)
+      mock.module('../sessionStorage.js', () => ({ ...actualSessionStorage! }))
     }
     setClaudeConfigHomeDirForTesting(undefined)
     if (configDir) {
