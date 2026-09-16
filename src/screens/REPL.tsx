@@ -5036,9 +5036,12 @@ export function REPL({
   // Guard onOpenBackgroundTasks when a local-jsx dialog (e.g. /mcp) is open —
   // otherwise Shift+Down stacks BackgroundTasksDialog on top and deadlocks input.
   // The typing flag keeps the hook's plain-letter shortcuts (f, k) out of text.
+  // Enter gets its own flag instead: it must survive a prompt that merely holds
+  // text, and stand down only while useHistorySearch owns the key.
   useBackgroundTaskNavigation({
     onOpenBackgroundTasks: isShowingLocalJSXCommand ? undefined : () => setShowBashesDialog(true),
-    promptTypingSuppressionActive
+    promptTypingSuppressionActive,
+    historySearchActive: isSearchingHistory
   });
   // Auto-exit viewing mode when teammate completes or errors
   useTeammateViewAutoExit();

@@ -19,6 +19,11 @@
  *   view until the runner happened to clear the controller.
  * - S4 pins ink's child-before-parent `useInput` dispatch order, which is why
  *   PromptInput's onSubmit reads `viewSelectionMode` before this hook clears it.
+ * - S5 pins that Enter typed into an open Ctrl+R search does NOT resolve the
+ *   teammate selection, and S5b/S5c are its two negative controls. S5c is the
+ *   load-bearing one: Enter must STILL resolve while the prompt merely holds
+ *   text, which is why `historySearchActive` is a separate option from
+ *   `promptTypingSuppressionActive` rather than a widening of it.
  */
 import { PassThrough } from 'node:stream'
 import { afterEach, beforeEach, expect, test } from 'bun:test'
@@ -59,13 +64,16 @@ function Harness({
   onReady,
   onState,
   promptTypingSuppressionActive,
+  historySearchActive,
 }: {
   onReady: (handler: (event: KeyboardEvent) => void) => void
   onState: (state: ViewState) => void
   promptTypingSuppressionActive: boolean
+  historySearchActive: boolean
 }): React.ReactNode {
   const { handleKeyDown } = useBackgroundTaskNavigation({
     promptTypingSuppressionActive,
+    historySearchActive,
   })
   const viewingAgentTaskId = useAppState(s => s.viewingAgentTaskId)
   const viewSelectionMode = useAppState(s => s.viewSelectionMode)
@@ -158,9 +166,15 @@ function fakeIo(): {
   }
 }
 
+// The two flags are passed SEPARATELY on purpose: the whole point of the S5
+// series is that an open history search and a prompt that merely holds text are
+// different states for Enter, so a test has to be able to set one without the
+// other. `historySearchActive` defaults to false so the S1–S4 call sites read
+// exactly as they did before.
 async function renderNavigation(
   initialState: AppState,
   promptTypingSuppressionActive: boolean,
+  historySearchActive = false,
 ): Promise<{
   press: (event: KeyboardEvent) => Promise<void>
   state: () => ViewState
@@ -195,6 +209,7 @@ async function renderNavigation(
             latest = value
           }}
           promptTypingSuppressionActive={promptTypingSuppressionActive}
+          historySearchActive={historySearchActive}
         />
       </AppStateProvider>,
     )
@@ -441,5 +456,84 @@ test('S4: a child useInput subscriber is dispatched before its parent', async ()
     await Bun.sleep(30)
     io.raw.stdin.end()
     io.raw.stdout.end()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// S5 — Enter during an open Ctrl+R search. useHistorySearch owns `enter` (its
+// historySearch:execute binding consumes it with stopImmediatePropagation), so
+// in the steady listener order this branch is never reached at all. It becomes
+// reachable once the search-owning subtree remounts and re-appends its useInput
+// BEHIND REPL's, which is the order this harness drives directly: the hook is
+// called with no competing subscriber, exactly as if the search's listener had
+// already been passed over. The guard is what makes the outcome the same in
+// both orders.
+//
+// S5b and S5c are the negative controls, and they are the point: a fix that
+// disables Enter generally is a regression, not a fix.
+// ---------------------------------------------------------------------------
+test('S5: enter typed into the Ctrl+R search does not resolve the selection', async () => {
+  const { task } = createTeammateTask()
+  // The real state during a search: the prompt buffer is empty and unfocused,
+  // so the suppression flag is true ONLY because of the search (S1's point),
+  // and the search flag is true on its own.
+  const mounted = await renderNavigation(
+    selectingState(task),
+    isPromptTypingSuppressionActive(false, '', true),
+    true,
+  )
+  try {
+    await mounted.press(key('return')) // user meant: run the highlighted match
+    expect(mounted.state().viewingAgentTaskId).toBeUndefined()
+    expect(mounted.state().viewSelectionMode).toBe('selecting-agent')
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+test('S5b: enter with no search still opens the selected transcript', async () => {
+  // Negative control in the S1d/S1e idiom. Enter is the only way to confirm a
+  // selection, so gating it too broadly traps the user in selecting-agent.
+  const { task } = createTeammateTask()
+  const mounted = await renderNavigation(
+    selectingState(task),
+    isPromptTypingSuppressionActive(false, ''),
+    false,
+  )
+  try {
+    await mounted.press(key('return'))
+    expect(mounted.state().viewingAgentTaskId).toBe(task.id)
+    expect(mounted.state().viewSelectionMode).toBe('viewing-agent')
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+test('S5c: enter still resolves the selection while the prompt merely holds text', async () => {
+  // THE control that pins the shape of the fix. Do not "tidy" the Enter branch
+  // onto promptTypingSuppressionActive: unlike 'f' and 'k', Enter is not a
+  // character that would land in the prompt buffer, and PromptInput's onSubmit
+  // already returns early while viewSelectionMode is 'selecting-agent'. Gate
+  // Enter on the collapsed typing flag and this state has NO Enter behaviour at
+  // all — nothing resolves the selection and nothing submits. So: prompt holds
+  // a draft, no search running, Enter must still confirm the selection.
+  const promptTypingSuppressionActive = isPromptTypingSuppressionActive(
+    false,
+    'a draft the user has not sent yet',
+  )
+  expect(promptTypingSuppressionActive).toBe(true)
+
+  const { task } = createTeammateTask()
+  const mounted = await renderNavigation(
+    selectingState(task),
+    promptTypingSuppressionActive,
+    false,
+  )
+  try {
+    await mounted.press(key('return'))
+    expect(mounted.state().viewingAgentTaskId).toBe(task.id)
+    expect(mounted.state().viewSelectionMode).toBe('viewing-agent')
+  } finally {
+    await mounted.cleanup()
   }
 })

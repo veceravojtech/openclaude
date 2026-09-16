@@ -82,6 +82,17 @@ export function useBackgroundTaskNavigation(options?: {
    * it is set they stay text.
    */
   promptTypingSuppressionActive?: boolean
+  /**
+   * REPL's raw isSearchingHistory. Enter is not a printable character the way
+   * 'f' and 'k' are: it must stay live while the prompt merely HOLDS TEXT, and
+   * stand down only while useHistorySearch owns the key through its
+   * historySearch:execute binding. That is why this is its own option and not
+   * promptTypingSuppressionActive: gating the Enter branch on the collapsed
+   * typing flag kills Enter outright in selecting-agent, because PromptInput's
+   * onSubmit already returns early in that mode — nothing would resolve the
+   * selection and nothing would submit.
+   */
+  historySearchActive?: boolean
 }): { handleKeyDown: (e: KeyboardEvent) => void } {
   const tasks = useAppState(s => s.tasks)
   const viewSelectionMode = useAppState(s => s.viewSelectionMode)
@@ -265,8 +276,14 @@ export function useBackgroundTaskNavigation(options?: {
       return
     }
 
-    // Enter to confirm selection (only when in selecting mode)
-    if (e.key === 'return' && viewSelectionMode === 'selecting-agent') {
+    // Enter to confirm selection (only when in selecting mode, and only while
+    // useHistorySearch does not own the key — see the option's doc). Unlike f
+    // and k this does NOT stand down for a prompt that merely holds text.
+    if (
+      e.key === 'return' &&
+      !options?.historySearchActive &&
+      viewSelectionMode === 'selecting-agent'
+    ) {
       e.preventDefault()
       // Nothing selected reads as the leader row, exactly as index -1 did.
       const kind = selectedTeammate?.kind ?? 'leader'
