@@ -26,7 +26,10 @@ const { getCombinedTools, loadReexposedMcpTools } = await import('./mcp.js')
 
 afterAll(() => {
   try {
+    // mock.restore() does NOT undo mock.module(); re-register the specifier
+    // from the pristine cache-busted namespace captured above.
     mock.restore()
+    mock.module('../services/mcp/client.js', () => ({ ...realMcpClient }))
     if (originalDisableExperimentalBetas === undefined) {
       delete process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS
     } else {

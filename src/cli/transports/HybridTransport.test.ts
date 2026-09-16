@@ -1,5 +1,21 @@
-import { afterEach, beforeEach, describe, expect, jest, mock, test } from 'bun:test'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  jest,
+  mock,
+  test,
+} from 'bun:test'
 import type { StdoutMessage } from 'src/entrypoints/sdk/controlTypes.js'
+import * as realAxios from 'axios'
+
+// Snapshot taken before any mock.module() call. mock.module() mutates the live
+// namespace object in place, so restoring from the namespace (or from a spread
+// of it) would re-install the stub instead of undoing it.
+const pristineRealAxios = { ...realAxios }
+const realAxiosDefault = pristineRealAxios.default
 
 type AxiosPost = (
   url: string,
@@ -9,11 +25,30 @@ type AxiosPost = (
 
 let postImpl: AxiosPost = async () => ({ status: 200 })
 
-mock.module('axios', () => ({
-  default: {
+// Only `post` is redirected. The factory it replaces returned `{ default: {
+// post } }`, which erased seventeen named axios exports and thirty-four members
+// of the default export for every file loaded afterwards. Object.assign onto a
+// forwarding function keeps the default export callable as well as indexable.
+const axiosDefaultStub = Object.assign(
+  function axiosStub(...args: unknown[]): unknown {
+    return (realAxiosDefault as unknown as (...a: unknown[]) => unknown)(...args)
+  },
+  realAxiosDefault,
+  {
     post: (...args: Parameters<AxiosPost>) => postImpl(...args),
   },
+)
+
+mock.module('axios', () => ({
+  ...pristineRealAxios,
+  default: axiosDefaultStub,
 }))
+
+afterAll(() => {
+  // mock.restore() does NOT undo mock.module(); re-register axios from its
+  // pre-mock snapshot.
+  mock.module('axios', () => ({ ...pristineRealAxios }))
+})
 
 describe('HybridTransport close', () => {
   let originalSessionAccessToken: string | undefined

@@ -1,8 +1,16 @@
-import { beforeEach, expect, mock, test } from 'bun:test'
+import { afterAll, beforeEach, expect, mock, test } from 'bun:test'
 import type { LocalAgentTaskState } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import type { ToolUseContext } from '../../Tool.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
 import { resumeAgentBackground } from './resumeAgent.js'
+import * as realSessionStorage from '../../utils/sessionStorage.js'
+import * as realAgentToolUtils from './agentToolUtils.js'
+
+// Snapshots taken before any mock.module() call. mock.module() mutates the live
+// namespace object in place, so restoring from the namespace (or from a spread
+// of it) would re-install the stub instead of undoing it.
+const pristineRealSessionStorage = { ...realSessionStorage }
+const pristineRealAgentToolUtils = { ...realAgentToolUtils }
 
 let mockTranscript: any = {
   messages: [],
@@ -14,7 +22,12 @@ let mockMetadata: any = {
   source: 'built-in',
 }
 
+// Spread the pristine namespaces into the stubs: sessionStorage.js exports
+// ninety-nine symbols and agentToolUtils.js twelve, and factories returning
+// only the four and the one below made every other export undefined for every
+// file loaded afterwards.
 mock.module('../../utils/sessionStorage.js', () => ({
+  ...pristineRealSessionStorage,
   getAgentTranscript: async () => mockTranscript,
   readAgentMetadata: async () => mockMetadata,
   writeAgentMetadata: async () => {},
@@ -23,8 +36,19 @@ mock.module('../../utils/sessionStorage.js', () => ({
 }))
 
 mock.module('./agentToolUtils.js', () => ({
+  ...pristineRealAgentToolUtils,
   runAsyncAgentLifecycle: async () => {},
 }))
+
+afterAll(() => {
+  // mock.restore() does NOT undo mock.module(); re-register both specifiers
+  // from their pre-mock snapshots. Both registrations are module-scope, so they
+  // are torn down once, at the end of the file.
+  mock.module('../../utils/sessionStorage.js', () => ({
+    ...pristineRealSessionStorage,
+  }))
+  mock.module('./agentToolUtils.js', () => ({ ...pristineRealAgentToolUtils }))
+})
 
 beforeEach(() => {
   mockTranscript = {
