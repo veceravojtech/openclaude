@@ -103,7 +103,7 @@ export function useBackgroundTaskNavigation(options?: {
   const setAppState = useSetAppState()
 
   // "A dialog owns the keyboard right now" — the overlay contract's own modal
-  // predicate, and the question the two destructive letters below actually need
+  // predicate, and the question nearly every branch below actually needs
   // answered. The named options above cannot answer it for the surface that
   // matters most:
   //
@@ -112,9 +112,18 @@ export function useBackgroundTaskNavigation(options?: {
   // own state and never writes the prompt, so isPromptInputActive, inputValue
   // and isSearchingHistory are ALL false while the user types into it — and
   // isPromptTypingSuppressionActive, which is built from exactly those three,
-  // returns false. FuzzyPicker stops propagation only for up/down/return/tab,
-  // so a query containing 'f' or 'k' still reaches this hook as a plain letter,
-  // and 'k' destroys the selected teammate mid-search.
+  // returns false. So 'k' destroys the selected teammate mid-search, and every
+  // other branch here fires under a dialog it was never aimed at.
+  //
+  // A dialog CANNOT stop this from its side, which is why the question has to
+  // be asked here. App's input loop emits 'input' to every useInput subscriber
+  // — this hook's bridge among them — and only then calls
+  // dispatchKeyboardEvent, which builds a DIFFERENT event object for the DOM
+  // onKeyDown path. FuzzyPicker's stopImmediatePropagation list lives on that
+  // second path, so it runs on the wrong object after this hook has already
+  // acted; it protects the dialog's own subtree, never this subscriber. The
+  // arrow and tab keys in its list only look covered here because this hook has
+  // no branch for a plain arrow or a tab.
   //
   // Asking the CONTRACT rather than adding a fourth named flag is what makes
   // this hold for the other dialogs too: every one of them registers itself
@@ -123,13 +132,21 @@ export function useBackgroundTaskNavigation(options?: {
   //
   // MODAL, not useIsOverlayActive: NON_MODAL_OVERLAYS holds 'autocomplete', and
   // during autocomplete the user is typing into the prompt for real, so
-  // promptTypingSuppressionActive already stands these letters down there.
+  // promptTypingSuppressionActive already stands the letters down there.
   // Gating on the wider predicate would only duplicate that.
   //
-  // Deliberately NOT applied to the Enter branch. Enter is not a character the
-  // dialog swallows the way a letter is, and its stand-down condition is the
-  // narrower historySearchActive — see that option's doc for why widening it
-  // leaves selecting-agent with no Enter behaviour at all.
+  // Escape is gated too, and that is safe rather than a trap because the exit
+  // comes out LAYERED: the press that a dialog is up for dismisses the dialog
+  // (every registered overlay has its own cancel path — use-select-input
+  // registers 'select' ONLY when onCancel exists), and the next press is
+  // ordinary Escape again. One extra press, in a state that otherwise destroys
+  // an in-flight turn the user never aimed at.
+  //
+  // NOT applied to the Enter branch, which is NOT a claim that Enter is safe:
+  // it fires on this surface too, for the same reason as the rest. Its
+  // stand-down condition is the narrower historySearchActive, and changing that
+  // is deliberately out of this change — see that option's doc for why the two
+  // conditions are not one.
   const isModalOverlayActive = useIsModalOverlayActive()
 
   // Running teammates in the one shared depth-first tree order, so Shift+Up/Down
@@ -217,7 +234,16 @@ export function useBackgroundTaskNavigation(options?: {
     // A live in-process teammate keeps status 'running' for its whole life
     // (idle is a separate flag), so gating on status alone made Escape a
     // no-op for an idle teammate and the view impossible to leave by key.
-    if (e.key === 'escape' && viewSelectionMode === 'viewing-agent') {
+    //
+    // While a modal overlay is up the press belongs to that dialog, and this
+    // branch is the one that ABORTS THE TEAMMATE'S CURRENT TURN — the same
+    // defect class as k with a smaller blast radius. Standing down costs the
+    // user one extra press and no work.
+    if (
+      e.key === 'escape' &&
+      !isModalOverlayActive &&
+      viewSelectionMode === 'viewing-agent'
+    ) {
       e.preventDefault()
       const taskId = viewingAgentTaskId
       if (taskId) {
@@ -253,8 +279,15 @@ export function useBackgroundTaskNavigation(options?: {
       return
     }
 
-    // Escape in selection mode: exit selection without aborting leader
-    if (e.key === 'escape' && viewSelectionMode === 'selecting-agent') {
+    // Escape in selection mode: exit selection without aborting leader. Stands
+    // down under a modal overlay for the same reason as the branch above —
+    // otherwise the press that closes a dialog also throws away the selection
+    // the user built to get there.
+    if (
+      e.key === 'escape' &&
+      !isModalOverlayActive &&
+      viewSelectionMode === 'selecting-agent'
+    ) {
       e.preventDefault()
       setAppState(prev => ({
         ...prev,
@@ -278,7 +311,16 @@ export function useBackgroundTaskNavigation(options?: {
     // feature off (nextExpandedView skips the step, deriveInitialExpandedView
     // boots it as 'none'); this is the third of those three gates, and the one
     // that decides what the key actually does.
-    if (e.shift && (e.key === 'up' || e.key === 'down')) {
+    // The overlay term is the fourth of those gates, and it is what keeps the
+    // selection from DRIFTING under a dialog: the k guard stops the kill while
+    // the dialog is up, but a selection moved during the dialog outlives its
+    // dismissal, so the next k — legitimately typed, no dialog, guard satisfied
+    // — would land on a row the user never chose.
+    if (
+      e.shift &&
+      !isModalOverlayActive &&
+      (e.key === 'up' || e.key === 'down')
+    ) {
       e.preventDefault()
       if (
         teammateCount > 0 ||

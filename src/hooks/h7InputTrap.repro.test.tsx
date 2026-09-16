@@ -77,6 +77,10 @@ type ViewState = {
   // be that the task is still there and still running, not that some view flag
   // kept its value.
   runningTeammateIds: string
+  // The selection, flattened to a primitive for the same reason. Shift+Up/Down
+  // and Escape-in-selecting-agent both MOVE it rather than any view flag, so
+  // S7b/S7c/S7e/S7f have to read the selection itself to say anything.
+  selectedTeammate: string
 }
 
 function Harness({
@@ -104,6 +108,13 @@ function Harness({
       .map(t => t.id)
       .join(','),
   )
+  const selectedTeammate = useAppState(s =>
+    s.selectedTeammate === null
+      ? 'none'
+      : s.selectedTeammate.kind === 'teammate'
+        ? `teammate:${s.selectedTeammate.taskId}`
+        : s.selectedTeammate.kind,
+  )
   useEffect(() => onReady(handleKeyDown), [handleKeyDown, onReady])
   useEffect(
     () =>
@@ -113,6 +124,7 @@ function Harness({
         expandedView,
         modalOverlayActive,
         runningTeammateIds,
+        selectedTeammate,
       }),
     [
       viewingAgentTaskId,
@@ -120,6 +132,7 @@ function Harness({
       expandedView,
       modalOverlayActive,
       runningTeammateIds,
+      selectedTeammate,
       onState,
     ],
   )
@@ -192,6 +205,25 @@ function key(name: string): KeyboardEvent {
   })
 }
 
+// Shift+Up/Down is the only branch in this hook that reads a modifier, so it
+// needs its own builder rather than a flag on `key()`: every existing call site
+// wants shift FALSE and should keep reading that way.
+function shiftKey(name: string): KeyboardEvent {
+  return new KeyboardEvent({
+    kind: 'key',
+    name,
+    sequence: '\x1b',
+    raw: '\x1b',
+    ctrl: false,
+    shift: true,
+    meta: false,
+    option: false,
+    super: false,
+    fn: false,
+    isPasted: false,
+  })
+}
+
 function fakeIo(): {
   stdout: NodeJS.WriteStream
   stdin: NodeJS.ReadStream
@@ -235,7 +267,8 @@ async function renderNavigation(
   overlayId?: string,
 ): Promise<{
   press: (event: KeyboardEvent) => Promise<void>
-  typeRaw: (text: string) => Promise<void>
+  typeRaw: (text: string, settleMs?: number) => Promise<void>
+  setOverlayMounted: (mounted: boolean) => Promise<void>
   state: () => ViewState
   cleanup: () => Promise<void>
 }> {
@@ -252,6 +285,7 @@ async function renderNavigation(
     expandedView: 'none',
     modalOverlayActive: false,
     runningTeammateIds: '',
+    selectedTeammate: 'none',
   }
   const teardown = async (): Promise<void> => {
     root.unmount()
@@ -259,7 +293,12 @@ async function renderNavigation(
     io.raw.stdin.end()
     io.raw.stdout.end()
   }
-  try {
+  // Rendering the whole tree from here, rather than once inline, is what lets a
+  // test UNMOUNT the overlay mid-run: `AppStateProvider` creates its store in a
+  // `useState` initialiser, so re-rendering the root keeps the same store and
+  // only the registrar comes and goes — the same thing `PromptInput` does to
+  // the dialog when its `onCancel` runs.
+  const renderTree = (overlayMounted: boolean): void => {
     root.render(
       <AppStateProvider initialState={initialState}>
         <Harness
@@ -272,9 +311,14 @@ async function renderNavigation(
           promptTypingSuppressionActive={promptTypingSuppressionActive}
           historySearchActive={historySearchActive}
         />
-        {overlayId === undefined ? null : <OverlayRegistrar id={overlayId} />}
+        {overlayId === undefined || !overlayMounted ? null : (
+          <OverlayRegistrar id={overlayId} />
+        )}
       </AppStateProvider>,
     )
+  }
+  try {
+    renderTree(true)
     for (let attempts = 0; attempts < 100 && !handler; attempts++) {
       await Bun.sleep(10)
     }
@@ -298,8 +342,19 @@ async function renderNavigation(
       // The OTHER delivery path, and the one the running CLI uses: a real
       // keystroke down ink's stdin pipeline into the hook's own `useInput`
       // bridge, rather than a `handleKeyDown` a parent kept a reference to.
-      async typeRaw(text) {
+      //
+      // `settleMs` exists for one key: a LONE escape is deliberately held by
+      // `App`'s incomplete-escape flush timer (`NORMAL_TIMEOUT`, 300ms) so it
+      // can be told apart from an escape-prefixed sequence, so an escape case
+      // has to outwait that timer. At the 60ms default an escape silently never
+      // arrives — which is exactly what the S7i delivery control caught before
+      // this parameter existed.
+      async typeRaw(text, settleMs = 60) {
         io.raw.stdin.write(text)
+        await Bun.sleep(settleMs)
+      },
+      async setOverlayMounted(mounted) {
+        renderTree(mounted)
         await Bun.sleep(60)
       },
       state: () => latest,
@@ -625,9 +680,13 @@ test('S5c: enter still resolves the selection while the prompt merely holds text
 // instead. That dialog keeps its query in its own `useState` and never writes
 // the prompt, so all three inputs `isPromptTypingSuppressionActive` reads —
 // `isPromptInputActive`, `inputValue`, `isSearchingHistory` — are FALSE, the
-// helper returns false, and the S1 guard is blind to the surface. `FuzzyPicker`
-// stops propagation only for up/down/return/tab, so a query containing 'k'
-// reaches this hook as a plain letter and kills the selected teammate.
+// helper returns false, and the S1 guard is blind to the surface. Nor does the
+// dialog stop the letter from its side: `App` emits `'input'` to every
+// `useInput` subscriber — this hook's bridge among them — BEFORE dispatching
+// the DOM keydown that `FuzzyPicker`'s stop list runs on, and on a different
+// event object. So a query containing 'k' reaches this hook and kills the
+// selected teammate. (See the S7 header: the same ordering is why the other
+// branches leak too.)
 //
 // What IS true during that dialog is the overlay contract:
 // `HistorySearchDialog` calls `useRegisterOverlay('history-search')` at mount,
@@ -793,6 +852,256 @@ test('S6f: a raw k through the useInput bridge still kills with no overlay', asy
 
     expect(lifecycleAbortController.signal.aborted).toBe(true)
     expect(mounted.state().runningTeammateIds).toBe('')
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// S7 — the other three branches that a dialog's keystrokes reach.
+//
+// The reason they reach it is NOT that this hook is late in some propagation
+// chain it could be lifted out of. `App`'s input loop emits `'input'` to every
+// `useInput` subscriber — this hook's bridge among them — and only THEN calls
+// `dispatchKeyboardEvent`, which builds a different event object for the DOM
+// `onKeyDown` path. `FuzzyPicker`'s stop list lives on that second path, so it
+// runs on the wrong object, after this hook has already acted. Nothing a dialog
+// does can stop this hook; the only thing that can is this hook asking whether
+// a dialog is up. That makes the overlay term the same answer for all of them:
+//
+// - S7  Escape in viewing-agent: it aborts the teammate's CURRENT TURN. Same
+//       defect class as 'k', smaller blast radius — the key was aimed at the
+//       dialog and it destroys in-flight work.
+// - S7b Escape in selecting-agent: it drops the selection the user built.
+// - S7c Shift+Up/Down: it MOVES the selection while the dialog is on screen,
+//       and the drift survives the dialog's dismissal, so the next 'k' lands on
+//       a row the user never chose.
+//
+// S7d/S7e/S7f are the negative controls and they are the load-bearing half
+// here: Escape is the exit key, and a gate that disabled it generally would be
+// a keyboard trap — strictly worse than the bug. S7g pins that the exit is
+// LAYERED rather than lost: the dialog's own Escape dismisses it, and the next
+// Escape does what Escape has always done.
+// ---------------------------------------------------------------------------
+test('S7: escape with an overlay up does not abort the viewed teammate turn', async () => {
+  const { task, workAbortController, lifecycleAbortController } =
+    createTeammateTask()
+  const mounted = await renderNavigation(
+    viewingState(task),
+    isPromptTypingSuppressionActive(false, '', false),
+    false,
+    'history-search',
+  )
+  try {
+    expect(mounted.state().modalOverlayActive).toBe(true)
+
+    await mounted.press(key('escape')) // user meant: close the dialog
+
+    // The turn the teammate is in the middle of is untouched…
+    expect(workAbortController.signal.aborted).toBe(false)
+    expect(lifecycleAbortController.signal.aborted).toBe(false)
+    // …and so is the view, which the dialog was drawn over.
+    expect(mounted.state().viewSelectionMode).toBe('viewing-agent')
+    expect(mounted.state().viewingAgentTaskId).toBe(task.id)
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+test('S7b: escape with an overlay up does not drop the teammate selection', async () => {
+  const { task } = createTeammateTask()
+  const mounted = await renderNavigation(
+    selectingState(task),
+    isPromptTypingSuppressionActive(false, '', false),
+    false,
+    'history-search',
+  )
+  try {
+    expect(mounted.state().modalOverlayActive).toBe(true)
+
+    await mounted.press(key('escape'))
+
+    expect(mounted.state().viewSelectionMode).toBe('selecting-agent')
+    expect(mounted.state().selectedTeammate).toBe(`teammate:${task.id}`)
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+test('S7c: shift+up with an overlay up does not move the selection', async () => {
+  // The compound this one breaks: the landed 'k' guard stops the kill WHILE the
+  // dialog is up, but a selection that drifted during the dialog outlives it,
+  // so the next 'k' — legitimately typed, no dialog, guard satisfied — lands on
+  // a row the user never selected.
+  const { task } = createTeammateTask()
+  const mounted = await renderNavigation(
+    selectingState(task),
+    isPromptTypingSuppressionActive(false, '', false),
+    false,
+    'history-search',
+  )
+  try {
+    expect(mounted.state().modalOverlayActive).toBe(true)
+    expect(mounted.state().selectedTeammate).toBe(`teammate:${task.id}`)
+
+    await mounted.press(shiftKey('up'))
+
+    expect(mounted.state().selectedTeammate).toBe(`teammate:${task.id}`)
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+test('S7d: escape with no overlay still aborts the viewed teammate turn', async () => {
+  // Negative control, and the S3 press-1 contract restated: abort the turn,
+  // stay in the view.
+  const { task, workAbortController } = createTeammateTask()
+  const mounted = await renderNavigation(
+    viewingState(task),
+    isPromptTypingSuppressionActive(false, '', false),
+  )
+  try {
+    expect(mounted.state().modalOverlayActive).toBe(false)
+
+    await mounted.press(key('escape'))
+
+    expect(workAbortController.signal.aborted).toBe(true)
+    expect(mounted.state().viewSelectionMode).toBe('viewing-agent')
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+test('S7e: escape with no overlay still leaves selecting-agent', async () => {
+  const { task } = createTeammateTask()
+  const mounted = await renderNavigation(
+    selectingState(task),
+    isPromptTypingSuppressionActive(false, '', false),
+  )
+  try {
+    expect(mounted.state().modalOverlayActive).toBe(false)
+
+    await mounted.press(key('escape'))
+
+    expect(mounted.state().viewSelectionMode).toBe('none')
+    expect(mounted.state().selectedTeammate).toBe('none')
+    // S2's contract: leaving selection mode does not collapse the tree.
+    expect(mounted.state().expandedView).toBe('teammates')
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+test('S7f: shift+up with no overlay still moves the selection', async () => {
+  const { task } = createTeammateTask()
+  const mounted = await renderNavigation(
+    selectingState(task),
+    isPromptTypingSuppressionActive(false, '', false),
+  )
+  try {
+    expect(mounted.state().modalOverlayActive).toBe(false)
+    expect(mounted.state().selectedTeammate).toBe(`teammate:${task.id}`)
+
+    await mounted.press(shiftKey('up'))
+
+    // One step up from the only teammate is the leader row.
+    expect(mounted.state().selectedTeammate).toBe('leader')
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+test('S7g: the escape exit is LAYERED by the overlay, not lost to it', async () => {
+  // THE case that makes the Escape gate safe to ship. Escape is the exit key,
+  // so the failure mode of gating it is a keyboard trap — worse than the bug it
+  // fixes. The gate is only defensible if every press still lands somewhere and
+  // the view is still reachable by keyboard alone.
+  //
+  // The sequence is the real one: the dialog is up, Escape dismisses THE DIALOG
+  // (its own onCancel — modelled here by unmounting the registrar, which is what
+  // PromptInput's setShowHistoryPicker(false) does), and from there Escape means
+  // what it has always meant. No overlay in the tree can be registered without
+  // an Escape that dismisses it: use-select-input registers 'select' only when
+  // onCancel exists, and every dialog component has a cancel path.
+  const { task, workAbortController, lifecycleAbortController } =
+    createTeammateTask()
+  const mounted = await renderNavigation(
+    viewingState(task),
+    isPromptTypingSuppressionActive(false, '', false),
+    false,
+    'history-search',
+  )
+  try {
+    expect(mounted.state().modalOverlayActive).toBe(true)
+
+    // Press 1 — belongs to the dialog. The teammate's turn survives it.
+    await mounted.press(key('escape'))
+    expect(workAbortController.signal.aborted).toBe(false)
+    expect(mounted.state().viewSelectionMode).toBe('viewing-agent')
+
+    // …and the dialog really goes away on that press.
+    await mounted.setOverlayMounted(false)
+    expect(mounted.state().modalOverlayActive).toBe(false)
+
+    // Press 2 — the ordinary S3 contract resumes: abort the turn, stay.
+    await mounted.press(key('escape'))
+    expect(workAbortController.signal.aborted).toBe(true)
+    expect(mounted.state().viewSelectionMode).toBe('viewing-agent')
+
+    // Press 3 — the view is still LEAVABLE by keyboard, which is the whole
+    // point: one extra press, not a trap.
+    await mounted.press(key('escape'))
+    expect(mounted.state().viewSelectionMode).toBe('none')
+    expect(mounted.state().viewingAgentTaskId).toBeUndefined()
+    // The teammate itself was never killed by any of the three.
+    expect(lifecycleAbortController.signal.aborted).toBe(false)
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+// ---------------------------------------------------------------------------
+// S7h/S7i — the Escape gate down the REAL delivery path, in the S6e/S6f idiom.
+// This is the branch that aborts in-flight work, so it gets the same treatment
+// the kill key got: a raw keystroke through ink's stdin pipeline into the
+// hook's own `useInput` bridge, against an overlay registered AFTER that bridge
+// subscribed. S7i is the delivery control — same raw byte, no overlay, the turn
+// must still abort — so S7h cannot pass on a write that never arrived.
+// ---------------------------------------------------------------------------
+test('S7h: a raw escape through the useInput bridge respects an overlay registered after mount', async () => {
+  const { task, workAbortController } = createTeammateTask()
+  const mounted = await renderNavigation(
+    viewingState(task),
+    isPromptTypingSuppressionActive(false, '', false),
+    false,
+    'history-search',
+  )
+  try {
+    expect(mounted.state().modalOverlayActive).toBe(true)
+
+    // Outwaits App's 300ms incomplete-escape flush timer; see `typeRaw`.
+    await mounted.typeRaw('\x1b', 400)
+
+    expect(workAbortController.signal.aborted).toBe(false)
+    expect(mounted.state().viewSelectionMode).toBe('viewing-agent')
+  } finally {
+    await mounted.cleanup()
+  }
+})
+
+test('S7i: a raw escape through the useInput bridge still aborts the turn with no overlay', async () => {
+  const { task, workAbortController } = createTeammateTask()
+  const mounted = await renderNavigation(
+    viewingState(task),
+    isPromptTypingSuppressionActive(false, '', false),
+  )
+  try {
+    expect(mounted.state().modalOverlayActive).toBe(false)
+
+    await mounted.typeRaw('\x1b', 400)
+
+    expect(workAbortController.signal.aborted).toBe(true)
+    expect(mounted.state().viewSelectionMode).toBe('viewing-agent')
   } finally {
     await mounted.cleanup()
   }
