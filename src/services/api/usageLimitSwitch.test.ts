@@ -168,11 +168,39 @@ describe('switchToNextAccountOnUsageLimit', () => {
     expect(effectsCalls).toBe(0)
   })
 
-  test('skips: background-source for a teammate query source', async () => {
+  test('switches for a teammate query source — the wait is the gate teammates fail, not this one', async () => {
     const d = deps(accountsWith('a'))
     expect(
       await switchToNextAccountOnUsageLimit(
         { ...eligible, querySource: 'agent:custom', triedKeys: new Set() },
+        d,
+      ),
+    ).toEqual({ type: 'switched', key: 'b', name: 'b@example.com' })
+    expect(switchCalls).toEqual(['b'])
+  })
+
+  test('a teammate-sourced switch is still filtered by vouchability, exactly like a foreground one', async () => {
+    // The source gate widened; nothing downstream of it did. Unit O's guard
+    // must not be reachable-around via the new source — an unvouchable entry
+    // is no more switchable-to for a teammate than for the user.
+    const tried = new Set<string>()
+    expect(
+      await switchToNextAccountOnUsageLimit(
+        { ...eligible, querySource: 'agent:custom', triedKeys: tried },
+        deps(accountsWith('a'), true, /* vouchable */ ['a']),
+      ),
+    ).toEqual({ type: 'skipped', reason: 'no-vouchable-candidate' })
+    expect(switchCalls).toEqual([])
+  })
+
+  test('skips: background-source for a source in neither allowlist', async () => {
+    // The allowlist shape is the assertion here: an unrecognised path stays
+    // out, so nothing acquires the ability to move the active account merely
+    // by being added somewhere else in the codebase.
+    const d = deps(accountsWith('a'))
+    expect(
+      await switchToNextAccountOnUsageLimit(
+        { ...eligible, querySource: 'away_summary', triedKeys: new Set() },
         d,
       ),
     ).toEqual({ type: 'skipped', reason: 'background-source' })

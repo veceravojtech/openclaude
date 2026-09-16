@@ -2,12 +2,17 @@
  * Switching Claude accounts when the active one drains its usage limit.
  *
  * Companion to `usageLimitWait.ts`, which handles the fall-through case.
- * Priority when a foreground query hits a usage-limit 429:
+ * Priority when a query hits a usage-limit 429:
  *
  *   1. Switch to another stored Claude account (this module) — it can
  *      unblock the request immediately.
  *   2. Wait out the reset clock on the current account (usageLimitWait).
  *   3. Report the limit (existing error path).
+ *
+ * Steps 1 and 2 do NOT admit the same query sources, and that asymmetry is
+ * deliberate rather than an oversight: the switch takes swarm teammates and
+ * the wait does not (see `isSwitchableUsageLimitSource`), so a teammate's
+ * ladder is step 1 and then step 3.
  *
  * Claude→Claude only, never across providers. A session is not compatible
  * across providers (different wire protocols, no shared cache or signature
@@ -38,6 +43,66 @@ import {
 import type { AccountSummary } from '../../utils/authAccounts.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { isForegroundUsageLimitSource } from './usageLimitWait.js'
+
+// -- source gate ---------------------------------------------------------------
+
+/**
+ * Background query sources that may still switch accounts.
+ *
+ * `inProcessRunner` tags both of a swarm teammate's queries `'agent:custom'`
+ * (`swarm/inProcessRunner.ts:2419` and `:2613`). That is the same tag
+ * `getQuerySourceForAgent` hands any non-built-in agent, so this admits custom
+ * subagents as well as teammates. Deliberate, not tolerated: the reason to let
+ * a teammate switch is that a switch costs a credential write rather than
+ * hours, and it costs exactly as little for a subagent. Nothing on the wire
+ * tells the two apart, and a predicate that pretended otherwise would be
+ * claiming a distinction the tag does not carry.
+ */
+const SWITCHABLE_BACKGROUND_SOURCES: ReadonlySet<string> = new Set([
+  'agent:custom',
+])
+
+/**
+ * Whether a query source may switch accounts when it hits a usage limit.
+ *
+ * Deliberately NOT `isForegroundUsageLimitSource`. The two gates used to be
+ * one function, and sharing it is what left a swarm teammate with no recovery
+ * at all — it could neither switch nor wait — when only one half of that had
+ * ever been reasoned about.
+ *
+ * The wait is foreground-only for a reason it states in place
+ * (`usageLimitWait.ts:17-20`): a teammate that slept would hold a claimed task
+ * hostage for hours. That reason is about DURATION, and it does not carry
+ * across. A switch is a credential write and an immediate retry, so a teammate
+ * that switches keeps its task and keeps moving. The switch excluded
+ * background sources only because it borrowed the wait's gate, never because
+ * anyone decided background work should not switch.
+ *
+ * Still an allowlist, for the reason `usageLimitWait.ts:97-101` gives about
+ * its own: an unrecognised source stays out, so a new call path cannot quietly
+ * acquire the ability to move the user's active account by being added
+ * somewhere else in the codebase.
+ *
+ * Derived from the wait's allowlist as a strict SUPERSET rather than written
+ * out as a second independent list, and that coupling is load-bearing.
+ * `decideUsageLimitWait` skips with `other-account-available` — it declines to
+ * sleep precisely because it expects this module to have handled the case. A
+ * source the wait waved through to the switch and the switch then refused
+ * would lose both remedies and get a bare limit error, which is the exact
+ * failure this split exists to remove. Widening the foreground set therefore
+ * widens this one too, and that direction is always safe: anything trusted to
+ * sleep for hours is trusted to switch in a millisecond. The reverse is not
+ * true, which is why the teammate tag is added here and not there.
+ */
+export function isSwitchableUsageLimitSource(
+  querySource: QuerySource | undefined,
+): boolean {
+  if (typeof querySource !== 'string') return false
+  return (
+    isForegroundUsageLimitSource(querySource) ||
+    SWITCHABLE_BACKGROUND_SOURCES.has(querySource)
+  )
+}
 
 // -- session-effects registry ------------------------------------------------
 
@@ -157,9 +222,23 @@ export type UsageLimitSwitchSkipReason =
    * cross providers, and other providers' 429s are ordinary limits.
    */
   | 'wrong-provider'
-  /** A subagent, teammate, classifier or summariser — same gate as the wait. */
+  /**
+   * A query source outside this module's allowlist — a classifier, summariser
+   * or other unattended path. NOT the wait's gate: `isSwitchableUsageLimitSource`
+   * admits swarm teammates, which `decideUsageLimitWait` still refuses, so the
+   * two modules report this same reason for different sets of sources.
+   */
   | 'background-source'
-  /** No session-effects hook is registered (no REPL owns this process). */
+  /**
+   * No session-effects hook is registered (no REPL owns this process).
+   *
+   * This is what a teammate meets after the source gate lets it through, and
+   * the answer differs by host: an in-process teammate shares the REPL's
+   * process, so the hook IS registered and the switch proceeds; a headless
+   * teammate has no REPL to have registered one, so it stops here rather than
+   * performing a storage-only switch that would leave the session naming the
+   * old account.
+   */
   | 'no-session-effects'
   /** Every other stored account was already tried in this request. */
   | 'no-candidate'
@@ -261,7 +340,7 @@ export async function switchToNextAccountOnUsageLimit({
   if (!isFirstParty) {
     return { type: 'skipped', reason: 'wrong-provider' }
   }
-  if (!isForegroundUsageLimitSource(querySource)) {
+  if (!isSwitchableUsageLimitSource(querySource)) {
     return { type: 'skipped', reason: 'background-source' }
   }
   const effects = accountSwitchEffects

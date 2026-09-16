@@ -4,6 +4,7 @@ import {
   decideUsageLimitWait,
   isForegroundUsageLimitSource,
 } from './usageLimitWait.js'
+import { isSwitchableUsageLimitSource } from './usageLimitSwitch.js'
 
 const CAP_MS = 6 * 60 * 60 * 1000
 const NOW = 1_000_000_000_000
@@ -44,6 +45,9 @@ describe('decideUsageLimitWait', () => {
   })
 
   test('skips: background-source for a teammate query source', () => {
+    // Load-bearing NON-GOAL, not an accident of a shared gate: the switch next
+    // door now admits this exact source, and the wait must keep refusing it. A
+    // teammate that slept would hold its claimed task hostage for hours.
     expect(
       decideUsageLimitWait({ ...eligible, querySource: 'agent:custom' }),
     ).toEqual({ type: 'skip', reason: 'background-source' })
@@ -112,5 +116,26 @@ describe('isForegroundUsageLimitSource', () => {
 
   test('treats an unrecognised source as background', () => {
     expect(isForegroundUsageLimitSource('brand_new_path')).toBe(false)
+  })
+
+  test('stays NARROWER than the switch gate it now feeds', () => {
+    // The two predicates are one line apart in behaviour and that line is the
+    // whole point of the split: the switch admits a teammate, the wait does
+    // not. Asserted against each other rather than separately, because a
+    // regression here is someone collapsing them back into one.
+    expect(isSwitchableUsageLimitSource('agent:custom')).toBe(true)
+    expect(isForegroundUsageLimitSource('agent:custom')).toBe(false)
+
+    // Superset, in the direction `decideUsageLimitWait`'s
+    // `other-account-available` skip depends on: anything allowed to sleep for
+    // hours must also be allowed the instant remedy, or it gets neither.
+    for (const source of ['repl_main_thread', 'repl_main_thread:extra', 'sdk']) {
+      expect(isForegroundUsageLimitSource(source)).toBe(true)
+      expect(isSwitchableUsageLimitSource(source)).toBe(true)
+    }
+
+    // Both remain allowlists: an unrecognised source gets neither remedy.
+    expect(isSwitchableUsageLimitSource('brand_new_path')).toBe(false)
+    expect(isSwitchableUsageLimitSource(undefined)).toBe(false)
   })
 })

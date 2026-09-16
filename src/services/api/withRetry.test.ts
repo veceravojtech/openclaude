@@ -941,9 +941,17 @@ describe('usage-limit account switch', () => {
     return { retryModule, switchModule }
   }
 
-  afterEach(() => {
+  afterEach(async () => {
     events.length = 0
     notices.length = 0
+    // A successful switch leaves a breadcrumb in errors.js so a 401 seconds
+    // later can say the account was not the user's choice. It outlives the
+    // test that caused it — the TTL is 60s — and the next describe's first
+    // test has not run its own afterEach yet, so the describe that sets it is
+    // the one that has to clear it. Latent until a test here actually
+    // switched; every "does not switch" case left it clean by accident.
+    const errors = await import('./errors.js')
+    errors.clearUsageLimitAccountSwitch()
   })
 
   async function runWithRetry(
@@ -1067,7 +1075,11 @@ describe('usage-limit account switch', () => {
     expect(notices[1].switchedAccountTo).toBeUndefined()
   })
 
-  test('never switches for a teammate query source', async () => {
+  test('switches for a teammate query source, and still never sleeps for one', async () => {
+    // Both halves of the gate split in one run, because the two are only
+    // correct together. A teammate used to share the wait's allowlist and so
+    // had NO recovery at all; it now takes the instant remedy and is still
+    // refused the multi-hour one, which would hold its claimed task hostage.
     accounts = [
       { key: 'a', emailAddress: 'a@example.com', isActive: true },
       { key: 'b', emailAddress: 'b@example.com', isActive: false },
@@ -1075,14 +1087,22 @@ describe('usage-limit account switch', () => {
     const { retryModule } = await importWithAccountSwitch()
     const { withRetry } = retryModule
 
+    // A reset header IS present, so the only thing keeping the teammate off
+    // the wait is the wait's own source gate — not a missing reset clock.
+    const resetAt = Math.floor(Date.now() / 1000) + 60
     const operation = mock(async () => {
-      throw makeError({})
+      throw makeError({ 'anthropic-ratelimit-unified-reset': String(resetAt) })
     })
     await runWithRetry(withRetry, operation as never, {
       querySource: 'agent:custom',
     })
-    expect(events).toEqual([])
-    expect(notices).toEqual([])
+    // Switched: the credential write and its session effects, in that order.
+    expect(events).toEqual(['switch:b', 'effects'])
+    // Did not sleep: exactly one notice, and it names the switch. A wait would
+    // have added a second carrying `resumeAtMs` once `b` ran out too.
+    expect(notices).toHaveLength(1)
+    expect(notices[0].switchedAccountTo).toBe('b@example.com')
+    expect(notices[0].resumeAtMs).toBeUndefined()
   })
 
   test('never switches on a non-Anthropic route, even with Claude accounts stored', async () => {

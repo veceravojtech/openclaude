@@ -18,6 +18,10 @@
  *   claimed task hostage for hours; `swarm/usageLimitGuard.ts` already stops
  *   teammates and hands the task back, and that stays the behaviour for them.
  *   The gate is the query source, so the two mechanisms never both fire.
+ *   Sleeping is the only remedy withheld from them: the switch next door keeps
+ *   its own, wider allowlist (`usageLimitSwitch.ts`'s
+ *   `isSwitchableUsageLimitSource`) and does admit teammates, because that one
+ *   costs a credential write instead of hours.
  * - **A switchable account beats a timer.** If the user has another account
  *   stored, waiting hours is the wrong remedy for a problem `/account` solves
  *   in a second. Report, don't sleep.
@@ -98,6 +102,14 @@ export type UsageLimitWaitDecision =
  * Deliberately an allowlist. An unrecognised source is treated as background,
  * so a new call path cannot silently acquire the ability to sleep for hours
  * by being added somewhere else in the codebase.
+ *
+ * No longer a one-module edit: `usageLimitSwitch.ts` derives its own, wider
+ * allowlist from this one (`isSwitchableUsageLimitSource` is these sources
+ * plus the swarm-teammate tag), so a source added here gains BOTH the wait and
+ * the switch. That is the intended direction — anything trusted to sleep for
+ * hours is trusted to switch instantly — but the switch is the wider set on
+ * purpose, and widening THIS one to close a switch-side gap would hand out an
+ * unwanted multi-hour sleep. Add switch-only sources over there.
  */
 export function isForegroundUsageLimitSource(
   querySource: QuerySource | undefined,
