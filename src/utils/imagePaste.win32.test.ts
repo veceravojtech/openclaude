@@ -13,9 +13,18 @@ const originalPlatform = process.platform
 const originalTemp = process.env.TEMP
 const originalClaudeCodeTmpdir = process.env.CLAUDE_CODE_TMPDIR
 
-let actualExecFileModule: ExecFileModule | undefined
-let actualExecaModule: ExecaModule | undefined
-let actualImageResizerModule: ImageResizerModule | undefined
+// Captured at module scope, before any test installs a stub. These used to be
+// captured lazily inside restoreMocks(), i.e. from afterEach -- by which point
+// this file had already mocked './execFileNoThrow.js' down to a single export,
+// so the "actual" snapshot WAS that stub and the restore re-installed it for
+// the rest of the process. Later files then failed to import execFileNoThrow.
+const actualExecFileModule: ExecFileModule = {
+  ...(await import('./execFileNoThrow.js')),
+}
+const actualExecaModule: ExecaModule = { ...(await import('execa')) }
+const actualImageResizerModule: ImageResizerModule = {
+  ...(await import('./imageResizer.js')),
+}
 let tempDirs: string[] = []
 
 function setPlatform(platform: NodeJS.Platform): void {
@@ -25,18 +34,9 @@ function setPlatform(platform: NodeJS.Platform): void {
 }
 
 async function restoreMocks(): Promise<void> {
-  actualExecFileModule ??= await import(
-    `./execFileNoThrow.js?actual=${Date.now()}-${Math.random()}`
-  )
-  actualExecaModule ??= await import(
-    `execa?actual=${Date.now()}-${Math.random()}`
-  )
-  actualImageResizerModule ??= await import(
-    `./imageResizer.js?actual=${Date.now()}-${Math.random()}`
-  )
-  mock.module('./execFileNoThrow.js', () => ({ ...actualExecFileModule! }))
-  mock.module('execa', () => ({ ...actualExecaModule! }))
-  mock.module('./imageResizer.js', () => ({ ...actualImageResizerModule! }))
+  mock.module('./execFileNoThrow.js', () => ({ ...actualExecFileModule }))
+  mock.module('execa', () => ({ ...actualExecaModule }))
+  mock.module('./imageResizer.js', () => ({ ...actualImageResizerModule }))
 }
 
 async function importImagePaste(): Promise<ImagePasteModule> {
@@ -165,9 +165,6 @@ describe('Windows clipboard image handling', () => {
       }
     })
 
-    actualImageResizerModule ??= await import(
-      `./imageResizer.js?actual=${Date.now()}-${Math.random()}`
-    )
     const maybeResizeAndDownsampleImageBuffer = mock(async () => ({
       buffer: imageBuffer,
       mediaType: 'png',
@@ -180,7 +177,7 @@ describe('Windows clipboard image handling', () => {
     }))
     mock.module('execa', () => ({ execa }))
     mock.module('./imageResizer.js', () => ({
-      ...actualImageResizerModule!,
+      ...actualImageResizerModule,
       maybeResizeAndDownsampleImageBuffer,
     }))
 
