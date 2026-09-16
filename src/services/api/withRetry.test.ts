@@ -5,6 +5,7 @@ import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test
 import * as debugNs from '../../utils/debug.js'
 import { markOpenAIRequestNonReplayable } from './openaiErrorClassification.js'
 type ProvidersModule = typeof import('../../utils/model/providers.js')
+type SleepModule = typeof import('../../utils/sleep.js')
 
 // Helper to build a mock APIError with specific headers
 function makeError(headers: Record<string, string>): APIError {
@@ -21,6 +22,7 @@ function makeError(headers: Record<string, string>): APIError {
 const originalEnv = { ...process.env }
 const originalDebugModule = { ...debugNs }
 let originalProvidersModule: ProvidersModule | undefined
+let originalSleepModule: SleepModule | undefined
 
 const envKeys = [
   'CLAUDE_CODE_USE_OPENAI',
@@ -53,7 +55,18 @@ afterEach(() => {
     }
     mock.restore()
     if (originalProvidersModule) {
-      mock.module('src/utils/model/providers.js', () => originalProvidersModule!)
+      // Spread, never the namespace object itself: mock.module() mutates the
+      // registration in place, so handing back the namespace re-installs the
+      // stub instead of undoing it (see utils/auth.test.ts:6-7).
+      mock.module('src/utils/model/providers.js', () => ({
+        ...originalProvidersModule!,
+      }))
+    }
+    // importFreshWithRetryModule() neuters sleep to keep the backoff tests
+    // fast. Nothing used to put it back, so the no-op sleep escaped this file
+    // and turned every later real-time backoff loop into a busy-poll.
+    if (originalSleepModule) {
+      mock.module('src/utils/sleep.js', () => ({ ...originalSleepModule! }))
     }
     mock.module('src/utils/debug.js', () => originalDebugModule)
   } finally {
@@ -64,6 +77,12 @@ afterEach(() => {
 async function importActualProviders(): Promise<ProvidersModule> {
   return import(
     `../../utils/model/providers.ts?withRetryActual=${Date.now()}-${Math.random()}`
+  )
+}
+
+async function importActualSleep(): Promise<SleepModule> {
+  return import(
+    `../../utils/sleep.ts?withRetryActual=${Date.now()}-${Math.random()}`
   )
 }
 
@@ -86,6 +105,7 @@ async function importFreshWithRetryModule(
 ) {
   mock.restore()
   originalProvidersModule ??= await importActualProviders()
+  originalSleepModule ??= await importActualSleep()
   mock.module('src/utils/sleep.js', () => ({
     sleep: async () => undefined,
   }))

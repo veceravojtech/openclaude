@@ -37,6 +37,11 @@ import { accountDisplayName } from './accountSwitch.js'
 import { listAccounts, migrateAndReconcile } from './authAccounts.js'
 import { setClaudeConfigHomeDirForTesting } from './envUtils.js'
 import * as realSecureStorage from './secureStorage/index.js'
+// Snapshot BEFORE any mock.module() call. mock.module() mutates the live
+// namespace object in place, so by afterEach `realSecureStorage` already
+// holds the stub — restoring from it (or from a spread of it) re-installs
+// the stub instead of undoing it.
+const pristineSecureStorage = { ...realSecureStorage }
 import type { SecureStorageData } from './secureStorage/index.js'
 import { plainTextStorage } from './secureStorage/plainTextStorage.js'
 
@@ -103,7 +108,7 @@ describe('the writer persists account identity', () => {
   afterEach(() => {
     try {
       mock.restore()
-      mock.module('./secureStorage/index.js', () => realSecureStorage)
+      mock.module('./secureStorage/index.js', () => ({ ...pristineSecureStorage }))
       setClaudeConfigHomeDirForTesting(undefined)
       rmSync(tmpRoot, { recursive: true, force: true })
     } finally {
