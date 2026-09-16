@@ -32,6 +32,13 @@ import type { SecureStorageData } from './secureStorage/index.js'
 // live namespace object in place, so restoring from the namespace (or from a
 // spread of it) would re-install the stub instead of undoing it.
 const pristineRealSecureStorage = { ...realSecureStorage }
+// Importing the REAL limits module here is deliberate as well as necessary:
+// accountSwitch -> claudeAiLimits -> api/claude -> usageLimitSwitch ->
+// accountSwitch is an import cycle, so loading both real modules in one
+// process is what would surface a module-initialisation failure in it.
+const pristineRealLimits = {
+  ...(await import('../services/claudeAiLimits.js')),
+}
 
 const HOUR = 60 * 60 * 1000
 
@@ -350,5 +357,142 @@ describe('naming an account where the naming leaves the screen', () => {
 
     const account = { key: KEY_A, emailAddress: EMAIL, isActive: true }
     expect(accountUsageLabel(account)).toBe(accountUsageLabel(account))
+  })
+})
+
+/**
+ * A switch has to move the quota view too.
+ *
+ * `getRawUtilization()` re-reads the per-account store on every call, so it
+ * follows a switch on its own; `currentLimits` is a plain binding that only a
+ * response moves. `switchAccount` is therefore where the stored state of the
+ * newly active account has to be projected, for the same reason the token,
+ * betas and tool-schema caches are cleared there.
+ *
+ * What this module owns is the WIRING — that the projection is called, once,
+ * and only when a switch actually happened. What the projection then shows is
+ * claudeAiLimits' own contract and is pinned in claudeAiLimits.test.ts.
+ */
+describe('a switch projects the new account quota view', () => {
+  let tmpRoot: string
+  let store: SecureStorageData
+  let projections: number
+
+  beforeEach(async () => {
+    await acquireSharedMutationLock('utils/accountSwitch.test.ts')
+    mock.restore()
+    tmpRoot = mkdtempSync(join(tmpdir(), 'openclaude-account-switch-'))
+    const configDir = join(tmpRoot, 'config')
+    mkdirSync(configDir)
+    setClaudeConfigHomeDirForTesting(configDir)
+
+    store = {
+      claudeAiOauth: tokensFor('work'),
+      claudeAiOauthActive: 'uuid-work',
+      claudeAiOauthAccounts: {
+        'uuid-work': tokensFor('work'),
+        'uuid-personal': tokensFor('personal'),
+      },
+    }
+
+    mock.module('./secureStorage/index.js', () => ({
+      ...realSecureStorage,
+      getSecureStorage: () => ({
+        name: 'in-memory-test-storage',
+        read: () => store,
+        readAsync: async () => store,
+        update: (next: SecureStorageData) => {
+          store = next
+          return { success: true }
+        },
+      }),
+    }))
+
+    projections = 0
+    mock.module('../services/claudeAiLimits.js', () => ({
+      ...pristineRealLimits,
+      projectActiveAccountLimits: () => {
+        projections += 1
+      },
+    }))
+  })
+
+  afterEach(() => {
+    try {
+      mock.restore()
+      mock.module('./secureStorage/index.js', () => ({
+        ...pristineRealSecureStorage,
+      }))
+      mock.module('../services/claudeAiLimits.js', () => ({
+        ...pristineRealLimits,
+      }))
+      setClaudeConfigHomeDirForTesting(undefined)
+      rmSync(tmpRoot, { recursive: true, force: true })
+    } finally {
+      releaseSharedMutationLock()
+    }
+  })
+
+  test('a successful switch projects the new account view exactly once', async () => {
+    const { switchAccount } = await import('./accountSwitch.js')
+
+    expect(projections).toBe(0)
+    expect((await switchAccount('uuid-personal')).success).toBe(true)
+
+    // Once, not zero (the status line would keep showing the account we left)
+    // and not twice (a repaint per switch, not per mirror moved).
+    expect(projections).toBe(1)
+  })
+
+  test('a switch that did not happen projects nothing', async () => {
+    const { switchAccount } = await import('./accountSwitch.js')
+
+    await expect(switchAccount('uuid-nobody')).rejects.toThrow(
+      /No stored Claude account/,
+    )
+
+    // Projecting here would repaint the status line for a switch the user
+    // never got, and the account they are still on has not changed.
+    expect(projections).toBe(0)
+    expect(store.claudeAiOauthActive).toBe('uuid-work')
+  })
+
+  test('the projection runs after the identity mirror has moved', async () => {
+    const { switchAccount } = await import('./accountSwitch.js')
+    const { getGlobalConfig, saveGlobalConfig } = await import('./config.js')
+
+    saveGlobalConfig(current => ({
+      ...current,
+      oauthAccount: {
+        accountUuid: 'uuid-work',
+        emailAddress: 'work@example.com',
+      },
+      oauthAccounts: {
+        'uuid-work': {
+          accountUuid: 'uuid-work',
+          emailAddress: 'work@example.com',
+        },
+        'uuid-personal': {
+          accountUuid: 'uuid-personal',
+          emailAddress: 'personal@example.com',
+        },
+      },
+    }))
+
+    // The projection keys off getOauthAccountInfo(), which reads
+    // config.oauthAccount. Running it before saveGlobalConfig would project
+    // the account being switched AWAY from — the exact staleness it exists to
+    // remove — so the order in switchAccount is load-bearing.
+    let accountWhenProjected: string | undefined
+    mock.module('../services/claudeAiLimits.js', () => ({
+      ...pristineRealLimits,
+      projectActiveAccountLimits: () => {
+        accountWhenProjected = getGlobalConfig().oauthAccount?.accountUuid
+      },
+    }))
+
+    expect((await switchAccount('uuid-personal')).success).toBe(true)
+
+    expect(accountWhenProjected).toBe('uuid-personal')
   })
 })

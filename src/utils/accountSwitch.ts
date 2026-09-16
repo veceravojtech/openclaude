@@ -7,6 +7,7 @@
  * brought together.
  */
 
+import { projectActiveAccountLimits } from '../services/claudeAiLimits.js'
 import type { AccountSummary } from './authAccounts.js'
 import {
   listAccounts,
@@ -177,6 +178,13 @@ export async function switchAccount(
   clearOAuthTokenCache()
   clearBetasCaches()
   clearToolSchemaCache()
+  // Same reason as the three above, for the one piece of per-account state
+  // that is a stored VALUE rather than a cache. `getRawUtilization` re-reads
+  // the quota store on every call and so flips with the switch, but
+  // `currentLimits` only moves when a response arrives - so without this the
+  // status line keeps showing the quota of the account we just left until the
+  // new one answers. The projection is total, so a switch can never fail on it.
+  projectActiveAccountLimits()
 
   return result
 }

@@ -315,18 +315,62 @@ export function emitStatusChange(limits: ClaudeAILimits) {
  * but it must not move currentLimits or wake the statusListeners, or a stale
  * in-flight response would repaint the new account's status line with the old
  * account's quota.
+ *
+ * The two guards are deliberately separate. The slot is written only when its
+ * stored value actually changed, and the fan-out is deduped against what the
+ * status line is ALREADY showing (currentLimits), NOT against the slot: after
+ * an account switch those two disagree, and a value that matches the slot it
+ * lands in is precisely the case where currentLimits would otherwise stay on
+ * the account the user just left. That separation is what lets
+ * projectActiveAccountLimits reuse this function as the single writer of the
+ * active-account view instead of adding a second one.
  */
 function applyLimitsForAccount(
   accountKey: string,
   newLimits: ClaudeAILimits,
 ): void {
   const slot = writableSlot(accountKey)
-  if (isEqual(slot.limits, newLimits)) {
+  if (!isEqual(slot.limits, newLimits)) {
+    slot.limits = newLimits
+  }
+  if (accountKey !== currentAccountUsageKey()) {
     return
   }
-  slot.limits = newLimits
-  if (accountKey === currentAccountUsageKey()) {
-    emitStatusChange(newLimits)
+  if (isEqual(currentLimits, newLimits)) {
+    return
+  }
+  emitStatusChange(newLimits)
+}
+
+/**
+ * Re-point the active-account view at the account that is active RIGHT NOW.
+ *
+ * getRawUtilization and getRawUtilizationCapturedAt are functions resolved at
+ * read time, so they flip the instant a switch lands. currentLimits is a plain
+ * binding that only moves when a response arrives, so without this call the
+ * two views of the same account disagree for as long as it takes the new
+ * account to answer, and the status line keeps showing the quota of the
+ * account the user just left.
+ *
+ * Call it from wherever an account BECOMES active. It projects already-stored
+ * state and nothing else: it captures no headers, changes no quota semantics
+ * and cannot misattribute, because it reads the key from
+ * currentAccountUsageKey itself rather than accepting one from a caller.
+ *
+ * Total by construction - a throwing status listener is logged, never
+ * propagated - because an account switch must not fail on a repaint.
+ */
+export function projectActiveAccountLimits(): void {
+  try {
+    const accountKey = currentAccountUsageKey()
+    // An account with nothing stored projects the DEFAULT limits, never the
+    // previous account's figures: showing nothing beats showing the account we
+    // just switched away from, the same rule switchAccount already applies to
+    // config.oauthAccount.
+    const stored = accountQuotaSlots.get(accountKey)?.limits ?? DEFAULT_LIMITS
+    applyLimitsForAccount(accountKey, { ...stored })
+  } catch (error) {
+    logError(error as Error)
   }
 }
 

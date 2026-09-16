@@ -5,6 +5,7 @@ import {
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
 import type { AccountInfo } from '../utils/config.js'
+import type { ClaudeAILimits } from './claudeAiLimits.js'
 import {
   extractQuotaStatusFromError,
   extractQuotaStatusFromHeaders,
@@ -403,5 +404,180 @@ describe('single-account behaviour is unchanged', () => {
     isSubscriber = true
     activeAccountUuid = ACCOUNT_TWO
     expect(limits.getRawUtilization().five_hour?.utilization).toBe(0.42)
+  })
+})
+/**
+ * Projecting the active account's STORED quota when the account changes.
+ *
+ * getRawUtilization() and getRawUtilizationCapturedAt() are functions resolved
+ * at read time, so they flip the instant a switch lands. currentLimits is a
+ * plain binding that only applyLimitsForAccount moves, and that only runs on a
+ * response — so the two views of "the active account" disagree from the switch
+ * until the new account next answers, and the status line keeps showing the
+ * account the user just left.
+ *
+ * These tests assert the observable end of the projection — what a reader of
+ * currentLimits gets and what the statusListeners fan-out saw — never that a
+ * particular internal was written.
+ */
+describe('projecting the active account stored limits', () => {
+  test('projects the switched-to account own figures and wakes the status line', async () => {
+    const limits = await importFreshLimits()
+
+    activeAccountUuid = ACCOUNT_ONE
+    limits.extractQuotaStatusFromHeaders(
+      quotaHeaders({ utilization5h: 0.1, reset5h: 111, unifiedReset: 1111 }),
+      ACCOUNT_ONE,
+    )
+    activeAccountUuid = ACCOUNT_TWO
+    limits.extractQuotaStatusFromHeaders(
+      quotaHeaders({ utilization5h: 0.42, reset5h: 222, unifiedReset: 2222 }),
+      ACCOUNT_TWO,
+    )
+    // Account two is what the user is looking at right now.
+    expect(limits.currentLimits.resetsAt).toBe(2222)
+
+    const fanOut: number[] = []
+    limits.statusListeners.add(next => fanOut.push(next.resetsAt ?? -1))
+
+    // The switch to account one lands. The read-time views flip on their own...
+    activeAccountUuid = ACCOUNT_ONE
+    expect(limits.getRawUtilization().five_hour?.utilization).toBe(0.1)
+    // ...and this is the gap: currentLimits is still account two's.
+    expect(limits.currentLimits.resetsAt).toBe(2222)
+
+    limits.projectActiveAccountLimits()
+
+    expect(limits.currentLimits.resetsAt).toBe(1111)
+    expect(fanOut).toEqual([1111])
+    // A projection, not a capture: account two's stored reading is untouched,
+    // so the multi-account Usage view still has both.
+    expect(
+      limits
+        .listAccountUsageSnapshots()
+        .find(s => s.accountUuid === ACCOUNT_TWO)?.raw.five_hour?.utilization,
+    ).toBe(0.42)
+    expect(
+      limits
+        .listAccountUsageSnapshots()
+        .find(s => s.accountUuid === ACCOUNT_ONE)?.raw.five_hour?.utilization,
+    ).toBe(0.1)
+  })
+
+  test('an account with no captured state projects the defaults, not the account we just left', async () => {
+    const limits = await importFreshLimits()
+
+    activeAccountUuid = ACCOUNT_ONE
+    limits.extractQuotaStatusFromHeaders(
+      quotaHeaders({ utilization5h: 0.77, reset5h: 111, unifiedReset: 1111 }),
+      ACCOUNT_ONE,
+    )
+    expect(limits.currentLimits.resetsAt).toBe(1111)
+
+    const fanOut: ClaudeAILimits[] = []
+    limits.statusListeners.add(next => fanOut.push({ ...next }))
+
+    // Account two has never been seen this process.
+    activeAccountUuid = ACCOUNT_TWO
+    limits.projectActiveAccountLimits()
+
+    expect(limits.currentLimits).toEqual({
+      status: 'allowed',
+      unifiedRateLimitFallbackAvailable: false,
+      isUsingOverage: false,
+    })
+    // 1111 here would be the whole bug: the figures of the account we left,
+    // shown as if they belonged to the account we just switched to.
+    expect(limits.currentLimits.resetsAt).toBeUndefined()
+    expect(fanOut).toHaveLength(1)
+    expect(fanOut[0]?.resetsAt).toBeUndefined()
+
+    // The account we left keeps its own stored reading for the Usage view.
+    activeAccountUuid = ACCOUNT_ONE
+    expect(limits.getRawUtilization().five_hour?.utilization).toBe(0.77)
+  })
+
+  test('projecting when nothing changed repaints nothing', async () => {
+    const limits = await importFreshLimits()
+
+    activeAccountUuid = ACCOUNT_ONE
+    limits.extractQuotaStatusFromHeaders(
+      quotaHeaders({ utilization5h: 0.1, reset5h: 111, unifiedReset: 1111 }),
+      ACCOUNT_ONE,
+    )
+
+    const fanOut: number[] = []
+    limits.statusListeners.add(next => fanOut.push(next.resetsAt ?? -1))
+
+    // Re-projecting the account that is already on screen must not wake
+    // anything: a switch back and forth is not a quota change.
+    limits.projectActiveAccountLimits()
+    limits.projectActiveAccountLimits()
+
+    expect(fanOut).toEqual([])
+    expect(limits.currentLimits.resetsAt).toBe(1111)
+  })
+
+  test('a throwing status listener cannot fail the projection', async () => {
+    const limits = await importFreshLimits()
+
+    activeAccountUuid = ACCOUNT_ONE
+    limits.extractQuotaStatusFromHeaders(
+      quotaHeaders({ utilization5h: 0.1, reset5h: 111, unifiedReset: 1111 }),
+      ACCOUNT_ONE,
+    )
+    activeAccountUuid = ACCOUNT_TWO
+
+    let painted = 0
+    const exploding = () => {
+      painted += 1
+      throw new Error('status listener blew up')
+    }
+    limits.statusListeners.add(exploding)
+    try {
+      // switchAccount calls this on a path that reports success or failure to
+      // the user; a repaint must never be what turns a completed switch into
+      // a failed one.
+      expect(() => limits.projectActiveAccountLimits()).not.toThrow()
+    } finally {
+      limits.statusListeners.delete(exploding)
+    }
+    // The listener really did run, so the not.toThrow above is not vacuous.
+    expect(painted).toBe(1)
+    expect(limits.currentLimits.resetsAt).toBeUndefined()
+  })
+
+  test('a response identical to the stored slot still clears a stale active view', async () => {
+    const limits = await importFreshLimits()
+
+    activeAccountUuid = ACCOUNT_ONE
+    limits.extractQuotaStatusFromHeaders(
+      quotaHeaders({ utilization5h: 0.1, reset5h: 111, unifiedReset: 1111 }),
+      ACCOUNT_ONE,
+    )
+    activeAccountUuid = ACCOUNT_TWO
+    limits.extractQuotaStatusFromHeaders(
+      quotaHeaders({ utilization5h: 0.42, reset5h: 222, unifiedReset: 2222 }),
+      ACCOUNT_TWO,
+    )
+
+    // Back on account one WITHOUT a projection — an out-of-band switch, or the
+    // one caller a future change forgets to wire.
+    activeAccountUuid = ACCOUNT_ONE
+    expect(limits.currentLimits.resetsAt).toBe(2222)
+
+    const fanOut: number[] = []
+    limits.statusListeners.add(next => fanOut.push(next.resetsAt ?? -1))
+
+    // Account one answers with exactly what its own slot already holds.
+    // Deduping that against the SLOT would leave the status line on account
+    // two forever; deduping against currentLimits repaints it.
+    limits.extractQuotaStatusFromHeaders(
+      quotaHeaders({ utilization5h: 0.1, reset5h: 111, unifiedReset: 1111 }),
+      ACCOUNT_ONE,
+    )
+
+    expect(fanOut).toEqual([1111])
+    expect(limits.currentLimits.resetsAt).toBe(1111)
   })
 })
