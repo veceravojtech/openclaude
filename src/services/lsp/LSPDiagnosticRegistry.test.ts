@@ -1,10 +1,15 @@
-import { beforeEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test'
 import type { Diagnostic, DiagnosticFile } from '../diagnosticTracking.js'
 
 const debugMessages: string[] = []
 
+// Cache-busted imports: a separate registry entry that mock.module() never
+// mutates, so these stay pristine and are safe to restore from.
 const realDebugModule = await import(
   `../../utils/debug.js?real=${Date.now()}-${Math.random()}`,
+)
+const realSlowOperationsModule = await import(
+  `../../utils/slowOperations.js?real=${Date.now()}-${Math.random()}`,
 )
 
 mock.module('../../utils/debug.js', () => ({
@@ -15,9 +20,21 @@ mock.module('../../utils/debug.js', () => ({
 }))
 // Other tests mock slowOperations process-wide; restore the real serializer so
 // diagnostic keys keep message/range/code entropy under full-suite ordering.
+// The pristine spread keeps the module's other nine exports defined — a
+// factory returning jsonStringify alone erased them for every later file.
 mock.module('../../utils/slowOperations.js', () => ({
+  ...realSlowOperationsModule,
   jsonStringify: JSON.stringify,
 }))
+
+afterAll(() => {
+  // mock.restore() does NOT undo mock.module(); re-register both specifiers
+  // from their pristine cache-busted namespaces.
+  mock.module('../../utils/debug.js', () => ({ ...realDebugModule }))
+  mock.module('../../utils/slowOperations.js', () => ({
+    ...realSlowOperationsModule,
+  }))
+})
 
 const registry = await import(
   `./LSPDiagnosticRegistry.ts?test=${Date.now()}-${Math.random()}`

@@ -1,4 +1,12 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  test,
+} from 'bun:test'
 import type { BetaToolUnion } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import type { TextBlockParam } from '@anthropic-ai/sdk/resources/index.mjs'
 import type { QuerySource } from '../../constants/querySource.js'
@@ -8,6 +16,15 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
+import * as realAnalytics from '../analytics/index.js'
+import * as realDebug from '../../utils/debug.js'
+
+// Snapshots taken before any mock.module() call. mock.module() mutates the live
+// namespace object in place, so a spread evaluated later — inside a factory, or
+// off the imported namespace — would copy the installed stub, not the real
+// exports, and "restoring" from it would reinstall the stub.
+const pristineRealAnalytics = { ...realAnalytics }
+const pristineRealDebug = { ...realDebug }
 
 type PromptCacheBreakModule = typeof import('./promptCacheBreakDetection.js')
 type EventCall = {
@@ -30,21 +47,33 @@ const logForDebuggingMock = mock(
     debugCalls.push({ message, options })
   },
 )
-const actualDebugModule = await import('../../utils/debug.js')
-
+// Spread the pristine namespaces into the stubs: analytics/index.js exports
+// five symbols and a factory returning only logEvent makes the other four
+// undefined for every file loaded afterwards.
 mock.module('../analytics/index.js', () => ({
+  ...pristineRealAnalytics,
   logEvent: logEventMock,
 }))
 
+// debug.js is mocked under two spellings because they are two registry
+// entries; each has to be restored under the spelling it was mocked with.
 mock.module('src/utils/debug.js', () => ({
-  ...actualDebugModule,
+  ...pristineRealDebug,
   logForDebugging: logForDebuggingMock,
 }))
 
 mock.module('../../utils/debug.js', () => ({
-  ...actualDebugModule,
+  ...pristineRealDebug,
   logForDebugging: logForDebuggingMock,
 }))
+
+afterAll(() => {
+  // mock.restore() does NOT undo mock.module(); re-register every specifier
+  // from its pre-mock snapshot so the stubs cannot bleed into later files.
+  mock.module('../analytics/index.js', () => ({ ...pristineRealAnalytics }))
+  mock.module('src/utils/debug.js', () => ({ ...pristineRealDebug }))
+  mock.module('../../utils/debug.js', () => ({ ...pristineRealDebug }))
+})
 
 const PROVIDER_ENV_KEYS = [
   'CLAUDE_CODE_USE_OPENAI',

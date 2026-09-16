@@ -43,7 +43,11 @@ let _allowlist: ReadonlyArray<{ marketplace: string; plugin: string }> = []
 let _mockOAuthTokens: { accessToken?: string } = { accessToken: 'fake-ci-token' }
 let _mockSubscriptionType: string | null = null
 
+// The pristine spread is the contamination half: the three names below happen
+// to cover every value export of channelAllowlist today, so a future export
+// added there would silently become undefined for every later file.
 mock.module('./channelAllowlist.js', () => ({
+  ..._realChannelAllowlist,
   isChannelsEnabled: () => _channelsEnabled,
   getChannelAllowlist: () => _allowlist,
   isChannelAllowlisted: (pluginSource: string | undefined) => {
