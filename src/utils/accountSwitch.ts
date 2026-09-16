@@ -18,13 +18,30 @@ import {
 } from './authAccounts.js'
 import { clearOAuthTokenCache } from './auth.js'
 import { clearBetasCaches } from './betas.js'
-import { saveGlobalConfig } from './config.js'
+import { getGlobalConfig, saveGlobalConfig } from './config.js'
 import { getSecureStorage } from './secureStorage/index.js'
 import { clearToolSchemaCache } from './toolSchemaCache.js'
 
-/** Every stored account, reconciled, for listing and for resolving a query. */
+/**
+ * Every stored account, reconciled, for listing and for resolving a query.
+ *
+ * The config identity map is joined in HERE rather than inside
+ * `listAccounts`: `authAccounts.ts` is deliberately config-free, and this
+ * module is where the two halves are brought together. `config.oauthAccounts`
+ * is keyed by the same account UUIDs the credential map uses and already
+ * holds the email, so an account written before the credential blob carried
+ * identity — every account already on disk — gets its name back without
+ * unlocking the keychain and without rewriting a single credential.
+ *
+ * Read-only, deliberately: naming an account must never write one. A backfill
+ * into the credential store would be undone by the next identity-less mirror
+ * write anyway, so the join stays on the read side.
+ */
 export function readAccounts(): AccountSummary[] {
-  return listAccounts(migrateAndReconcile(getSecureStorage().read() ?? {}).data)
+  return listAccounts(
+    migrateAndReconcile(getSecureStorage().read() ?? {}).data,
+    getGlobalConfig().oauthAccounts,
+  )
 }
 
 /**

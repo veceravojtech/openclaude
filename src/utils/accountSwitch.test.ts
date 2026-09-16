@@ -496,3 +496,158 @@ describe('a switch projects the new account quota view', () => {
     expect(accountWhenProjected).toBe('uuid-personal')
   })
 })
+
+/**
+ * `/account <email>` and `/account` for the accounts the user ALREADY has.
+ *
+ * Restoring identity on the WRITE side only helps credentials written from
+ * now on. Every account already on disk is keyed by its UUID and carries no
+ * identity at all, so `emailForTokens` returns undefined for it, which is
+ * exactly the pair of symptoms the user reported: `accountDisplayName` prints
+ * a raw UUID, and `resolveAccountKey` has no email to match so
+ * `/account <email>` answers "no stored account matches".
+ *
+ * `readAccounts` is where the two halves meet, so it is where the identity
+ * map from `config.oauthAccounts` — keyed by the SAME account UUIDs — is
+ * joined in. These tests assert the observable end of both symptoms through
+ * the real `readAccounts`, and that the join is read-only: naming an account
+ * must never write a credential.
+ */
+describe('naming the accounts already on disk', () => {
+  // Real-shaped, because `accountUsageLabel` truncates a UUID-shaped key and
+  // the PII assertion below depends on that branch being the one taken.
+  const LEGACY_UUID = '3f2b19ac-7d40-4c1e-9b55-0a8e6d21cf34'
+  const EMAIL = 'legacy@example.com'
+
+  let tmpRoot: string
+  let store: SecureStorageData
+  let writes: number
+
+  /** A credential saved before identity was recorded: no tokenAccount, no profile. */
+  function identitylessTokens(who: string): OAuthTokens {
+    return {
+      accessToken: `${who}-access`,
+      refreshToken: `${who}-refresh`,
+      expiresAt: Date.now() + HOUR,
+      scopes: ['user:inference'],
+    }
+  }
+
+  beforeEach(async () => {
+    await acquireSharedMutationLock('utils/accountSwitch.test.ts')
+    mock.restore()
+    tmpRoot = mkdtempSync(join(tmpdir(), 'openclaude-account-naming-'))
+    const configDir = join(tmpRoot, 'config')
+    mkdirSync(configDir)
+    setClaudeConfigHomeDirForTesting(configDir)
+
+    writes = 0
+    store = {
+      claudeAiOauth: identitylessTokens('legacy'),
+      claudeAiOauthActive: LEGACY_UUID,
+      claudeAiOauthAccounts: {
+        [LEGACY_UUID]: identitylessTokens('legacy'),
+        // The pre-identity entry, keyed by the legacy key rather than a UUID.
+        default: identitylessTokens('ancient'),
+      },
+    }
+
+    mock.module('./secureStorage/index.js', () => ({
+      ...realSecureStorage,
+      getSecureStorage: () => ({
+        name: 'in-memory-test-storage',
+        read: () => store,
+        readAsync: async () => store,
+        update: (next: SecureStorageData) => {
+          writes += 1
+          store = next
+          return { success: true }
+        },
+      }),
+    }))
+
+    const { saveGlobalConfig } = await import('./config.js')
+    saveGlobalConfig(current => ({
+      ...current,
+      // The shape the real config holds: keyed by account UUID, holding the
+      // non-secret identity only, and carrying no entry for `default`.
+      oauthAccounts: {
+        [LEGACY_UUID]: { accountUuid: LEGACY_UUID, emailAddress: EMAIL },
+      },
+    }))
+  })
+
+  afterEach(() => {
+    try {
+      mock.restore()
+      mock.module('./secureStorage/index.js', () => ({
+        ...pristineRealSecureStorage,
+      }))
+      setClaudeConfigHomeDirForTesting(undefined)
+      rmSync(tmpRoot, { recursive: true, force: true })
+    } finally {
+      releaseSharedMutationLock()
+    }
+  })
+
+  test('/account <email> resolves an account stored with no identity of its own', async () => {
+    const { readAccounts, resolveAccountKey } = await import('./accountSwitch.js')
+
+    expect(resolveAccountKey(readAccounts(), EMAIL)).toEqual({
+      type: 'ok',
+      key: LEGACY_UUID,
+    })
+    // The same match the command offers the user, case-insensitively.
+    expect(resolveAccountKey(readAccounts(), 'LEGACY@Example.com')).toEqual({
+      type: 'ok',
+      key: LEGACY_UUID,
+    })
+  })
+
+  test('/account lists the email rather than a raw UUID', async () => {
+    const { readAccounts, accountDisplayName } = await import('./accountSwitch.js')
+
+    const listed = readAccounts().find(a => a.key === LEGACY_UUID)
+    expect(listed?.emailAddress).toBe(EMAIL)
+    expect(accountDisplayName(listed!)).toBe(EMAIL)
+  })
+
+  test('naming an account writes no credential', async () => {
+    const { readAccounts } = await import('./accountSwitch.js')
+    const before = JSON.stringify(store)
+
+    readAccounts()
+    readAccounts()
+
+    // The join is a read-side fallback: no credential write, no lock, no
+    // re-keying. A backfill into the credential store would show up here.
+    expect(writes).toBe(0)
+    expect(JSON.stringify(store)).toBe(before)
+  })
+
+  test('the join cannot name the pre-identity `default` entry', async () => {
+    const { readAccounts, accountDisplayName } = await import('./accountSwitch.js')
+
+    // `config.oauthAccounts` is keyed by account UUID, so a `default`-keyed
+    // credential — the one whose UUID was never recorded — has no entry there
+    // to join against and stays named by its key. This is a structural limit
+    // of the read-side join, not a gap in it.
+    const fallback = readAccounts().find(a => a.key === 'default')
+    expect(fallback?.emailAddress).toBeUndefined()
+    expect(accountDisplayName(fallback!)).toBe('default')
+  })
+
+  test('the joined email still never reaches off-screen output', async () => {
+    const { readAccounts, accountUsageLabel } = await import('./accountSwitch.js')
+
+    // `accountUsageLabel` omits the email on purpose because its output lands
+    // in transcripts and log files. The join populates `emailAddress` for
+    // accounts that previously had none, so that omission has to hold for a
+    // strictly wider set of accounts than before.
+    const listed = readAccounts().find(a => a.key === LEGACY_UUID)
+    const name = accountUsageLabel(listed!)
+    expect(name).toBe('3f2b19ac…')
+    expect(name).not.toContain('@')
+    expect(name).not.toContain('legacy')
+  })
+})

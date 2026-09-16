@@ -48,6 +48,17 @@ export type AccountSummary = {
   isActive: boolean
 }
 
+/**
+ * The non-secret identity the CALLER already holds for an account, keyed by
+ * the same account UUID the credential map uses — the shape
+ * `config.oauthAccounts` stores, narrowed to the one field naming needs.
+ *
+ * It is a PARAMETER rather than a config read because everything above
+ * `withCredentialLock` is pure; `readAccounts` in `accountSwitch.ts` is the
+ * designated meeting point of the two halves and is where it is supplied.
+ */
+export type AccountIdentities = Record<string, { emailAddress?: string }>
+
 // --- pure helpers -----------------------------------------------------------
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -177,14 +188,29 @@ export function migrateAndReconcile(
   return { data: next, changed }
 }
 
-/** Every stored account, active one first-class via `isActive`. */
-export function listAccounts(data: SecureStorageData): AccountSummary[] {
+/**
+ * Every stored account, active one first-class via `isActive`.
+ *
+ * `identities` names an account whose own token blob carries none — which is
+ * every credential written before the identity fields existed, so in practice
+ * every account already on a user's disk. Without it such an entry can only
+ * be printed as a raw UUID, and a query by email cannot match it at all.
+ *
+ * It fills a hole and never overrides one: the token blob is the account the
+ * credential actually belongs to, while the identity map is a mirror that can
+ * lag behind a re-login. An entry keyed `default` has no account UUID by
+ * definition, so nothing can be joined to it.
+ */
+export function listAccounts(
+  data: SecureStorageData,
+  identities: AccountIdentities = {},
+): AccountSummary[] {
   const accounts = data.claudeAiOauthAccounts ?? {}
   const active = data.claudeAiOauthActive
   return Object.entries(accounts).map(([key, account]) => ({
     key,
     label: account.label,
-    emailAddress: emailForTokens(account),
+    emailAddress: emailForTokens(account) ?? identities[key]?.emailAddress,
     isActive: key === active,
   }))
 }

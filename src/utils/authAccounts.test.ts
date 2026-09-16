@@ -20,6 +20,7 @@ import {
   vouchableAccountKeys,
   vouchForAccount,
 } from './authAccounts.js'
+import type { AccountInfo } from './config.js'
 import { setClaudeConfigHomeDirForTesting } from './envUtils.js'
 import { plainTextStorage } from './secureStorage/plainTextStorage.js'
 import type {
@@ -580,5 +581,77 @@ describe('the deliberate over-correction', () => {
     // The active account is vouchable; the idle alternative is not. A 429 on
     // `uuid-personal` therefore finds no target and falls through to the wait.
     expect([...vouchableAccountKeys(data, NOW)]).toEqual(['uuid-personal'])
+  })
+})
+
+/**
+ * Naming an account whose token blob predates the account identity fields.
+ *
+ * Every account already on disk was written before `tokenAccount` existed, so
+ * `emailForTokens` returns undefined for it and the UI has nothing but a raw
+ * UUID to print — and `/account <email>` has nothing to match against. The
+ * caller-supplied identity map is the join that gives those entries their
+ * name back on the READ side, without a credential write.
+ *
+ * The map is a PARAMETER rather than a config read so this half of the module
+ * stays pure, the same way `migrateAndReconcile` takes `preferredKey` and
+ * `vouchableAccountKeys` takes `now`.
+ */
+describe('listAccounts joins the caller-supplied identity map', () => {
+  const identityless = tokens()
+
+  /**
+   * Typed as the map `config.oauthAccounts` actually holds rather than as the
+   * narrow parameter type, so these tests also pin that the real config value
+   * is assignable to it — the production call site passes exactly this.
+   */
+  function identityFor(uuid: string, email: string): Record<string, AccountInfo> {
+    return { [uuid]: { accountUuid: uuid, emailAddress: email } }
+  }
+
+  test('an identity-less entry is named from the identity map', () => {
+    const data: SecureStorageData = {
+      claudeAiOauthAccounts: { 'uuid-work': identityless },
+      claudeAiOauthActive: 'uuid-work',
+    }
+
+    expect(
+      listAccounts(data, identityFor('uuid-work', 'work@example.com')),
+    ).toEqual([
+      {
+        key: 'uuid-work',
+        label: undefined,
+        emailAddress: 'work@example.com',
+        isActive: true,
+      },
+    ])
+  })
+
+  test('the token blob own identity wins over the identity map', () => {
+    const data: SecureStorageData = {
+      claudeAiOauthAccounts: { 'uuid-work': tokensFor('uuid-work') },
+      claudeAiOauthActive: 'uuid-work',
+    }
+
+    // The map is the config-side mirror and can lag behind a re-login; the
+    // token blob is the account the credential actually belongs to, so it
+    // decides. The fallback only ever fills a hole.
+    expect(
+      listAccounts(data, identityFor('uuid-work', 'stale@example.com'))[0]
+        ?.emailAddress,
+    ).toBe('uuid-work@example.com')
+  })
+
+  test('an entry with no identity on either side stays unnamed', () => {
+    const data: SecureStorageData = {
+      claudeAiOauthAccounts: { [LEGACY_ACCOUNT_KEY]: identityless },
+      claudeAiOauthActive: LEGACY_ACCOUNT_KEY,
+    }
+
+    // The structural limit of the join: the config identity map is keyed by
+    // account UUID, and a pre-identity credential is keyed `default`, so no
+    // entry can exist for it there and nothing can name it.
+    expect(listAccounts(data, {})[0]?.emailAddress).toBeUndefined()
+    expect(listAccounts(data)[0]?.emailAddress).toBeUndefined()
   })
 })
