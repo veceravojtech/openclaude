@@ -8,7 +8,6 @@ import type { KeyboardEvent } from '../../ink/events/keyboard-event.js';
 import { setClipboard } from '../../ink/termio/osc.js';
 import { Box, Link, Text } from '../../ink.js';
 import { OAuthService } from '../../services/oauth/index.js';
-import { saveOAuthTokensIfNeeded } from '../../utils/auth.js';
 import { logError } from '../../utils/log.js';
 interface OAuthFlowStepProps {
   onSuccess: (token: string) => void;
@@ -123,13 +122,24 @@ export function OAuthFlowStep({
         state: 'processing'
       });
 
-      // OAuthFlowStep creates inference-only tokens for GitHub Actions, not a
-      // replacement login. Use saveOAuthTokensIfNeeded directly to avoid
-      // performLogout which would destroy the user's existing auth session.
-      // Awaited deliberately: the saver takes the credential lock, and leaving
-      // it floating would let the success UI below run against a write that
-      // has not landed yet.
-      await saveOAuthTokensIfNeeded(result);
+      // The token minted here is ADDITIVE and never becomes this machine's
+      // session: a one-year, inference-only credential whose only consumer is
+      // the CLAUDE_CODE_OAUTH_TOKEN repository secret that setupGitHubActions
+      // pushes with `gh secret set`. Nothing in this flow reads it back out of
+      // secure storage, so it is not written there at all — the same choice
+      // ConsoleOAuthFlow makes for the identical token it mints in
+      // setup-token mode.
+      //
+      // Writing it could only ever destroy credentials. shouldPersistTokens
+      // does NOT skip an inference-only blob — shouldUseClaudeAIAuth is
+      // satisfied by user:inference alone, and the expiresIn requested above
+      // gives it a refresh token and an expiresAt — so applyTokensToAccounts
+      // merged it onto the account named by its own tokenAccount, collapsing
+      // that account's scopes to the inference-only set and replacing the
+      // refresh token behind the user's interactive session. When the token
+      // exchange omitted its account block the blob named nobody,
+      // accountKeyForTokens returned undefined, and the same overwrite landed
+      // on whoever claudeAiOauthActive happened to point at instead.
 
       // For OAuth flow, the access token can be used as an API key
       const timer1 = setTimeout((setOAuthStatus_0, accessToken, onSuccess_0, timersRef_0) => {
