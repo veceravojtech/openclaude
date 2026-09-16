@@ -6,6 +6,7 @@ import {
 } from '../../test/sharedMutationLock.js'
 
 type BrowserModule = typeof import('../../utils/browser.js')
+type ConfigModule = typeof import('../../utils/config.js')
 type ExecFileNoThrowModule = typeof import('../../utils/execFileNoThrow.js')
 
 type ExecCall = {
@@ -15,6 +16,7 @@ type ExecCall = {
 
 type RealModules = {
   browser: BrowserModule
+  config: ConfigModule
   execFileNoThrow: ExecFileNoThrowModule
 }
 
@@ -44,6 +46,9 @@ async function importRealModules(): Promise<RealModules> {
     browser: (await import(
       `../../utils/browser.ts?setup-actions-real-${cacheKey}`
     )) as BrowserModule,
+    config: (await import(
+      `../../utils/config.ts?setup-actions-real-${cacheKey}`
+    )) as ConfigModule,
     execFileNoThrow: (await import(
       `../../utils/execFileNoThrow.ts?setup-actions-real-${cacheKey}`
     )) as ExecFileNoThrowModule,
@@ -168,6 +173,7 @@ function handleGhCommand(args: string[]) {
 
 function installMocks(real: RealModules): void {
   mock.module('src/utils/config.js', () => ({
+    ...real.config,
     saveGlobalConfig: mock((updater: (current: GlobalConfig) => GlobalConfig) => {
       setupConfig = updater(setupConfig)
     }),
@@ -212,11 +218,18 @@ afterEach(() => {
   try {
     mock.restore()
     if (realModules) {
-      mock.module(
-        '../../utils/execFileNoThrow.js',
-        () => realModules!.execFileNoThrow,
-      )
-      mock.module('../../utils/browser.js', () => realModules!.browser)
+      // `mock.restore()` does not unregister a `mock.module()` registration, and
+      // handing back the captured namespace object itself is a silent no-op --
+      // `mock.module()` mutates the live namespace in place, so the restore has to
+      // re-register a spread COPY. The captured namespaces come from cache-busted
+      // specifiers taken before any stub existed, so they are pristine. Each
+      // specifier is restored under the exact spelling it was mocked with.
+      // Precedent: src/utils/auth.test.ts:6-7.
+      mock.module('src/utils/config.js', () => ({ ...realModules!.config }))
+      mock.module('../../utils/execFileNoThrow.js', () => ({
+        ...realModules!.execFileNoThrow,
+      }))
+      mock.module('../../utils/browser.js', () => ({ ...realModules!.browser }))
     }
   } finally {
     releaseSharedMutationLock()
