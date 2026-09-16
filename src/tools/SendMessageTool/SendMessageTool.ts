@@ -2,8 +2,10 @@ import { feature } from 'bun:bundle'
 import { z } from 'zod/v4'
 import { isReplBridgeActive } from '../../bootstrap/state.js'
 import { getReplBridgeHandle } from '../../bridge/replBridgeHandle.js'
+import { isTerminalTaskStatus, type TaskStatus } from '../../Task.js'
 import type { Tool, ToolUseContext } from '../../Tool.js'
 import { buildTool, type ToolDef } from '../../Tool.js'
+import type { AppState } from '../../state/AppState.js'
 import { findTeammateTaskByAgentId } from '../../tasks/InProcessTeammateTask/InProcessTeammateTask.js'
 import {
   isLocalAgentTask,
@@ -11,7 +13,11 @@ import {
 } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import { isMainSessionTask } from '../../tasks/LocalMainSessionTask.js'
 import { toAgentId } from '../../types/ids.js'
-import { generateRequestId, parseAgentId } from '../../utils/agentId.js'
+import {
+  formatAgentId,
+  generateRequestId,
+  parseAgentId,
+} from '../../utils/agentId.js'
 import { resolveCallerIdentity } from '../../utils/agentIdentity.js'
 import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js'
 import { logForDebugging } from '../../utils/debug.js'
@@ -149,6 +155,56 @@ function findTeammateColor(
 }
 
 /**
+ * Whether the recipient of a direct message has anything alive to read it.
+ *
+ * A teammate's inbox is a file on disk (`getInboxPath`); it becomes a delivery
+ * only because the teammate's runner polls it. `appState.tasks` is where that
+ * runner's existence is recorded, and the `in_process_teammate` row carrying
+ * the recipient's `identity.agentId` is the same source every other liveness
+ * check in this codebase keys on: `hasLiveTaskFor` (utils/swarm/subTeamRecovery),
+ * `countLiveInProcessTeammates` (tools/AgentTool/teammateReplicas) and
+ * `getRunningTeammatesSorted` (tasks/InProcessTeammateTask). ListAgents already
+ * refuses to list a terminal teammate as addressable on that same evidence —
+ * "a killed teammate is not resumable" (ListAgentsTool/collectAddressableAgents)
+ * — so this is SendMessage agreeing with what the lead was already told,
+ * instead of reporting a success it cannot back.
+ *
+ * `untracked` is the honest verdict for a recipient with no such row: the team
+ * lead, an agent in another process, a roster name AppState has not caught up
+ * with. Absence of a row is not evidence of death — only a row that says
+ * terminal is — so those keep today's optimistic success.
+ */
+type TeammateDelivery =
+  | { state: 'live' }
+  | { state: 'undeliverable'; status: TaskStatus }
+  | { state: 'untracked' }
+
+function classifyTeammateDelivery(
+  tasks: AppState['tasks'],
+  recipientName: string,
+  teamName: string | undefined,
+): TeammateDelivery {
+  // A teammate id is `name@team`, so a recipient placed in no team cannot be
+  // one of these rows at all.
+  if (!teamName) return { state: 'untracked' }
+  // findTeammateTaskByAgentId prefers a running row over a stale terminal one,
+  // so a respawned teammate is never condemned by its predecessor's corpse.
+  const task = findTeammateTaskByAgentId(
+    formatAgentId(recipientName, teamName),
+    tasks,
+  )
+  if (!task) return { state: 'untracked' }
+  // A `parked` status (the teammate lifecycle change) belongs HERE, as one
+  // line — above the terminal check, so it lands the same way whether or not
+  // `parked` is made terminal:
+  //   if (task.status === 'parked') return { state: 'undeliverable', status: task.status }
+  // The refusal text below already reads correctly for it: a parked teammate
+  // is not running, and its inbox is read when it comes back.
+  if (!isTerminalTaskStatus(task.status)) return { state: 'live' }
+  return { state: 'undeliverable', status: task.status }
+}
+
+/**
  * The name a message is signed with, and the `to` a reply comes back on.
  *
  * A subagent spawned inside a teammate's turn runs in that teammate's ambient
@@ -182,7 +238,19 @@ async function handleMessage(
     resolveCallerIdentity(context),
     getTeamName(appState.teamContext),
   )
+  const address = formatRecipientAddress(recipientName, teamName)
+  const delivery = classifyTeammateDelivery(
+    appState.tasks,
+    recipientName,
+    teamName,
+  )
 
+  // The write happens either way, and deliberately so. The inbox is a durable
+  // file keyed by name and team, drained by whatever runs under that name next
+  // — a respawn today, a resume once a teammate can be parked — so a message
+  // left in it is recoverable, while a message never written is gone for good.
+  // Dropping it could only ever destroy the single copy; keeping it costs one
+  // append. What was wrong here was never the write, it was the claim.
   await writeToMailbox(
     recipientName,
     {
@@ -195,12 +263,28 @@ async function handleMessage(
     teamName,
   )
 
+  if (delivery.state === 'undeliverable') {
+    // No `routing`: the UI draws a delivery whenever routing is present
+    // (SendMessageTool/UI.tsx), and this was not one. Without it the refusal
+    // text is what both the model and the human see.
+    return {
+      data: {
+        success: false,
+        message:
+          `Not delivered: ${address} is not running (task status: ${delivery.status}). ` +
+          `The message was kept in its inbox, but nothing is reading it — it stays unread ` +
+          `until a teammate of that name runs again. Spawn or restart it, or send to a ` +
+          `running teammate.`,
+      },
+    }
+  }
+
   const recipientColor = findTeammateColor(appState, recipientName)
 
   return {
     data: {
       success: true,
-      message: `Message sent to ${formatRecipientAddress(recipientName, teamName)}'s inbox`,
+      message: `Message sent to ${address}'s inbox`,
       routing: {
         sender: senderName,
         senderColor,

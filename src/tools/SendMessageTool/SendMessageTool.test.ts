@@ -4,11 +4,13 @@ import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
 import type { AppState } from '../../state/AppState.js'
+import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js'
 import type { LocalAgentTaskState } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
+import type { TaskStatus } from '../../Task.js'
 import type { ToolUseContext } from '../../Tool.js'
 import type { AgentId } from '../../types/ids.js'
 import type { AssistantMessage } from '../../types/message.js'
@@ -124,9 +126,52 @@ function runningSubagent(agentId: string): LocalAgentTaskState {
   }
 }
 
-function appStateWith(registry: Record<string, string> = {}): AppState {
+/**
+ * The AppState row a spawned in-process teammate has, at `status`. This row —
+ * not the team file — is what says whether a runner is alive to drain the
+ * teammate's inbox.
+ */
+function teammateTask(
+  name: string,
+  status: TaskStatus,
+): InProcessTeammateTaskState {
+  const agentId = `${name}@${TEAM}`
   return {
-    tasks: { [SUBAGENT_ID]: runningSubagent(SUBAGENT_ID) },
+    id: agentId,
+    type: 'in_process_teammate',
+    status,
+    description: 'ship the fix',
+    startTime: 0,
+    outputFile: '',
+    outputOffset: 0,
+    notified: false,
+    identity: {
+      agentId,
+      agentName: name,
+      teamName: TEAM,
+      planModeRequired: false,
+      parentSessionId: 'lead-session',
+    },
+    prompt: 'ship the fix',
+    awaitingPlanApproval: false,
+    permissionMode: 'default',
+    pendingUserMessages: [],
+    isIdle: false,
+    shutdownRequested: false,
+    lastReportedToolCount: 0,
+    lastReportedTokenCount: 0,
+  }
+}
+
+function appStateWith(
+  registry: Record<string, string> = {},
+  teammateTasks: InProcessTeammateTaskState[] = [],
+): AppState {
+  return {
+    tasks: {
+      [SUBAGENT_ID]: runningSubagent(SUBAGENT_ID),
+      ...Object.fromEntries(teammateTasks.map(task => [task.id, task])),
+    },
     agentNameRegistry: new Map(
       Object.entries(registry).map(([name, id]) => [name, id as AgentId]),
     ),
@@ -348,4 +393,79 @@ test('replying to the raw id an unnamed subagent signed with reaches its pending
   expect(task && 'pendingMessages' in task ? task.pendingMessages : []).toEqual([
     'thanks, keep going',
   ])
+})
+
+test('a message to a teammate whose task is terminal reports the real state, not a false success', async () => {
+  const lead = contextFor(appStateWith({}, [teammateTask('coder', 'killed')]))
+  const result = await send(
+    { to: 'coder', message: 'status?', summary: 'status' },
+    lead.context,
+  )
+
+  // The old behaviour was `success: true` into a mailbox nobody reads.
+  expect(result.success).toBe(false)
+  expect(result.message).toContain('Not delivered')
+  // No routing: the UI draws a delivery whenever routing is present, and this
+  // was not one — the caller and the human both get the text instead.
+  expect(result.routing).toBeUndefined()
+  // The write is deliberately KEPT: the inbox is durable, so the message
+  // survives for a resume or a respawn under the same name.
+  expect(await lastSenderTo('coder')).toBe('team-lead')
+})
+
+test('the undelivered message names the recipient and the status that made it undeliverable', async () => {
+  for (const status of ['completed', 'failed', 'killed'] as const) {
+    const lead = contextFor(appStateWith({}, [teammateTask('coder', status)]))
+    const result = await send(
+      { to: 'coder', message: 'ping', summary: 'ping' },
+      lead.context,
+    )
+    // A model caller has to be able to act on this without parsing prose: the
+    // address it used and the status word that explains the refusal.
+    expect(result.success).toBe(false)
+    expect(result.message).toContain(`coder@${TEAM}`)
+    expect(result.message).toContain(status)
+  }
+})
+
+test('a live teammate is messaged exactly as before, in every direction', async () => {
+  // lead -> teammate
+  const lead = contextFor(appStateWith({}, [teammateTask('coder', 'running')]))
+  const fromLead = await send(
+    { to: 'coder', message: 'status?', summary: 'status' },
+    lead.context,
+  )
+  expect(fromLead.success).toBe(true)
+  expect(fromLead.message).toContain('inbox')
+  expect(fromLead.routing?.target).toBe('@coder')
+  expect(await lastSenderTo('coder')).toBe('team-lead')
+
+  // teammate -> teammate
+  const teammate = contextFor(
+    appStateWith({}, [teammateTask('coder', 'running')]),
+  )
+  const fromTeammate = await asSupervisor(() =>
+    send({ to: 'coder', message: 'on it', summary: 'on it' }, teammate.context),
+  )
+  expect(fromTeammate.success).toBe(true)
+  expect(await lastSenderTo('coder')).toBe('supervisor')
+
+  // teammate -> lead. The lead has no teammate task row at all, and absence of
+  // a row is not evidence of death, so it keeps today's success.
+  const toLead = contextFor(appStateWith({}, [teammateTask('coder', 'killed')]))
+  const fromTeammateToLead = await asSupervisor(() =>
+    send({ to: 'team-lead', message: 'done', summary: 'done' }, toLead.context),
+  )
+  expect(fromTeammateToLead.success).toBe(true)
+
+  // broadcast, with a dead row present: still one write per roster member.
+  const broadcaster = contextFor(
+    appStateWith({}, [teammateTask('coder', 'killed')]),
+  )
+  const broadcast = await send(
+    { to: '*', message: 'standup', summary: 'standup' },
+    broadcaster.context,
+  )
+  expect(broadcast.success).toBe(true)
+  expect(broadcast.recipients).toEqual(['supervisor', 'coder'])
 })
