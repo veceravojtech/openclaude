@@ -46,7 +46,15 @@ mock.module('../../services/analytics/growthbook.js', () => ({
   getFeatureValue_CACHED_MAY_BE_STALE: () => true,
 }))
 
+// Cache-busted pristine snapshots for the stubs that were still partial. Same
+// idiom and same reason as the growthbook/config/debug/log spreads around
+// them: a partial stub makes the omitted exports undefined for every file the
+// sweep loads afterwards, and mock.restore() never puts them back.
+const realAnalytics = await import(
+  `../../services/analytics/index.js?real=${Date.now()}-${Math.random()}`
+)
 mock.module('../../services/analytics/index.js', () => ({
+  ...realAnalytics,
   logEvent: mock(() => {}),
 }))
 
@@ -111,7 +119,12 @@ mock.module('../log.js', () => ({
   logError: mock(() => {}),
 }))
 
+const realGitAvailability = await import(
+  `./gitAvailability.js?real=${Date.now()}-${Math.random()}`
+)
 mock.module('./gitAvailability.js', () => ({
+  // Keeps clearGitAvailabilityCache alive for later files.
+  ...realGitAvailability,
   checkGitAvailable: async () => true,
   markGitUnavailable: mock(() => {}),
 }))
@@ -131,7 +144,13 @@ mock.module('./marketplaceHelpers.js', () => ({
   isSourceAllowedByPolicy: () => true,
 }))
 
+const realMarketplaceManager = await import(
+  `./marketplaceManager.js?real=${Date.now()}-${Math.random()}`
+)
 mock.module('./marketplaceManager.js', () => ({
+  // Spread first: the 9 names below left the other 13 exports of
+  // marketplaceManager.js undefined process-wide.
+  ...realMarketplaceManager,
   addMarketplaceSource,
   getMarketplace: async () => ({ plugins: [] }),
   getMarketplaceCacheOnly: async () => ({ plugins: [] }),
@@ -143,7 +162,12 @@ mock.module('./marketplaceManager.js', () => ({
   saveKnownMarketplacesConfig,
 }))
 
+const realOfficialMarketplaceGcs = await import(
+  `./officialMarketplaceGcs.js?real=${Date.now()}-${Math.random()}`
+)
 mock.module('./officialMarketplaceGcs.js', () => ({
+  // Keeps classifyGcsError alive for later files.
+  ...realOfficialMarketplaceGcs,
   fetchOfficialMarketplaceFromGcs,
 }))
 
@@ -155,7 +179,29 @@ checkAndInstallOfficialMarketplace = mod.checkAndInstallOfficialMarketplace
 
 afterAll(() => {
   try {
+    // mock.restore() does NOT undo mock.module(). Re-register all nine
+    // specifiers from their pristine snapshots, under the exact spellings they
+    // were mocked with — each spelling is its own registry entry.
     mock.restore()
+    mock.module('../../services/analytics/growthbook.js', () => ({
+      ...realGrowthbook,
+    }))
+    mock.module('../../services/analytics/index.js', () => ({
+      ...realAnalytics,
+    }))
+    mock.module('../config.js', () => ({ ...realConfig }))
+    mock.module('../debug.js', () => ({ ...realDebug }))
+    mock.module('../log.js', () => ({ ...realLog }))
+    mock.module('./gitAvailability.js', () => ({ ...realGitAvailability }))
+    mock.module('./marketplaceHelpers.js', () => ({
+      ...realMarketplaceHelpers,
+    }))
+    mock.module('./marketplaceManager.js', () => ({
+      ...realMarketplaceManager,
+    }))
+    mock.module('./officialMarketplaceGcs.js', () => ({
+      ...realOfficialMarketplaceGcs,
+    }))
   } finally {
     releaseSharedMutationLock()
   }
