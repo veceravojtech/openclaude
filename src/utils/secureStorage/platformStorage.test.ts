@@ -109,7 +109,7 @@ describe("Secure Storage Platform Implementations", () => {
     }));
     const moduleSuffix = `?platformStorageTest=${Date.now()}-${Math.random()}`;
     realEnvUtils = await import(`../envUtils.js${moduleSuffix}`);
-    mock.module("../envUtils.js", () => realEnvUtils);
+    mock.module("../envUtils.js", () => ({ ...realEnvUtils }));
     ({ setClaudeConfigHomeDirForTesting } = realEnvUtils);
     ({ getSecureStorageServiceName, CREDENTIALS_SERVICE_SUFFIX } = await import(
       `./macOsKeychainHelpers.js${moduleSuffix}`
@@ -137,7 +137,7 @@ describe("Secure Storage Platform Implementations", () => {
     try {
       mock.module("execa", () => ({ ...pristineRealExeca }));
       if (realEnvUtils) {
-        mock.module("../envUtils.js", () => realEnvUtils);
+        mock.module("../envUtils.js", () => ({ ...realEnvUtils }));
       }
     } finally {
       releaseSharedMutationLock();

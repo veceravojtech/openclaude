@@ -340,7 +340,8 @@ describe('enableConfigs startup validation (#1807)', () => {
   // module alongside the fs reset to contain that state.
   let realEnv: Record<string, unknown>
   beforeAll(async () => {
-    realEnv = (await import('./env.js')) as Record<string, unknown>
+    // Snapshot, not the namespace: mock.module() mutates it in place.
+    realEnv = { ...((await import('./env.js')) as Record<string, unknown>) }
   })
 
   afterEach(() => {

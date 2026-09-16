@@ -16,6 +16,11 @@ import {
   listProviderRateLimitSnapshots,
 } from '../providerUsageRegistry.js'
 import * as realGithubModelsCredentials from '../../../utils/githubModelsCredentials.js'
+// Snapshot before any mock.module() call. mock.module() mutates the live
+// namespace in place, so aliasing it inside a test would capture whatever
+// stub the previous test installed -- and restoring from it would re-install
+// that stub instead of the genuine module.
+const pristineGithubModelsCredentials = { ...realGithubModelsCredentials }
 
 type FetchType = typeof globalThis.fetch
 
@@ -1849,7 +1854,7 @@ test('strips Anthropic-specific headers on GitHub Codex transport with providerO
 })
 
 test('GitHub Copilot 401 chat_completions retries with refreshed token', async () => {
-  const realModule = realGithubModelsCredentials
+  const realModule = pristineGithubModelsCredentials
   try {
     const refreshSpy = mock(async () => {
       process.env.GITHUB_TOKEN = 'refreshed-token'
@@ -1919,7 +1924,7 @@ test('GitHub Copilot 401 chat_completions retries with refreshed token', async (
 })
 
 test('GitHub Copilot 401 with credential pool uses refreshed token not pool key', async () => {
-  const realGithubModule = realGithubModelsCredentials
+  const realGithubModule = pristineGithubModelsCredentials
   try {
     const refreshSpy = mock(async () => {
       process.env.GITHUB_TOKEN = 'refreshed-token'
@@ -1981,7 +1986,7 @@ test('GitHub Copilot 401 with credential pool uses refreshed token not pool key'
 })
 
 test('GitHub Copilot 401 with "token has expired" triggers refresh', async () => {
-  const realGithubModule = realGithubModelsCredentials
+  const realGithubModule = pristineGithubModelsCredentials
   try {
     const refreshSpy = mock(async () => {
       process.env.GITHUB_TOKEN = 'refreshed-token'
@@ -2037,7 +2042,7 @@ test('GitHub Copilot 401 with "token has expired" triggers refresh', async () =>
 })
 
 test('GitHub Copilot 401 without expired-token message does not trigger refresh', async () => {
-  const realGithubModule = realGithubModelsCredentials
+  const realGithubModule = pristineGithubModelsCredentials
   try {
     const refreshSpy = mock(async () => true)
 
@@ -2085,7 +2090,7 @@ test('GitHub Copilot 401 without expired-token message does not trigger refresh'
 })
 
 test('GitHub Copilot 401 refresh returning same token does not update auth', async () => {
-  const realGithubModule = realGithubModelsCredentials
+  const realGithubModule = pristineGithubModelsCredentials
   try {
     const refreshSpy = mock(async () => {
       process.env.GITHUB_TOKEN = 'initial-token'
@@ -2142,7 +2147,7 @@ test('GitHub Copilot 401 refresh returning same token does not update auth', asy
 })
 
 test('GitHub Copilot 401 codex_responses with providerOverride does not trigger refresh', async () => {
-  const realGithubModule = realGithubModelsCredentials
+  const realGithubModule = pristineGithubModelsCredentials
   try {
     const refreshSpy = mock(async () => {
       process.env.GITHUB_TOKEN = 'refreshed-token'
@@ -2193,7 +2198,7 @@ test('GitHub Copilot 401 codex_responses with providerOverride does not trigger 
 })
 
 test('GitHub Copilot 401 chat_completions with providerOverride does not trigger refresh', async () => {
-  const realGithubModule = realGithubModelsCredentials
+  const realGithubModule = pristineGithubModelsCredentials
   try {
     const refreshSpy = mock(async () => {
       process.env.GITHUB_TOKEN = 'refreshed-token'
@@ -2243,7 +2248,7 @@ test('GitHub Copilot 401 chat_completions with providerOverride does not trigger
 })
 
 test('GitHub Copilot refreshes a matching providerOverride token', async () => {
-  const realGithubModule = realGithubModelsCredentials
+  const realGithubModule = pristineGithubModelsCredentials
   try {
     const refreshSpy = mock(async () => {
       process.env.GITHUB_TOKEN = 'refreshed-token'

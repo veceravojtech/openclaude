@@ -188,9 +188,13 @@ function installFileSuggestionsDependencyMocks(options: LoadModuleOptions = {}):
 
 async function loadFileSuggestionsModule(options: LoadModuleOptions = {}) {
   activeSpawnScenario = options.spawnScenario
-  actualCrossSpawnModule ??= await import('cross-spawn')
-  actualRipgrepModule ??= await import('../utils/ripgrep.js')
-  actualFileIndexModule ??= await import('../native-ts/file-index/index.js')
+  // Snapshots, not namespaces: mock.module() mutates the namespace object in
+  // place, so a stored reference would hold the stub by restore time.
+  actualCrossSpawnModule ??= { ...(await import('cross-spawn')) }
+  actualRipgrepModule ??= { ...(await import('../utils/ripgrep.js')) }
+  actualFileIndexModule ??= {
+    ...(await import('../native-ts/file-index/index.js')),
+  }
   actualMarkdownConfigLoaderModule ??= await import(
     '../utils/markdownConfigLoader.js'
   )

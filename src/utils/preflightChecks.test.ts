@@ -123,7 +123,9 @@ async function waitForPreflightFailureEffect(
 
 beforeEach(async () => {
   await acquireSharedMutationLock('utils/preflightChecks.test.ts')
-  originalAxiosModule ??= await import('axios')
+  // Snapshot, not the namespace: mock.module() mutates the namespace object
+  // in place, so a stored reference would show the stub by afterEach.
+  originalAxiosModule ??= { ...(await import('axios')) }
 })
 
 afterEach(() => {

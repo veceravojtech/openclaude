@@ -35,8 +35,12 @@ beforeAll(async () => {
     'tools/ExitPlanModeTool/ExitPlanModeV2Tool.test.ts',
   )
 
-  actualPlans = await import('../../utils/plans.ts')
-  actualTeammateMailbox = await import('../../utils/teammateMailbox.ts')
+  // Snapshots, not namespaces: mock.module() mutates them in place, so the
+  // afterAll restore would otherwise re-install this file's own stub.
+  actualPlans = { ...(await import('../../utils/plans.ts')) }
+  actualTeammateMailbox = {
+    ...(await import('../../utils/teammateMailbox.ts')),
+  }
 
   mock.module('../../utils/plans.js', () => ({
     ...actualPlans,
