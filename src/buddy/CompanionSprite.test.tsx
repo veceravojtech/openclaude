@@ -13,7 +13,8 @@ import {
 import { robinhood } from './types.js'
 
 // Deterministic companion fixture (complete-config mock, cache-busted real
-// module — see companion.test.ts for the pattern and why).
+// module — see companion.test.ts for the pattern and why). `actualConfig` IS
+// the pristine pre-mock snapshot the afterAll below restores from.
 const actualConfig = await import(`../utils/config.js?real=${Date.now()}`)
 mock.module('../utils/config.js', () => ({
   ...actualConfig,

@@ -21,6 +21,8 @@ type AutocompactArgs = Parameters<QueryDeps['autocompact']>
 // Some smoke-suite files mock config globally; bun:test does not unregister
 // mock.module() registrations on mock.restore(). Pin this suite to the real
 // config before importing query so saved settings are visible to the query loop.
+// This registration is not a stub: it re-registers the complete pristine
+// namespace, so there is nothing for an afterAll to restore.
 const realConfigModule = (await import(
   `../utils/config.js?autoCompactCooldownReal=${Date.now()}-${Math.random()}`
 )) as typeof import('../utils/config.js')

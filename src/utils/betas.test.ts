@@ -120,7 +120,9 @@ afterEach(() => {
 // test file in the same runner process: isFirstPartyAnthropicProvider and
 // isCustomAnthropicProvider used to be missing, which silently defeated the
 // provider-isolation guard in src/test/providerModuleIsolation.ts (it compares
-// all seven provider functions). Spreading a cache-busted namespace is safe —
+// all seven provider functions). This registration is not a stub either: it
+// re-registers the complete pristine namespace, so there is nothing for an
+// afterAll to restore. Spreading a cache-busted namespace is safe —
 // it is a separate registry entry that mock.module() never mutates, so it
 // cannot recurse into the stub the way spreading the mocked specifier's own
 // live namespace would.

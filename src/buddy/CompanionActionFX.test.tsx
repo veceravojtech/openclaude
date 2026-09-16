@@ -10,7 +10,9 @@ import { renderToString } from '../utils/staticRender.js'
 import { robinhood } from './types.js'
 
 // Deterministic companion fixture (complete-config mock, cache-busted real
-// module — see companion.test.ts for the pattern and why). Without this, the
+// module — see companion.test.ts for the pattern and why). `actualConfig` IS
+// the pristine pre-mock snapshot the afterAll below restores from.
+// Without this, the
 // tests would silently pass through `companion === undefined` on machines
 // with no hatched buddy instead of exercising the eligibility gates.
 const actualConfig = await import(`../utils/config.js?real=${Date.now()}`)

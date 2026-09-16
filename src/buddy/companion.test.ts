@@ -7,6 +7,8 @@ import { SPECIES } from './types.js'
 // mock silently breaks unrelated suites (see repo testing conventions).
 // The cache-busting query loads a second, unmocked instance of the module;
 // spreading the plain specifier would capture the mock and recurse.
+// `actualConfig` IS the pristine pre-mock snapshot this file restores from: a
+// separate registry entry that mock.module() never mutates.
 const actualConfig = await import(`../utils/config.js?real=${Date.now()}`)
 let mockCompanion: StoredCompanion | undefined
 
