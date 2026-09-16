@@ -54,7 +54,7 @@ afterEach(() => {
   try {
     mock.restore()
     if (actualRespawn) {
-      mock.module('../../utils/swarm/respawnSubLead.js', () => actualRespawn!)
+      mock.module('../../utils/swarm/respawnSubLead.js', () => ({ ...actualRespawn! }))
     }
     clearDynamicTeamContext()
     setClaudeConfigHomeDirForTesting(undefined)

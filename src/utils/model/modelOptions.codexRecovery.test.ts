@@ -26,7 +26,7 @@ async function importFreshModelOptionsModule(provider: string) {
   }))
   const nonce = `${Date.now()}-${Math.random()}`
   const modelModule = await import(`./model.js?codexRecoveryTest=${nonce}`)
-  mock.module('./model.js', () => modelModule)
+  mock.module('./model.js', () => ({ ...modelModule }))
   return import(`./modelOptions.js?ts=${nonce}`)
 }
 

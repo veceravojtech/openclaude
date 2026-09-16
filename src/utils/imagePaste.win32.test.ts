@@ -34,9 +34,9 @@ async function restoreMocks(): Promise<void> {
   actualImageResizerModule ??= await import(
     `./imageResizer.js?actual=${Date.now()}-${Math.random()}`
   )
-  mock.module('./execFileNoThrow.js', () => actualExecFileModule!)
-  mock.module('execa', () => actualExecaModule!)
-  mock.module('./imageResizer.js', () => actualImageResizerModule!)
+  mock.module('./execFileNoThrow.js', () => ({ ...actualExecFileModule! }))
+  mock.module('execa', () => ({ ...actualExecaModule! }))
+  mock.module('./imageResizer.js', () => ({ ...actualImageResizerModule! }))
 }
 
 async function importImagePaste(): Promise<ImagePasteModule> {

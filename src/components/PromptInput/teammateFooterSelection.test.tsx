@@ -72,8 +72,8 @@ beforeEach(async () => {
 
 afterEach(() => {
   try {
-    mock.module('../AutoUpdaterWrapper.js', () => actualAutoUpdaterWrapper)
-    mock.module('../../keybindings/loadUserBindings.js', () => actualUserBindings)
+    mock.module('../AutoUpdaterWrapper.js', () => ({ ...actualAutoUpdaterWrapper }))
+    mock.module('../../keybindings/loadUserBindings.js', () => ({ ...actualUserBindings }))
   } finally {
     releaseSharedMutationLock()
   }

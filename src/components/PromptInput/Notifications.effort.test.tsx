@@ -99,7 +99,7 @@ afterEach(() => {
     } else {
       process.env[EFFORT_ENV_KEY] = savedEffortEnv
     }
-    mock.module('../AutoUpdaterWrapper.js', () => actualAutoUpdaterWrapper)
+    mock.module('../AutoUpdaterWrapper.js', () => ({ ...actualAutoUpdaterWrapper }))
   } finally {
     releaseSharedMutationLock()
   }

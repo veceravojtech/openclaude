@@ -48,13 +48,13 @@ afterEach(() => {
     if (originalSettingsModule) {
       mock.module(
         '../../utils/settings/settings.js',
-        () => originalSettingsModule!,
+        () => ({ ...originalSettingsModule! }),
       )
     }
     if (originalSpawnMultiAgentModule) {
       mock.module(
         '../shared/spawnMultiAgent.js',
-        () => originalSpawnMultiAgentModule!,
+        () => ({ ...originalSpawnMultiAgentModule! }),
       )
     }
     setClaudeConfigHomeDirForTesting(undefined)

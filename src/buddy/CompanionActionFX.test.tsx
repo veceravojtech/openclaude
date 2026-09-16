@@ -33,7 +33,7 @@ mock.module('../utils/config.js', () => ({
 const { CompanionActionFX } = await import('./CompanionActionFX.js')
 
 afterAll(() => {
-  mock.module('../utils/config.js', () => actualConfig)
+  mock.module('../utils/config.js', () => ({ ...actualConfig }))
   mock.restore()
 })
 

@@ -250,7 +250,7 @@ afterEach(async () => {
     // process. Each re-registration must use the captured, cache-busted module
     // (see the top of this file) — never the live namespace.
     if (originalProvidersModule) {
-      mock.module('./model/providers.js', () => originalProvidersModule!)
+      mock.module('./model/providers.js', () => ({ ...originalProvidersModule! }))
     }
     mock.module('axios', () => originalAxiosModule ?? realAxios)
     mock.module('src/constants/oauth.js', () => ({ ...realOauthConstants }))

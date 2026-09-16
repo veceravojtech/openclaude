@@ -68,10 +68,10 @@ describe('runAgent provider routing', () => {
     allowedModelsForTest = undefined
     settingsForTest = {}
     if (actualSettingsModule) {
-      mock.module('../../utils/settings/settings.js', () => actualSettingsModule!)
+      mock.module('../../utils/settings/settings.js', () => ({ ...actualSettingsModule! }))
     }
     if (actualModelAllowlistModule) {
-      mock.module('../../utils/model/modelAllowlist.js', () => actualModelAllowlistModule!)
+      mock.module('../../utils/model/modelAllowlist.js', () => ({ ...actualModelAllowlistModule! }))
     }
     releaseSharedMutationLock()
   })

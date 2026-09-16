@@ -26,7 +26,7 @@ afterEach(() => {
     axios.get = originalAxiosGet
     mock.restore()
     if (originalProvidersModule) {
-      mock.module('../../utils/model/providers.js', () => originalProvidersModule!)
+      mock.module('../../utils/model/providers.js', () => ({ ...originalProvidersModule! }))
     }
   } finally {
     releaseSharedMutationLock()

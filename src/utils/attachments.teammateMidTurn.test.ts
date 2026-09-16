@@ -61,7 +61,7 @@ afterEach(() => {
   try {
     if (actualMailbox) {
       mock.restore()
-      mock.module('./teammateMailbox.js', () => actualMailbox!)
+      mock.module('./teammateMailbox.js', () => ({ ...actualMailbox! }))
     }
     __test.resetSubTeamLeadershipCache()
     setClaudeConfigHomeDirForTesting(undefined)

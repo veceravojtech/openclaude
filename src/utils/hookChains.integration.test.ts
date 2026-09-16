@@ -53,14 +53,14 @@ async function importRealModules() {
 
 async function restorePersistentModuleMocks(): Promise<void> {
   const real = await importRealModules()
-  mock.module('../services/analytics/index.js', () => real.analytics)
-  mock.module('./telemetry/events.js', () => real.events)
-  mock.module('../services/policyLimits/index.js', () => real.policyLimits)
-  mock.module('./swarm/teamHelpers.js', () => real.teamHelpers)
-  mock.module('./teammateMailbox.js', () => real.teammateMailbox)
-  mock.module('./teammate.js', () => real.teammate)
-  mock.module('../bridge/replBridgeHandle.js', () => real.replBridge)
-  mock.module('../tools/AgentTool/AgentTool.js', () => real.agentTool)
+  mock.module('../services/analytics/index.js', () => ({ ...real.analytics }))
+  mock.module('./telemetry/events.js', () => ({ ...real.events }))
+  mock.module('../services/policyLimits/index.js', () => ({ ...real.policyLimits }))
+  mock.module('./swarm/teamHelpers.js', () => ({ ...real.teamHelpers }))
+  mock.module('./teammateMailbox.js', () => ({ ...real.teammateMailbox }))
+  mock.module('./teammate.js', () => ({ ...real.teammate }))
+  mock.module('../bridge/replBridgeHandle.js', () => ({ ...real.replBridge }))
+  mock.module('../tools/AgentTool/AgentTool.js', () => ({ ...real.agentTool }))
 }
 
 async function importHookChainsHarness(

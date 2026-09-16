@@ -32,17 +32,17 @@ afterEach(() => {
     if (actualSpawnInProcess) {
       mock.module(
         '../../utils/swarm/spawnInProcess.js',
-        () => actualSpawnInProcess!,
+        () => ({ ...actualSpawnInProcess! }),
       )
     }
     if (actualInProcessRunner) {
       mock.module(
         '../../utils/swarm/inProcessRunner.js',
-        () => actualInProcessRunner!,
+        () => ({ ...actualInProcessRunner! }),
       )
     }
     if (actualTeamHelpers) {
-      mock.module('../../utils/swarm/teamHelpers.js', () => actualTeamHelpers!)
+      mock.module('../../utils/swarm/teamHelpers.js', () => ({ ...actualTeamHelpers! }))
     }
   } finally {
     releaseSharedMutationLock()

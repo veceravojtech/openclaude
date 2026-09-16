@@ -234,7 +234,7 @@ afterEach(() => {
     } else {
       process.env[AGENT_VIEW_ENV_KEY] = savedAgentViewEnv
     }
-    mock.module('../AutoUpdaterWrapper.js', () => actualAutoUpdaterWrapper)
+    mock.module('../AutoUpdaterWrapper.js', () => ({ ...actualAutoUpdaterWrapper }))
   } finally {
     releaseSharedMutationLock()
   }

@@ -81,11 +81,11 @@ afterEach(async () => {
     if (originalSessionStorageModule) {
       mock.module(
         '../../utils/sessionStorage.js',
-        () => originalSessionStorageModule!,
+        () => ({ ...originalSessionStorageModule! }),
       )
     }
     if (originalAgentToolUtilsModule) {
-      mock.module('./agentToolUtils.js', () => originalAgentToolUtilsModule!)
+      mock.module('./agentToolUtils.js', () => ({ ...originalAgentToolUtilsModule! }))
     }
     // Process-global: leaving it set would hand every later test in the run a
     // teammate identity it never asked for.

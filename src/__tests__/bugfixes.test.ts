@@ -585,7 +585,7 @@ describe('Dev-channels dialog coverage', () => {
       mock.restore()
       mock.module(
         '../services/mcp/channelAllowlist.js',
-        () => _realChannelAllowlist,
+        () => ({ ..._realChannelAllowlist }),
       )
       // Reset shared bootstrap state so failures don't leak into later tests.
       const {

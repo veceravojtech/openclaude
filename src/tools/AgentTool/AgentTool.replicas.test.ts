@@ -36,12 +36,12 @@ afterEach(() => {
   try {
     mock.restore()
     if (originalSettingsModule) {
-      mock.module('../../utils/settings/settings.js', () => originalSettingsModule!)
+      mock.module('../../utils/settings/settings.js', () => ({ ...originalSettingsModule! }))
     }
     if (originalSpawnMultiAgentModule) {
       mock.module(
         '../shared/spawnMultiAgent.js',
-        () => originalSpawnMultiAgentModule!,
+        () => ({ ...originalSpawnMultiAgentModule! }),
       )
     }
     for (const key of ENV_KEYS) {

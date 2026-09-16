@@ -22,10 +22,10 @@ afterEach(() => {
   try {
     mock.restore()
     if (actualConfig) {
-      mock.module('../../utils/config.js', () => actualConfig!)
+      mock.module('../../utils/config.js', () => ({ ...actualConfig! }))
     }
     if (actualProviders) {
-      mock.module('../../utils/model/providers.js', () => actualProviders!)
+      mock.module('../../utils/model/providers.js', () => ({ ...actualProviders! }))
     }
   } finally {
     releaseSharedMutationLock()

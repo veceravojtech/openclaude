@@ -47,7 +47,7 @@ beforeEach(async () => {
 })
 
 afterEach(() => {
-  mock.module(MAILBOX_MODULE, () => actualMailbox)
+  mock.module(MAILBOX_MODULE, () => ({ ...actualMailbox }))
   releaseSharedMutationLock()
 })
 

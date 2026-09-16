@@ -66,8 +66,8 @@ mock.module('../../utils/auth.js', () => ({
 
 afterAll(() => {
   mock.restore()
-  mock.module('./channelAllowlist.js', () => _realChannelAllowlist)
-  mock.module('../../utils/auth.js', () => _realAuth)
+  mock.module('./channelAllowlist.js', () => ({ ..._realChannelAllowlist }))
+  mock.module('../../utils/auth.js', () => ({ ..._realAuth }))
 })
 
 function cap(extra: Record<string, unknown> = {}): ServerCapabilities {

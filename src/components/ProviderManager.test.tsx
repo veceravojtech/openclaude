@@ -848,8 +848,8 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
-    mock.module('../utils/settings/settings.js', () => actualSettingsModule)
-    mock.module('../utils/providerStartupOverrides.js', () => actualProviderStartupOverridesModule)
+    mock.module('../utils/settings/settings.js', () => ({ ...actualSettingsModule }))
+    mock.module('../utils/providerStartupOverrides.js', () => ({ ...actualProviderStartupOverridesModule }))
 
     for (const [key, value] of Object.entries(ORIGINAL_ENV)) {
       if (value === undefined) {

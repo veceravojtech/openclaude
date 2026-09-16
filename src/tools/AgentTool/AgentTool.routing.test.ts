@@ -42,13 +42,13 @@ afterEach(() => {
   try {
     mock.restore()
     if (actualPromptsModule) {
-      mock.module('../../constants/prompts.js', () => actualPromptsModule!)
+      mock.module('../../constants/prompts.js', () => ({ ...actualPromptsModule! }))
     }
     if (actualRunAgentModule) {
-      mock.module('./runAgent.js', () => actualRunAgentModule!)
+      mock.module('./runAgent.js', () => ({ ...actualRunAgentModule! }))
     }
     if (actualSettingsModule) {
-      mock.module('../../utils/settings/settings.js', () => actualSettingsModule!)
+      mock.module('../../utils/settings/settings.js', () => ({ ...actualSettingsModule! }))
     }
     resetSettingsCache()
     settingsForTest = {}

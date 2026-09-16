@@ -58,10 +58,10 @@ async function restoreMockedModulesToActual(): Promise<void> {
     import(`./providers.js?restore=${nonce}`),
     import(`./modelAllowlist.js?restore=${nonce}`),
   ])
-  mock.module('./providers.js', () => actualProviders)
-  mock.module('src/utils/model/providers.js', () => actualProviders)
-  mock.module('./modelAllowlist.js', () => actualModelAllowlist)
-  mock.module('src/utils/model/modelAllowlist.js', () => actualModelAllowlist)
+  mock.module('./providers.js', () => ({ ...actualProviders }))
+  mock.module('src/utils/model/providers.js', () => ({ ...actualProviders }))
+  mock.module('./modelAllowlist.js', () => ({ ...actualModelAllowlist }))
+  mock.module('src/utils/model/modelAllowlist.js', () => ({ ...actualModelAllowlist }))
 }
 
 const SAVED_ENV = {

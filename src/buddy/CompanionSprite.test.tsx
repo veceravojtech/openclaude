@@ -40,7 +40,7 @@ chalk.level = 3
 
 afterAll(() => {
   chalk.level = originalChalkLevel
-  mock.module('../utils/config.js', () => actualConfig)
+  mock.module('../utils/config.js', () => ({ ...actualConfig }))
   mock.restore()
 })
 

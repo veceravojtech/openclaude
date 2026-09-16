@@ -34,13 +34,13 @@ beforeAll(async () => {
   actualPlans = await import(
     `../plans.ts?planPermissionsActual=${Date.now()}-${Math.random()}`
   )
-  mock.module('../plans.js', () => actualPlans)
+  mock.module('../plans.js', () => ({ ...actualPlans }))
 })
 
 afterAll(() => {
   try {
     mock.restore()
-    mock.module('../plans.js', () => actualPlans)
+    mock.module('../plans.js', () => ({ ...actualPlans }))
   } finally {
     releaseSharedMutationLock()
   }
@@ -665,7 +665,7 @@ describe('plan mode mechanical read-only policy', () => {
       )
       expect(result.behavior).toBe('deny')
     } finally {
-      mock.module('../plans.js', () => actualPlans)
+      mock.module('../plans.js', () => ({ ...actualPlans }))
       await rm(directory, { recursive: true, force: true })
     }
   })

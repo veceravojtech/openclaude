@@ -38,12 +38,12 @@ afterEach(() => {
   try {
     mock.restore()
     if (originalSettingsModule) {
-      mock.module('../../utils/settings/settings.js', () => originalSettingsModule!)
+      mock.module('../../utils/settings/settings.js', () => ({ ...originalSettingsModule! }))
     }
     if (originalSpawnMultiAgentModule) {
       mock.module(
         '../shared/spawnMultiAgent.js',
-        () => originalSpawnMultiAgentModule!,
+        () => ({ ...originalSpawnMultiAgentModule! }),
       )
     }
     restoreEnv('CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS')

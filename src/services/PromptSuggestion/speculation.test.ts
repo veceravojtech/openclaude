@@ -50,7 +50,7 @@ beforeAll(async () => {
 afterAll(() => {
   try {
     mock.restore()
-    mock.module('../../utils/forkedAgent.js', () => actualForkedAgent)
+    mock.module('../../utils/forkedAgent.js', () => ({ ...actualForkedAgent }))
     if (previousUserType === undefined) {
       delete process.env.USER_TYPE
     } else {

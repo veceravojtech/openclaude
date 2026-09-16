@@ -60,7 +60,7 @@ beforeAll(async () => {
 afterAll(() => {
   try {
     mock.restore()
-    mock.module('../hooks.js', () => actualHooks)
+    mock.module('../hooks.js', () => ({ ...actualHooks }))
   } finally {
     releaseSharedMutationLock()
   }
