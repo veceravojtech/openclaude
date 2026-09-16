@@ -1,4 +1,5 @@
 import { afterEach, expect, mock, test } from 'bun:test'
+import type { SecureStorage } from './secureStorage/index.js'
 
 // Capture the genuine settings module once, through a query-suffixed specifier so
 // the capture can never pick up an already-registered mock. A plain
@@ -8,6 +9,15 @@ import { afterEach, expect, mock, test } from 'bun:test'
 const realSettings = (await import(
   `./settings/settings.js?authTestRealSettings=${Date.now()}-${Math.random()}`
 )) as typeof import('./settings/settings.js')
+
+// Same capture, same reason, for the OTHER machine-state input auth.ts reads:
+// the credential store. `withControlledAuthEnv` scrubs env vars, but nothing in
+// an env scrub reaches secure storage, so `getSubscriptionType()` falls through
+// to the stored OAuth credential and a developer box with a real libsecret entry
+// answers with that entry's genuine subscriptionType — green on CI, red locally.
+const realSecureStorage = (await import(
+  `./secureStorage/index.js?authTestRealSecureStorage=${Date.now()}-${Math.random()}`
+)) as typeof import('./secureStorage/index.js')
 
 type MockSource =
   | 'userSettings'
@@ -30,6 +40,7 @@ async function importAuthFresh() {
 // Addresses jatmn's P3 on #1731: test isolation for mock.module().
 afterEach(() => {
   mock.module('./settings/settings.js', () => ({ ...realSettings }))
+  restoreCredentialStore()
   mock.restore()
 })
 
@@ -49,6 +60,36 @@ function mockSettings(
       return s === source ? { subscriptionType } : null
     },
   }))
+}
+
+// An "I am logged out" credential store. Modelling the empty case as `absent`
+// (not `unreadable`) matters: `absent` is what a clean checkout actually has,
+// and `unreadable` would exercise the degraded-read paths instead.
+const emptyCredentialStore: SecureStorage = {
+  name: 'auth-test-empty-credential-store',
+  read: () => null,
+  readResult: () => ({ status: 'absent' }),
+  readAsync: async () => null,
+  update: () => ({
+    success: false,
+    warning: 'auth.test.ts credential store is read-only',
+  }),
+  delete: () => true,
+}
+
+// Spread the whole captured namespace, exactly as mockSettings() does, so the
+// stub is complete either way: `mock.module()` REPLACES a cold namespace and
+// MERGES into a warm one, and a partial stub would make this file pass in only
+// one import order.
+function mockEmptyCredentialStore(): void {
+  mock.module('./secureStorage/index.js', () => ({
+    ...realSecureStorage,
+    getSecureStorage: () => emptyCredentialStore,
+  }))
+}
+
+function restoreCredentialStore(): void {
+  mock.module('./secureStorage/index.js', () => ({ ...realSecureStorage }))
 }
 
 async function withControlledAuthEnv<T>(
@@ -89,9 +130,11 @@ async function withControlledAuthEnv<T>(
   delete process.env.CLAUDE_CODE_USE_GEMINI
   delete process.env.CLAUDE_CODE_USE_MISTRAL
   delete process.env.CLAUDE_CODE_USE_GITHUB
+  mockEmptyCredentialStore()
   try {
     return await fn()
   } finally {
+    restoreCredentialStore()
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) {
         delete process.env[key]
