@@ -13,22 +13,19 @@ import { publicBuildVersion } from '../../utils/version.js'
 const _realProvidersModule = await import(
   `../../utils/model/providers.js?real=${Date.now()}-${Math.random()}`,
 )
-const realProviders = {
-  getAPIProvider: _realProvidersModule.getAPIProvider,
-  usesAnthropicAccountFlow: _realProvidersModule.usesAnthropicAccountFlow,
-  isGithubNativeAnthropicMode: _realProvidersModule.isGithubNativeAnthropicMode,
-  getAPIProviderForStatsig: _realProvidersModule.getAPIProviderForStatsig,
-  isFirstPartyAnthropicBaseUrl: _realProvidersModule.isFirstPartyAnthropicBaseUrl,
-}
+// Spread the whole cache-busted namespace rather than cherry-picking names:
+// this registration is meant to RESTORE the real module, but listing only the
+// five names this suite happens to touch made every other export of
+// providers.js (isCustomAnthropicProvider, isFirstPartyAnthropicProvider)
+// undefined for every file loaded afterwards in the same Bun process.
+const realProviders = { ..._realProvidersModule }
 mock.module('../../utils/model/providers.js', () => realProviders)
 mock.module('src/utils/model/providers.js', () => realProviders)
 const _realModelSupportOverridesModule = await import(
   `../../utils/model/modelSupportOverrides.js?real=${Date.now()}-${Math.random()}`,
 )
-const realModelSupportOverrides = {
-  get3PModelCapabilityOverride:
-    _realModelSupportOverridesModule.get3PModelCapabilityOverride,
-}
+// Same reasoning as realProviders above — spread, never cherry-pick.
+const realModelSupportOverrides = { ..._realModelSupportOverridesModule }
 mock.module(
   '../../utils/model/modelSupportOverrides.js',
   () => realModelSupportOverrides,
