@@ -35,6 +35,20 @@ async function renderNoticePlainText(
   return renderToString(notice!.render(ctx), 80)
 }
 
+// Bun fixes a mocked specifier's export SHAPE at the first registration, so a
+// stub carrying one function makes every other export of that module
+// permanently unresolvable for the rest of the process - betas.ts has 14
+// exports and providers.ts 9, and the stubs below name one apiece. Capture the
+// real namespaces through cache-busted specifiers nothing mocks, spread them
+// into every stub so the shape stays whole, and put them back in afterEach:
+// mock.restore() does not undo mock.module().
+const pristineProviders = await import(
+  `./model/providers.ts?statusNoticeSafetyActual=${Date.now()}-${Math.random()}`
+)
+const pristineBetas = await import(
+  `./betas.ts?statusNoticeSafetyActual=${Date.now()}-${Math.random()}`
+)
+
 const SAVED_ARGV = process.argv
 const SAVED_API_KEY = process.env.ANTHROPIC_API_KEY
 
@@ -60,14 +74,18 @@ afterEach(() => {
     process.env.ANTHROPIC_API_KEY = SAVED_API_KEY
   }
   mock.restore()
+  mock.module('./model/providers.js', () => ({ ...pristineProviders }))
+  mock.module('./betas.js', () => ({ ...pristineBetas }))
 })
 
 describe('third-party permissive mode notice (#244 finding 1)', () => {
   test('fires when 3P + acceptEdits + classifier-off model', async () => {
     mock.module('./model/providers.js', () => ({
+      ...pristineProviders,
       getAPIProvider: () => 'openai',
     }))
     mock.module('./betas.js', () => ({
+      ...pristineBetas,
       modelSupportsAutoMode: () => false,
     }))
     const { getActiveNotices: freshGetActiveNotices } = await import(
@@ -80,9 +98,11 @@ describe('third-party permissive mode notice (#244 finding 1)', () => {
 
   test('fires when 3P + bypassPermissions', async () => {
     mock.module('./model/providers.js', () => ({
+      ...pristineProviders,
       getAPIProvider: () => 'openai',
     }))
     mock.module('./betas.js', () => ({
+      ...pristineBetas,
       modelSupportsAutoMode: () => false,
     }))
     const { getActiveNotices: freshGetActiveNotices } = await import(
@@ -95,9 +115,11 @@ describe('third-party permissive mode notice (#244 finding 1)', () => {
 
   test('suppressed in default mode even on 3P', async () => {
     mock.module('./model/providers.js', () => ({
+      ...pristineProviders,
       getAPIProvider: () => 'openai',
     }))
     mock.module('./betas.js', () => ({
+      ...pristineBetas,
       modelSupportsAutoMode: () => false,
     }))
     const { getActiveNotices: freshGetActiveNotices } = await import(
@@ -110,9 +132,11 @@ describe('third-party permissive mode notice (#244 finding 1)', () => {
 
   test('suppressed on firstParty Anthropic in acceptEdits', async () => {
     mock.module('./model/providers.js', () => ({
+      ...pristineProviders,
       getAPIProvider: () => 'firstParty',
     }))
     mock.module('./betas.js', () => ({
+      ...pristineBetas,
       modelSupportsAutoMode: () => true,
     }))
     const { getActiveNotices: freshGetActiveNotices } = await import(
@@ -125,9 +149,11 @@ describe('third-party permissive mode notice (#244 finding 1)', () => {
 
   test('suppressed when classifier supports the model (defensive)', async () => {
     mock.module('./model/providers.js', () => ({
+      ...pristineProviders,
       getAPIProvider: () => 'openai',
     }))
     mock.module('./betas.js', () => ({
+      ...pristineBetas,
       modelSupportsAutoMode: () => true,
     }))
     const { getActiveNotices: freshGetActiveNotices } = await import(
