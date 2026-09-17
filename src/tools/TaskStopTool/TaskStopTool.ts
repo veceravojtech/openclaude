@@ -1,6 +1,6 @@
 import { z } from 'zod/v4'
-import type { TaskStateBase } from '../../Task.js'
 import { buildTool, type ToolDef } from '../../Tool.js'
+import { resolveStoppableTask } from '../../tasks/resolveStoppableTask.js'
 import { stopTask } from '../../tasks/stopTask.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
@@ -69,20 +69,27 @@ export const TaskStopTool = buildTool({
     }
 
     const appState = getAppState()
-    const task = appState.tasks?.[id] as TaskStateBase | undefined
 
-    if (!task) {
+    // A task id, a teammate's `name@team` address, or a bare teammate name:
+    // ListAgents advertises `name@team`, so accepting only registry keys here
+    // rejected the one id the agent had been handed. The resolver also supplies
+    // the failure text, which distinguishes an unknown id from a teammate of
+    // another session instead of calling both "not found".
+    const resolved = await resolveStoppableTask(id, appState.tasks)
+    if (!resolved.ok) {
       return {
         result: false,
-        message: `No task found with ID: ${id}`,
-        errorCode: 1,
+        message: resolved.message,
+        errorCode: resolved.code === 'ambiguous' ? 4 : 1,
       }
     }
+    const { task, taskId } = resolved
+    const label = taskId === id ? taskId : `${id} (${taskId})`
 
     if (task.status !== 'running') {
       return {
         result: false,
-        message: `Task ${id} is not running (status: ${task.status})`,
+        message: `Task ${label} is not running (status: ${task.status})`,
         errorCode: 3,
       }
     }

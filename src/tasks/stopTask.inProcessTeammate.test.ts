@@ -115,6 +115,96 @@ test('stopTask kills an idle in-process teammate', async () => {
   await expect(stopTask(task.id, context)).rejects.toBeInstanceOf(StopTaskError)
 })
 
+test('stopTask kills a teammate addressed as name@team', async () => {
+  // The address ListAgents hands out. It is never a key in AppState.tasks —
+  // task ids are a type prefix plus 8 chars of [0-9a-z], so `@` can never
+  // appear in one — and the raw key lookup here used to reject it outright.
+  const abortController = new AbortController()
+  const task = idleTeammate(abortController)
+  let state = {
+    tasks: { [task.id]: task },
+    teamContext: {
+      teamName: 'alpha',
+      teamFilePath: '',
+      leadAgentId: 'lead-id',
+      teammates: { [task.identity.agentId]: { name: 'idler' } },
+    },
+  } as unknown as AppState
+  const context = {
+    getAppState: () => state,
+    setAppState: (f: (prev: AppState) => AppState) => {
+      state = f(state)
+    },
+  }
+
+  const result = await stopTask(task.identity.agentId, context)
+  // Reported under the id the task really has, not the address that was typed.
+  expect(result).toEqual({
+    taskId: task.id,
+    taskType: 'in_process_teammate',
+    command: task.description,
+  })
+  expect(state.tasks[task.id]?.status).toBe('killed')
+  expect(abortController.signal.aborted).toBe(true)
+})
+
+test('stopTask refuses to call a teammate of another session a bad id', async () => {
+  // AppState.tasks is per-process and never persisted: a teammate spawned by
+  // another session has no row here under any id, so "No task found with ID"
+  // sent the caller off to re-type an address that was never the problem.
+  writeTeam(
+    'codex-probe',
+    [{ agentId: 'codex-a@codex-probe', name: 'codex-a' }],
+    undefined,
+    'be73e248-0f3c-4a1e-9b5c-7d2f1a8c4e60',
+  )
+  let state = { tasks: {} } as unknown as AppState
+  const context = {
+    getAppState: () => state,
+    setAppState: (f: (prev: AppState) => AppState) => {
+      state = f(state)
+    },
+  }
+
+  const error = await stopTask('codex-a@codex-probe', context).catch(
+    (e: unknown) => e,
+  )
+  expect(error).toBeInstanceOf(StopTaskError)
+  const message = (error as StopTaskError).message
+  expect(message).not.toContain('No task found with ID')
+  expect(message).toContain('is not a task in this session')
+  expect(message).toContain('be73e248-0f3c-4a1e-9b5c-7d2f1a8c4e60')
+})
+
+test('stopTask reports a kill that did not take, instead of a fabricated success', async () => {
+  // The honesty rule terminate() now follows: success is an OBSERVED stop. Here
+  // the store drops the kill's mutation, so the teammate is still running when
+  // the kill returns — the caller must not be told it was stopped.
+  const abortController = new AbortController()
+  const task = idleTeammate(abortController)
+  const state = {
+    tasks: { [task.id]: task },
+    teamContext: {
+      teamName: 'alpha',
+      teamFilePath: '',
+      leadAgentId: 'lead-id',
+      teammates: { [task.identity.agentId]: { name: 'idler' } },
+    },
+  } as unknown as AppState
+  const context = {
+    getAppState: () => state,
+    // A store that never applies the update: the row stays `running`.
+    setAppState: () => {},
+  }
+
+  const error = await stopTask(task.id, context).catch((e: unknown) => e)
+  expect(error).toBeInstanceOf(StopTaskError)
+  expect((error as StopTaskError).code).toBe('not_terminated')
+  expect((error as StopTaskError).message).toContain('still running')
+  expect(state.tasks[task.id]?.status).toBe('running')
+  expect(abortController.signal.aborted).toBe(false)
+})
+
 test('a killed teammate keeps its row for the grace window instead of lingering 3s undrawn', async () => {
   // The kill path used to set a 3s setTimeout that evicted the task — and the
   // row was not drawn during those 3s anyway, so a killed teammate simply
@@ -163,11 +253,13 @@ function writeTeam(
   teamName: string,
   members: Array<{ agentId: string; name: string }>,
   parent?: { parentTeam: string; parentAgentId: string },
+  leadSessionId?: string,
 ): void {
   const teamFile: TeamFile = {
     name: teamName,
     createdAt: 0,
     leadAgentId: members[0]?.agentId ?? 'lead-id',
+    leadSessionId,
     ...parent,
     members: members.map(m => ({
       agentId: m.agentId,
