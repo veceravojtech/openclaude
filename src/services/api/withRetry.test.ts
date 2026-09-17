@@ -6,6 +6,9 @@ import * as debugNs from '../../utils/debug.js'
 import { markOpenAIRequestNonReplayable } from './openaiErrorClassification.js'
 type ProvidersModule = typeof import('../../utils/model/providers.js')
 type SleepModule = typeof import('../../utils/sleep.js')
+type AuthModule = typeof import('../../utils/auth.js')
+type FastModeModule = typeof import('../../utils/fastMode.js')
+type AccountSwitchModule = typeof import('../../utils/accountSwitch.js')
 
 // Helper to build a mock APIError with specific headers
 function makeError(headers: Record<string, string>): APIError {
@@ -23,6 +26,9 @@ const originalEnv = { ...process.env }
 const originalDebugModule = { ...debugNs }
 let originalProvidersModule: ProvidersModule | undefined
 let originalSleepModule: SleepModule | undefined
+let originalAuthModule: AuthModule | undefined
+let originalFastModeModule: FastModeModule | undefined
+let originalAccountSwitchModule: AccountSwitchModule | undefined
 
 const envKeys = [
   'CLAUDE_CODE_USE_OPENAI',
@@ -68,6 +74,21 @@ afterEach(() => {
     if (originalSleepModule) {
       mock.module('src/utils/sleep.js', () => ({ ...originalSleepModule! }))
     }
+    // auth, fastMode and accountSwitch were stubbed but never put back, so
+    // they escaped this file too: the accountSwitch stub made readAccounts()
+    // serve this file's fixture to every later suite, and the auth stub made
+    // getClaudeAIOAuthTokens() hand out a mock token.
+    if (originalAuthModule) {
+      mock.module('src/utils/auth.js', () => ({ ...originalAuthModule! }))
+    }
+    if (originalFastModeModule) {
+      mock.module('src/utils/fastMode.js', () => ({ ...originalFastModeModule! }))
+    }
+    if (originalAccountSwitchModule) {
+      mock.module('src/utils/accountSwitch.js', () => ({
+        ...originalAccountSwitchModule!,
+      }))
+    }
     mock.module('src/utils/debug.js', () => originalDebugModule)
   } finally {
     releaseSharedMutationLock()
@@ -83,6 +104,24 @@ async function importActualProviders(): Promise<ProvidersModule> {
 async function importActualSleep(): Promise<SleepModule> {
   return import(
     `../../utils/sleep.ts?withRetryActual=${Date.now()}-${Math.random()}`
+  )
+}
+
+async function importActualAuth(): Promise<AuthModule> {
+  return import(
+    `../../utils/auth.ts?withRetryActual=${Date.now()}-${Math.random()}`
+  )
+}
+
+async function importActualFastMode(): Promise<FastModeModule> {
+  return import(
+    `../../utils/fastMode.ts?withRetryActual=${Date.now()}-${Math.random()}`
+  )
+}
+
+async function importActualAccountSwitch(): Promise<AccountSwitchModule> {
+  return import(
+    `../../utils/accountSwitch.ts?withRetryActual=${Date.now()}-${Math.random()}`
   )
 }
 
@@ -124,9 +163,9 @@ async function importFreshWithRetryModule(
     usesAnthropicAccountFlow: () => false,
   }))
   if (options.forceFastMode) {
-    const realFastMode = await import('../../utils/fastMode.js')
+    originalFastModeModule ??= await importActualFastMode()
     mock.module('src/utils/fastMode.js', () => ({
-      ...realFastMode,
+      ...originalFastModeModule!,
       isFastModeEnabled: () => true,
     }))
   }
@@ -134,8 +173,14 @@ async function importFreshWithRetryModule(
     // Spread the real module: withRetry also pulls clearApiKeyHelperCache and
     // the subscriber predicates from it. Nothing here reaches real credentials
     // — the stub answers before any keychain or network access would happen.
-    const realAuth = await import('../../utils/auth.js')
-    mock.module('src/utils/auth.js', () => ({ ...realAuth, ...options.auth }))
+    // Capture through a cache-busted specifier: a plain import would hand back
+    // the live namespace, which mock.module() mutates in place, so a later
+    // restore would re-install the stub instead of undoing it.
+    originalAuthModule ??= await importActualAuth()
+    mock.module('src/utils/auth.js', () => ({
+      ...originalAuthModule!,
+      ...options.auth,
+    }))
   }
   return import(`./withRetry.js?ts=${Date.now()}-${Math.random()}`)
 }
@@ -901,9 +946,7 @@ describe('persistent retry cap', () => {
 })
 
 describe('usage-limit account switch', () => {
-  type AccountSwitchModule = typeof import('../../utils/accountSwitch.js')
   type AccountSummary = import('../../utils/authAccounts.js').AccountSummary
-  let originalAccountSwitchModule: AccountSwitchModule | undefined
 
   // The accounts map the mocked accountSwitch module serves. Mutable so a
   // "switch" can move the active marker, exactly like the real storage
@@ -916,7 +959,7 @@ describe('usage-limit account switch', () => {
     provider: 'firstParty' | 'openai' = 'firstParty',
   ) {
     const retryModule = await importFreshWithRetryModule(provider)
-    originalAccountSwitchModule ??= await import('../../utils/accountSwitch.js')
+    originalAccountSwitchModule ??= await importActualAccountSwitch()
     mock.module('src/utils/accountSwitch.js', () => ({
       ...originalAccountSwitchModule!,
       readAccounts: () => accounts,
