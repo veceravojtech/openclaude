@@ -23,7 +23,10 @@ import { getCwd } from '../../utils/cwd.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { errorMessage } from '../../utils/errors.js'
 import { execFileNoThrow } from '../../utils/execFileNoThrow.js'
-import { parseUserSpecifiedModel } from '../../utils/model/model.js'
+import {
+  parseUserSpecifiedModel,
+  preferOneMillionContext,
+} from '../../utils/model/model.js'
 import type { PermissionMode } from '../../utils/permissions/PermissionMode.js'
 import { isTmuxAvailable } from '../../utils/swarm/backends/detection.js'
 import {
@@ -90,6 +93,13 @@ function getDefaultTeammateModel(leaderModel: string | null): string {
  * have access". If leader model is null (not yet set), falls through to the
  * default.
  *
+ * The selected model gets the same 1M-context preference as the leader
+ * (preferOneMillionContext). Without it a teammate on the unset default got
+ * plain Opus while the leader ran Opus[1m], and compacted at 150k tokens
+ * instead of 950k — on its first call, since the system prompt and tools alone
+ * can exceed 150k. This value is also the `--model` a split-pane teammate is
+ * launched with, so it must already carry the tag.
+ *
  * Exported for testing.
  */
 export function resolveTeammateModel(
@@ -97,9 +107,13 @@ export function resolveTeammateModel(
   leaderModel: string | null,
 ): string {
   if (inputModel === 'inherit') {
-    return leaderModel ?? getDefaultTeammateModel(leaderModel)
+    return preferOneMillionContext(
+      leaderModel ?? getDefaultTeammateModel(leaderModel),
+    )
   }
-  return inputModel ?? getDefaultTeammateModel(leaderModel)
+  return preferOneMillionContext(
+    inputModel ?? getDefaultTeammateModel(leaderModel),
+  )
 }
 
 // ============================================================================

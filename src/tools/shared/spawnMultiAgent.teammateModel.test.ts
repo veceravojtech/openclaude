@@ -110,12 +110,42 @@ test('an explicit teammateDefaultModel in /config still wins over the leader mod
 
 test('the first-party default is unchanged by the OpenAI-compatible fix', async () => {
   // The leader being on Sonnet must NOT drag first-party teammates off Opus:
-  // only the ambiguous `openai` bucket inherits.
+  // only the ambiguous `openai` bucket inherits. The default Opus carries the
+  // 1M preference every agent gets on a model that supports it.
   const resolveTeammateModel = await importResolveTeammateModel({
     provider: 'firstParty',
   })
 
   expect(resolveTeammateModel(undefined, 'claude-sonnet-4-5-20250929')).toBe(
-    'claude-opus-5',
+    'claude-opus-5[1m]',
   )
+})
+
+test('an unset teammate default runs on the same 1M window as its claude-opus-5[1m] lead', async () => {
+  // Regression: with teammateDefaultModel never set, a lead on
+  // claude-opus-5[1m] spawned teammates on plain claude-opus-5. They compacted
+  // at 150k tokens instead of 950k, and with ~198k tokens of system prompt and
+  // tools on every request they were over that line on their first call —
+  // compacting instead of working, with nothing new in their view.
+  const resolveTeammateModel = await importResolveTeammateModel({
+    provider: 'firstParty',
+  })
+
+  expect(resolveTeammateModel(undefined, 'claude-opus-5[1m]')).toBe(
+    'claude-opus-5[1m]',
+  )
+  expect(resolveTeammateModel('inherit', 'claude-opus-5[1m]')).toBe(
+    'claude-opus-5[1m]',
+  )
+})
+
+test('a teammate model picked in /config is still honoured, on its 1M variant', async () => {
+  const resolveTeammateModel = await importResolveTeammateModel({
+    provider: 'firstParty',
+    teammateDefaultModel: 'sonnet',
+  })
+
+  const model = resolveTeammateModel(undefined, 'claude-opus-5[1m]')
+  expect(model).toContain('sonnet')
+  expect(model.endsWith('[1m]')).toBe(true)
 })

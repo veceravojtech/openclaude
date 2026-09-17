@@ -213,9 +213,9 @@ export function getUserSpecifiedModelSetting(): ModelSetting | undefined {
 export function getMainLoopModel(): ModelName {
   const model = getUserSpecifiedModelSetting()
   if (model !== undefined && model !== null) {
-    return parseUserSpecifiedModel(model)
+    return preferOneMillionContext(parseUserSpecifiedModel(model))
   }
-  return getDefaultMainLoopModel()
+  return preferOneMillionContext(getDefaultMainLoopModel())
 }
 
 export function getBestModel(): ModelName {
@@ -371,6 +371,52 @@ export function getDefaultHaikuModel(): ModelName {
 }
 
 /**
+ * Every agent — the main thread, sub-agents and teammates — runs the 1M-context
+ * variant of its model whenever that model supports one.
+ *
+ * The model itself stays whatever was selected (/model, teammateDefaultModel,
+ * an agent's `model:`, the Agent tool's `model`); only the context window is
+ * preferred. The `[1m]` tag drives BOTH the request's context-1m beta and the
+ * auto-compact threshold, so two agents on the same model, one tagged and one
+ * not, compact at 950k and 150k tokens. When the system prompt and tool schemas
+ * alone approach 200k tokens, the untagged agent is over its threshold on its
+ * very first call and can never get back under it.
+ *
+ * Returned unchanged:
+ * - a model that already carries the tag;
+ * - a model that does not support 1M, and every model when 1M is disabled
+ *   (CLAUDE_CODE_DISABLE_1M_CONTEXT — modelSupports1M returns false then);
+ * - on a route that is not Claude-native (a custom Anthropic-compatible base
+ *   URL, or any non-Anthropic provider), where nothing guarantees a 1M window.
+ *   Same predicate as checkIsClaudeNativeProvider in agent.ts, restated with
+ *   only getAPIProvider and isFirstPartyAnthropicBaseUrl so this module does
+ *   not import agent.ts, which imports this module.
+ * - when the org's availableModels allowlist would refuse the tagged model.
+ *   The allowlist matches model strings and has no notion of the tag, so an
+ *   exact entry like `claude-sonnet-4-6` refuses `claude-sonnet-4-6[1m]` — and
+ *   runAgent throws on a refused agent model. Preferring 1M must never turn an
+ *   allowed model into a refused one. Because this one function decides for
+ *   the main thread and every agent alike, they stay on the same window, and
+ *   so compact at the same point, under that allowlist too.
+ */
+export function preferOneMillionContext(model: ModelName): ModelName {
+  if (/\[1m]$/i.test(model) || !modelSupports1M(model)) {
+    return model
+  }
+  const provider = getAPIProvider()
+  const isClaudeNative =
+    provider === 'bedrock' ||
+    provider === 'vertex' ||
+    provider === 'foundry' ||
+    (provider === 'firstParty' && isFirstPartyAnthropicBaseUrl())
+  if (!isClaudeNative) {
+    return model
+  }
+  const tagged = `${model}[1m]`
+  return isModelAllowed(tagged) ? tagged : model
+}
+
+/**
  * Get the model to use for runtime, depending on the runtime context.
  * @param params Subset of the runtime context to determine the model to use.
  * @returns The model to use
@@ -382,21 +428,23 @@ export function getRuntimeMainLoopModel(params: {
 }): ModelName {
   const { permissionMode, mainLoopModel, exceeds200kTokens = false } = params
 
-  // opusplan uses Opus in plan mode without [1m] suffix.
+  // opusplan uses Opus in plan mode while the conversation is under 200k.
+  // The switch itself is unchanged; the Opus it switches to gets the same 1M
+  // preference as every other model, so plan mode compacts like the rest.
   if (
     getUserSpecifiedModelSetting() === 'opusplan' &&
     permissionMode === 'plan' &&
     !exceeds200kTokens
   ) {
-    return getDefaultOpusModel()
+    return preferOneMillionContext(getDefaultOpusModel())
   }
 
   // sonnetplan by default
   if (getUserSpecifiedModelSetting() === 'haiku' && permissionMode === 'plan') {
-    return getDefaultSonnetModel()
+    return preferOneMillionContext(getDefaultSonnetModel())
   }
 
-  return mainLoopModel
+  return preferOneMillionContext(mainLoopModel)
 }
 
 /**

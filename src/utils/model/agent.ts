@@ -9,6 +9,7 @@ import {
   getCanonicalName,
   getRuntimeMainLoopModel,
   parseUserSpecifiedModel,
+  preferOneMillionContext,
 } from './model.js'
 import { getAPIProvider, isFirstPartyAnthropicBaseUrl } from './providers.js'
 
@@ -36,8 +37,24 @@ export function getDefaultSubagentModel(): string {
  * that prefix is inherited by subagents using alias models (e.g., "sonnet", "haiku", "opus").
  * This ensures subagents use the same region as the parent, which is necessary when
  * IAM permissions are scoped to specific cross-region inference profiles.
+ *
+ * Whichever model is selected, the result gets the same 1M-context preference
+ * as the main thread (preferOneMillionContext): the agent's request model and
+ * its auto-compact threshold both come from this string, so an agent on a
+ * 1M-capable model must never compact at a different point than its lead.
  */
 export function getAgentModel(
+  agentModel: string | undefined,
+  parentModel: string,
+  toolSpecifiedModel?: string,
+  permissionMode?: PermissionMode,
+): string {
+  return preferOneMillionContext(
+    resolveAgentModel(agentModel, parentModel, toolSpecifiedModel, permissionMode),
+  )
+}
+
+function resolveAgentModel(
   agentModel: string | undefined,
   parentModel: string,
   toolSpecifiedModel?: string,

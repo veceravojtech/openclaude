@@ -120,6 +120,123 @@ describe('getAgentModel provider-aware fallback', () => {
     }
   })
 
+  describe('the 1M context preference — every agent compacts at the same point', () => {
+    test('a full model id selected for an agent gets the 1M window its lead has', async () => {
+      // The teammate default reaches getAgentModel as a full id: the lead ran
+      // claude-opus-5[1m] while its teammates got plain claude-opus-5 and
+      // compacted at 150k tokens instead of 950k — on their first call.
+      mockProvider('firstParty', true)
+      const { getAgentModel } = await importAgentModule()
+
+      expect(
+        getAgentModel('claude-opus-5', 'claude-opus-5[1m]', undefined, 'default'),
+      ).toBe('claude-opus-5[1m]')
+    })
+
+    test('the selected model is kept; only the context window is preferred', async () => {
+      mockProvider('firstParty', true)
+      const { getAgentModel } = await importAgentModule()
+
+      const sonnet = getAgentModel(undefined, 'claude-opus-5[1m]', 'sonnet', 'default')
+      expect(sonnet).toContain('sonnet')
+      expect(sonnet.endsWith('[1m]')).toBe(true)
+
+      // Haiku has no 1M variant: selecting it is honoured exactly.
+      const haiku = getAgentModel(undefined, 'claude-opus-5[1m]', 'haiku', 'default')
+      expect(haiku).toContain('haiku')
+      expect(haiku).not.toContain('[1m]')
+    })
+
+    test('a model that already carries the tag is not tagged twice', async () => {
+      mockProvider('firstParty', true)
+      const { getAgentModel } = await importAgentModule()
+
+      expect(
+        getAgentModel(undefined, 'claude-opus-5[1m]', 'opus', 'default'),
+      ).toBe('claude-opus-5[1m]')
+    })
+
+    test('only on a Claude-native route: a custom Anthropic-compatible base URL is left alone', async () => {
+      mockProvider('firstParty', false)
+      let { getAgentModel } = await importAgentModule()
+      expect(
+        getAgentModel('claude-opus-5', 'claude-opus-5', undefined, 'default'),
+      ).toBe('claude-opus-5')
+
+      mockProvider('bedrock')
+      ;({ getAgentModel } = await importAgentModule())
+      expect(
+        getAgentModel('claude-opus-5', 'claude-opus-5', undefined, 'default'),
+      ).toBe('claude-opus-5[1m]')
+    })
+
+    test('CLAUDE_CODE_DISABLE_1M_CONTEXT turns the preference off', async () => {
+      mockProvider('firstParty', true)
+      const previous = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+      process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1'
+      try {
+        const { getAgentModel } = await importAgentModule()
+        expect(
+          getAgentModel('claude-opus-5', 'claude-opus-5', undefined, 'default'),
+        ).toBe('claude-opus-5')
+      } finally {
+        if (previous === undefined) {
+          delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+        } else {
+          process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = previous
+        }
+      }
+    })
+
+    test('an allowlist naming the untagged model keeps the lead and its agent both untagged', async () => {
+      // runAgent throws on an agent model the allowlist refuses, and the
+      // allowlist has no notion of the tag — so preferring 1M must never turn
+      // an allowed model into a refused one. One policy decides for both, so
+      // they still share a window.
+      mockProvider('firstParty', true)
+      setAvailableModelsForTest(['claude-opus-5'])
+      const { getAgentModel } = await importAgentModule()
+      const { getRuntimeMainLoopModel } = await import(
+        `./model.ts?agent-test-allowlist=${Date.now()}-${Math.random()}`
+      )
+
+      expect(
+        getAgentModel('claude-opus-5', 'claude-opus-5', undefined, 'default'),
+      ).toBe('claude-opus-5')
+      expect(
+        getRuntimeMainLoopModel({
+          permissionMode: 'default',
+          mainLoopModel: 'claude-opus-5',
+        }),
+      ).toBe('claude-opus-5')
+    })
+
+    test('a lead on an untagged model and its agent resolve to the same 1M model, so they compact at the same point', async () => {
+      mockProvider('firstParty', true)
+      const stamp = `${Date.now()}-${Math.random()}`
+      const { getAgentModel } = await importAgentModule()
+      const { getRuntimeMainLoopModel } = await import(
+        `./model.ts?agent-test-compaction=${stamp}`
+      )
+      const { getContextWindowForModel } = await import(
+        `../context.ts?agent-test-compaction=${stamp}`
+      )
+
+      const lead = getRuntimeMainLoopModel({
+        permissionMode: 'default',
+        mainLoopModel: 'claude-opus-5',
+      })
+      const agent = getAgentModel(undefined, lead, 'claude-opus-5', 'default')
+
+      expect(lead).toBe('claude-opus-5[1m]')
+      expect(agent).toBe(lead)
+      expect(getContextWindowForModel(agent, [])).toBe(
+        getContextWindowForModel(lead, []),
+      )
+      expect(getContextWindowForModel(agent, [])).toBe(1_000_000)
+    })
+  })
+
   describe('Claude-native providers', () => {
     test('haiku alias resolves to haiku model for official Anthropic API', async () => {
       // Mock providers to return firstParty with official URL
@@ -327,12 +444,16 @@ describe('getAgentModel provider-aware fallback', () => {
 
       const { getAgentModel } = await importAgentModule()
 
+      // The tier match still hands back the parent's exact model; the result
+      // then carries the 1M preference every agent gets on a model that
+      // supports it (preferOneMillionContext).
       expect(
         getAgentModel(undefined, 'claude-sonnet-4-6', 'sonnet', 'default'),
-      ).toBe('claude-sonnet-4-6')
+      ).toBe('claude-sonnet-4-6[1m]')
       expect(
         getAgentModel(undefined, 'claude-opus-4-6', 'opus', 'default'),
-      ).toBe('claude-opus-4-6')
+      ).toBe('claude-opus-4-6[1m]')
+      // Haiku has no 1M variant, so the preference leaves it untouched.
       expect(
         getAgentModel(
           undefined,

@@ -5,6 +5,7 @@ import {
   getDefaultMainLoopModelSetting,
   type ModelName,
   parseUserSpecifiedModel,
+  preferOneMillionContext,
 } from '../utils/model/model.js'
 
 // The value of the selector is a full model name that can be used directly in
@@ -25,10 +26,17 @@ export function useMainLoopModel(): ModelName {
   const [, forceRerender] = useReducer(x => x + 1, 0)
   useEffect(() => onGrowthBookRefresh(forceRerender), [])
 
-  const model = parseUserSpecifiedModel(
-    mainLoopModelForSession ??
-      mainLoopModel ??
-      getDefaultMainLoopModelSetting(),
+  // The same 1M preference getMainLoopModel and getRuntimeMainLoopModel apply:
+  // this value becomes the main thread's toolUseContext.options.mainLoopModel,
+  // which auto-compact reads, while query.ts derives the request model through
+  // getRuntimeMainLoopModel. Both must carry the tag or they disagree about
+  // the window.
+  const model = preferOneMillionContext(
+    parseUserSpecifiedModel(
+      mainLoopModelForSession ??
+        mainLoopModel ??
+        getDefaultMainLoopModelSetting(),
+    ),
   )
   return model
 }
