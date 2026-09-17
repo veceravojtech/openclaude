@@ -2544,10 +2544,17 @@ export async function runInProcessTeammate(
 
         // Mirror compaction into task.messages — otherwise the AppState
         // mirror grows unbounded (500 turns = 500+ messages, 10-50MB).
-        // Replace with the compacted messages, matching allMessages.
+        // Replace with the compacted messages, matching allMessages, folded
+        // through the mirror's caps: hookResults can carry hook_progress.
         updateTaskState(
           taskId,
-          task => ({ ...task, messages: [...contextMessages, userMessage] }),
+          task => ({
+            ...task,
+            messages: [...contextMessages, userMessage].reduce<Message[]>(
+              (mirror, message) => appendCappedTeammateMessage(mirror, message),
+              [],
+            ),
+          }),
           setAppState,
         )
       }

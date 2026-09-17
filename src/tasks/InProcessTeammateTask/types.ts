@@ -145,8 +145,31 @@ export function isInProcessTeammateTask(
  * sessions and ~125MB per concurrent agent in swarm bursts. Whale session
  * 9a990de8 launched 292 agents in 2 minutes and reached 36.8GB. The dominant
  * cost is this array holding a second full copy of every message.
+ *
+ * For an in-process teammate (appendCappedTeammateMessage) this counts only
+ * the NON-progress entries — the ones the view draws as rows — so a flood of
+ * progress can never evict the conversation. Progress has its own ceiling,
+ * TEAMMATE_PROGRESS_UI_CAP, which bounds the mirror at
+ * task.messages.length <= TEAMMATE_MESSAGES_UI_CAP + TEAMMATE_PROGRESS_UI_CAP.
+ * appendCappedMessage still counts every item it is given.
  */
 export const TEAMMATE_MESSAGES_UI_CAP = 50
+
+/**
+ * Cap on the number of progress entries kept in an in-process teammate's
+ * task.messages, on top of TEAMMATE_MESSAGES_UI_CAP non-progress entries.
+ * Progress is never drawn as a row; it only feeds the live display of the
+ * tool rows it belongs to, so a small ceiling is enough.
+ */
+export const TEAMMATE_PROGRESS_UI_CAP = 30
+
+/**
+ * How many of a tool call's most recent trail entries (agent_progress,
+ * skill_progress, …) an in-process teammate's mirror keeps, in addition to
+ * the trail's first entry. AgentTool's live row reads the first entry (the
+ * prompt) and its last three assistant entries plus their results.
+ */
+export const TEAMMATE_PROGRESS_TAIL_PER_TOOL = 10
 
 /**
  * Append an item to a message array, capping the result at

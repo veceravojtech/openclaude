@@ -10,7 +10,7 @@
  */
 
 import { isTerminalTaskStatus, type SetAppState, type Task, type TaskStateBase } from '../../Task.js';
-import type { Message } from '../../types/message.js';
+import type { Message, ProgressMessage } from '../../types/message.js';
 import { logForDebugging } from '../../utils/debug.js';
 import { createUserMessage } from '../../utils/messages.js';
 import { isEphemeralToolProgress } from '../../utils/sessionStorage.js';
@@ -19,7 +19,7 @@ import { getParentTeamName, getSubTeamNameFor } from '../../utils/swarm/teamHelp
 import { updateTaskState } from '../../utils/task/framework.js';
 import { isRetainedOrWithinGrace } from '../../utils/task/retention.js';
 import type { InProcessTeammateTaskState } from './types.js';
-import { appendCappedMessage, isInProcessTeammateTask } from './types.js';
+import { isInProcessTeammateTask, TEAMMATE_MESSAGES_UI_CAP, TEAMMATE_PROGRESS_TAIL_PER_TOOL, TEAMMATE_PROGRESS_UI_CAP } from './types.js';
 
 /**
  * InProcessTeammateTask - Handles in-process teammate execution.
@@ -51,30 +51,176 @@ export function requestTeammateShutdown(taskId: string, setAppState: SetAppState
 }
 
 /**
- * Append a message to a teammate's task.messages UI mirror. Every append to
+ * Append a message to a teammate's task.messages UI mirror. Every write to
  * that mirror goes through here rather than appendCappedMessage directly.
  *
- * An ephemeral tool progress tick (bash_progress and friends, one per second)
- * REPLACES the previous tick for the same tool call, exactly as REPL.tsx does
- * for @main. The mirror is capped and progress rows are never drawn, so
- * appending each tick let one long-running command evict the whole visible
- * conversation. Non-ephemeral progress (agent_progress, hook_progress,
- * skill_progress) is appended: the UI renders its full trail.
+ * The teammate view draws the mirror's non-progress entries as rows. Progress
+ * is never a row: Messages.tsx joins it to its tool_use row by
+ * parentToolUseID, in array order, for that row's live display. When progress
+ * shared the rows' cap, a Bash tick per second or an agent_progress per inner
+ * tool call of a sub-agent evicted the whole visible conversation. Rows and
+ * progress are therefore capped separately, which bounds the mirror at
+ *
+ *   length <= TEAMMATE_MESSAGES_UI_CAP + TEAMMATE_PROGRESS_UI_CAP
+ *
+ * Per append:
+ * 1. Progress whose tool_use is not in the mirror is dropped.
+ * 2. An ephemeral tick (isEphemeralToolProgress) replaces EVERY earlier tick
+ *    for the same tool call and progress type. This is intentionally stricter
+ *    than REPL.tsx, which for @main replaces only the last entry: parallel
+ *    tool calls interleave their ticks (A, B, A, B…), so the last entry never
+ *    matches and each call would keep appending a tick per second.
+ * 3. A trail (agent_progress, skill_progress, …) keeps its first entry and
+ *    its last TEAMMATE_PROGRESS_TAIL_PER_TOOL entries.
+ * 4. Past TEAMMATE_MESSAGES_UI_CAP rows the oldest row is evicted, together
+ *    with the progress of any tool_use it carried.
+ * 5. Past TEAMMATE_PROGRESS_UI_CAP progress entries, finished tools give up
+ *    progress before running ones (dropProgressVictim).
  *
  * Lives here, not beside appendCappedMessage in types.ts: that file has no
  * runtime imports, and importing sessionStorage there would close the
  * cycle sessionStorage → messages → attachments → state/selectors → types.
  */
 export function appendCappedTeammateMessage(prev: readonly Message[] | undefined, message: Message): Message[] {
-  if (message.type === 'progress' && isEphemeralToolProgress(message.data.type)) {
-    const last = prev?.at(-1);
-    if (prev && last?.type === 'progress' && last.parentToolUseID === message.parentToolUseID && last.data.type === message.data.type) {
-      const copy = prev.slice();
-      copy[copy.length - 1] = message;
-      return copy;
+  // Always a new array (AppState immutability); prev is never mutated.
+  let next = prev ? prev.slice() : [];
+  if (message.type !== 'progress') {
+    next.push(message);
+    return enforceProgressCeiling(evictOldestRows(next));
+  }
+
+  // 1. No row would draw it. A tool's progress never precedes its tool_use in
+  // the stream, so a missing tool_use has already been evicted.
+  if (!next.some(m => toolUseIDsOf(m).includes(message.parentToolUseID))) {
+    return next;
+  }
+
+  // 2. BashTool, PowerShellTool, MCPTool and TaskOutputTool render only the
+  // latest tick (progressMessages.at(-1)).
+  if (isEphemeralToolProgress(message.data.type)) {
+    next = withoutProgress(next, p => p.parentToolUseID === message.parentToolUseID && p.data.type === message.data.type);
+  }
+  next.push(message);
+
+  // 3. AgentTool/UI.tsx takes the prompt from the first entry, shows
+  // "Initializing…" when the trail is empty, and draws only the last few
+  // inner tool uses; the middle of a long trail is never shown.
+  if (isTrailProgress(message)) {
+    const trail = trailIndices(next, message.parentToolUseID);
+    if (trail.length > 1 + TEAMMATE_PROGRESS_TAIL_PER_TOOL) {
+      next = withoutIndex(next, trail[1]);
     }
   }
-  return appendCappedMessage(prev, message);
+  return enforceProgressCeiling(next);
+}
+
+function isProgress(message: Message): message is ProgressMessage {
+  return message.type === 'progress';
+}
+
+/**
+ * Progress a tool UI reads as a trail (agent_progress, skill_progress, …).
+ * Ephemeral ticks are deduplicated instead, and hook_progress is counted, so
+ * neither may lose single entries.
+ */
+function isTrailProgress(progress: ProgressMessage): boolean {
+  return !isEphemeralToolProgress(progress.data.type) && progress.data.type !== 'hook_progress';
+}
+
+function toolUseIDsOf(message: Message): string[] {
+  return message.type === 'assistant' ? message.message.content.flatMap(block => block.type === 'tool_use' ? [block.id] : []) : [];
+}
+
+function toolResultIDsOf(message: Message): string[] {
+  return message.type === 'user' && Array.isArray(message.message.content) ? message.message.content.flatMap(block => block.type === 'tool_result' ? [block.tool_use_id] : []) : [];
+}
+
+function trailIndices(messages: readonly Message[], parentToolUseID: string): number[] {
+  return messages.flatMap((m, i) => isProgress(m) && m.parentToolUseID === parentToolUseID && isTrailProgress(m) ? [i] : []);
+}
+
+function withoutProgress(messages: readonly Message[], drop: (progress: ProgressMessage) => boolean): Message[] {
+  return messages.filter(m => !(isProgress(m) && drop(m)));
+}
+
+function withoutIndex(messages: readonly Message[], index: number): Message[] {
+  return messages.filter((_, i) => i !== index);
+}
+
+/**
+ * 4. The rows the view can draw are what the cap protects, so only rows count
+ * against TEAMMATE_MESSAGES_UI_CAP. An evicted tool_use takes its progress
+ * with it: nothing is left to draw that progress under.
+ */
+function evictOldestRows(messages: Message[]): Message[] {
+  let next = messages;
+  while (next.filter(m => !isProgress(m)).length > TEAMMATE_MESSAGES_UI_CAP) {
+    const oldestRow = next.findIndex(m => !isProgress(m));
+    const orphaned = toolUseIDsOf(next[oldestRow]);
+    next = next.filter((m, i) => i !== oldestRow && !(isProgress(m) && orphaned.includes(m.parentToolUseID)));
+  }
+  return next;
+}
+
+/** 5. Every dropProgressVictim call removes at least one entry, so this ends. */
+function enforceProgressCeiling(messages: Message[]): Message[] {
+  let next = messages;
+  while (next.filter(isProgress).length > TEAMMATE_PROGRESS_UI_CAP) {
+    next = dropProgressVictim(next);
+  }
+  return next;
+}
+
+/**
+ * Removes the progress the teammate view misses least. A tool is finished
+ * once its tool_result is in the mirror. After that its row reads progress
+ * only in transcript mode or for cosmetic counts (AgentTool/UI.tsx
+ * VerboseAgentTranscript and its grouped "N tool uses"; BashTool's timeout
+ * display), so finished tools lose progress before running ones.
+ */
+function dropProgressVictim(messages: Message[]): Message[] {
+  const finished = new Set(messages.flatMap(toolResultIDsOf));
+  const isFinishedProgress = (m: Message): m is ProgressMessage => isProgress(m) && finished.has(m.parentToolUseID);
+
+  // 5.1 The oldest trail entry of a finished tool.
+  const finishedTrailEntry = messages.findIndex(m => isFinishedProgress(m) && isTrailProgress(m));
+  if (finishedTrailEntry !== -1) {
+    return withoutIndex(messages, finishedTrailEntry);
+  }
+
+  // 5.2 A finished tool's hook_progress, as a whole group. HookProgressMessage
+  // compares its count against the resolved hooks, so a partial group would
+  // show hooks as still running.
+  const finishedHook = messages.find((m): m is ProgressMessage => isFinishedProgress(m) && m.data.type === 'hook_progress');
+  if (finishedHook) {
+    return withoutProgress(messages, p => p.parentToolUseID === finishedHook.parentToolUseID && p.data.type === 'hook_progress');
+  }
+
+  // 5.3 Whatever else a finished tool still holds: its last tick.
+  const finishedEntry = messages.findIndex(isFinishedProgress);
+  if (finishedEntry !== -1) {
+    return withoutIndex(messages, finishedEntry);
+  }
+
+  // 5.4 Every remaining tool is running. The longest trail loses its oldest
+  // entry after the first (the prompt) while it has more than two, so the
+  // latest entry AgentTool draws stays.
+  let longestTrail: number[] = [];
+  for (const parentToolUseID of new Set(messages.filter(isProgress).map(p => p.parentToolUseID))) {
+    const trail = trailIndices(messages, parentToolUseID);
+    if (trail.length > longestTrail.length) {
+      longestTrail = trail;
+    }
+  }
+  if (longestTrail.length > 2) {
+    return withoutIndex(messages, longestTrail[1]);
+  }
+
+  // 5.5 Only hook groups, ticks and short trails are left: the tool holding
+  // the oldest progress entry loses all of it, so no hook group is left
+  // partial. The ceiling was exceeded, so that entry exists.
+  const oldest = messages.find(isProgress);
+  return oldest ? withoutProgress(messages, p => p.parentToolUseID === oldest.parentToolUseID) : messages;
 }
 
 /**
