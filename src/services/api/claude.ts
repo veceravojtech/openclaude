@@ -1057,6 +1057,7 @@ export async function* executeNonStreamingRequest(
       signal: retryOptions.signal,
       initialConsecutive529Errors: retryOptions.initialConsecutive529Errors,
       querySource: retryOptions.querySource,
+      queryActivity: retryOptions.queryActivity,
     },
   )
 

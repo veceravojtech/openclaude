@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import type {
   BetaMessage,
   BetaMessageStreamParams,
@@ -104,6 +104,29 @@ const hadSavedMacro = Object.hasOwn(globalThis, 'MACRO')
 const savedMacro = (globalThis as Record<string, unknown>).MACRO
 const originalNodeEnv = process.env.NODE_ENV
 let fixturesRoot: string | undefined
+
+// Pristine snapshots for the two modules the usage-limit wait test stubs.
+// Captured through a cache-busted specifier BEFORE any mock.module() call, so
+// the restore hands back the real implementation rather than re-installing the
+// stub — mock.module() mutates the registration in place, so spreading the
+// live namespace would do the latter. A no-op sleep that escaped this file
+// would turn every later real-time backoff loop into a busy-poll.
+type SleepModule = typeof import('../../utils/sleep.js')
+type AccountSwitchModule = typeof import('../../utils/accountSwitch.js')
+let originalSleepModule: SleepModule | undefined
+let originalAccountSwitchModule: AccountSwitchModule | undefined
+
+async function importActualSleep(): Promise<SleepModule> {
+  return import(
+    `../../utils/sleep.ts?lifecycleActual=${Date.now()}-${Math.random()}`
+  )
+}
+
+async function importActualAccountSwitch(): Promise<AccountSwitchModule> {
+  return import(
+    `../../utils/accountSwitch.ts?lifecycleActual=${Date.now()}-${Math.random()}`
+  )
+}
 
 type FetchOverride = NonNullable<Options['fetchOverride']>
 type LifecycleSnapshot = ReturnType<QueryLifecycleOperationTracker['snapshot']>
@@ -538,6 +561,17 @@ afterEach(() => {
     if (fixturesRoot) {
       rmSync(fixturesRoot, { force: true, recursive: true })
       fixturesRoot = undefined
+    }
+    // Spread the pristine snapshot, never the live namespace: mock.module()
+    // mutates the registration in place, so handing back the namespace object
+    // would re-install the stub instead of undoing it.
+    if (originalSleepModule) {
+      mock.module('src/utils/sleep.js', () => ({ ...originalSleepModule! }))
+    }
+    if (originalAccountSwitchModule) {
+      mock.module('src/utils/accountSwitch.js', () => ({
+        ...originalAccountSwitchModule!,
+      }))
     }
   } finally {
     releaseSharedMutationLock()
@@ -1334,5 +1368,100 @@ describeLifecycle('Claude API lifecycle tracking', () => {
     expect(requestSnapshots).toHaveLength(1)
     expect(requestSnapshots[0]?.apiCalls).toHaveLength(1)
     expect(queryLifecycle.snapshot().apiCalls).toEqual([])
+  })
+
+  test('hands the query watchdog to the non-streaming fallback so its usage-limit wait survives', async () => {
+    // Regression for the half of 8e7ab5fd that was never wired. Its message
+    // claims claude.ts "hands it to both retry paths, streaming and the
+    // non-streaming fallback"; executeNonStreamingRequest declared
+    // queryActivity and both call sites passed it, but the withRetry options
+    // object it builds omitted the key, so the parameter was accepted and
+    // silently dropped. The fallback's auto-wait therefore slept with the idle
+    // watchdog still armed and the query was aborted as idle after five
+    // minutes — the exact bug that commit set out to fix.
+    //
+    // Driven through executeNonStreamingRequest rather than withRetry directly:
+    // calling withRetry directly is precisely why the original tests passed
+    // while this path stayed broken.
+    setClientTestEnv()
+    const queryLifecycle = new QueryLifecycleOperationTracker()
+
+    originalSleepModule ??= await importActualSleep()
+    originalAccountSwitchModule ??= await importActualAccountSwitch()
+    // The wait is only reached when no other account could unblock instead, and
+    // the real readers consult the machine's own credential store — which would
+    // make the decision depend on how many accounts the developer is logged
+    // into. Pin it to a single active account so the wait is the only remedy.
+    mock.module('src/utils/sleep.js', () => ({ sleep: async () => undefined }))
+    mock.module('src/utils/accountSwitch.js', () => ({
+      ...originalAccountSwitchModule!,
+      readAccounts: () => [
+        { key: 'only', emailAddress: 'only@example.com', isActive: true },
+      ],
+      readVouchableAccountKeys: () => new Set(['only']),
+    }))
+
+    const watchdog: string[] = []
+    const queryActivity = {
+      beginUserInteraction: () => {
+        watchdog.push('suspend')
+        return () => {
+          watchdog.push('resume')
+        }
+      },
+    } as unknown as NonNullable<Options['queryActivity']>
+
+    const resetAt = Math.floor(Date.now() / 1000) + 60
+    let calls = 0
+    const fetchOverride: FetchOverride = async () => {
+      calls++
+      if (calls === 1) {
+        return new Response(
+          JSON.stringify({
+            type: 'error',
+            // "rate limit exceeded", not "usage limit reached": the latter
+            // trips isQuotaExhaustedMessage (openaiErrorClassification.ts:318)
+            // and is thrown as non-retryable before the wait is ever decided.
+            error: { type: 'rate_limit_error', message: 'rate limit exceeded' },
+          }),
+          {
+            status: 429,
+            headers: {
+              'content-type': 'application/json',
+              'request-id': 'req-429',
+              'anthropic-ratelimit-unified-reset': String(resetAt),
+            },
+          },
+        )
+      }
+      watchdog.push('retried')
+      return makeJsonResponse(makeBetaMessage())
+    }
+
+    const result = await drainGenerator(
+      executeNonStreamingRequest(
+        { model: 'claude-lifecycle-test', source: 'sdk', fetchOverride },
+        {
+          model: 'claude-lifecycle-test',
+          thinkingConfig: { type: 'disabled' },
+          signal: new AbortController().signal,
+          querySource: 'sdk',
+          queryActivity,
+        },
+        makeParams,
+        () => {},
+        () => {},
+        null,
+        queryLifecycle,
+      ),
+    )
+
+    if (result === null) throw new Error('expected non-streaming response')
+    expect(result.id).toBe('msg-lifecycle-test')
+    expect(calls).toBe(2)
+    // Suspended for exactly the wait and resumed before the retry ran. Order
+    // matters: a resume that landed after the retried request would mean the
+    // watchdog stayed armed across the sleep, which is the defect itself.
+    expect(watchdog).toEqual(['suspend', 'resume', 'retried'])
   })
 })
