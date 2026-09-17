@@ -87,14 +87,18 @@ export const PANE_TEAMMATE_FIRST_CONTACT_TIMEOUT_MS = 180_000
  * (API error on the first turn, Stop hooks skipped, child back at its prompt
  * forever). Re-anchored by every signal.
  *
- * The trade-off is real: a first turn that legitimately runs longer than this
- * without once messaging the lead is failed early. The alternative — the
- * permanent silent 'running' row this replaces — is strictly worse, the
- * failure is visible and recoverable (respawn), and a late real completion
- * cannot double-notify (the `notified` guard in enqueueAgentNotification).
- * Env-tunable for workloads with known-long silent turns.
+ * 30 minutes because a healthy teammate's FIRST turn routinely runs tens of
+ * minutes — the idle notification that disarms this deadline only comes at
+ * END of turn, so until then a merely-slow child is indistinguishable from a
+ * hung one. Sizing this below the normal workload fails working teammates:
+ * the inverse bug of the silent hang this watchdog exists to fix, and
+ * noisier. A spurious failure is an accepted, bounded cost because a late
+ * real completion WINS: the watchdog keeps watching a task it failed itself,
+ * and the arriving idle notification flips it to completed and emits the
+ * completion — one spurious failure notification is the price of the
+ * self-correction. Env-tunable for workloads with known-longer silent turns.
  */
-export const PANE_TEAMMATE_PROGRESS_TIMEOUT_MS = 600_000
+export const PANE_TEAMMATE_PROGRESS_TIMEOUT_MS = 1_800_000
 
 /** How often the watchdog scans the lead's mailbox and deadlines. */
 export const PANE_TEAMMATE_WATCHDOG_SCAN_INTERVAL_MS = 5_000
@@ -238,6 +242,13 @@ export function armPaneTeammateWatchdog({
   // True while the teammate is parked on a usage limit: failure deadlines
   // stand down (parked is alive and resumable), completion still watched for.
   let parked = false
+  // True once THIS watchdog failed the task on a deadline. The watchdog then
+  // keeps watching for the child's idle notification: a merely-slow teammate
+  // was failed spuriously, and its late completion must WIN — the task flips
+  // to completed and the completion is emitted. Deliberately not set when
+  // the task went terminal by another hand (killed): that is not ours to
+  // revisit.
+  let watchdogFailedTask = false
   // Count of probes that answered 'unknown' at an expired deadline. The first
   // unknown defers for free; maxUnknownRetries then bound the re-probes.
   let unknownProbes = 0
@@ -264,14 +275,38 @@ export function armPaneTeammateWatchdog({
    * the emission exactly-once against a later real completion.
    * Returns false when the task was already terminal (or gone): not ours to
    * transition.
+   *
+   * The one sanctioned rewrite of a terminal state: `fromWatchdogFailure`
+   * allows failed → completed, the self-correcting late completion. It also
+   * clears `error` and re-arms `notified: false` so the completion is EMITTED
+   * — the guard that normally prevents double-emission would otherwise
+   * swallow the later, different status.
    */
   function transitionTerminal(
     status: 'completed' | 'failed',
     error?: string,
+    options?: { fromWatchdogFailure?: boolean },
   ): boolean {
     let transitioned = false
     updateTaskState(taskId, setAppState, task => {
       if (task.status !== 'running') {
+        if (
+          options?.fromWatchdogFailure &&
+          task.status === 'failed' &&
+          status === 'completed'
+        ) {
+          transitioned = true
+          const at = now()
+          return {
+            ...task,
+            status,
+            error: undefined,
+            endTime: at,
+            notified: false,
+            retain: false,
+            evictAfter: at + TEAMMATE_GRACE_MS,
+          }
+        }
         return task
       }
       transitioned = true
@@ -322,7 +357,11 @@ export function armPaneTeammateWatchdog({
    */
   function failTask(error: string): void {
     if (transitionTerminal('failed', error)) {
+      watchdogFailedTask = true
       emit('failed', error)
+      // Do NOT dispose: a merely-slow child was failed spuriously, and its
+      // late idle notification must still be able to complete the task.
+      return
     }
     dispose()
   }
@@ -332,17 +371,25 @@ export function armPaneTeammateWatchdog({
       return
     }
 
-    // Still our task to watch? A task that is terminal (killed by TaskStop,
-    // transitioned elsewhere) or already evicted means the watchdog's job is
-    // done — disarm without a word.
+    // Still our task to watch? A task that is terminal by another hand
+    // (killed by TaskStop) or already evicted means the watchdog's job is
+    // done — disarm without a word. The one exception is a task THIS
+    // watchdog failed on a deadline: it stays watched so a merely-slow
+    // child's late idle notification can still complete it.
     let taskSeen = false
-    let taskRunning = false
+    let taskStatusNow: string | undefined
     updateTaskState(taskId, setAppState, task => {
       taskSeen = true
-      taskRunning = task.status === 'running'
+      taskStatusNow = task.status
       return task
     })
-    if (!taskSeen || !taskRunning) {
+    if (!taskSeen) {
+      dispose()
+      return
+    }
+    const watchingLateCompletion =
+      watchdogFailedTask && taskStatusNow === 'failed'
+    if (taskStatusNow !== 'running' && !watchingLateCompletion) {
       dispose()
       return
     }
@@ -402,8 +449,14 @@ export function armPaneTeammateWatchdog({
           }
         } else {
           // 'available' and 'interrupted' both mean the turn is over and the
-          // teammate is back at its prompt — the one-shot task is done.
-          if (transitionTerminal('completed')) {
+          // teammate is back at its prompt — the one-shot task is done. The
+          // fromWatchdogFailure option is what lets this WIN over a watchdog
+          // failure that fired on a merely-slow child.
+          if (
+            transitionTerminal('completed', undefined, {
+              fromWatchdogFailure: true,
+            })
+          ) {
             emit('completed', undefined, latestIdle.summary)
           }
         }
@@ -413,6 +466,12 @@ export function armPaneTeammateWatchdog({
       // Non-idle traffic (DM, permission request) is proof of progress; the
       // deadline re-anchor above already accounts for it.
       parked = false
+    }
+
+    // A task this watchdog already failed has no deadlines left to mind —
+    // the late-completion watch above is its only remaining job.
+    if (watchingLateCompletion) {
+      return
     }
 
     // 2. Turn-start boot signal: the team-file isActive write.

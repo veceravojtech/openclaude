@@ -216,10 +216,48 @@ test('a booted child that goes silent — the incident — fails with a no-progr
 
   expect(taskStatus(world)).toBe('failed')
   const task = world.state.tasks[world.taskId()!] as Record<string, unknown>
-  expect(String(task.error)).toContain('no lifecycle signal')
-  expect(String(task.error)).not.toContain('Pane exited')
+  // Exact shape, pinned: deadline named, never a death claim on an alive pane.
+  expect(task.error).toBe(
+    'Teammate emitted no lifecycle signal within 600s (pane alive but unresponsive)',
+  )
   expect(world.notifications().length).toBe(1)
   expect(world.notifications()[0]).toContain('<status>failed</status>')
+})
+
+test('a late real completion after a watchdog failure wins — the task self-corrects to completed', async () => {
+  const world = makeWorld()
+  registerTeammate(world)
+  worldToDispose.push(...world.handles)
+
+  // The watchdog fires on a merely-slow child…
+  world.teamFile.members[1]!.isActive = true
+  await world.handles[0]!.scan()
+  world.probes = ['alive']
+  world.nowMs += PROGRESS_TIMEOUT_MS + 1
+  await world.handles[0]!.scan()
+  expect(taskStatus(world)).toBe('failed')
+  expect(world.notifications().length).toBe(1)
+  expect(world.notifications()[0]).toContain('<status>failed</status>')
+
+  // …and then the child, which was working all along, finishes its turn. The
+  // completion must WIN: failed → completed, completion emitted despite the
+  // earlier failure having set `notified`.
+  world.mailbox.push(
+    idleNotification('worker', world.nowMs, 'available', 'slow but finished'),
+  )
+  await world.handles[0]!.scan()
+  expect(taskStatus(world)).toBe('completed')
+  const task = world.state.tasks[world.taskId()!] as Record<string, unknown>
+  expect(task.error).toBeUndefined()
+  const notifications = world.notifications()
+  expect(notifications.length).toBe(2)
+  expect(notifications[1]).toContain('<status>completed</status>')
+  expect(notifications[1]).toContain('slow but finished')
+
+  // And it stays won: no further churn.
+  await world.handles[0]!.scan()
+  expect(taskStatus(world)).toBe('completed')
+  expect(world.notifications().length).toBe(2)
 })
 
 test('a healthy child disarms the watchdog and reports success', async () => {
@@ -304,8 +342,9 @@ test('an UNKNOWN pane state never causes a false pane-exit failure, only a bound
   await world.handles[0]!.scan()
   expect(taskStatus(world)).toBe('failed')
   const task = world.state.tasks[world.taskId()!] as Record<string, unknown>
-  expect(String(task.error)).toContain('no lifecycle signal')
-  expect(String(task.error)).not.toContain('Pane exited')
+  expect(task.error).toBe(
+    'Teammate emitted no lifecycle signal within 604s (pane state unknown after 5 probes)',
+  )
 
   // A transient unknown must not have fired a notification on the way.
   expect(world.notifications().length).toBe(1)
