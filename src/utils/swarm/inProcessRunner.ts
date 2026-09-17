@@ -36,12 +36,14 @@ import { resetMicrocompactState } from '../../services/compact/microCompact.js'
 import type { AppState } from '../../state/AppState.js'
 import { isTerminalTaskStatus } from '../../Task.js'
 import type { Tool, ToolUseContext } from '../../Tool.js'
-import { appendTeammateMessage } from '../../tasks/InProcessTeammateTask/InProcessTeammateTask.js'
+import {
+  appendCappedTeammateMessage,
+  appendTeammateMessage,
+} from '../../tasks/InProcessTeammateTask/InProcessTeammateTask.js'
 import type {
   InProcessTeammateTaskState,
   TeammateIdentity,
 } from '../../tasks/InProcessTeammateTask/types.js'
-import { appendCappedMessage } from '../../tasks/InProcessTeammateTask/types.js'
 import {
   createActivityDescriptionResolver,
   createProgressTracker,
@@ -2330,7 +2332,7 @@ export async function runInProcessTeammate(
         taskId,
         task => ({
           ...task,
-          messages: appendCappedMessage(
+          messages: appendCappedTeammateMessage(
             task.messages,
             createUserMessage({ content: wrappedInitialPrompt }),
           ),
@@ -2707,7 +2709,7 @@ export async function runInProcessTeammate(
                 return {
                   ...task,
                   progress,
-                  messages: appendCappedMessage(task.messages, message),
+                  messages: appendCappedTeammateMessage(task.messages, message),
                   inProgressToolUseIDs,
                 }
               },
@@ -2845,7 +2847,10 @@ export async function runInProcessTeammate(
           taskId,
           task => ({
             ...task,
-            messages: appendCappedMessage(task.messages, interruptMessage),
+            messages: appendCappedTeammateMessage(
+              task.messages,
+              interruptMessage,
+            ),
           }),
           setAppState,
         )

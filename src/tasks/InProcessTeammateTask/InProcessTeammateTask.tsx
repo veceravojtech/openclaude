@@ -13,6 +13,7 @@ import { isTerminalTaskStatus, type SetAppState, type Task, type TaskStateBase }
 import type { Message } from '../../types/message.js';
 import { logForDebugging } from '../../utils/debug.js';
 import { createUserMessage } from '../../utils/messages.js';
+import { isEphemeralToolProgress } from '../../utils/sessionStorage.js';
 import { killInProcessTeammateAndCascade } from '../../utils/swarm/spawnInProcess.js';
 import { getParentTeamName, getSubTeamNameFor } from '../../utils/swarm/teamHelpers.js';
 import { updateTaskState } from '../../utils/task/framework.js';
@@ -50,6 +51,33 @@ export function requestTeammateShutdown(taskId: string, setAppState: SetAppState
 }
 
 /**
+ * Append a message to a teammate's task.messages UI mirror. Every append to
+ * that mirror goes through here rather than appendCappedMessage directly.
+ *
+ * An ephemeral tool progress tick (bash_progress and friends, one per second)
+ * REPLACES the previous tick for the same tool call, exactly as REPL.tsx does
+ * for @main. The mirror is capped and progress rows are never drawn, so
+ * appending each tick let one long-running command evict the whole visible
+ * conversation. Non-ephemeral progress (agent_progress, hook_progress,
+ * skill_progress) is appended: the UI renders its full trail.
+ *
+ * Lives here, not beside appendCappedMessage in types.ts: that file has no
+ * runtime imports, and importing sessionStorage there would close the
+ * cycle sessionStorage → messages → attachments → state/selectors → types.
+ */
+export function appendCappedTeammateMessage(prev: readonly Message[] | undefined, message: Message): Message[] {
+  if (message.type === 'progress' && isEphemeralToolProgress(message.data.type)) {
+    const last = prev?.at(-1);
+    if (prev && last?.type === 'progress' && last.parentToolUseID === message.parentToolUseID && last.data.type === message.data.type) {
+      const copy = prev.slice();
+      copy[copy.length - 1] = message;
+      return copy;
+    }
+  }
+  return appendCappedMessage(prev, message);
+}
+
+/**
  * Append a message to a teammate's conversation history.
  * Used for zoomed view to show the teammate's conversation.
  */
@@ -60,7 +88,7 @@ export function appendTeammateMessage(taskId: string, message: Message, setAppSt
     }
     return {
       ...task,
-      messages: appendCappedMessage(task.messages, message)
+      messages: appendCappedTeammateMessage(task.messages, message)
     };
   });
 }
@@ -81,7 +109,7 @@ export function injectUserMessageToTeammate(taskId: string, message: string, set
     return {
       ...task,
       pendingUserMessages: [...task.pendingUserMessages, message],
-      messages: appendCappedMessage(task.messages, createUserMessage({
+      messages: appendCappedTeammateMessage(task.messages, createUserMessage({
         content: message
       }))
     };
