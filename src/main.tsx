@@ -3011,7 +3011,7 @@ async function run(): Promise<CommanderCommand> {
       systemPrompt,
       appendSystemPrompt,
       thinkingConfig,
-      // Interactive REPL default is 50 via resolveReplMaxTurns; CLI wins over env.
+      // Interactive REPL default is 1000 via resolveReplMaxTurns; CLI wins over env.
       maxTurns: options.maxTurns,
     };
 
