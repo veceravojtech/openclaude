@@ -25,6 +25,7 @@
  */
 import type { AppState } from '../../state/AppState.js'
 import type { TaskStatus } from '../../Task.js'
+import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js'
 import { TEAM_LEAD_NAME } from '../../utils/swarm/constants.js'
 import type { TeammateStatus } from '../../utils/teamDiscovery.js'
 import { formatRecipientAddress } from '../SendMessageTool/addressing.js'
@@ -48,6 +49,20 @@ export const ADDRESSABLE_AGENT_STATUSES = [
 export type AddressableAgentStatus =
   (typeof ADDRESSABLE_AGENT_STATUSES)[number]
 
+export const ADDRESSABLE_AGENT_SOURCES = ['task', 'team_file'] as const
+/**
+ * Where a row's liveness comes from.
+ * - `task`: a task in this session's AppState — the live, authoritative fact.
+ * - `team_file`: the team file on disk and nothing else. The file is written
+ *   at spawn and never corrected when a child dies, so such a row proves only
+ *   that the member was once written down: it may be dead, or it may belong to
+ *   a different session. Its status is reported `unknown`, never busy or idle.
+ *
+ * Absent on the derived `team_lead` rows, which are addresses rather than
+ * observations and carry no liveness either way.
+ */
+export type AddressableAgentSource = (typeof ADDRESSABLE_AGENT_SOURCES)[number]
+
 export type AddressableAgent = {
   name: string
   agentId: string
@@ -60,6 +75,10 @@ export type AddressableAgent = {
   idleSince?: string
   /** The exact value to pass as SendMessage's `to`. */
   to: string
+  /** What `status` is based on; see AddressableAgentSource. */
+  source?: AddressableAgentSource
+  /** The AppState task id — what TaskStop takes. Only on task-backed rows. */
+  taskId?: string
 }
 
 /**
@@ -115,17 +134,28 @@ function mapTaskStatus(status: TaskStatus): AddressableAgentStatus {
   }
 }
 
-function mapTeamFileStatus(
-  status: TeammateStatus['status'],
+/**
+ * A teammate's status from its task. A running teammate is reported as busy or
+ * idle — the distinction callers pick work by — and a terminal one keeps its
+ * terminal word, which is the whole point: a failed teammate must read
+ * `failed`, not `busy`.
+ *
+ * The team file is deliberately not a fallback here. Its status comes from the
+ * member's `isActive` flag, which only the teammate itself maintains — via
+ * `setMemberActiveState` in `teamHelpers.ts`, as it goes idle and busy again.
+ * A teammate that dies never reaches that write, and `getTeammateStatuses`
+ * reads a missing or true flag as "running". So the file pins a member live at
+ * the last moment it was able to speak for itself, which is how five teammates
+ * that died on their first turn went on being advertised as busy and
+ * addressable.
+ */
+function teammateTaskStatus(
+  task: InProcessTeammateTaskState,
 ): AddressableAgentStatus {
-  switch (status) {
-    case 'running':
-      return 'busy'
-    case 'idle':
-      return 'idle'
-    default:
-      return 'unknown'
+  if (task.status === 'running') {
+    return task.isIdle ? 'idle' : 'busy'
   }
+  return mapTaskStatus(task.status)
 }
 
 // Same truncation spawnInProcess applies to a teammate task's description.
@@ -200,22 +230,46 @@ export function collectAddressableAgents(
   const isNeighbour = (team: string | undefined): boolean =>
     team === undefined || neighbourTeams.size === 0 || neighbourTeams.has(team)
 
+  // The task behind an agentId, terminal ones included — a member whose task
+  // has failed or been killed must report that, not the file's default. A
+  // running task wins over a lingering terminal one: a re-spawn reuses the
+  // same deterministic agentId, and the live row is the true one.
+  const taskByAgentId = new Map<string, InProcessTeammateTaskState>()
+  for (const task of Object.values(tasks)) {
+    if (task.type !== 'in_process_teammate') {
+      continue
+    }
+    const seen = taskByAgentId.get(task.identity.agentId)
+    if (seen && seen.status === 'running') {
+      continue
+    }
+    taskByAgentId.set(task.identity.agentId, task)
+  }
+
   const memberRow = (
     member: TeammateStatus,
     team: string | undefined,
-  ): AddressableAgent => ({
-    name: member.name,
-    agentId: member.agentId,
-    kind: 'teammate',
-    status: mapTeamFileStatus(member.status),
-    description: member.prompt
-      ? `${member.name}: ${summarizePrompt(member.prompt)}`
-      : `${member.name}: ${member.agentType ?? 'teammate'}`,
-    model: member.model,
-    team,
-    idleSince: member.idleSince,
-    to: formatRecipientAddress(member.name, team),
-  })
+  ): AddressableAgent => {
+    // Pane teammates register a task too, so most members have one and the
+    // dedupe above has usually already placed them. What lands here without a
+    // task is the interesting case: dead, or spawned by another session.
+    const task = taskByAgentId.get(member.agentId)
+    return {
+      name: member.name,
+      agentId: member.agentId,
+      kind: 'teammate',
+      status: task ? teammateTaskStatus(task) : 'unknown',
+      description: member.prompt
+        ? `${member.name}: ${summarizePrompt(member.prompt)}`
+        : `${member.name}: ${member.agentType ?? 'teammate'}`,
+      model: member.model,
+      team,
+      idleSince: member.idleSince,
+      to: formatRecipientAddress(member.name, team),
+      source: task ? 'task' : 'team_file',
+      taskId: task?.id,
+    }
+  }
 
   // (c) named background subagents
   for (const [name, agentId] of agentNameRegistry) {
@@ -235,6 +289,8 @@ export function collectAddressableAgents(
       description: task.description,
       model: task.model,
       to: name,
+      source: 'task',
+      taskId: task.id,
     })
   }
 
@@ -254,7 +310,7 @@ export function collectAddressableAgents(
       name: task.identity.agentName,
       agentId: task.identity.agentId,
       kind: 'teammate',
-      status: task.isIdle ? 'idle' : 'busy',
+      status: teammateTaskStatus(task),
       description: task.description,
       model: task.model,
       team: task.identity.teamName,
@@ -262,6 +318,8 @@ export function collectAddressableAgents(
         task.identity.agentName,
         task.identity.teamName,
       ),
+      source: 'task',
+      taskId: task.id,
     })
   }
 
@@ -335,6 +393,8 @@ export const NO_ADDRESSABLE_AGENTS_MESSAGE =
 export const SEND_MESSAGE_HINT =
   'Message any of these with SendMessage(to=...)'
 
+export const TEAM_FILE_ONLY_MARKER = '(team file; no live local task)'
+
 /** Compact model-facing rendering: one line per agent plus the hint. */
 export function renderAddressableAgents(
   agents: readonly AddressableAgent[],
@@ -343,7 +403,18 @@ export function renderAddressableAgents(
     return NO_ADDRESSABLE_AGENTS_MESSAGE
   }
   const lines = agents.map(agent => {
-    const line = `${agent.name}  ${agent.kind}  ${agent.status}  to=${agent.to}`
+    // `to=` stays exactly where and what it was: SendMessage addressing is a
+    // separate concern from liveness, and it works.
+    const parts = [
+      `${agent.name}  ${agent.kind}  ${agent.status}  to=${agent.to}`,
+    ]
+    if (agent.taskId) {
+      parts.push(`task=${agent.taskId}`)
+    }
+    if (agent.source === 'team_file') {
+      parts.push(TEAM_FILE_ONLY_MARKER)
+    }
+    const line = parts.join('  ')
     return agent.description ? `${line}  - ${agent.description}` : line
   })
   return [...lines, '', SEND_MESSAGE_HINT].join('\n')

@@ -11,6 +11,7 @@ import {
   NO_ADDRESSABLE_AGENTS_MESSAGE,
   renderAddressableAgents,
   SEND_MESSAGE_HINT,
+  TEAM_FILE_ONLY_MARKER,
 } from './collectAddressableAgents.js'
 
 const TEAM = 'alpha'
@@ -186,11 +187,15 @@ test('team-file members add pane teammates and are deduped against in-process on
     teamName: TEAM,
     includeTeamLead: false,
   })
-  expect(agents.map(a => [a.name, a.kind, a.status])).toEqual([
-    ['coder', 'teammate', 'busy'],
-    ['mystery', 'teammate', 'unknown'],
-    ['painter', 'teammate', 'idle'],
-    ['runner', 'teammate', 'busy'],
+  // Only `coder` has a task behind it, so only `coder` gets a liveness word.
+  // The other three are in the file and nowhere else: the file's own
+  // idle/running column is derived from a flag nothing ever writes, so it is
+  // not evidence and they report `unknown`.
+  expect(agents.map(a => [a.name, a.kind, a.status, a.source])).toEqual([
+    ['coder', 'teammate', 'busy', 'task'],
+    ['mystery', 'teammate', 'unknown', 'team_file'],
+    ['painter', 'teammate', 'unknown', 'team_file'],
+    ['runner', 'teammate', 'unknown', 'team_file'],
   ])
   expect(agents.find(a => a.name === 'painter')).toMatchObject({
     agentId: `painter@${TEAM}`,
@@ -500,5 +505,103 @@ test('renderAddressableAgents prints one line per agent plus the SendMessage hin
     'scout  background_agent  running  to=scout',
     '',
     SEND_MESSAGE_HINT,
+  ])
+})
+
+test('a team-file member with no live local task is not presented as live', () => {
+  // `isActive` is maintained only by the teammate itself, as it goes idle and
+  // busy; getTeammateStatuses reads a missing or true flag as "running". A
+  // pane teammate that died on its first turn never got to say otherwise, so
+  // it stays `isActive: true` forever and this row used to claim it was busy.
+  // Without a task behind it, the file says only that the member was once
+  // written down: it may be dead, or it may belong to another session.
+  const agents = collectAddressableAgents({
+    ...state([]),
+    teamMembers: [member('ghost')],
+    teamName: TEAM,
+    includeTeamLead: false,
+  })
+  expect(agents).toHaveLength(1)
+  expect(agents[0]).toMatchObject({
+    name: 'ghost',
+    status: 'unknown',
+    source: 'team_file',
+    to: `ghost@${TEAM}`,
+  })
+  expect(agents[0]?.taskId).toBeUndefined()
+  expect(renderAddressableAgents(agents)).toContain(TEAM_FILE_ONLY_MARKER)
+})
+
+test('a task-backed row carries the real task id, in the row and in the output', () => {
+  // The task id is what TaskStop takes. It was in hand here all along and
+  // never surfaced, so a user watching a teammate hang had no id to stop it by.
+  const agents = collectAddressableAgents({
+    ...state([teammate('coder'), backgroundAgent('a-1')], { scout: 'a-1' }),
+    ...asLead,
+    teamName: TEAM,
+  })
+  expect(agents.map(a => [a.name, a.source, a.taskId, a.to])).toEqual([
+    ['coder', 'task', 't-coder', `coder@${TEAM}`],
+    ['scout', 'task', 'a-1', 'scout'],
+  ])
+  const lines = renderAddressableAgents(agents).split('\n')
+  expect(lines[0]).toContain('task=t-coder')
+  expect(lines[1]).toContain('task=a-1')
+  expect(lines[0]).not.toContain(TEAM_FILE_ONLY_MARKER)
+})
+
+test('a team-file member with a live task takes the task status and its id', () => {
+  // The task is the live fact; the file is a cache of it. A member whose task
+  // has failed reports `failed`, not the file's cheerful default.
+  const agents = collectAddressableAgents({
+    ...state([
+      teammate('coder', { isIdle: true }),
+      teammate('gone', { status: 'failed' }),
+    ]),
+    teamMembers: [member('coder'), member('gone')],
+    teamName: TEAM,
+    includeTeamLead: false,
+  })
+  expect(agents.map(a => [a.name, a.status, a.source, a.taskId])).toEqual([
+    ['coder', 'idle', 'task', 't-coder'],
+    ['gone', 'failed', 'task', 't-gone'],
+  ])
+  expect(renderAddressableAgents(agents)).not.toContain(TEAM_FILE_ONLY_MARKER)
+})
+
+test('the `to` address is identical whether a row is task-backed or file-only', () => {
+  // Addressing is a separate, working concern: honesty about liveness must not
+  // cost SendMessage its recipient.
+  const backed = collectAddressableAgents({
+    ...state([teammate('coder')]),
+    teamMembers: [member('coder')],
+    teamName: TEAM,
+    includeTeamLead: false,
+  })
+  const fileOnly = collectAddressableAgents({
+    ...state([]),
+    teamMembers: [member('coder')],
+    teamName: TEAM,
+    includeTeamLead: false,
+  })
+  expect(backed.map(a => a.to)).toEqual([`coder@${TEAM}`])
+  expect(fileOnly.map(a => a.to)).toEqual([`coder@${TEAM}`])
+  expect(backed[0]?.source).toBe('task')
+  expect(fileOnly[0]?.source).toBe('team_file')
+  // Same for a sub-team child, whose address carries the sub-team's name.
+  const child = collectAddressableAgents({
+    ...state([]),
+    teamMembers: [],
+    teamName: TEAM,
+    includeTeamLead: false,
+    tree: {
+      subTeam: {
+        teamName: SUB_TEAM,
+        members: [member('child', { agentId: `child@${SUB_TEAM}` })],
+      },
+    },
+  })
+  expect(child.map(a => [a.to, a.status, a.source])).toEqual([
+    [`child@${SUB_TEAM}`, 'unknown', 'team_file'],
   ])
 })

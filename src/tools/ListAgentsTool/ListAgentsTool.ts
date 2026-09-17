@@ -18,6 +18,7 @@ import {
 } from '../SendMessageTool/addressing.js'
 import {
   ADDRESSABLE_AGENT_KINDS,
+  ADDRESSABLE_AGENT_SOURCES,
   ADDRESSABLE_AGENT_STATUSES,
   collectAddressableAgents,
   renderAddressableAgents,
@@ -80,6 +81,8 @@ const outputSchema = lazySchema(() =>
         team: z.string().optional(),
         idleSince: z.string().optional(),
         to: z.string(),
+        source: z.enum(ADDRESSABLE_AGENT_SOURCES).optional(),
+        taskId: z.string().optional(),
       }),
     ),
   }),

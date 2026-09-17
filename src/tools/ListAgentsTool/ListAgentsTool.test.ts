@@ -22,6 +22,7 @@ import { createAgentId } from '../../utils/uuid.js'
 import {
   NO_ADDRESSABLE_AGENTS_MESSAGE,
   SEND_MESSAGE_HINT,
+  TEAM_FILE_ONLY_MARKER,
 } from './collectAddressableAgents.js'
 import { ListAgentsTool, type Output } from './ListAgentsTool.js'
 
@@ -212,9 +213,11 @@ test('call() merges the team file, in-process teammates and named background age
 
   // The lead sees everyone but itself; it is not a teammate, so no lead row.
   const { data } = await ListAgentsTool.call({}, contextFor(appState))
+  // `painter` exists only in the team file — no task backs it — so it is
+  // reported unconfirmed rather than idle, and carries no task id to stop by.
   expect(data.agents.map(a => [a.name, a.kind, a.status, a.to])).toEqual([
     ['coder', 'teammate', 'busy', `coder@${teamName}`],
-    ['painter', 'teammate', 'idle', `painter@${teamName}`],
+    ['painter', 'teammate', 'unknown', `painter@${teamName}`],
     // A background agent has no team, so its bare name is its address.
     ['scout', 'background_agent', 'completed', 'scout'],
   ])
@@ -223,11 +226,22 @@ test('call() merges the team file, in-process teammates and named background age
     model: 'opus',
     team: teamName,
     description: 'painter: paint the shed',
+    source: 'team_file',
+  })
+  expect(data.agents.find(a => a.name === 'painter')?.taskId).toBeUndefined()
+  // The task-backed rows carry the id TaskStop takes, end to end.
+  expect(data.agents.find(a => a.name === 'coder')).toMatchObject({
+    source: 'task',
+    taskId: 't-coder',
+  })
+  expect(data.agents.find(a => a.name === 'scout')).toMatchObject({
+    source: 'task',
+    taskId: 'a-scout',
   })
   expect(toText(data).split('\n')).toEqual([
-    'coder  teammate  busy  to=coder@alpha  - coder: fix the tests',
-    'painter  teammate  idle  to=painter@alpha  - painter: paint the shed',
-    'scout  background_agent  completed  to=scout  - scout the repo',
+    'coder  teammate  busy  to=coder@alpha  task=t-coder  - coder: fix the tests',
+    `painter  teammate  unknown  to=painter@alpha  ${TEAM_FILE_ONLY_MARKER}  - painter: paint the shed`,
+    'scout  background_agent  completed  to=scout  task=a-scout  - scout the repo',
     '',
     SEND_MESSAGE_HINT,
   ])
