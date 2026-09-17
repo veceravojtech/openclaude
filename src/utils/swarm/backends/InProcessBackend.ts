@@ -1,3 +1,4 @@
+import type { AppState } from '../../../state/AppState.js'
 import type { ToolUseContext } from '../../../Tool.js'
 import {
   findTeammateTaskByAgentId,
@@ -10,9 +11,15 @@ import {
   createShutdownRequestMessage,
   writeToMailbox,
 } from '../../../utils/teammateMailbox.js'
+import {
+  TEAM_LEAD_NAME,
+  TEAMMATE_SHUTDOWN_DEADLINE_MS,
+  TEAMMATE_SHUTDOWN_POLL_INTERVAL_MS,
+} from '../constants.js'
 import { startInProcessTeammate } from '../inProcessRunner.js'
 import {
   killInProcessTeammate,
+  killInProcessTeammateAndCascade,
   spawnInProcessTeammate,
 } from '../spawnInProcess.js'
 import type {
@@ -20,7 +27,26 @@ import type {
   TeammateMessage,
   TeammateSpawnConfig,
   TeammateSpawnResult,
+  TerminateOutcome,
 } from './types.js'
+
+/**
+ * Overrides for {@link InProcessBackend.terminate}, so its deadline and its
+ * escalation can be exercised without waiting real seconds or really killing
+ * anything. Extra OPTIONAL parameters, which is why the method still satisfies
+ * the two-argument `TeammateExecutor.terminate` contract.
+ */
+export type InProcessTerminateOptions = {
+  /** Defaults to {@link TEAMMATE_SHUTDOWN_DEADLINE_MS}. */
+  deadlineMs?: number
+  /** Defaults to {@link TEAMMATE_SHUTDOWN_POLL_INTERVAL_MS}. */
+  pollIntervalMs?: number
+  /** Defaults to `killInProcessTeammateAndCascade`. */
+  forceKill?: (
+    taskId: string,
+    setAppState: (updater: (prev: AppState) => AppState) => void,
+  ) => Promise<boolean>
+}
 
 /**
  * InProcessBackend implements TeammateExecutor for in-process teammates.
@@ -182,16 +208,39 @@ export class InProcessBackend implements TeammateExecutor {
   }
 
   /**
-   * Gracefully terminates an in-process teammate.
+   * Asks an in-process teammate to shut down, and makes sure it does.
    *
-   * Sends a shutdown request message to the teammate and sets the
-   * shutdownRequested flag. The teammate processes the request and
-   * either approves (exits) or rejects (continues working).
+   * Three steps, in order:
    *
-   * Unlike pane-based teammates, in-process teammates handle their own
-   * exit via the shutdown flow - no external killPane() is needed.
+   * 1. Deliver a `shutdown_request` to the teammate's mailbox and mark the row
+   *    `shutdownRequested` (which is what draws it as `stopping`). The request
+   *    reaches the teammate as a PROMPT — it only stops if its model answers
+   *    with `shutdown_response{approve:true}`.
+   * 2. Wait up to `deadlineMs` for the teammate to actually stop, polling the
+   *    same liveness predicate {@link isActive} exposes.
+   * 3. On expiry, stop asking: force-kill it (and the sub-team it leads) via
+   *    `killInProcessTeammateAndCascade`. Cooperation had its chance.
+   *
+   * The returned {@link TerminateOutcome} reports what happened, and
+   * `'terminated'` is only ever returned for an observed stop. This used to
+   * return `true` for "a note was left in a file", which meant a caller could
+   * not distinguish a dead teammate from one that had ignored the request.
+   *
+   * A shutdown request is re-delivered on every call. `shutdownRequested` is an
+   * in-flight/UI marker, NOT a "do not ask again" latch: it used to
+   * short-circuit this method with a fabricated `true`, so a teammate that
+   * declined once could never be asked again and every later caller was lied
+   * to.
+   *
+   * @param options - Test seam only; production callers pass nothing and get
+   * {@link TEAMMATE_SHUTDOWN_DEADLINE_MS} and the real force kill. Kept off
+   * the `TeammateExecutor` interface, which stays a two-argument contract.
    */
-  async terminate(agentId: string, reason?: string): Promise<boolean> {
+  async terminate(
+    agentId: string,
+    reason?: string,
+    options?: InProcessTerminateOptions,
+  ): Promise<TerminateOutcome> {
     logForDebugging(
       `[InProcessBackend] terminate() called for ${agentId}: ${reason}`,
     )
@@ -200,58 +249,98 @@ export class InProcessBackend implements TeammateExecutor {
       logForDebugging(
         `[InProcessBackend] terminate() failed: no context set for ${agentId}`,
       )
-      return false
+      return 'not_found'
     }
+    const context = this.context
 
-    // Get current AppState to find the task
-    const state = this.context.getAppState()
-    const task = findTeammateTaskByAgentId(agentId, state.tasks)
-
+    const task = findTeammateTaskByAgentId(agentId, context.getAppState().tasks)
     if (!task) {
       logForDebugging(
         `[InProcessBackend] terminate() failed: task not found for ${agentId}`,
       )
-      return false
+      return 'not_found'
     }
 
-    // Don't send another shutdown request if one is already pending
-    if (task.shutdownRequested) {
+    // Already stopped: there is nothing to ask and nothing to escalate, and
+    // `terminated` is the honest answer rather than a fresh request nobody
+    // will ever read.
+    if (!(await this.isActive(agentId))) {
       logForDebugging(
-        `[InProcessBackend] terminate(): shutdown already requested for ${agentId}`,
+        `[InProcessBackend] terminate(): ${agentId} is already stopped`,
       )
-      return true
+      return 'terminated'
     }
 
-    // Generate deterministic request ID
     const requestId = `shutdown-${agentId}-${Date.now()}`
-
-    // Create shutdown request message
     const shutdownRequest = createShutdownRequestMessage({
       requestId,
-      from: 'team-lead', // Terminate is always called by the leader
+      from: TEAM_LEAD_NAME, // Terminate is always called by the leader
       reason,
     })
-
-    // Send to teammate's mailbox
-    const teammateAgentName = task.identity.agentName
     await writeToMailbox(
-      teammateAgentName,
+      task.identity.agentName,
       {
-        from: 'team-lead',
+        from: TEAM_LEAD_NAME,
         text: jsonStringify(shutdownRequest),
         timestamp: new Date().toISOString(),
       },
       task.identity.teamName,
     )
-
-    // Mark the task as shutdown requested
-    requestTeammateShutdown(task.id, this.context.setAppState)
-
+    requestTeammateShutdown(task.id, context.setAppState)
     logForDebugging(
-      `[InProcessBackend] terminate() sent shutdown request to ${agentId}`,
+      `[InProcessBackend] terminate() sent shutdown request ${requestId} to ${agentId}`,
     )
 
-    return true
+    const deadlineMs = options?.deadlineMs ?? TEAMMATE_SHUTDOWN_DEADLINE_MS
+    const pollIntervalMs =
+      options?.pollIntervalMs ?? TEAMMATE_SHUTDOWN_POLL_INTERVAL_MS
+    if (await this.waitForStop(agentId, deadlineMs, pollIntervalMs)) {
+      logForDebugging(
+        `[InProcessBackend] terminate(): ${agentId} stopped cooperatively`,
+      )
+      return 'terminated'
+    }
+
+    logForDebugging(
+      `[InProcessBackend] terminate(): ${agentId} did not stop within ${deadlineMs}ms - force killing`,
+    )
+    const forceKill = options?.forceKill ?? killInProcessTeammateAndCascade
+    await forceKill(task.id, context.setAppState)
+
+    // Re-checked rather than assumed: a force kill that did not take is still
+    // "requested", however loudly it was attempted.
+    const stopped = !(await this.isActive(agentId))
+    logForDebugging(
+      `[InProcessBackend] terminate(): force kill of ${agentId} ${stopped ? 'succeeded' : 'did not stop it'}`,
+    )
+    return stopped ? 'terminated' : 'requested'
+  }
+
+  /**
+   * Resolves true as soon as the teammate has stopped, or false once
+   * `deadlineMs` has passed with it still active. Polls rather than listening
+   * on the abort signal: a teammate can also stop by reaching a terminal status
+   * or by leaving AppState entirely, and {@link isActive} already knows all
+   * three shapes.
+   */
+  private async waitForStop(
+    agentId: string,
+    deadlineMs: number,
+    pollIntervalMs: number,
+  ): Promise<boolean> {
+    const deadline = Date.now() + deadlineMs
+    for (;;) {
+      if (!(await this.isActive(agentId))) {
+        return true
+      }
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) {
+        return false
+      }
+      await new Promise(resolve =>
+        setTimeout(resolve, Math.min(pollIntervalMs, remaining)),
+      )
+    }
   }
 
   /**

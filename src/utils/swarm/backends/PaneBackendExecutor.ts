@@ -20,6 +20,7 @@ import type {
   TeammateMessage,
   TeammateSpawnConfig,
   TeammateSpawnResult,
+  TerminateOutcome,
 } from './types.js'
 
 /**
@@ -244,12 +245,19 @@ export class PaneBackendExecutor implements TeammateExecutor {
   }
 
   /**
-   * Gracefully terminates a pane-based teammate.
+   * Asks a pane-based teammate to shut down, by delivering a shutdown request
+   * to its mailbox and letting its own process decide to exit.
    *
-   * For pane-based teammates, we send a shutdown request via mailbox and
-   * let the teammate process handle exit gracefully.
+   * Never better than `'requested'`: the teammate is another process, and this
+   * executor has no way to observe whether it actually exited (`isActive()`
+   * below cannot either). A caller that needs the pane gone must follow up with
+   * {@link kill}. It previously returned a bare `true` here, which read as
+   * "terminated" to every caller.
    */
-  async terminate(agentId: string, reason?: string): Promise<boolean> {
+  async terminate(
+    agentId: string,
+    reason?: string,
+  ): Promise<TerminateOutcome> {
     logForDebugging(
       `[PaneBackendExecutor] terminate() called for ${agentId}: ${reason}`,
     )
@@ -259,7 +267,7 @@ export class PaneBackendExecutor implements TeammateExecutor {
       logForDebugging(
         `[PaneBackendExecutor] terminate() failed: invalid agentId format`,
       )
-      return false
+      return 'not_found'
     }
 
     const { agentName, teamName } = parsed
@@ -286,7 +294,7 @@ export class PaneBackendExecutor implements TeammateExecutor {
       `[PaneBackendExecutor] terminate() sent shutdown request to ${agentId}`,
     )
 
-    return true
+    return 'requested'
   }
 
   /**

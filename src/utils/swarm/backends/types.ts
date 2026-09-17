@@ -272,6 +272,23 @@ export type TeammateMessage = {
 }
 
 /**
+ * What a `terminate()` call actually achieved.
+ *
+ * A bare boolean could not express the middle case, and so every caller was
+ * told `true` for it: a `shutdown_request` is a prompt the teammate's model may
+ * ignore, so "the request was delivered" and "the teammate is gone" are
+ * different facts.
+ *
+ * - `'terminated'`: termination was OBSERVED — the teammate is no longer
+ *   active. The only outcome a caller may read as success.
+ * - `'requested'`: the request was delivered and the teammate is still alive.
+ *   For an executor that cannot observe its teammates at all (pane-based) this
+ *   is the best it can ever report.
+ * - `'not_found'`: there was no such teammate to terminate.
+ */
+export type TerminateOutcome = 'terminated' | 'requested' | 'not_found'
+
+/**
  * Common interface for teammate execution backends.
  * Abstracts the differences between pane-based (tmux/iTerm2) and in-process execution.
  *
@@ -291,8 +308,14 @@ export type TeammateExecutor = {
   /** Send a message to a teammate */
   sendMessage(agentId: string, message: TeammateMessage): Promise<void>
 
-  /** Terminate a teammate (graceful shutdown request) */
-  terminate(agentId: string, reason?: string): Promise<boolean>
+  /**
+   * Ask a teammate to shut down gracefully.
+   *
+   * Never reports `'terminated'` unless termination was observed; see
+   * {@link TerminateOutcome}. An implementation that can observe its teammates
+   * is expected to bound the wait and escalate rather than trust cooperation.
+   */
+  terminate(agentId: string, reason?: string): Promise<TerminateOutcome>
 
   /** Force kill a teammate (immediate termination) */
   kill(agentId: string): Promise<boolean>
