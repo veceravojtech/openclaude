@@ -55,11 +55,17 @@ export function readAccounts(): AccountSummary[] {
  * Read-only, like `readAccounts` — nothing here writes, re-keys or deletes a
  * credential entry. An entry the client cannot vouch for is left on disk
  * exactly as it is; it just stops being selectable.
+ *
+ * The config identity map is supplied for the same reason `readAccounts`
+ * supplies it, and the two must agree: an account the list can name by email
+ * but the guard calls 'unnameable' is an account the user can switch to by
+ * hand while a usage limit refuses to move them onto it automatically.
  */
 export function readVouchableAccountKeys(now?: number): Set<string> {
   return vouchableAccountKeys(
     migrateAndReconcile(getSecureStorage().read() ?? {}).data,
     now ?? Date.now(),
+    getGlobalConfig().oauthAccounts,
   )
 }
 

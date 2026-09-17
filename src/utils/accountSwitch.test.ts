@@ -625,6 +625,35 @@ describe('naming the accounts already on disk', () => {
     expect(JSON.stringify(store)).toBe(before)
   })
 
+  test('the auto-switch guard sees the same identity the list does', async () => {
+    const { readAccounts, readVouchableAccountKeys } = await import(
+      './accountSwitch.js'
+    )
+
+    // The asymmetry this closes: without the map, `readVouchableAccountKeys`
+    // calls every pre-identity account 'unnameable', so a user could switch to
+    // an account BY EMAIL by hand that a usage-limit 429 would still refuse to
+    // move them onto. The two reads must agree about who an account is.
+    const listed = readAccounts().find(a => a.key === LEGACY_UUID)
+    expect(listed?.emailAddress).toBe(EMAIL)
+
+    const vouchable = readVouchableAccountKeys()
+    expect(vouchable.has(LEGACY_UUID)).toBe(true)
+    // Still refused, and for the one reason a config row cannot answer: there
+    // is no UUID keyed `default` in the map to join against.
+    expect(vouchable.has('default')).toBe(false)
+  })
+
+  test('the vouching read writes no credential either', async () => {
+    const { readVouchableAccountKeys } = await import('./accountSwitch.js')
+    const before = JSON.stringify(store)
+
+    readVouchableAccountKeys()
+
+    expect(writes).toBe(0)
+    expect(JSON.stringify(store)).toBe(before)
+  })
+
   test('the join cannot name the pre-identity `default` entry', async () => {
     const { readAccounts, accountDisplayName } = await import('./accountSwitch.js')
 

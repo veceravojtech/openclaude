@@ -527,6 +527,101 @@ describe('vouchableAccountKeys', () => {
     expect(Object.keys(data.claudeAiOauthAccounts ?? {})).toEqual(['uuid-work'])
     expect([...vouchableAccountKeys(data, NOW)]).toEqual(['uuid-work'])
   })
+
+  describe('the config identity map answers `unnameable`, and nothing else', () => {
+    // An account written before the credential blob carried identity — which
+    // is every account already on a user's disk. Healthy in every way the
+    // guard actually cares about, and refused purely because the guard was
+    // looking in the one place the answer is not.
+    const legacy = () => tokens({ expiresAt: NOW + HOUR_MS })
+
+    test('names an identity-less entry the config map can name', () => {
+      const data: SecureStorageData = {
+        claudeAiOauthAccounts: { 'uuid-legacy': legacy() },
+      }
+
+      // Fail-before: the blob alone cannot name it.
+      expect(vouchForAccount(legacy(), NOW)).toBe('unnameable')
+      expect([...vouchableAccountKeys(data, NOW)]).toEqual([])
+
+      expect([
+        ...vouchableAccountKeys(data, NOW, {
+          'uuid-legacy': { emailAddress: 'work@example.com' },
+        }),
+      ]).toEqual(['uuid-legacy'])
+    })
+
+    test('does NOT rescue an expired account, however well named', () => {
+      // The whole point of the override is that it settles ONE question. An
+      // expired entry reports 'expired' first, so the map never sees it — and
+      // must not, because no config row can vouch for a credential.
+      const data: SecureStorageData = {
+        claudeAiOauthAccounts: {
+          'uuid-legacy': tokens({ expiresAt: NOW - 1 }),
+        },
+      }
+
+      expect([
+        ...vouchableAccountKeys(data, NOW, {
+          'uuid-legacy': { emailAddress: 'work@example.com' },
+        }),
+      ]).toEqual([])
+    })
+
+    test('does NOT rescue an account with no refresh token, however well named', () => {
+      const data: SecureStorageData = {
+        claudeAiOauthAccounts: {
+          'uuid-legacy': tokens({
+            expiresAt: NOW + HOUR_MS,
+            refreshToken: null,
+          }),
+        },
+      }
+
+      expect([
+        ...vouchableAccountKeys(data, NOW, {
+          'uuid-legacy': { emailAddress: 'work@example.com' },
+        }),
+      ]).toEqual([])
+    })
+
+    test('an empty or missing email in the map is not an identity', () => {
+      // The config file is unvalidated parsed JSON too, so the check is
+      // structural for the same reason the vouch conditions are.
+      const data: SecureStorageData = {
+        claudeAiOauthAccounts: { 'uuid-legacy': legacy() },
+      }
+
+      expect([
+        ...vouchableAccountKeys(data, NOW, { 'uuid-legacy': {} }),
+      ]).toEqual([])
+      expect([
+        ...vouchableAccountKeys(data, NOW, {
+          'uuid-legacy': { emailAddress: '' },
+        }),
+      ]).toEqual([])
+      expect([
+        ...vouchableAccountKeys(data, NOW, {
+          'some-other-uuid': { emailAddress: 'work@example.com' },
+        }),
+      ]).toEqual([])
+    })
+
+    test('cannot rescue the `default` entry, which has no UUID to look up', () => {
+      // The structural limit the read-side join has too: the config map is
+      // keyed by account UUID and a `default` entry is what exists precisely
+      // when no UUID could be recovered.
+      const data: SecureStorageData = {
+        claudeAiOauthAccounts: { [LEGACY_ACCOUNT_KEY]: legacy() },
+      }
+
+      expect([
+        ...vouchableAccountKeys(data, NOW, {
+          'uuid-work': { emailAddress: 'work@example.com' },
+        }),
+      ]).toEqual([])
+    })
+  })
 })
 
 /**

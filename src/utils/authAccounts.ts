@@ -274,15 +274,41 @@ export function vouchForAccount(
  *
  * Pure: no disk, no mutation. `readVouchableAccountKeys` in `accountSwitch.ts`
  * is the reading counterpart.
+ *
+ * `identities` is the same config map `listAccounts` takes, and it settles
+ * exactly one of the three verdicts: 'unnameable' asks whether the client can
+ * say WHOSE account this is, and for an account written before the credential
+ * blob carried identity the map is the only place that answer lives. Refusing
+ * such an account was the guard being unable to see the answer rather than the
+ * answer being no — the same hole the read-side join closed for `/account`,
+ * which could otherwise name an account by email that a 429 would still refuse
+ * to move onto.
+ *
+ * It overrides ONLY 'unnameable', never 'no-refresh-token' and never
+ * 'expired': those two are about the credential itself, which no config row
+ * can vouch for. `vouchForAccount` returns the FIRST failing condition in a
+ * fixed order, so an account that is both expired and unnameable reports
+ * 'expired' and is refused here regardless of the map.
  */
 export function vouchableAccountKeys(
   data: SecureStorageData,
   now: number,
+  identities: AccountIdentities = {},
 ): Set<string> {
   const accounts = data.claudeAiOauthAccounts ?? {}
   const vouchable = new Set<string>()
   for (const [key, account] of Object.entries(accounts)) {
-    if (vouchForAccount(account, now) === undefined) {
+    const failure = vouchForAccount(account, now)
+    if (failure === undefined) {
+      vouchable.add(key)
+      continue
+    }
+    // Structural rather than nullish, for the reason the vouch docblock gives
+    // about stored blobs and which applies to the config file just as well: it
+    // is parsed JSON these types have never validated, so an empty string or a
+    // missing key must not read as an identity.
+    const joined = identities[key]?.emailAddress
+    if (failure === 'unnameable' && typeof joined === 'string' && joined !== '') {
       vouchable.add(key)
     }
   }
