@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { execFileSync } from 'node:child_process'
 
 import {
   acquireSharedMutationLock,
@@ -93,6 +94,68 @@ test('buildInheritedEnvVars forwards PATH for source-built teammate tool lookups
 
   expect(envVars).toContain('PATH=')
   expect(envVars).toContain('/custom/bin\\:/usr/bin')
+})
+
+test('buildInheritedEnvVars appends per-spawn extras for a provider-pinned teammate', () => {
+  const envVars = buildInheritedEnvVars({
+    OPENAI_BASE_URL: 'https://chatgpt.com/backend-api/codex',
+    OPENAI_MODEL: 'codexplan',
+    CHATGPT_ACCOUNT_ID: 'acct-123',
+  })
+
+  expect(envVars).toContain('OPENAI_BASE_URL=')
+  expect(envVars).toContain('chatgpt.com/backend-api/codex')
+  expect(envVars).toContain('OPENAI_MODEL=codexplan')
+  expect(envVars).toContain('CHATGPT_ACCOUNT_ID=acct-123')
+})
+
+test('buildInheritedEnvVars lets a per-spawn extra override an inherited allowlist value', () => {
+  process.env.OPENAI_MODEL = 'inherited-model'
+
+  const envVars = buildInheritedEnvVars({ OPENAI_MODEL: 'codexplan' })
+
+  const inheritedIndex = envVars.indexOf('OPENAI_MODEL=inherited-model')
+  const extraIndex = envVars.indexOf('OPENAI_MODEL=codexplan')
+
+  expect(inheritedIndex).toBeGreaterThanOrEqual(0)
+  // `env` applies assignments left to right, so the extra must come last to win.
+  expect(extraIndex).toBeGreaterThan(inheritedIndex)
+})
+
+test('buildInheritedEnvVars skips empty per-spawn extras', () => {
+  const envVars = buildInheritedEnvVars({
+    CHATGPT_ACCOUNT_ID: '',
+    OPENAI_MODEL: 'codexplan',
+  })
+
+  expect(envVars).not.toContain('CHATGPT_ACCOUNT_ID=')
+  expect(envVars).toContain('OPENAI_MODEL=codexplan')
+})
+
+test('buildInheritedEnvVars shell-quotes a per-spawn extra so a real shell reads it back intact', () => {
+  const rawValue = 'a b "c" $HOME'
+
+  const envVars = buildInheritedEnvVars({ CODEX_SPAWN_PROBE: rawValue })
+
+  const printed = execFileSync(
+    '/bin/sh',
+    ['-c', `/usr/bin/env ${envVars} /usr/bin/printenv CODEX_SPAWN_PROBE`],
+    { encoding: 'utf8', env: {} },
+  )
+
+  expect(printed).toBe(`${rawValue}\n`)
+})
+
+test('buildInheritedEnvVars leaves a sibling spawn untouched by another teammate extras', () => {
+  process.env.OPENAI_MODEL = 'inherited-model'
+
+  const baseline = buildInheritedEnvVars()
+  const pinned = buildInheritedEnvVars({ OPENAI_MODEL: 'codexplan' })
+  const sibling = buildInheritedEnvVars()
+
+  expect(sibling).toBe(baseline)
+  expect(sibling).not.toContain('codexplan')
+  expect(pinned).not.toBe(baseline)
 })
 
 test('buildInheritedCliFlags preserves fullAccess mode for spawned teammates', () => {

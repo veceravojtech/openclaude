@@ -159,8 +159,15 @@ const TEAMMATE_ENV_VARS = [
  * Builds the `env KEY=VALUE ...` string for teammate spawn commands.
  * Always includes CLAUDECODE=1 and CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1,
  * plus any provider/config env vars that are set in the current process.
+ *
+ * @param extra - Per-spawn env vars for this teammate only. The allowlist above
+ *   can only forward the parent's values, so a teammate pinned to a different
+ *   provider than the leader needs its route passed in here. Entries are
+ *   appended after the inherited ones, and `env` applies assignments left to
+ *   right, so a key given here overrides the inherited value of the same key.
+ *   Empty values are skipped, matching the inherited-var guard.
  */
-export function buildInheritedEnvVars(): string {
+export function buildInheritedEnvVars(extra?: Record<string, string>): string {
   const envVars = [
     'CLAUDECODE=1',
     'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1',
@@ -171,6 +178,14 @@ export function buildInheritedEnvVars(): string {
 
   for (const key of TEAMMATE_ENV_VARS) {
     const value = process.env[key]
+    if (value !== undefined && value !== '') {
+      envVars.push(`${key}=${quote([value])}`)
+    }
+  }
+
+  // Appended last on purpose: `env` applies assignments left to right, so a
+  // per-spawn value here wins over the inherited one for the same key.
+  for (const [key, value] of Object.entries(extra ?? {})) {
     if (value !== undefined && value !== '') {
       envVars.push(`${key}=${quote([value])}`)
     }

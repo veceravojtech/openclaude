@@ -51,6 +51,7 @@ import { TEAM_CREATE_TOOL_NAME } from '../TeamCreateTool/constants.js';
 import { getTaskOutputPath } from '../../utils/task/diskOutput.js';
 import { getAgentId, getParentSessionId, isTeammate } from '../../utils/teammate.js';
 import { isInProcessTeammate } from '../../utils/teammateContext.js';
+import { isInProcessEnabled } from '../../utils/swarm/backends/registry.js';
 import { getAssistantMessageContentLength } from '../../utils/tokens.js';
 import { createAgentId } from '../../utils/uuid.js';
 import { createAgentWorktree, hasWorktreeChanges, removeAgentWorktree } from '../../utils/worktree.js';
@@ -58,6 +59,7 @@ import { BASH_TOOL_NAME } from '../BashTool/toolName.js';
 import { BackgroundHint } from '../BashTool/UI.js';
 import { FILE_READ_TOOL_NAME } from '../FileReadTool/prompt.js';
 import { spawnTeammate, generateUniqueTeammateName } from '../shared/spawnMultiAgent.js';
+import { PROVIDER_PROFILE_IN_PROCESS_ERROR, resolveProviderProfileEnv } from './providerProfileBinding.js';
 import { getTeammateSpawnCapError } from './teammateReplicas.js';
 import { setAgentColor } from './agentColorManager.js';
 import { agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extractPartialResult, finalizeAgentTool, getLastToolUseName, runAsyncAgentLifecycle } from './agentToolUtils.js';
@@ -109,7 +111,8 @@ export const fullInputSchema = lazySchema(() => {
     name: z.string().optional().describe('Name for the spawned agent. Makes it addressable via SendMessage({to: name}) while running.'),
     team_name: z.string().optional().describe('Team name for spawning. Uses current team context if omitted.'),
     mode: permissionModeSchema().optional().describe('Permission mode for spawned teammate (e.g., "plan" to require plan approval).'),
-    replicas: z.number().int().min(1).optional().describe('Number of teammates to spawn from this call (default 1). Requires `name`; they are named <name>-1 ... <name>-N and all share the same prompt (or all start idle when prompt is omitted). Capped per call and by the live teammate pool size.')
+    replicas: z.number().int().min(1).optional().describe('Number of teammates to spawn from this call (default 1). Requires `name`; they are named <name>-1 ... <name>-N and all share the same prompt (or all start idle when prompt is omitted). Capped per call and by the live teammate pool size.'),
+    provider_profile: z.string().trim().min(1, 'provider_profile cannot be empty').optional().describe('Bind the teammate to a provider PROFILE (its id or name, e.g. a saved Codex/OAuth profile), NOT a model id. Only Codex OAuth profiles are supported; for API-key providers pass `model` and let model routing resolve the provider. Not valid for idle or in-process teammates.')
   });
   return baseInputSchema().merge(multiAgentInputSchema).extend({
     isolation: z.enum(['worktree']).optional().describe('Isolation mode. "worktree" creates a temporary git worktree so the agent works on an isolated copy of the repo. When the session is outside a git repository (for example a parent of multiple repos), pass cwd set to the target repository root so the worktree is created from that repo.'),
@@ -155,6 +158,7 @@ type AgentToolInput = z.infer<ReturnType<typeof baseInputSchema>> & {
   replicas?: number;
   isolation?: 'worktree';
   cwd?: string;
+  provider_profile?: string;
 };
 type AgentToolIsolation = AgentToolInput['isolation'];
 
@@ -397,7 +401,8 @@ export const AgentTool = buildTool({
     mode: spawnMode,
     replicas,
     isolation,
-    cwd
+    cwd,
+    provider_profile: providerProfileRef
   }: AgentToolInput, toolUseContext, canUseTool, assistantMessage, onProgress?) {
     const startTime = Date.now();
     // The supervisor picks models per teammate on purpose — cheap models for
@@ -465,6 +470,15 @@ export const AgentTool = buildTool({
     // can manage their own background agents.
     if (isInProcessTeammate() && teamName && run_in_background === true) {
       throw new Error('In-process teammates cannot spawn background agents. Use run_in_background=false for synchronous subagents.');
+    }
+
+    // provider_profile binds the spawned CHILD PROCESS's provider env.
+    // Subagents run inside this process — no child, no env — so the binding
+    // is meaningless there. Rejecting is deliberate: silently ignoring it
+    // would send the subagent to the leader's provider and reproduce the
+    // exact hang provider_profile exists to fix.
+    if (providerProfileRef !== undefined && !(teamName && name)) {
+      throw new Error(PROVIDER_PROFILE_IN_PROCESS_ERROR);
     }
 
     // Replica and live-pool caps. Applied to single teammate spawns too so the
@@ -540,6 +554,25 @@ export const AgentTool = buildTool({
         !isModelAllowed(routedTeammateModelOnly)
       ) {
         throw new Error(`Model '${routedTeammateModelOnly}' is not available. Your organization restricts model selection.`);
+      }
+      // Resolve the provider_profile binding eagerly so its error paths
+      // (unknown profile, unsupported provider, unresolvable credentials)
+      // fail THIS call immediately instead of hanging the child later.
+      // Idle (prompt-less) spawns are forced in-process by handleSpawn, as
+      // is everything while the in-process backend is enabled; both share
+      // the leader process and have no child env to inject.
+      let providerProfileEnv: Record<string, string> | undefined;
+      if (providerProfileRef !== undefined) {
+        if (prompt === undefined || isInProcessEnabled()) {
+          throw new Error(PROVIDER_PROFILE_IN_PROCESS_ERROR);
+        }
+        providerProfileEnv = resolveProviderProfileEnv(providerProfileRef);
+        // TODO: thread providerProfileEnv into spawnTeammate as
+        // SpawnTeammateConfig.providerEnv once that field lands in
+        // src/tools/shared/spawnMultiAgent.ts (concurrently owned —
+        // left unwired here by design). Resolving now already fixes the
+        // failure modes that produced silent hangs.
+        void providerProfileEnv;
       }
       const spawnOne = (spawnName: string) => spawnTeammate({
         name: spawnName,

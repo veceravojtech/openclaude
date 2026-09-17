@@ -13,6 +13,7 @@ import {
 } from '../../utils/settings/settingsCache.js'
 import type { SettingsJson } from '../../utils/settings/types.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
+import { fullInputSchema } from './AgentTool.js'
 
 type PromptsModule = typeof import('../../constants/prompts.js')
 type RunAgentModule = typeof import('./runAgent.js')
@@ -55,6 +56,28 @@ afterEach(() => {
   } finally {
     releaseSharedMutationLock()
   }
+})
+
+test('the full schema accepts provider_profile as a non-empty string', () => {
+  // Static import pattern matches AgentTool.replicas.test.ts: the schema
+  // itself has no settings dependency.
+  expect(
+    fullInputSchema().safeParse({
+      description: 'codex worker',
+      prompt: 'review',
+      name: 'codex-worker',
+      provider_profile: 'codex-oauth',
+    }).success,
+  ).toBe(true)
+  // Trim then reject emptiness, mirroring the model field's contract.
+  expect(
+    fullInputSchema().safeParse({
+      description: 'codex worker',
+      prompt: 'review',
+      name: 'codex-worker',
+      provider_profile: '   ',
+    }).success,
+  ).toBe(false)
 })
 
 test('normal subagent prompt metadata uses routed effective model', async () => {

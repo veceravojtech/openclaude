@@ -10,13 +10,30 @@ import type { AgentDefinition } from './loadAgentsDir.js'
 type ModelAllowlistModule = typeof import('../../utils/model/modelAllowlist.js')
 type SettingsModule = typeof import('../../utils/settings/settings.js')
 type SpawnMultiAgentModule = typeof import('../shared/spawnMultiAgent.js')
+type RegistryModule = typeof import('../../utils/swarm/backends/registry.js')
+type ProviderProfileBindingModule = typeof import('./providerProfileBinding.js')
 type SpawnTeammateConfig = Parameters<SpawnMultiAgentModule['spawnTeammate']>[0]
 
 let originalModelAllowlistModule: ModelAllowlistModule | undefined
 let originalSettingsModule: SettingsModule | undefined
 let originalSpawnMultiAgentModule: SpawnMultiAgentModule | undefined
+let originalRegistryModule: RegistryModule | undefined
+let originalProviderProfileBindingModule: ProviderProfileBindingModule | undefined
 let settingsForTest: SettingsJson = {}
 let allowedModelsForTest = new Set(['allowed-model'])
+// Provider-profile binding harness knobs, reset in beforeEach.
+let inProcessEnabledForTest = false
+// Fixture uses shape only: CHATGPT_ACCOUNT_ID is an account-linked
+// identifier and must never carry a real value in a fixture.
+const codexProfileEnvFixture: Record<string, string> = {
+  OPENAI_BASE_URL: 'https://chatgpt.com/backend-api/codex',
+  OPENAI_MODEL: 'codexplan',
+  CODEX_CREDENTIAL_SOURCE: 'oauth',
+  CHATGPT_ACCOUNT_ID: 'a'.repeat(36),
+  CLAUDE_CODE_USE_OPENAI: '1',
+}
+let providerProfileEnvForTest: Record<string, string> | Error =
+  codexProfileEnvFixture
 
 const originalEnv = {
   CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:
@@ -32,6 +49,8 @@ beforeEach(async () => {
   delete process.env.CLAUDE_CODE_SUBAGENT_MODEL
   settingsForTest = {}
   allowedModelsForTest = new Set(['allowed-model'])
+  inProcessEnabledForTest = false
+  providerProfileEnvForTest = codexProfileEnvFixture
 })
 
 afterEach(async () => {
@@ -50,6 +69,18 @@ afterEach(async () => {
       mock.module(
         '../shared/spawnMultiAgent.js',
         () => ({ ...originalSpawnMultiAgentModule! }),
+      )
+    }
+    if (originalRegistryModule) {
+      mock.module(
+        '../../utils/swarm/backends/registry.js',
+        () => ({ ...originalRegistryModule! }),
+      )
+    }
+    if (originalProviderProfileBindingModule) {
+      mock.module(
+        './providerProfileBinding.js',
+        () => ({ ...originalProviderProfileBindingModule! }),
       )
     }
     restoreEnv('CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS')
@@ -116,6 +147,25 @@ async function importAgentToolWithSpawnMock(): Promise<{
   mock.module('../shared/spawnMultiAgent.js', () => ({
     ...originalSpawnMultiAgentModule!,
     spawnTeammate,
+  }))
+  originalRegistryModule ??= await import(
+    `../../utils/swarm/backends/registry.ts?agentToolActual=${Date.now()}-${Math.random()}`
+  )
+  mock.module('../../utils/swarm/backends/registry.js', () => ({
+    ...originalRegistryModule!,
+    isInProcessEnabled: () => inProcessEnabledForTest,
+  }))
+  originalProviderProfileBindingModule ??= await import(
+    `./providerProfileBinding.ts?agentToolActual=${Date.now()}-${Math.random()}`
+  )
+  mock.module('./providerProfileBinding.js', () => ({
+    ...originalProviderProfileBindingModule!,
+    resolveProviderProfileEnv: () => {
+      if (providerProfileEnvForTest instanceof Error) {
+        throw providerProfileEnvForTest
+      }
+      return providerProfileEnvForTest
+    },
   }))
 
   const { AgentTool } = await import(
@@ -503,4 +553,85 @@ test('allows a custom agent to be spawned as a teammate even if it shadows a bui
   )
 
   expect(spawnTeammate).toHaveBeenCalled()
+})
+
+test('rejects provider_profile when the in-process backend is enabled', async () => {
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+  inProcessEnabledForTest = true
+
+  await expect(
+    callTeammateAgentTool(AgentTool, {
+      provider_profile: 'codex-oauth',
+    } as never),
+  ).rejects.toThrow(/in-process/)
+
+  expect(spawnTeammate).not.toHaveBeenCalled()
+})
+
+test('rejects provider_profile for an idle (prompt-less) teammate spawn', async () => {
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+
+  // Idle spawns are forced in-process regardless of the backend flag, so
+  // provider_profile must reject even with the flag off.
+  await expect(
+    AgentTool.call(
+      {
+        description: 'spawn idle worker',
+        name: 'worker-idle',
+        team_name: 'review-team',
+        provider_profile: 'codex-oauth',
+      } as never,
+      makeToolUseContext(),
+      mock(async () => ({ behavior: 'allow' })) as never,
+      { requestId: 'req-1' } as never,
+    ),
+  ).rejects.toThrow(/in-process/)
+
+  expect(spawnTeammate).not.toHaveBeenCalled()
+})
+
+test('rejects provider_profile on a plain subagent spawn', async () => {
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+
+  // No name/team: a subagent runs inside the leader process, so there is
+  // no child env to bind.
+  await expect(
+    AgentTool.call(
+      {
+        description: 'run subagent',
+        prompt: 'do the thing',
+        provider_profile: 'codex-oauth',
+      } as never,
+      makeToolUseContext(),
+      mock(async () => ({ behavior: 'allow' })) as never,
+      { requestId: 'req-1' } as never,
+    ),
+  ).rejects.toThrow(/in-process/)
+
+  expect(spawnTeammate).not.toHaveBeenCalled()
+})
+
+test('resolves provider_profile and proceeds to the pane spawn', async () => {
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+
+  await callTeammateAgentTool(AgentTool, {
+    provider_profile: 'codex-oauth',
+  } as never)
+
+  expect(spawnTeammate).toHaveBeenCalledTimes(1)
+})
+
+test('propagates a provider_profile resolution failure before spawning', async () => {
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+  providerProfileEnvForTest = new Error(
+    "Unknown provider profile 'ghost'. Available profiles: none.",
+  )
+
+  await expect(
+    callTeammateAgentTool(AgentTool, {
+      provider_profile: 'ghost',
+    } as never),
+  ).rejects.toThrow(/Unknown provider profile 'ghost'/)
+
+  expect(spawnTeammate).not.toHaveBeenCalled()
 })
