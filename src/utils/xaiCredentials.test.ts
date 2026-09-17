@@ -5,6 +5,23 @@ import {
 } from '../test/sharedMutationLock.js'
 
 type StorageData = Record<string, unknown>
+type SecureStorageModule = typeof import('./secureStorage/index.js')
+
+/**
+ * The real namespace, through a specifier nothing mocks. Bun fixes a mocked
+ * specifier's export SHAPE at the first registration, so a stub that omits an
+ * export makes that name permanently unresolvable for the rest of the process,
+ * and any later file importing it dies at link time with
+ * `SyntaxError: Export named '...' not found`. Spreading this into the stub
+ * keeps the shape complete.
+ */
+async function importActualSecureStorage(): Promise<SecureStorageModule> {
+  return import(
+    `./secureStorage/index.ts?xaiCredentialsActual=${Date.now()}-${Math.random()}`
+  )
+}
+
+let pristineSecureStorage: SecureStorageModule | undefined
 
 const originalEnv = { ...process.env }
 const originalArgv = [...process.argv]
@@ -18,7 +35,9 @@ const credential = {
 }
 
 async function importFreshXaiCredentials() {
+  pristineSecureStorage ??= await importActualSecureStorage()
   mock.module('./secureStorage/index.js', () => ({
+    ...pristineSecureStorage,
     getSecureStorage: () => ({
       name: 'mock-secure-storage',
       read: () => storageData,

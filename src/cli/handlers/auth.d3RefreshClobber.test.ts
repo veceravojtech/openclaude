@@ -38,14 +38,49 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
-import * as realSecureStorage from '../../utils/secureStorage/index.js'
 import type { SecureStorageData } from '../../utils/secureStorage/index.js'
 import { plainTextStorage } from '../../utils/secureStorage/plainTextStorage.js'
 
-// Snapshots taken before any mock.module() call. mock.module() mutates the
-// live namespace object in place, so restoring from the namespace (or from a
-// spread of it) would re-install the stub instead of undoing it.
-const pristineRealSecureStorage = { ...realSecureStorage }
+type SecureStorageModule = typeof import('../../utils/secureStorage/index.js')
+type OAuthClientModule = typeof import('../../services/oauth/client.js')
+type GetOauthProfileModule =
+  typeof import('../../services/oauth/getOauthProfile.js')
+type FirstTokenDateModule =
+  typeof import('../../services/api/firstTokenDate.js')
+
+// Captured through a cache-busted specifier that nothing mocks, so these are
+// the REAL modules. A plain `import * as` — or a spread of one — is only
+// pristine for the FIRST file to touch the specifier: mock.module() mutates
+// the live namespace in place, so a file running after any other secureStorage
+// mocker would snapshot that file's stub and then "restore" it.
+async function importActualSecureStorage(): Promise<SecureStorageModule> {
+  return import(
+    `../../utils/secureStorage/index.ts?d3RefreshClobberActual=${Date.now()}-${Math.random()}`
+  )
+}
+
+async function importActualOAuthClient(): Promise<OAuthClientModule> {
+  return import(
+    `../../services/oauth/client.ts?d3RefreshClobberActual=${Date.now()}-${Math.random()}`
+  )
+}
+
+async function importActualGetOauthProfile(): Promise<GetOauthProfileModule> {
+  return import(
+    `../../services/oauth/getOauthProfile.ts?d3RefreshClobberActual=${Date.now()}-${Math.random()}`
+  )
+}
+
+async function importActualFirstTokenDate(): Promise<FirstTokenDateModule> {
+  return import(
+    `../../services/api/firstTokenDate.ts?d3RefreshClobberActual=${Date.now()}-${Math.random()}`
+  )
+}
+
+let pristineSecureStorage: SecureStorageModule | undefined
+let pristineOAuthClient: OAuthClientModule | undefined
+let pristineGetOauthProfile: GetOauthProfileModule | undefined
+let pristineFirstTokenDate: FirstTokenDateModule | undefined
 
 const HOUR = 60 * 60 * 1000
 
@@ -91,6 +126,10 @@ describe('a refresh-token login for a second account', () => {
   beforeEach(async () => {
     await acquireSharedMutationLock('cli/handlers/auth.d3RefreshClobber.test.ts')
     mock.restore()
+    pristineSecureStorage ??= await importActualSecureStorage()
+    pristineOAuthClient ??= await importActualOAuthClient()
+    pristineGetOauthProfile ??= await importActualGetOauthProfile()
+    pristineFirstTokenDate ??= await importActualFirstTokenDate()
     tmpRoot = mkdtempSync(join(tmpdir(), 'openclaude-d3-refresh-clobber-'))
     configDir = join(tmpRoot, 'config')
     mkdirSync(configDir)
@@ -101,7 +140,7 @@ describe('a refresh-token login for a second account', () => {
     // The REAL plaintext backend, so the handler performs a genuine atomic
     // write into the temp home and the assertions can read the file back.
     mock.module('../../utils/secureStorage/index.js', () => ({
-      ...realSecureStorage,
+      ...pristineSecureStorage!,
       getSecureStorage: () => plainTextStorage,
     }))
 
@@ -123,9 +162,8 @@ describe('a refresh-token login for a second account', () => {
     mock.module('../../services/api/firstTokenDate.js', () => ({
       fetchAndStoreClaudeCodeFirstTokenDate: async () => {},
     }))
-    const realClient = await import('../../services/oauth/client.js')
     mock.module('../../services/oauth/client.js', () => ({
-      ...realClient,
+      ...pristineOAuthClient!,
       fetchAndStoreUserRoles: async () => {},
     }))
   })
@@ -133,7 +171,29 @@ describe('a refresh-token login for a second account', () => {
   afterEach(() => {
     try {
       mock.restore()
-      mock.module('../../utils/secureStorage/index.js', () => ({ ...pristineRealSecureStorage }))
+      // mock.restore() does not undo mock.module() registrations, so every
+      // specifier stubbed above has to be handed its real namespace back or it
+      // escapes this file and serves the stub to the rest of the sweep.
+      if (pristineSecureStorage) {
+        mock.module('../../utils/secureStorage/index.js', () => ({
+          ...pristineSecureStorage!,
+        }))
+      }
+      if (pristineOAuthClient) {
+        mock.module('../../services/oauth/client.js', () => ({
+          ...pristineOAuthClient!,
+        }))
+      }
+      if (pristineGetOauthProfile) {
+        mock.module('../../services/oauth/getOauthProfile.js', () => ({
+          ...pristineGetOauthProfile!,
+        }))
+      }
+      if (pristineFirstTokenDate) {
+        mock.module('../../services/api/firstTokenDate.js', () => ({
+          ...pristineFirstTokenDate!,
+        }))
+      }
       setClaudeConfigHomeDirForTesting(undefined)
       rmSync(tmpRoot, { recursive: true, force: true })
     } finally {

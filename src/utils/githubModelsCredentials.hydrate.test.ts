@@ -11,6 +11,23 @@ import {
 
 type GithubModelsCredentialsModule =
   typeof import('./githubModelsCredentials.js')
+type SecureStorageModule = typeof import('./secureStorage/index.js')
+
+/**
+ * The real namespace, through a specifier nothing mocks. Bun fixes a mocked
+ * specifier's export SHAPE at the first registration, so a stub that omits an
+ * export makes that name permanently unresolvable for the rest of the process,
+ * and any later file importing it dies at link time with
+ * `SyntaxError: Export named '...' not found`. Spreading this into each stub
+ * below keeps the shape complete.
+ */
+async function importActualSecureStorage(): Promise<SecureStorageModule> {
+  return import(
+    `./secureStorage/index.ts?githubModelsHydrateActual=${Date.now()}-${Math.random()}`
+  )
+}
+
+let pristineSecureStorage: SecureStorageModule | undefined
 
 function importFreshGithubModelsCredentials(
   cacheKey: string,
@@ -37,6 +54,7 @@ describe('hydrateGithubModelsTokenFromSecureStorage', () => {
 
   beforeEach(async () => {
     await acquireSharedMutationLock('utils/githubModelsCredentials.hydrate.test.ts')
+    pristineSecureStorage ??= await importActualSecureStorage()
   })
 
   afterEach(() => {
@@ -61,6 +79,7 @@ describe('hydrateGithubModelsTokenFromSecureStorage', () => {
     delete process.env.CLAUDE_CODE_SIMPLE
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage: () => ({
         read: () => ({
           githubModels: { accessToken: 'stored-secret' },
@@ -83,6 +102,7 @@ describe('hydrateGithubModelsTokenFromSecureStorage', () => {
     delete process.env.CLAUDE_CODE_SIMPLE
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage: () => ({
         read: () => ({
           githubModels: {
@@ -107,6 +127,7 @@ describe('hydrateGithubModelsTokenFromSecureStorage', () => {
     delete process.env.CLAUDE_CODE_GITHUB_TOKEN_HYDRATED
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage: () => ({
         read: () => ({
           githubModels: { accessToken: 'stored-secret' },

@@ -9,6 +9,34 @@ import {
 } from '../test/sharedMutationLock.js'
 
 type CodexCredentialsModule = typeof import('./codexCredentials.js')
+type SecureStorageModule = typeof import('./secureStorage/index.js')
+
+/**
+ * The real namespace, through a specifier nothing mocks. Bun fixes a mocked
+ * specifier's export SHAPE at the first registration, so a stub that omits an
+ * export makes that name permanently unresolvable for the rest of the process,
+ * and any later file importing it dies at link time with
+ * `SyntaxError: Export named '...' not found`. Spreading this into each stub
+ * below keeps the shape complete.
+ */
+async function importActualSecureStorage(): Promise<SecureStorageModule> {
+  return import(
+    `./secureStorage/index.ts?codexCredentialsActual=${Date.now()}-${Math.random()}`
+  )
+}
+
+let pristineSecureStorage: SecureStorageModule | undefined
+
+type PlainTextStorageModule =
+  typeof import('./secureStorage/plainTextStorage.js')
+
+async function importActualPlainTextStorage(): Promise<PlainTextStorageModule> {
+  return import(
+    `./secureStorage/plainTextStorage.ts?codexCredentialsActual=${Date.now()}-${Math.random()}`
+  )
+}
+
+let pristinePlainTextStorage: PlainTextStorageModule | undefined
 
 function importFreshCodexCredentials(
   cacheKey: string,
@@ -42,6 +70,8 @@ describe('codexCredentials', () => {
 
   beforeEach(async () => {
     await acquireSharedMutationLock('utils/codexCredentials.test.ts')
+    pristineSecureStorage ??= await importActualSecureStorage()
+    pristinePlainTextStorage ??= await importActualPlainTextStorage()
     mockedPlainTextStorageState = null
     mockedPlainTextStorageUpdateResult = {
       success: true,
@@ -74,6 +104,20 @@ describe('codexCredentials', () => {
   afterEach(() => {
     try {
       mock.restore()
+      // mock.restore() does not undo mock.module() registrations. Without this
+      // the plainTextStorage stub outlived the file and served later suites an
+      // update() wired to this file's (reset) result state, so their seeding
+      // writes silently returned success: false.
+      if (pristinePlainTextStorage) {
+        mock.module('./secureStorage/plainTextStorage.js', () => ({
+          ...pristinePlainTextStorage!,
+        }))
+      }
+      if (pristineSecureStorage) {
+        mock.module('./secureStorage/index.js', () => ({
+          ...pristineSecureStorage!,
+        }))
+      }
       globalThis.fetch = originalFetch
 
       if (originalSimple === undefined) {
@@ -128,6 +172,7 @@ describe('codexCredentials', () => {
     )
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage,
     }))
 
@@ -181,6 +226,7 @@ describe('codexCredentials', () => {
     let attemptedNativeWrite: Record<string, unknown> | undefined
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage: (options?: { allowPlainTextFallback?: boolean }) => {
         expect(options?.allowPlainTextFallback).toBe(false)
         return {
@@ -242,6 +288,7 @@ describe('codexCredentials', () => {
     }
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage: (options?: { allowPlainTextFallback?: boolean }) => {
         expect(options?.allowPlainTextFallback).toBe(false)
         return {
@@ -282,6 +329,7 @@ describe('codexCredentials', () => {
     let nativeDeleteAttempts = 0
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage: (options?: { allowPlainTextFallback?: boolean }) => {
         expect(options?.allowPlainTextFallback).toBe(false)
         return {
@@ -334,6 +382,7 @@ describe('codexCredentials', () => {
     mockedPlainTextStorageDeleteResult = false
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage: (options?: { allowPlainTextFallback?: boolean }) => {
         expect(options?.allowPlainTextFallback).toBe(false)
         return {
@@ -382,6 +431,7 @@ describe('codexCredentials', () => {
     }))
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage,
     }))
 
@@ -427,6 +477,7 @@ describe('codexCredentials', () => {
     }
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage: () => ({
         read: () => storageState,
         readAsync: async () => storageState,
@@ -510,6 +561,7 @@ describe('codexCredentials', () => {
     }
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage: () => ({
         read: () => storageState,
         readAsync: async () => storageState,
@@ -584,6 +636,7 @@ describe('codexCredentials', () => {
     }
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage: () => ({
         read: () => storageState,
         readAsync: async () => storageState,
@@ -666,6 +719,7 @@ describe('codexCredentials', () => {
     }
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage: () => ({
         read: () => storageState,
         readAsync: async () => storageState,
@@ -752,6 +806,7 @@ describe('codexCredentials', () => {
     }
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage: () => ({
         read: () => storageState,
         readAsync: async () => storageState,
@@ -787,6 +842,7 @@ describe('codexCredentials', () => {
     }
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage: () => ({
         read: () => storageState,
         readAsync: async () => storageState,
@@ -832,6 +888,7 @@ describe('codexCredentials', () => {
     mockedPlainTextStorageState = null
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage: (options?: { allowPlainTextFallback?: boolean }) => {
         expect(options?.allowPlainTextFallback).toBe(false)
         return {
@@ -872,6 +929,7 @@ describe('codexCredentials', () => {
     }
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage: () => ({
         read: () => {
           throw new Error(
@@ -913,6 +971,7 @@ describe('codexCredentials', () => {
     }
 
     mock.module('./secureStorage/index.js', () => ({
+      ...pristineSecureStorage,
       getSecureStorage: () => ({
         read: () => storageState,
         readAsync: async () => storageState,
