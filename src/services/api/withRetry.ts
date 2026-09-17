@@ -1,3 +1,4 @@
+import type { QueryActivity } from '../../Tool.js'
 import { feature } from 'bun:bundle'
 import type Anthropic from '@anthropic-ai/sdk'
 import {
@@ -196,6 +197,13 @@ interface RetryOptions {
    * regardless of which request mode hit the overload.
    */
   initialConsecutive529Errors?: number
+  /**
+   * The query's watchdog, when the caller has one. Only the suspension is used:
+   * a usage-limit wait sleeps for hours without yielding, and QueryGuard would
+   * otherwise abort the query as idle after five minutes ("Query timed out
+   * before completion") — the wait never reaching its resume time.
+   */
+  queryActivity?: Pick<QueryActivity, 'beginUserInteraction'>
 }
 
 export class CannotRetryError extends Error {
@@ -593,7 +601,18 @@ export async function* withRetry<T>(
           // Cancellable by construction: a wait is only ever decided when a
           // signal exists, so Escape rejects this sleep with APIUserAbortError
           // and the abort propagates out of the whole retry chain.
-          await sleep(waitDecision.delayMs, options.signal, { abortError })
+          //
+          // Suspend the query watchdog for exactly the wait. It yields nothing
+          // while sleeping, so an idle watchdog would abort the query minutes
+          // in; the suspension also keeps the hours-long wait out of the hard
+          // maximum runtime. Resumed on every exit, the Escape abort included.
+          const resumeQueryWatchdog =
+            options.queryActivity?.beginUserInteraction?.()
+          try {
+            await sleep(waitDecision.delayMs, options.signal, { abortError })
+          } finally {
+            resumeQueryWatchdog?.()
+          }
           continue
         }
 

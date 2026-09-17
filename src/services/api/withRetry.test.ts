@@ -1075,6 +1075,49 @@ describe('usage-limit account switch', () => {
     expect(notices[1].switchedAccountTo).toBeUndefined()
   })
 
+  test('suspends the query watchdog for exactly the auto-wait, and resumes it once', async () => {
+    // Regression: the wait yields one notice and then sleeps for the whole delay,
+    // so the lead's QueryGuard saw no activity and aborted the query as idle
+    // after five minutes ("Query timed out before completion") long before the
+    // resume time.
+    accounts = [{ key: 'a', emailAddress: 'a@example.com', isActive: true }]
+    const { retryModule } = await importWithAccountSwitch()
+    const { withRetry } = retryModule
+
+    const watchdog: string[] = []
+    const queryActivity = {
+      beginUserInteraction: () => {
+        watchdog.push('suspend')
+        return () => {
+          watchdog.push('resume')
+        }
+      },
+    }
+    const resetAt = Math.floor(Date.now() / 1000) + 60
+    let calls = 0
+    const operation = mock(async () => {
+      calls++
+      if (calls === 1) {
+        throw makeError({
+          'anthropic-ratelimit-unified-reset': String(resetAt),
+        })
+      }
+      watchdog.push('retried')
+      return 'recovered'
+    })
+
+    const { result, threw } = await runWithRetry(withRetry, operation as never, {
+      queryActivity,
+    })
+
+    expect(threw).toBeNull()
+    expect(result).toBe('recovered')
+    expect(notices).toHaveLength(1)
+    expect(notices[0].resumeAtMs).toBeDefined()
+    // Suspended for the wait, resumed before the retried request runs.
+    expect(watchdog).toEqual(['suspend', 'resume', 'retried'])
+  })
+
   test('switches for a teammate query source, and still never sleeps for one', async () => {
     // Both halves of the gate split in one run, because the two are only
     // correct together. A teammate used to share the wait's allowlist and so

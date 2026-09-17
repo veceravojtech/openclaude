@@ -207,6 +207,47 @@ describe('runAgent provider routing', () => {
     ])
   })
 
+  test('hands the query watchdog to synchronous child contexts, and keeps it from asynchronous ones', async () => {
+    // A synchronous child runs inside the lead's query, so a long usage-limit
+    // wait inside it must be able to suspend the lead's QueryGuard; an async
+    // child outlives that query and must not touch its watchdog.
+    const queryActivity = {
+      registerActivity: () => {},
+      acquireLease: () => ({ id: '', release() {} }),
+      beginUserInteraction: () => () => {},
+    }
+    const runAgent = await importRunAgent()
+
+    for (const isAsync of [false, true]) {
+      const parentContext = {
+        ...createToolUseContext('parent-model'),
+        queryActivity,
+      } as ToolUseContext
+      const stop = new Error('stop after cache-safe params')
+      let capturedContext: ToolUseContext | undefined
+      const generator = runAgent({
+        agentDefinition: createAgentDefinition(),
+        promptMessages: [createUserMessage({ content: 'inspect this' })],
+        toolUseContext: parentContext,
+        canUseTool: async () => ({ behavior: 'allow' }),
+        isAsync,
+        querySource: 'agent:builtin:general-purpose',
+        availableTools: [],
+        onCacheSafeParams: params => {
+          capturedContext = params.toolUseContext
+          throw stop
+        },
+      })
+
+      await expect(generator.next()).rejects.toBe(stop)
+      if (isAsync) {
+        expect(capturedContext?.queryActivity).toBeUndefined()
+      } else {
+        expect(capturedContext?.queryActivity).toBe(queryActivity)
+      }
+    }
+  })
+
   test('keeps query lifecycle tracking out of asynchronous child contexts', async () => {
     const queryLifecycle = new QueryLifecycleOperationTracker()
     const parentContext = createToolUseContext('parent-model', queryLifecycle)

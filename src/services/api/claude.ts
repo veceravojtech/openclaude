@@ -32,6 +32,7 @@ import {
 } from '../../constants/system.js'
 import {
   getEmptyToolPermissionContext,
+  type QueryActivity,
   type QueryChainTracking,
   type Tool,
   type ToolPermissionContext,
@@ -793,6 +794,8 @@ export type Options = {
   taskBudget?: { total: number; remaining?: number }
   providerOverride?: { model: string; baseURL: string; apiKey: string }
   queryLifecycle?: QueryLifecycleOperationTracker
+  /** The query's watchdog, so a long usage-limit wait can suspend it (withRetry). */
+  queryActivity?: QueryActivity
   messageNormalizationTools?: Tools
   /**
    * Synchronous ownership check invoked immediately before an outbound
@@ -965,6 +968,7 @@ export async function* executeNonStreamingRequest(
     signal: AbortSignal
     initialConsecutive529Errors?: number
     querySource?: QuerySource
+    queryActivity?: Options['queryActivity']
   },
   paramsFromContext: (context: RetryContext) => BetaMessageStreamParams,
   onAttempt: (attempt: number, start: number, maxOutputTokens: number) => void,
@@ -2172,6 +2176,7 @@ async function* queryModel(
         ...(isFastModeEnabled() ? { fastMode: isFastMode } : false),
         signal,
         querySource: options.querySource,
+        queryActivity: options.queryActivity,
       },
     )
 
@@ -3126,6 +3131,7 @@ async function* queryModel(
             signal,
             initialConsecutive529Errors: is529Error(streamingError) ? 1 : 0,
             querySource: options.querySource,
+            queryActivity: options.queryActivity,
           },
           paramsFromContext,
           (attempt, _startTime, tokens) => {
@@ -3283,6 +3289,7 @@ async function* queryModel(
             ...(isFastModeEnabled() && { fastMode: isFastMode }),
             signal,
             querySource: options.querySource,
+            queryActivity: options.queryActivity,
           },
           paramsFromContext,
           (attempt, _startTime, tokens) => {

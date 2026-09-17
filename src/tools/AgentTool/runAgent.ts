@@ -754,6 +754,12 @@ export async function* runAgent({
     ...(!isAsync && toolUseContext.queryLifecycle
       ? { queryLifecycle: toolUseContext.queryLifecycle }
       : {}),
+    // Same split as queryLifecycle: a synchronous child runs inside the lead's
+    // query, so its long usage-limit wait must suspend the lead's watchdog;
+    // an async child outlives that query and must not touch it.
+    ...(!isAsync && toolUseContext.queryActivity
+      ? { queryActivity: toolUseContext.queryActivity }
+      : {}),
     // Sync agents share these callbacks with parent
     shareSetAppState: !isAsync,
     shareSetResponseLength: true, // Both sync and async contribute to response metrics

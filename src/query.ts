@@ -1601,6 +1601,7 @@ async function* queryLoop(
               ),
               queryTracking,
               queryLifecycle: toolUseContext.queryLifecycle,
+              queryActivity: toolUseContext.queryActivity,
               onProviderRequestStart: () => {
                 if (toolUseContext.abortController.signal.aborted) {
                   providerDispatchRejected = true
