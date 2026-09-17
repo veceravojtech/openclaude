@@ -45,7 +45,6 @@ import type { LocalJSXCommandContext, CommandResultDisplay } from '../../command
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js';
 import { isAgentSwarmsEnabled } from '../../utils/agentSwarmsEnabled.js';
 import { getCliTeammateModeOverride, clearCliTeammateModeOverride } from '../../utils/swarm/backends/teammateModeSnapshot.js';
-import { getHardcodedTeammateModelFallback } from '../../utils/swarm/teammateModel.js';
 import { useSearchInput } from '../../hooks/useSearchInput.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { clearFastModeCooldown, getFastModeModelDisplay, isFastModeAvailable, isFastModeEnabled, getFastModeModel, isFastModeSupportedByModel } from '../../utils/fastMode.js';
@@ -1959,10 +1958,8 @@ export function Config({
     </Box>;
 }
 function teammateModelDisplayString(value: string | null | undefined, leaderModel?: string | null): string {
-  if (value === undefined) {
-    return modelDisplayString(getHardcodedTeammateModelFallback(leaderModel));
-  }
-  if (value === null) return "Default (leader's model)";
+  // Unset and "Default" both follow the leader (getDefaultTeammateModel).
+  if (value === undefined || value === null) return "Default (leader's model)";
   return modelDisplayString(value);
 }
 function compactModelDisplayString(value: string | undefined): string {

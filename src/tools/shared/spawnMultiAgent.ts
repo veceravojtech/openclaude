@@ -24,6 +24,7 @@ import { logForDebugging } from '../../utils/debug.js'
 import { errorMessage } from '../../utils/errors.js'
 import { execFileNoThrow } from '../../utils/execFileNoThrow.js'
 import {
+  getDefaultMainLoopModelSetting,
   parseUserSpecifiedModel,
   preferOneMillionContext,
 } from '../../utils/model/model.js'
@@ -76,14 +77,34 @@ import { TEAM_CREATE_TOOL_NAME } from '../TeamCreateTool/constants.js'
 
 function getDefaultTeammateModel(leaderModel: string | null): string {
   const configured = getGlobalConfig().teammateDefaultModel
-  if (configured === null) {
-    // User picked "Default" in the /config picker — follow the leader.
-    return leaderModel ?? getHardcodedTeammateModelFallback()
-  }
-  if (configured !== undefined) {
+  if (configured !== undefined && configured !== null) {
     return parseUserSpecifiedModel(configured)
   }
-  return getHardcodedTeammateModelFallback(leaderModel)
+  // Never set, or "Default" picked in /config: a teammate runs the leader's
+  // model unless something explicitly says otherwise. The unset case used to
+  // take the newest default Opus instead, so a lead on Opus 4.6 spawned Opus 5
+  // teammates. The provider table is only a last resort for when there is no
+  // leader model to follow.
+  return leaderModel ?? getHardcodedTeammateModelFallback()
+}
+
+/**
+ * The model the leader is actually running, with the same precedence query.ts
+ * uses for the leader's own requests: a session-only /model switch, then the
+ * model setting (which includes --model), then the default. Reading only
+ * `mainLoopModel` missed a session switch and was null on a default model, so
+ * a teammate could be handed a model the leader was not using.
+ *
+ * Exported for testing.
+ */
+export function getLeaderModel(
+  state: Pick<AppState, 'mainLoopModel' | 'mainLoopModelForSession'>,
+): string {
+  return parseUserSpecifiedModel(
+    state.mainLoopModelForSession ??
+      state.mainLoopModel ??
+      getDefaultMainLoopModelSetting(),
+  )
 }
 
 /**
@@ -419,7 +440,7 @@ export async function handleSpawnSplitPane(
   const { name, prompt, agent_type, cwd, plan_mode_required } = input
 
   // Resolve model: 'inherit' → leader's model; undefined → default Opus
-  const model = resolveTeammateModel(input.model, getAppState().mainLoopModel)
+  const model = resolveTeammateModel(input.model, getLeaderModel(getAppState()))
 
   if (prompt === undefined) {
     throw new Error(IDLE_SPAWN_UNSUPPORTED_ERROR)
@@ -664,7 +685,7 @@ async function handleSpawnSeparateWindow(
   const { name, prompt, agent_type, cwd, plan_mode_required } = input
 
   // Resolve model: 'inherit' → leader's model; undefined → default Opus
-  const model = resolveTeammateModel(input.model, getAppState().mainLoopModel)
+  const model = resolveTeammateModel(input.model, getLeaderModel(getAppState()))
 
   if (prompt === undefined) {
     throw new Error(IDLE_SPAWN_UNSUPPORTED_ERROR)
@@ -957,7 +978,7 @@ async function handleSpawnInProcess(
   const { name, prompt, agent_type, plan_mode_required } = input
 
   // Resolve model: 'inherit' → leader's model; undefined → default Opus
-  const model = resolveTeammateModel(input.model, getAppState().mainLoopModel)
+  const model = resolveTeammateModel(input.model, getLeaderModel(getAppState()))
   const modelWasToolSpecified =
     input.modelWasToolSpecified ?? input.model !== undefined
 

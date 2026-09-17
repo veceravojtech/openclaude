@@ -33,13 +33,13 @@ afterEach(() => {
 })
 
 /**
- * Import resolveTeammateModel() with the two inputs that decide the default:
- * the /config value (teammateDefaultModel) and the active provider category.
+ * Import spawnMultiAgent with the two inputs that decide a teammate's default
+ * model: the /config value (teammateDefaultModel) and the active provider.
  */
-async function importResolveTeammateModel(options: {
+async function importSpawnMultiAgent(options: {
   provider: string
   teammateDefaultModel?: string | null
-}): Promise<SpawnMultiAgentModule['resolveTeammateModel']> {
+}): Promise<SpawnMultiAgentModule> {
   const nonce = `${Date.now()}-${Math.random()}`
   actualConfig ??= await import(`../../utils/config.ts?teammateModelActual=${nonce}`)
   actualProviders ??= await import(
@@ -64,10 +64,14 @@ async function importResolveTeammateModel(options: {
     isCustomAnthropicProvider: () => false,
   }))
 
-  const mod: SpawnMultiAgentModule = await import(
-    `./spawnMultiAgent.js?teammateModel=${nonce}`
-  )
-  return mod.resolveTeammateModel
+  return import(`./spawnMultiAgent.js?teammateModel=${nonce}`)
+}
+
+async function importResolveTeammateModel(options: {
+  provider: string
+  teammateDefaultModel?: string | null
+}): Promise<SpawnMultiAgentModule['resolveTeammateModel']> {
+  return (await importSpawnMultiAgent(options)).resolveTeammateModel
 }
 
 test('an unconfigured teammate default inherits the leader model on an OpenAI-compatible provider', async () => {
@@ -108,17 +112,83 @@ test('an explicit teammateDefaultModel in /config still wins over the leader mod
   expect(resolveTeammateModel(undefined, 'glm-5.3')).toBe('glm-5.3-flash')
 })
 
-test('the first-party default is unchanged by the OpenAI-compatible fix', async () => {
-  // The leader being on Sonnet must NOT drag first-party teammates off Opus:
-  // only the ambiguous `openai` bucket inherits. The default Opus carries the
-  // 1M preference every agent gets on a model that supports it.
+test('an unset teammate default follows the leader on first-party too', async () => {
+  // This used to assert the opposite — that a leader on Sonnet must NOT pull
+  // first-party teammates off the newest Opus. The rule now is that a teammate
+  // runs the leader's model unless something explicitly says otherwise, on
+  // every provider, not only the OpenAI-compatible bucket.
   const resolveTeammateModel = await importResolveTeammateModel({
     provider: 'firstParty',
   })
 
   expect(resolveTeammateModel(undefined, 'claude-sonnet-4-5-20250929')).toBe(
-    'claude-opus-5[1m]',
+    'claude-sonnet-4-5-20250929[1m]',
   )
+})
+
+test('a lead on Opus 4.6 spawns Opus 4.6 teammates when no model is given', async () => {
+  // Regression: the unset default took the newest default Opus, so a lead on
+  // Opus 4.6 got Opus 5 teammates.
+  const resolveTeammateModel = await importResolveTeammateModel({
+    provider: 'firstParty',
+  })
+
+  expect(resolveTeammateModel(undefined, 'claude-opus-4-6')).toBe(
+    'claude-opus-4-6[1m]',
+  )
+  expect(resolveTeammateModel(undefined, 'claude-opus-4-6[1m]')).toBe(
+    'claude-opus-4-6[1m]',
+  )
+  expect(resolveTeammateModel('inherit', 'claude-opus-4-6')).toBe(
+    'claude-opus-4-6[1m]',
+  )
+})
+
+test('a model the spawn names explicitly still wins over the leader on first-party', async () => {
+  const resolveTeammateModel = await importResolveTeammateModel({
+    provider: 'firstParty',
+  })
+
+  expect(resolveTeammateModel('claude-sonnet-4-6', 'claude-opus-4-6')).toBe(
+    'claude-sonnet-4-6[1m]',
+  )
+})
+
+test('with no leader model at all, the provider default is the last resort', async () => {
+  const resolveTeammateModel = await importResolveTeammateModel({
+    provider: 'firstParty',
+  })
+
+  expect(resolveTeammateModel(undefined, null)).toBe('claude-opus-5[1m]')
+})
+
+test('the leader model is what the leader actually runs: a session switch first, then the setting', async () => {
+  // query.ts sends the leader's requests with mainLoopModelForSession ??
+  // mainLoopModel ?? default. Reading mainLoopModel alone handed teammates the
+  // persistent setting after a session-only /model switch.
+  const { getLeaderModel } = await importSpawnMultiAgent({
+    provider: 'firstParty',
+  })
+
+  expect(
+    getLeaderModel({
+      mainLoopModelForSession: 'claude-opus-4-6',
+      mainLoopModel: 'claude-opus-5[1m]',
+    }),
+  ).toBe('claude-opus-4-6')
+  expect(
+    getLeaderModel({
+      mainLoopModelForSession: null,
+      mainLoopModel: 'claude-opus-4-6[1m]',
+    }),
+  ).toBe('claude-opus-4-6[1m]')
+  // A default leader still yields a concrete model, never null.
+  const onDefault = getLeaderModel({
+    mainLoopModelForSession: null,
+    mainLoopModel: null,
+  })
+  expect(typeof onDefault).toBe('string')
+  expect(onDefault.length).toBeGreaterThan(0)
 })
 
 test('an unset teammate default runs on the same 1M window as its claude-opus-5[1m] lead', async () => {
