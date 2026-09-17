@@ -5,6 +5,11 @@ import { isModelAlias } from '../../utils/model/aliases.js'
 import { parseModelFlagValue } from '../../utils/cliArgs.js'
 import { argsBeforeModelOwningSubcommand } from '../../utils/printFlag.js'
 import { resolveRouteIdFromBaseUrl } from '../../integrations/routeMetadata.js'
+import {
+  getAPIProvider,
+  isFirstPartyAnthropicBaseUrl,
+} from '../../utils/model/providers.js'
+import { findProviderProfileRouteForModel } from '../../utils/providerProfiles.js'
 
 /**
  * Provider override resolved from agent routing config.
@@ -148,15 +153,61 @@ export function resolveAgentProvider(
 /**
  * Resolve an agent route directly from a requested model name (cross-provider or model-only).
  * Checks for an exact match in agentModels. Does not fuzzy match or normalize case.
+ *
+ * With no usable agentModels entry, a session on Anthropic's own API also looks
+ * for a saved provider profile that serves a non-Claude model (see
+ * resolveProviderProfileRoute). An explicit agentModels entry always wins.
  */
 export function resolveAgentModelProvider(
   modelName: string | undefined,
   settings: SettingsJson | null,
 ): AgentRoute | null {
-  if (!settings || !settings.agentModels || !modelName) return null
+  if (!modelName) return null
 
   const trimmedModelName = modelName.trim()
-  return toAgentRoute(trimmedModelName, settings.agentModels[trimmedModelName])
+  const configured = settings?.agentModels
+    ? toAgentRoute(trimmedModelName, settings.agentModels[trimmedModelName])
+    : null
+  return configured ?? resolveProviderProfileRoute(trimmedModelName)
+}
+
+/**
+ * Whether a requested model could be a Claude model: an alias, `inherit`, or an
+ * id naming a Claude family. Deliberately broad — a false "Claude" only skips
+ * the profile fallback, while a false "not Claude" would reroute a model
+ * Anthropic's API may well serve.
+ */
+function isPossiblyClaudeModel(model: string): boolean {
+  return (
+    model === 'inherit' ||
+    isModelAlias(model) ||
+    /claude|opus|sonnet|haiku/i.test(model)
+  )
+}
+
+/** Whether this session's requests go to Anthropic's own API. */
+function isAnthropicFirstPartySession(): boolean {
+  return getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()
+}
+
+/**
+ * A saved provider profile's route for a model, used only when the session runs
+ * on Anthropic's own API and the model is not a Claude model.
+ *
+ * That is the one case where the model cannot run on the session's provider at
+ * all: without a route, an agent or teammate asked for e.g. `glm-5.3` sent it to
+ * Anthropic and died at once with "There's an issue with the selected model". A
+ * matching profile yields exactly the route an equivalent agentModels entry
+ * would, so the user need not repeat its endpoint and key in settings.
+ *
+ * Scoped this narrowly so no working setup changes: on any other provider, or
+ * for a Claude model, resolution is exactly what it was.
+ */
+function resolveProviderProfileRoute(model: string): ProviderOverride | null {
+  if (!isAnthropicFirstPartySession() || isPossiblyClaudeModel(model)) {
+    return null
+  }
+  return findProviderProfileRouteForModel(model)
 }
 
 /**

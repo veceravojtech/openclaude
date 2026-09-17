@@ -629,6 +629,56 @@ export function hasProviderProfiles(config = getGlobalConfig()): boolean {
   return getProviderProfiles(config).length > 0
 }
 
+/**
+ * The agent route a saved provider profile gives a model it serves:
+ * `{ model, baseURL, apiKey }` — exactly what an agentModels entry carrying that
+ * profile's base_url and api_key resolves to. Null when no profile qualifies.
+ *
+ * Agent routes are plain OpenAI-compatible connections, and a pane teammate
+ * receives one through applyAgentProviderOverrideToEnv, which clears API-format
+ * and auth-header knobs. So a profile qualifies only when that plain connection
+ * reproduces it faithfully:
+ * - it uses the OpenAI-compatible wire (not Anthropic, Gemini, Mistral, GitHub,
+ *   Bedrock or Vertex shaping);
+ * - it has a base URL and an API key (OAuth profiles such as Codex have none);
+ * - it sets no non-default API format, auth scheme, auth header, Azure style or
+ *   custom headers, which the route would silently drop.
+ *
+ * The requested model must be one the profile lists (its model field may hold
+ * several, separated by `,` or `;`), compared case-insensitively. The first
+ * qualifying profile in saved order wins.
+ */
+export function findProviderProfileRouteForModel(
+  requestedModel: string,
+  profiles: readonly ProviderProfile[] = getProviderProfiles(),
+): { model: string; baseURL: string; apiKey: string } | null {
+  const wanted = requestedModel.trim().toLowerCase()
+  if (!wanted) return null
+  for (const profile of profiles) {
+    if (resolveProfileCompatibility(profile.provider).compatibilityMode !== 'openai') {
+      continue
+    }
+    const baseURL = profile.baseUrl?.trim()
+    const apiKey = sanitizeApiKey(profile.apiKey)
+    if (!baseURL || !apiKey) continue
+    const hasNonDefaultWire =
+      (profile.apiFormat !== undefined && profile.apiFormat !== 'chat_completions') ||
+      (profile.authScheme !== undefined && profile.authScheme !== 'bearer') ||
+      Boolean(profile.authHeader?.trim()) ||
+      Boolean(profile.authHeaderValue?.trim()) ||
+      profile.azureStyle === true ||
+      Object.keys(profile.customHeaders ?? {}).length > 0
+    if (hasNonDefaultWire) continue
+    const served = parseModelList(profile.model ?? '').find(
+      model => model.toLowerCase() === wanted,
+    )
+    if (served) {
+      return { model: served, baseURL, apiKey }
+    }
+  }
+  return null
+}
+
 function hasProviderSelectionFlags(
   processEnv: NodeJS.ProcessEnv = process.env,
 ): boolean {

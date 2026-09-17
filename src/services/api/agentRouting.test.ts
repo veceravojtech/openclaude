@@ -12,6 +12,8 @@ import {
 } from './agentRouting.js'
 import { getAgentModel } from '../../utils/model/agent.js'
 import * as agentModelModule from '../../utils/model/agent.js'
+import * as providersModule from '../../utils/model/providers.js'
+import * as providerProfilesModule from '../../utils/providerProfiles.js'
 import type { SettingsJson } from '../../utils/settings/types.js'
 
 const baseSettings = {
@@ -871,5 +873,93 @@ describe('resolveAgentRunModelRouting: in-process teammate route identity', () =
         apiKey: 'sk-ds',
       },
     })
+  })
+})
+
+describe('a saved provider profile serves a non-Claude model on an Anthropic session', () => {
+  // Regression: a lead on Opus 4.6 spawned teammates on glm-5.3. With no
+  // agentModels entry the model went to Anthropic and every teammate died on its
+  // first request ("There's an issue with the selected model (glm-5.3)"), even
+  // though a saved Z.AI profile serves glm-5.3.
+  const zaiRoute = {
+    model: 'glm-5.3',
+    baseURL: 'https://api.z.ai/api/coding/paas/v4',
+    apiKey: 'test-key-abc123',
+  }
+  let spies: { mockRestore(): void }[] = []
+  let profileLookup: ReturnType<typeof spyOn>
+
+  function onProvider(provider: string, anthropicBaseUrl = true): void {
+    spies.push(
+      spyOn(providersModule, 'getAPIProvider').mockReturnValue(provider as never),
+      spyOn(providersModule, 'isFirstPartyAnthropicBaseUrl').mockReturnValue(
+        anthropicBaseUrl,
+      ),
+    )
+  }
+
+  beforeEach(() => {
+    // Never the developer's own saved profiles: those can serve these models.
+    profileLookup = spyOn(
+      providerProfilesModule,
+      'findProviderProfileRouteForModel',
+    ).mockImplementation(model => (model === 'glm-5.3' ? zaiRoute : null))
+    spies = [profileLookup]
+  })
+  afterEach(() => {
+    for (const spy of spies) spy.mockRestore()
+  })
+
+  test('routes in-process agents and pane teammates through the profile', () => {
+    onProvider('firstParty')
+    const settings = {} as SettingsJson
+
+    expect(resolveAgentModelProvider('glm-5.3', settings)).toEqual(zaiRoute)
+    expect(
+      resolveOutOfProcessTeammateProvider({ cliModel: 'glm-5.3', settings }),
+    ).toEqual(zaiRoute)
+    const routing = resolveAgentRunModelRouting({
+      resolvedAgentModel: 'glm-5.3',
+      parentModel: 'claude-opus-4-6[1m]',
+      toolSpecifiedModel: 'glm-5.3',
+      settings,
+    })
+    expect(routing.providerOverride).toEqual(zaiRoute)
+    expect(routing.mainLoopModel).toBe('glm-5.3')
+  })
+
+  test('an explicit agentModels entry still wins over the profile', () => {
+    onProvider('firstParty')
+    const settings = {
+      agentModels: {
+        'glm-5.3': { base_url: 'https://proxy.example.com/v1', api_key: 'sk-own' },
+      },
+    } as unknown as SettingsJson
+
+    expect(resolveAgentModelProvider('glm-5.3', settings)).toEqual({
+      model: 'glm-5.3',
+      baseURL: 'https://proxy.example.com/v1',
+      apiKey: 'sk-own',
+    })
+  })
+
+  test('a Claude model is never rerouted through a profile', () => {
+    onProvider('firstParty')
+    profileLookup.mockImplementation(() => zaiRoute)
+
+    for (const model of ['claude-opus-4-6', 'claude-opus-4-6[1m]', 'opus', 'opus-4-6', 'inherit']) {
+      expect(resolveAgentModelProvider(model, {} as SettingsJson)).toBeNull()
+    }
+    expect(profileLookup).not.toHaveBeenCalled()
+  })
+
+  test('on any other provider, or behind a custom base URL, resolution is unchanged', () => {
+    onProvider('openai')
+    expect(resolveAgentModelProvider('glm-5.3', {} as SettingsJson)).toBeNull()
+    for (const spy of spies.splice(1)) spy.mockRestore()
+
+    onProvider('firstParty', false)
+    expect(resolveAgentModelProvider('glm-5.3', {} as SettingsJson)).toBeNull()
+    expect(profileLookup).not.toHaveBeenCalled()
   })
 })
