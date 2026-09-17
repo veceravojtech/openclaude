@@ -1039,9 +1039,11 @@ type IdlePolicy = {
  * could still assign work, the wait ends with an idle shutdown; that check
  * runs before a new occurrence is launched, so an always-running hook cannot
  * starve it. A shutdown request from the lead needs no special handling: the
- * mailbox scan returns it before the policy is consulted, and the sticky
- * task.shutdownRequested flag (never cleared after a rejected request) must
- * not silence the policy for the rest of the teammate's life.
+ * mailbox scan returns it before the policy is consulted, and
+ * task.shutdownRequested must not silence the policy. A rejection now clears
+ * that flag (clearTeammateShutdownRequest), but a request the model simply
+ * ignored leaves it set, and a set flag is no evidence that the teammate is
+ * about to stop.
  */
 function createIdlePolicy(
   identity: TeammateIdentity,

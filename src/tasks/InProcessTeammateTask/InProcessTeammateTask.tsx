@@ -37,6 +37,12 @@ export const InProcessTeammateTask: Task = {
 
 /**
  * Request shutdown for a teammate.
+ *
+ * The flag means "a shutdown request is in flight": it is what draws the row as
+ * `stopping` (taskStatusUtils). It is NOT a record that a request was ever
+ * made, which is why {@link clearTeammateShutdownRequest} exists — leaving it
+ * set after the teammate has answered makes a live teammate read as stopping
+ * for the rest of its life.
  */
 export function requestTeammateShutdown(taskId: string, setAppState: SetAppState): void {
   updateTaskState<InProcessTeammateTaskState>(taskId, setAppState, task => {
@@ -48,6 +54,23 @@ export function requestTeammateShutdown(taskId: string, setAppState: SetAppState
       shutdownRequested: true
     };
   });
+}
+
+/**
+ * Takes a teammate's shutdown request out of flight, after it has been answered
+ * with a rejection: the teammate keeps working, so the row must stop reading
+ * `stopping` and the next request must be able to set the flag again.
+ *
+ * The flag used to be set once and never cleared. Together with the
+ * short-circuit that used to sit in `InProcessBackend.terminate`, that made one
+ * declined request permanently silence every later one — while still reporting
+ * success to the caller.
+ */
+export function clearTeammateShutdownRequest(taskId: string, setAppState: SetAppState): void {
+  updateTaskState<InProcessTeammateTaskState>(taskId, setAppState, task => task.shutdownRequested ? {
+    ...task,
+    shutdownRequested: false
+  } : task);
 }
 
 /**

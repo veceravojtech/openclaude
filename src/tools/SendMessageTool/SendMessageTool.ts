@@ -6,7 +6,10 @@ import { isTerminalTaskStatus, type TaskStatus } from '../../Task.js'
 import type { Tool, ToolUseContext } from '../../Tool.js'
 import { buildTool, type ToolDef } from '../../Tool.js'
 import type { AppState } from '../../state/AppState.js'
-import { findTeammateTaskByAgentId } from '../../tasks/InProcessTeammateTask/InProcessTeammateTask.js'
+import {
+  clearTeammateShutdownRequest,
+  findTeammateTaskByAgentId,
+} from '../../tasks/InProcessTeammateTask/InProcessTeammateTask.js'
 import {
   isLocalAgentTask,
   queuePendingMessage,
@@ -545,6 +548,21 @@ async function handleShutdownRejection(
     },
     teamName,
   )
+
+  // The request has been ANSWERED, so it is no longer in flight: an in-process
+  // teammate takes its own `shutdownRequested` flag down again. Leaving it set
+  // left the row reading `stopping` forever and — before the short-circuit in
+  // InProcessBackend.terminate was removed — made every later request from the
+  // lead a no-op that reported success. Who exits (or here, keeps working) is
+  // the ambient teammate, so this uses `getAgentId()` rather than the caller
+  // that signed the response, exactly as the approval path does.
+  const agentId = getAgentId()
+  if (agentId) {
+    const task = findTeammateTaskByAgentId(agentId, context.getAppState().tasks)
+    if (task) {
+      clearTeammateShutdownRequest(task.id, context.setAppState)
+    }
+  }
 
   return {
     data: {

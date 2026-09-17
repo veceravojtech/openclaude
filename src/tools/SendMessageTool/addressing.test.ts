@@ -245,6 +245,12 @@ test('resolveCallerTeamName and getRootTeamName read the tree, not the session',
   expect(formatRecipientAddress('scout', undefined)).toBe('scout')
 })
 
+/**
+ * The last AppState the tool's own `setAppState` produced, so a test can read
+ * a task field the handler wrote. Reset per `contextFor`.
+ */
+let lastAppState: AppState | undefined
+
 /** The AppState a teammate shares with its lead: the ROOT team's context. */
 function appState(workerTask?: unknown): AppState {
   return {
@@ -263,11 +269,16 @@ function appState(workerTask?: unknown): AppState {
 }
 
 function contextFor(agentId?: string, workerTask?: unknown): ToolUseContext {
-  const state = appState(workerTask)
+  let state = appState(workerTask)
+  lastAppState = state
+  const setAppState = (f: (prev: AppState) => AppState): void => {
+    state = f(state)
+    lastAppState = state
+  }
   return {
     getAppState: () => state,
-    setAppState: () => {},
-    setAppStateForTasks: () => {},
+    setAppState,
+    setAppStateForTasks: setAppState,
     agentId: agentId as AgentId | undefined,
   } as unknown as ToolUseContext
 }
@@ -418,12 +429,67 @@ test('shutdown messages resolve like any `to` and are signed by the caller', asy
   expect(await inboxProtocolFrom('team-lead', SUB)).toEqual(['worker', 'scout'])
 })
 
+test('a rejected shutdown clears the flag so the next request is a fresh one', async () => {
+  // shutdownRequested used to be set by the lead's terminate() and then never
+  // cleared, which left the row reading `stopping` for the rest of the
+  // teammate's life and let terminate() short-circuit every later request.
+  // A rejection is an ANSWER: the request is no longer in flight.
+  const workerTask = {
+    ...runningWorkerTask(new AbortController()),
+    shutdownRequested: true,
+  }
+
+  const result = await asTeammate(WORKER_ID, 'worker', SUB, () =>
+    sendStructured(
+      'team-lead',
+      {
+        type: 'shutdown_response',
+        request_id: 'shutdown-4@worker',
+        approve: false,
+        reason: 'mid-task',
+      },
+      undefined,
+      workerTask,
+    ),
+  )
+
+  expect(result).toContain('Shutdown rejected')
+  expect(
+    (lastAppState?.tasks[WORKER_ID] as { shutdownRequested?: boolean })
+      .shutdownRequested,
+  ).toBe(false)
+  // Still running: a rejection stops the request, not the teammate.
+  expect(lastAppState?.tasks[WORKER_ID]?.status).toBe('running')
+})
+
 test('an approved shutdown answers its own team’s lead, signed by the caller', async () => {
   // The teammate's own task has to be in AppState: with it, approval aborts
   // that controller. The roster entry's `backendType: 'in-process'` is what
   // keeps this path off `gracefulShutdown` — do not loosen it here.
   const abortController = new AbortController()
-  const workerTask = {
+  const workerTask = runningWorkerTask(abortController)
+
+  const result = await asTeammate(WORKER_ID, 'worker', SUB, () =>
+    sendStructured(
+      'team-lead',
+      {
+        type: 'shutdown_response',
+        request_id: 'shutdown-3@worker',
+        approve: true,
+      },
+      undefined,
+      workerTask,
+    ),
+  )
+  expect(result).toContain('Shutdown approved')
+  expect(abortController.signal.aborted).toBe(true)
+  expect(await inboxProtocolFrom('team-lead', SUB)).toEqual(['worker'])
+  expect(await inboxSenders('team-lead', ROOT)).toEqual([])
+})
+
+/** The worker's own in-process task row, as its lead's AppState holds it. */
+function runningWorkerTask(abortController: AbortController) {
+  return {
     id: WORKER_ID,
     type: 'in_process_teammate',
     status: 'running',
@@ -449,21 +515,4 @@ test('an approved shutdown answers its own team’s lead, signed by the caller',
     lastReportedTokenCount: 0,
     abortController,
   }
-
-  const result = await asTeammate(WORKER_ID, 'worker', SUB, () =>
-    sendStructured(
-      'team-lead',
-      {
-        type: 'shutdown_response',
-        request_id: 'shutdown-3@worker',
-        approve: true,
-      },
-      undefined,
-      workerTask,
-    ),
-  )
-  expect(result).toContain('Shutdown approved')
-  expect(abortController.signal.aborted).toBe(true)
-  expect(await inboxProtocolFrom('team-lead', SUB)).toEqual(['worker'])
-  expect(await inboxSenders('team-lead', ROOT)).toEqual([])
-})
+}
