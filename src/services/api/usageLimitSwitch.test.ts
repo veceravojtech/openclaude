@@ -501,3 +501,119 @@ describe('formatDeclinedCandidatesForDebug', () => {
     expect(line).not.toContain('work account')
   })
 })
+
+describe('switchToNextAccountOnUsageLimit: an expired account is refreshed before the switch', () => {
+  // Regression: the other account in a two-account pool is the one not in use,
+  // so its access token had expired (~5 h) while its refresh token was fine.
+  // vouchForAccount refused it, the switch reported no-vouchable-candidate, and
+  // every 429 waited out the reset instead ("resuming at 21:40").
+  let effectsCalls: number
+  let calls: string[]
+
+  const deps = (options: {
+    accounts: AccountSummary[]
+    vouchable: readonly string[]
+    refreshable: readonly string[]
+    refreshSucceeds: boolean
+  }) => ({
+    readAccounts: () => options.accounts,
+    readVouchableKeys: (): ReadonlySet<string> => new Set(options.vouchable),
+    switchAccount: async (key: string) => {
+      calls.push(`switch:${key}`)
+      return { success: true }
+    },
+    readRefreshableKeys: (): ReadonlySet<string> => new Set(options.refreshable),
+    switchWithFreshCredential: async (key: string, previousKey: string | undefined) => {
+      calls.push(`fresh:${key}<-${previousKey}`)
+      return { success: options.refreshSucceeds }
+    },
+  })
+
+  beforeEach(() => {
+    effectsCalls = 0
+    calls = []
+    registerAccountSwitchEffects(() => {
+      effectsCalls++
+    })
+  })
+
+  afterEach(() => {
+    clearAccountSwitchEffects()
+  })
+
+  test('the idle account with an expired access token is refreshed and switched to', async () => {
+    const before = getAccountSwitchEpoch()
+    const outcome = await switchToNextAccountOnUsageLimit(
+      { ...eligible, triedKeys: new Set() },
+      deps({
+        accounts: [account('a', 'a@example.com', true), account('b', 'b@example.com')],
+        vouchable: ['a'],
+        refreshable: ['b'],
+        refreshSucceeds: true,
+      }),
+    )
+
+    expect(outcome).toEqual({ type: 'switched', key: 'b', name: 'b@example.com' })
+    // Handed the account it came from, so a failed refresh can switch back.
+    expect(calls).toEqual(['fresh:b<-a'])
+    expect(effectsCalls).toBe(1)
+    expect(getAccountSwitchEpoch()).toBe(before + 1)
+  })
+
+  test('a refresh that yields no live token keeps the session where it was, once per request', async () => {
+    const before = getAccountSwitchEpoch()
+    const triedKeys = new Set<string>()
+    const failing = deps({
+      accounts: [account('a', 'a@example.com', true), account('b', 'b@example.com')],
+      vouchable: ['a'],
+      refreshable: ['b'],
+      refreshSucceeds: false,
+    })
+
+    const first = await switchToNextAccountOnUsageLimit({ ...eligible, triedKeys }, failing)
+    expect(first).toEqual({ type: 'skipped', reason: 'switch-failed' })
+    expect(effectsCalls).toBe(0)
+    expect(getAccountSwitchEpoch()).toBe(before)
+    expect(triedKeys.has('b')).toBe(true)
+
+    // The next 429 in the same request does not refresh `b` again: nothing is
+    // left, so the wait decision can take over.
+    const second = await switchToNextAccountOnUsageLimit({ ...eligible, triedKeys }, failing)
+    expect(second).toEqual({ type: 'skipped', reason: 'no-candidate' })
+    expect(calls).toEqual(['fresh:b<-a'])
+  })
+
+  test('an account usable as it stands is preferred, and no refresh is attempted', async () => {
+    const outcome = await switchToNextAccountOnUsageLimit(
+      { ...eligible, triedKeys: new Set() },
+      deps({
+        accounts: [
+          account('a', 'a@example.com', true),
+          account('b', 'b@example.com'),
+          account('c', 'c@example.com'),
+        ],
+        vouchable: ['a', 'b'],
+        refreshable: ['c'],
+        refreshSucceeds: true,
+      }),
+    )
+
+    expect(outcome).toEqual({ type: 'switched', key: 'b', name: 'b@example.com' })
+    expect(calls).toEqual(['switch:b'])
+  })
+
+  test('an account that is not refreshable is still declined as before', async () => {
+    const outcome = await switchToNextAccountOnUsageLimit(
+      { ...eligible, triedKeys: new Set() },
+      deps({
+        accounts: [account('a', 'a@example.com', true), { key: 'default', isActive: false }],
+        vouchable: ['a'],
+        refreshable: [],
+        refreshSucceeds: true,
+      }),
+    )
+
+    expect(outcome).toEqual({ type: 'skipped', reason: 'no-vouchable-candidate' })
+    expect(calls).toEqual([])
+  })
+})

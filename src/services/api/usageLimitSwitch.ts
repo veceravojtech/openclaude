@@ -43,6 +43,10 @@ import {
 import type { AccountSummary } from '../../utils/authAccounts.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { isForegroundUsageLimitSource } from './usageLimitWait.js'
+import {
+  readRefreshableAccountKeys,
+  switchToAccountWithFreshCredential,
+} from '../../utils/accountSwitchFreshCredential.js'
 
 // -- source gate ---------------------------------------------------------------
 
@@ -264,6 +268,17 @@ type SwitchDeps = {
   readAccounts: () => AccountSummary[]
   readVouchableKeys: () => ReadonlySet<string>
   switchAccount: (key: string) => Promise<{ success: boolean; warning?: string }>
+  /**
+   * Keys that fail vouching only on an expired access token (see
+   * accountSwitchFreshCredential). Optional: without it, and without
+   * switchWithFreshCredential, an expired account is never tried — the
+   * behaviour before refresh-then-switch existed.
+   */
+  readRefreshableKeys?: () => ReadonlySet<string>
+  switchWithFreshCredential?: (
+    key: string,
+    previousKey: string | undefined,
+  ) => Promise<{ success: boolean; warning?: string }>
 }
 
 // Getters, not values: ESM live bindings resolve late here, so a module
@@ -277,6 +292,12 @@ const productionSwitchDeps: SwitchDeps = {
   },
   get switchAccount() {
     return switchAccount
+  },
+  get readRefreshableKeys() {
+    return readRefreshableAccountKeys
+  },
+  get switchWithFreshCredential() {
+    return switchToAccountWithFreshCredential
   },
 }
 
@@ -320,6 +341,46 @@ function logDeclinedCandidates(declined: readonly AccountSummary[]): void {
  * against the same account within the request. The one-per-account budget is
  * what stops an exhausted account map from turning into a loop.
  */
+/**
+ * Try the first untried, non-active account that is refreshable (see
+ * readRefreshableAccountKeys). Returns the account when the switch took, null
+ * when one was tried and its credential could not be refreshed, and undefined
+ * when there was none to try — including when the deps provide no refresh path,
+ * or reading the refreshable keys fails (never a crash in place of the 429).
+ */
+async function trySwitchWithFreshCredential(
+  accounts: readonly AccountSummary[],
+  triedKeys: Set<string>,
+  deps: SwitchDeps,
+): Promise<AccountSummary | null | undefined> {
+  if (!deps.readRefreshableKeys || !deps.switchWithFreshCredential) {
+    return undefined
+  }
+  let refreshableKeys: ReadonlySet<string>
+  try {
+    refreshableKeys = deps.readRefreshableKeys()
+  } catch {
+    return undefined
+  }
+  const account = accounts.find(
+    candidate =>
+      !candidate.isActive &&
+      !triedKeys.has(candidate.key) &&
+      refreshableKeys.has(candidate.key),
+  )
+  if (!account) {
+    return undefined
+  }
+  triedKeys.add(account.key)
+  const previousKey = accounts.find(candidate => candidate.isActive)?.key
+  try {
+    const result = await deps.switchWithFreshCredential(account.key, previousKey)
+    return result.success ? account : null
+  } catch {
+    return null
+  }
+}
+
 export async function switchToNextAccountOnUsageLimit({
   status,
   isFirstParty,
@@ -372,6 +433,26 @@ export async function switchToNextAccountOnUsageLimit({
   }
   const candidate = chooseSwitchCandidate(accounts, triedKeys, vouchableKeys)
   if (!candidate) {
+    // Nothing is usable as it stands. An account whose ONLY failing condition
+    // is an expired access token is the normal state of the account not in
+    // use, so try one: refresh its credential, and keep the switch only if that
+    // yields a live token (switchToAccountWithFreshCredential switches back
+    // otherwise). Claimed first, like every candidate, so a failed refresh is
+    // not retried within this request and the wait below can take over.
+    const refreshed = await trySwitchWithFreshCredential(accounts, triedKeys, deps)
+    if (refreshed) {
+      effects()
+      accountSwitchEpoch++
+      return {
+        type: 'switched',
+        key: refreshed.key,
+        name: accountDisplayName(refreshed),
+      }
+    }
+    if (refreshed === null) {
+      return { type: 'skipped', reason: 'switch-failed' }
+    }
+
     // `candidate` is undefined exactly when no untried non-active account is
     // vouchable, so every untried non-active account left IS a declined one.
     // Non-empty therefore means "something was there and the client refused to
