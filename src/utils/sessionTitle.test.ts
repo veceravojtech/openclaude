@@ -44,6 +44,55 @@ function rejectWhenAborted(signal: AbortSignal): Promise<never> {
   })
 }
 
+/**
+ * Pristine namespaces, captured ONCE through cache-busted specifiers nothing
+ * mocks. mock.restore() does not undo mock.module() registrations, so without
+ * the afterEach restore below every stub this file installs outlived it and
+ * served the rest of the sweep: the leaked ./betas.js copy carried its own
+ * module state, so utils/api.test.ts read schema.defer_loading as undefined.
+ */
+type PristineModules = {
+  analytics: Record<string, unknown>
+  betas: Record<string, unknown>
+  claude: Record<string, unknown>
+  combinedAbortSignal: Record<string, unknown>
+  debug: Record<string, unknown>
+  model: Record<string, unknown>
+  providers: Record<string, unknown>
+}
+
+let pristine: PristineModules | undefined
+
+async function capturePristineModules(): Promise<PristineModules> {
+  const nonce = `sessionTitlePristine=${Date.now()}-${Math.random()}`
+  const [
+    analytics,
+    betas,
+    claude,
+    combinedAbortSignal,
+    debug,
+    model,
+    providers,
+  ] = await Promise.all([
+    import(`../services/analytics/index.ts?${nonce}`),
+    import(`./betas.ts?${nonce}`),
+    import(`../services/api/claude.ts?${nonce}`),
+    import(`./combinedAbortSignal.ts?${nonce}`),
+    import(`./debug.ts?${nonce}`),
+    import(`./model/model.ts?${nonce}`),
+    import(`./model/providers.ts?${nonce}`),
+  ])
+  return {
+    analytics,
+    betas,
+    claude,
+    combinedAbortSignal,
+    debug,
+    model,
+    providers,
+  }
+}
+
 async function importSubject() {
   // Force Bun to load fresh module instances so each test sees current mocks.
   const nonce = `${Date.now()}-${Math.random()}`
@@ -70,6 +119,7 @@ async function importSubject() {
     },
   }))
   mock.module('../services/api/claude.js', () => ({
+    ...pristine?.claude,
     queryHaiku: async (args: QueryHaikuArgs) => {
       queryHaikuCalls.push(args)
       return queryHaikuImpl(args)
@@ -138,7 +188,8 @@ async function importSubject() {
   return import(`./sessionTitle.js?test=${nonce}`)
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  pristine ??= await capturePristineModules()
   mock.restore()
   queryHaikuCalls = []
   queryHaikuText = '{"title":"Fix login button on mobile"}'
@@ -154,6 +205,21 @@ beforeEach(() => {
 
 afterEach(() => {
   mock.restore()
+  // mock.restore() leaves mock.module() registrations in place, so hand every
+  // stubbed specifier its real namespace back or it escapes this file.
+  if (pristine) {
+    mock.module('../services/analytics/index.js', () => ({
+      ...pristine!.analytics,
+    }))
+    mock.module('./betas.js', () => ({ ...pristine!.betas }))
+    mock.module('../services/api/claude.js', () => ({ ...pristine!.claude }))
+    mock.module('./combinedAbortSignal.js', () => ({
+      ...pristine!.combinedAbortSignal,
+    }))
+    mock.module('./debug.js', () => ({ ...pristine!.debug }))
+    mock.module('./model/model.js', () => ({ ...pristine!.model }))
+    mock.module('./model/providers.js', () => ({ ...pristine!.providers }))
+  }
 })
 
 describe('generateSessionTitle', () => {

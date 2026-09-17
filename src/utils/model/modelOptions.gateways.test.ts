@@ -9,12 +9,31 @@ import {
   setSessionSettingsCache,
 } from '../settings/settingsCache.js'
 
+/**
+ * Pristine namespaces through cache-busted specifiers nothing mocks. The
+ * ./providers.js stub below lists only the seven functions this file drives,
+ * and mock.restore() does not undo mock.module(), so it used to escape and
+ * report getAPIProvider() as this file's fixture for the rest of the sweep -
+ * which is why UsageTool/report.accounts.test.ts grew an extra openrouter
+ * section. Spreading keeps the export shape whole; the afterEach restore puts
+ * the real modules back.
+ */
+let pristineProviders: Record<string, unknown> | undefined
+let pristineModel: Record<string, unknown> | undefined
+
+async function capturePristineModelModules(): Promise<void> {
+  const nonce = `modelOptionsPristine=${Date.now()}-${Math.random()}`
+  pristineProviders ??= await import(`./providers.ts?${nonce}`)
+  pristineModel ??= await import(`./model.ts?${nonce}`)
+}
+
 async function importFreshModelOptionsModule(
   provider = 'openai',
   isFirstPartyAnthropicBaseUrl = false,
 ) {
   mock.restore()
   mock.module('./providers.js', () => ({
+    ...pristineProviders,
     getAPIProvider: () => provider,
     getAPIProviderForStatsig: () => provider,
     isFirstPartyAnthropicBaseUrl: () => isFirstPartyAnthropicBaseUrl,
@@ -68,6 +87,7 @@ function restoreEnvValue(key: keyof typeof originalEnv): void {
 
 beforeEach(async () => {
   await acquireEnvMutex()
+  await capturePristineModelModules()
   mock.restore()
   setSessionSettingsCache({ settings: {}, errors: [] })
   for (const key of Object.keys(originalEnv) as (keyof typeof originalEnv)[]) {
@@ -79,6 +99,12 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    if (pristineProviders) {
+      mock.module('./providers.js', () => ({ ...pristineProviders }))
+    }
+    if (pristineModel) {
+      mock.module('./model.js', () => ({ ...pristineModel }))
+    }
     resetSettingsCache()
     for (const key of Object.keys(originalEnv) as (keyof typeof originalEnv)[]) {
       restoreEnvValue(key)

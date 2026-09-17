@@ -8,7 +8,12 @@ describe('custom gateway', () => {
   })
 
   afterEach(() => {
+    // Clear AND reload, as registry.test.ts:36-43 does. The registry is
+    // process-wide, so clearing without reloading hands the next file in the
+    // sweep an empty one: integrations/models/kimi.test.ts then read
+    // getModel('k3')?.brandId as undefined instead of 'kimi'.
     _clearRegistryForTesting()
+    ensureIntegrationsLoaded()
   })
 
   test('discovers /v1/models and maps context_length to contextWindow', async () => {
