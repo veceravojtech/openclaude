@@ -3,6 +3,7 @@ import {
   BACKGROUND_SESSION_ID_ENV,
   BACKGROUND_SESSION_LAUNCHER_PID_ENV,
 } from '../cli/bgRouting.js'
+import { applyExperimentalBetasDefault } from '../utils/experimentalBetasDefault.js'
 import {
   argsBeforeModelOwningSubcommand,
   parseRootOptionValue,
@@ -36,11 +37,15 @@ if (typeof globalThis.File === 'undefined') {
 }
 
 // OpenClaude: disable experimental API betas by default.
-// Tool search (defer_loading), global cache scope, and context management
-// require internal API support not available to external accounts → 500.
+// Global cache scope and context management require internal API support not
+// available to external accounts → 500. Tool search (defer_loading) was in the
+// same position when this default was added, but now works on Anthropic's own
+// API, so it is exempt from this DEFAULT there — see
+// isToolSearchExemptFromDefaultedBetasSwitch. Setting the variable yourself
+// (true or false) is honoured for everything, tool search included.
 // Users can opt-in with CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=false.
 // eslint-disable-next-line custom-rules/no-top-level-side-effects
-process.env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS ??= 'true'
+applyExperimentalBetasDefault(process.env)
 
 // Bugfix for corepack auto-pinning, which adds yarnpkg to peoples' package.jsons
 // eslint-disable-next-line custom-rules/no-top-level-side-effects

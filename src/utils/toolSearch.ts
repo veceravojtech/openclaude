@@ -34,6 +34,7 @@ import { getMergedBetas } from './betas.js'
 import { getContextWindowForModel } from './context.js'
 import { logForDebugging } from './debug.js'
 import { isEnvDefinedFalsy, isEnvTruthy } from './envUtils.js'
+import { isToolSearchExemptFromDefaultedBetasSwitch } from './experimentalBetasDefault.js'
 import {
   getAPIProvider,
   isFirstPartyAnthropicBaseUrl,
@@ -209,9 +210,13 @@ export function resolveToolSearchMode(
   // providers: converted wires (OpenAI shims, Gemini Vertex) never carry
   // beta shapes, so deferral stays available there.
   // github.com/anthropics/claude-code/issues/20031
+  // Exception: OpenClaude's own DEFAULTED switch does not disable tool search
+  // on Anthropic's API — a switch the user set still does. The schema
+  // stripper in api.ts applies the same exemption to defer_loading.
   if (
     isEnvTruthy(env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS) &&
-    ANTHROPIC_WIRE_PROVIDERS.has(provider)
+    ANTHROPIC_WIRE_PROVIDERS.has(provider) &&
+    !isToolSearchExemptFromDefaultedBetasSwitch(env, provider)
   ) {
     return 'standard'
   }

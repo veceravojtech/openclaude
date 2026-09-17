@@ -4,6 +4,7 @@ import {
   modelSupportsToolReference,
   resolveToolSearchMode,
 } from './toolSearch.js'
+import { EXPERIMENTAL_BETAS_DEFAULTED_ENV } from './experimentalBetasDefault.js'
 import { TaskCreateTool } from '../tools/TaskCreateTool/TaskCreateTool.js'
 import { ToolSearchTool } from '../tools/ToolSearchTool/ToolSearchTool.js'
 
@@ -53,6 +54,42 @@ describe('resolveToolSearchMode', () => {
     expect(resolveToolSearchMode(env, 'github')).toBe('tst')
     expect(resolveToolSearchMode(env, 'gemini')).toBe('tst')
     expect(resolveToolSearchMode(env, 'mistral')).toBe('tst')
+  })
+
+  test("OpenClaude's defaulted switch leaves tool search on for Anthropic's own API", () => {
+    // Without this every MCP tool schema rode along on every request: ~198k
+    // tokens per call on a machine with 18 MCP servers, against ~39k deferred.
+    const env = {
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: 'true',
+      [EXPERIMENTAL_BETAS_DEFAULTED_ENV]: '1',
+    }
+    expect(resolveToolSearchMode(env, 'firstParty')).toBe('tst')
+  })
+
+  test('a defaulted switch still forces standard behind a custom base URL and on other Anthropic-wire providers', () => {
+    const env = {
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: 'true',
+      [EXPERIMENTAL_BETAS_DEFAULTED_ENV]: '1',
+    }
+    expect(
+      resolveToolSearchMode(
+        { ...env, ANTHROPIC_BASE_URL: 'https://llm-gateway.example.com' },
+        'firstParty',
+      ),
+    ).toBe('standard')
+    expect(resolveToolSearchMode(env, 'bedrock')).toBe('standard')
+    expect(resolveToolSearchMode(env, 'vertex')).toBe('standard')
+    expect(resolveToolSearchMode(env, 'foundry')).toBe('standard')
+    expect(resolveToolSearchMode(env, 'minimax')).toBe('standard')
+  })
+
+  test('ENABLE_TOOL_SEARCH=false still wins over the defaulted-switch exemption', () => {
+    const env = {
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: 'true',
+      [EXPERIMENTAL_BETAS_DEFAULTED_ENV]: '1',
+      ENABLE_TOOL_SEARCH: 'false',
+    }
+    expect(resolveToolSearchMode(env, 'firstParty')).toBe('standard')
   })
 
   test('explicit ENABLE_TOOL_SEARCH=false still disables everywhere', () => {

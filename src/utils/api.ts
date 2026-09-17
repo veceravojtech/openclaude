@@ -44,6 +44,7 @@ import { createCombinedAbortSignal } from './combinedAbortSignal.js'
 import { getCwd } from './cwd.js'
 import { logForDebugging } from './debug.js'
 import { isEnvTruthy } from './envUtils.js'
+import { isToolSearchExemptFromDefaultedBetasSwitch } from './experimentalBetasDefault.js'
 import { createUserMessage } from './messages.js'
 import { isAnthropicBillingAttributionBlock } from './anthropicAttribution.js'
 import {
@@ -307,6 +308,15 @@ export async function toolToAPISchema(
       'input_schema',
       'cache_control',
     ])
+    // Tool search is exempt from OpenClaude's DEFAULTED switch on Anthropic's
+    // API (resolveToolSearchMode applies the same exemption). Stripping
+    // defer_loading there would send every deferred tool in full anyway while
+    // ToolSearch still hands out references to them.
+    if (
+      isToolSearchExemptFromDefaultedBetasSwitch(process.env, getAPIProvider())
+    ) {
+      allowed.add('defer_loading')
+    }
     const stripped = Object.keys(schema).filter(k => !allowed.has(k))
     if (stripped.length > 0) {
       logStripOnce(stripped)
