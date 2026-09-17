@@ -17,7 +17,12 @@ import {
   isTmuxAvailable,
 } from './detection.js'
 import { registerTmuxBackend } from './registry.js'
-import type { CreatePaneResult, PaneBackend, PaneId } from './types.js'
+import type {
+  CreatePaneResult,
+  PaneBackend,
+  PaneId,
+  PaneLiveness,
+} from './types.js'
 
 // Track whether the first pane has been used for external swarm session
 let firstPaneUsedForExternal = false
@@ -34,6 +39,76 @@ const PANE_SHELL_INIT_DELAY_MS = 200
 
 function waitForPaneShellReady(): Promise<void> {
   return sleep(PANE_SHELL_INIT_DELAY_MS)
+}
+
+/**
+ * Separator between the two fields `isPaneAlive` asks tmux for. A comma is
+ * safe: `#{pane_dead}` is 0 or 1 and `#{pane_current_command}` is a process
+ * name, so neither field can contain one.
+ */
+const TMUX_PANE_STATE_SEPARATOR = ','
+
+/**
+ * Command names that mean "no child is running here".
+ *
+ * A teammate pane is created running a shell and the CLI is typed into it, so
+ * the shell is the pane's foreground command exactly when the CLI is not
+ * running — either it has not started yet or it has exited. Callers make that
+ * distinction with a startup grace period, not here.
+ */
+const SHELL_COMMANDS = new Set([
+  'bash',
+  'csh',
+  'dash',
+  'fish',
+  'ksh',
+  'login',
+  'sh',
+  'tcsh',
+  'zsh',
+])
+
+/**
+ * Turns `#{pane_dead},#{pane_current_command}` into a liveness verdict.
+ *
+ * Exported for testing: this is the whole judgement, and it must be provable
+ * without a live tmux server.
+ *
+ * - `pane_dead` is 1 for a pane whose process finished under
+ *   `remain-on-exit` — unambiguously dead.
+ * - a shell in the foreground means the child is not running (see
+ *   SHELL_COMMANDS).
+ * - anything unparseable is 'unknown', never 'dead'.
+ */
+export function interpretTmuxPaneState(raw: string): PaneLiveness {
+  const trimmed = raw.trim()
+  if (!trimmed) {
+    return 'unknown'
+  }
+
+  const separatorIndex = trimmed.indexOf(TMUX_PANE_STATE_SEPARATOR)
+  if (separatorIndex === -1) {
+    return 'unknown'
+  }
+
+  const deadFlag = trimmed.slice(0, separatorIndex).trim()
+  // A shell started as a login shell is reported with a leading '-'.
+  const command = trimmed
+    .slice(separatorIndex + TMUX_PANE_STATE_SEPARATOR.length)
+    .trim()
+    .replace(/^-/, '')
+
+  if (deadFlag === '1') {
+    return 'dead'
+  }
+  if (deadFlag !== '0') {
+    return 'unknown'
+  }
+  if (!command) {
+    return 'unknown'
+  }
+
+  return SHELL_COMMANDS.has(command) ? 'dead' : 'alive'
 }
 
 /**
@@ -161,6 +236,41 @@ export class TmuxBackend implements PaneBackend {
         `Failed to send command to pane ${paneId}: ${result.stderr}`,
       )
     }
+  }
+
+  /**
+   * Reports whether the CLI that was typed into a pane is still running.
+   *
+   * See `interpretTmuxPaneState` for why the pane's own existence is not the
+   * question and what the two format fields mean.
+   */
+  async isPaneAlive(
+    paneId: PaneId,
+    useExternalSession = false,
+  ): Promise<PaneLiveness> {
+    const runTmux = useExternalSession ? runTmuxInSwarm : runTmuxInUserSession
+    const result = await runTmux([
+      'display-message',
+      '-p',
+      '-t',
+      paneId,
+      `#{pane_dead}${TMUX_PANE_STATE_SEPARATOR}#{pane_current_command}`,
+    ])
+
+    if (result.code !== 0) {
+      // Two very different failures share this exit path: the pane is gone
+      // (tmux says so by name), or tmux itself could not be reached — no
+      // server, wrong socket, a transient error. Only the first is evidence
+      // of death; the second must stay 'unknown' or a hiccup in the leader's
+      // environment would fail every healthy teammate at once.
+      const missingPane = /can't find pane|no such pane/i.test(result.stderr)
+      logForDebugging(
+        `[TmuxBackend] isPaneAlive(${paneId}) query failed (exit ${result.code}): ${result.stderr}`,
+      )
+      return missingPane ? 'dead' : 'unknown'
+    }
+
+    return interpretTmuxPaneState(result.stdout)
   }
 
   /**

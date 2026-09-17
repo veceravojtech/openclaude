@@ -3,7 +3,12 @@ import { logForDebugging } from '../../../utils/debug.js'
 import { execFileNoThrow } from '../../../utils/execFileNoThrow.js'
 import { IT2_COMMAND, isInITerm2, isIt2CliAvailable } from './detection.js'
 import { registerITermBackend } from './registry.js'
-import type { CreatePaneResult, PaneBackend, PaneId } from './types.js'
+import type {
+  CreatePaneResult,
+  PaneBackend,
+  PaneId,
+  PaneLiveness,
+} from './types.js'
 
 // Track session IDs for teammates
 const teammateSessionIds: string[] = []
@@ -310,6 +315,33 @@ export class ITermBackend implements PaneBackend {
     logForDebugging(
       '[ITermBackend] Pane rebalancing not implemented for iTerm2',
     )
+  }
+
+  /**
+   * Reports whether a teammate's process is still running in its pane.
+   *
+   * iTerm2 exposes session existence, not the session's foreground process, so
+   * this can only ever prove the strong case: the session is gone, therefore
+   * the child is gone. A session that is still listed says nothing — the shell
+   * survives its child — and is reported as 'unknown' rather than guessed
+   * 'alive', because a wrong 'dead' would fail a healthy teammate.
+   */
+  async isPaneAlive(
+    paneId: PaneId,
+    _useExternalSession?: boolean,
+  ): Promise<PaneLiveness> {
+    const listResult = await runIt2(['session', 'list'])
+
+    if (listResult.code !== 0) {
+      // Python API off, it2 removed, transient socket error — a fact about
+      // this machine, not about the teammate.
+      logForDebugging(
+        `[ITermBackend] isPaneAlive(${paneId}) could not list sessions: ${listResult.stderr}`,
+      )
+      return 'unknown'
+    }
+
+    return listResult.stdout.includes(paneId) ? 'unknown' : 'dead'
   }
 
   /**

@@ -22,6 +22,16 @@ export type PaneBackendType = 'tmux' | 'iterm2'
 export type PaneId = string
 
 /**
+ * What a backend can tell us about the process a teammate was launched with.
+ *
+ * 'unknown' is a first-class answer, not a failure: a pane whose foreground
+ * process we cannot read is NOT evidence of death. Callers must never treat
+ * 'unknown' as 'dead' — falsely failing a healthy teammate is worse than the
+ * silent death this exists to catch.
+ */
+export type PaneLiveness = 'alive' | 'dead' | 'unknown'
+
+/**
  * Result of creating a new teammate pane.
  */
 export type CreatePaneResult = {
@@ -85,6 +95,27 @@ export type PaneBackend = {
     command: string,
     useExternalSession?: boolean,
   ): Promise<void>
+
+  /**
+   * Reports whether the process that was launched into a pane is still
+   * running.
+   *
+   * This is NOT "does the pane exist". A teammate pane is created running a
+   * shell, and the CLI is then typed into it, so the pane outlives its child:
+   * when the child exits the shell takes the foreground back and the pane
+   * stays. A backend that can only see the pane, not what is running in it,
+   * must answer 'unknown' rather than 'alive'.
+   *
+   * Optional: a backend that cannot answer at all simply omits it, and callers
+   * treat the absence as 'unknown'. Never infer death from 'unknown'.
+   *
+   * @param paneId - The pane whose child process to check
+   * @param useExternalSession - If true, uses external session socket (tmux-specific)
+   */
+  isPaneAlive?(
+    paneId: PaneId,
+    useExternalSession?: boolean,
+  ): Promise<PaneLiveness>
 
   /**
    * Sets the border color for a pane.
