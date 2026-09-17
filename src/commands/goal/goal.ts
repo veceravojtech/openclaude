@@ -1,6 +1,7 @@
 import type { LocalCommandCall } from '../../types/command.js'
 import { buildGoalStartInstruction } from '../../services/goal/instructions.js'
 import { saveGoalState } from '../../services/goal/persistence.js'
+import { resolveReplMaxTurns } from '../../utils/replMaxTurns.js'
 import {
   createGoalState,
   pauseGoal,
@@ -58,7 +59,9 @@ async function setGoal(
   context: Parameters<LocalCommandCall>[1],
   persistGoalState: SaveGoalState,
 ) {
-  const goal = createGoalState(condition)
+  // The lead's own turn cap (/config, OPENCLAUDE_MAX_TURNS, or the default),
+  // so a goal is never stopped sooner than the lead would be.
+  const goal = createGoalState(condition, undefined, resolveReplMaxTurns())
   await persistGoalState(goal)
   context.setAppState(prev => ({ ...prev, goal }))
   return {

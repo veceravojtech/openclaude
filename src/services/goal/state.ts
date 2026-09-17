@@ -1,8 +1,14 @@
 import { randomUUID } from 'crypto'
+import { DEFAULT_REPL_MAX_TURNS } from '../../utils/replMaxTurns.js'
 
 import type { GoalDecision, GoalState } from './types.js'
 
-export const DEFAULT_GOAL_MAX_TURNS = 50
+/**
+ * A goal gets the same turn allowance as its lead's interactive prompt, so it
+ * is bounded by context rather than by a lower count of its own. /goal passes
+ * the lead's resolved cap (resolveReplMaxTurns); this is the fallback.
+ */
+export const DEFAULT_GOAL_MAX_TURNS = DEFAULT_REPL_MAX_TURNS
 export const MAX_GOAL_CONDITION_CHARS = 4_000
 
 export function nowIso(): string {

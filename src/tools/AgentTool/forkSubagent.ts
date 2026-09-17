@@ -68,7 +68,8 @@ export const FORK_AGENT = {
   whenToUse:
     'Implicit fork — inherits full conversation context. Not selectable via subagent_type; triggered by omitting subagent_type when the fork experiment is active.',
   tools: ['*'],
-  maxTurns: 200,
+  // No maxTurns: like every other sub-agent, a fork is bounded only by its
+  // context (auto-compact), not by a turn count below its lead's.
   model: 'inherit',
   permissionMode: 'bubble',
   source: 'built-in',

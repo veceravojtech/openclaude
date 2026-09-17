@@ -3,10 +3,12 @@ import { describe, expect, test } from 'bun:test'
 import {
   achieveGoal,
   createGoalState,
+  DEFAULT_GOAL_MAX_TURNS,
   pauseGoal,
 } from '../../services/goal/state.js'
 import { getDefaultAppState, type AppState } from '../../state/AppStateStore.js'
 import type { LocalCommandResult } from '../../types/command.js'
+import { DEFAULT_REPL_MAX_TURNS } from '../../utils/replMaxTurns.js'
 import { call, createGoalCall } from './goal.js'
 
 type TextCommandResult = Extract<LocalCommandResult, { type: 'text' }>
@@ -64,7 +66,7 @@ describe('/goal command', () => {
     const activeResult = expectTextResult(await call('', context))
     expect(activeResult.value).toContain('Status: active')
     expect(activeResult.value).toContain('Condition: finish implementation')
-    expect(activeResult.value).toContain('Turns: 0/50')
+    expect(activeResult.value).toContain(`Turns: 0/${DEFAULT_GOAL_MAX_TURNS}`)
     expect(activeResult.value).toContain('Evaluator failures: 0')
 
     context.setAppState(prev => ({ ...prev, goal: pauseGoal(getState().goal!) }))
@@ -80,7 +82,7 @@ describe('/goal command', () => {
     }))
     const achievedResult = expectTextResult(await call('', context))
     expect(achievedResult.value).toContain('Status: achieved')
-    expect(achievedResult.value).toContain('Turns: 1/50')
+    expect(achievedResult.value).toContain(`Turns: 1/${DEFAULT_GOAL_MAX_TURNS}`)
     expect(achievedResult.value).toContain('Last evaluator reason: done')
   })
 
@@ -96,6 +98,25 @@ describe('/goal command', () => {
     expect(result.value).toContain('Goal set')
     expect(result.shouldQuery).toBe(true)
     expect(result.metaMessages?.[0]).toContain('finish the implementation')
+  })
+
+  test('/goal gives the goal its lead\'s turn cap, so it is not stopped sooner than the lead', async () => {
+    // Regression: goals stopped at a fixed 50 turns while the lead's own
+    // interactive cap is 1000 by default and follows /config and the env.
+    const previous = process.env.OPENCLAUDE_MAX_TURNS
+    process.env.OPENCLAUDE_MAX_TURNS = '777'
+    try {
+      const { context, getState } = makeContext()
+      await call('finish the implementation', context)
+      expect(getState().goal?.maxTurns).toBe(777)
+    } finally {
+      if (previous === undefined) delete process.env.OPENCLAUDE_MAX_TURNS
+      else process.env.OPENCLAUDE_MAX_TURNS = previous
+    }
+  })
+
+  test('the goal fallback cap is the lead\'s default, not a lower count of its own', () => {
+    expect(DEFAULT_GOAL_MAX_TURNS).toBe(DEFAULT_REPL_MAX_TURNS)
   })
 
   test('/goal validates empty conditions', async () => {
