@@ -40,6 +40,15 @@ function mockProvider(
     getAPIProvider: () => provider,
     getAPIProviderForStatsig: () => provider,
     isFirstPartyAnthropicBaseUrl: () => isFirstPartyAnthropicBaseUrl,
+    // model.ts imports these two. Without them a COLD run of this file alone
+    // replaces the namespace with this stub and fails at link time
+    // ("Export named 'isFirstPartyAnthropicProvider' not found"), so every
+    // test here was red alone and green only when another file warmed
+    // providers.js first. Same definitions as providers.ts, over the stub.
+    isFirstPartyAnthropicProvider: () =>
+      provider === 'firstParty' && isFirstPartyAnthropicBaseUrl,
+    isCustomAnthropicProvider: () =>
+      provider === 'firstParty' && !isFirstPartyAnthropicBaseUrl,
     isGithubNativeAnthropicMode: () => false,
     usesAnthropicAccountFlow: () => provider === 'firstParty',
   }))
