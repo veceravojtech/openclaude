@@ -38,6 +38,11 @@ import {
   resetBackendDetection,
 } from '../../utils/swarm/backends/registry.js'
 import { getTeammateModeFromSnapshot } from '../../utils/swarm/backends/teammateModeSnapshot.js'
+import {
+  armPaneTeammateWatchdog,
+  type PaneTeammateWatchdogDeps,
+  type PaneTeammateWatchdogHandle,
+} from '../../utils/swarm/backends/paneTeammateWatchdog.js'
 import type { BackendType } from '../../utils/swarm/backends/types.js'
 import { isPaneBackend } from '../../utils/swarm/backends/types.js'
 import {
@@ -889,8 +894,17 @@ async function handleSpawnSeparateWindow(
  * Register a background task entry for an out-of-process (tmux/iTerm2) teammate.
  * This makes tmux teammates visible in the background tasks pill and dialog,
  * matching how in-process teammates are tracked.
+ *
+ * Also arms the pane-teammate watchdog (paneTeammateWatchdog.ts), which is
+ * the only thing that ever transitions this task terminal: pane teammates
+ * have no runner, so without it the row says 'running' forever — including
+ * for a child that died on its first turn and never reported (the Stop-hook
+ * skip on API-error turns).
+ *
+ * Exported for testing (the watchdog tests drive it with every boundary
+ * injected). Returns the watchdog handle; production callers ignore it.
  */
-function registerOutOfProcessTeammateTask(
+export function registerOutOfProcessTeammateTask(
   setAppState: (updater: (prev: AppState) => AppState) => void,
   {
     teammateId,
@@ -915,7 +929,8 @@ function registerOutOfProcessTeammateTask(
     backendType: BackendType
     toolUseId?: string
   },
-): void {
+  watchdogDeps?: PaneTeammateWatchdogDeps,
+): PaneTeammateWatchdogHandle {
   const taskId = generateTaskId('in_process_teammate')
   const description = `${sanitizedName}: ${prompt.substring(0, 50)}${prompt.length > 50 ? '...' : ''}`
 
@@ -951,6 +966,28 @@ function registerOutOfProcessTeammateTask(
 
   registerTask(taskState, setAppState)
 
+  // Arm the first-contact / absence-of-progress watchdog beside the task
+  // registration: pane teammates have no runner to transition this task, and
+  // a child that dies on its first turn reports nothing at all (Stop hooks
+  // are skipped on API-error turns). The watchdog fails the task when no
+  // lifecycle signal arrives, and completes it when the child's idle
+  // notification does — with the isPaneAlive probe consulted only to name
+  // the failure. Deliberate kills disarm it via the same abort signal that
+  // kills the pane below.
+  const watchdog = armPaneTeammateWatchdog({
+    taskId,
+    description,
+    teammateName: sanitizedName,
+    teamName,
+    paneId,
+    insideTmux,
+    backendType,
+    toolUseId,
+    setAppState,
+    signal: abortController.signal,
+    deps: watchdogDeps,
+  })
+
   // When abort is signaled, kill the pane using the backend that created it
   // (tmux kill-pane for tmux panes, it2 session close for iTerm2 native panes).
   // SDK task_notification bookend is emitted by killInProcessTeammate (the
@@ -964,6 +1001,8 @@ function registerOutOfProcessTeammateTask(
     },
     { once: true },
   )
+
+  return watchdog
 }
 
 /**
