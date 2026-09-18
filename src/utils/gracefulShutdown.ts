@@ -3,6 +3,7 @@ import { writeSync } from 'fs'
 import memoize from 'lodash-es/memoize.js'
 import { onExit } from 'signal-exit'
 import type { ExitReason } from 'src/entrypoints/agentSdkTypes.js'
+import { markProcessWindingDown } from './lifecycleState.js'
 import {
   getIsInteractive,
   getIsScrollDraining,
@@ -366,7 +367,11 @@ export function gracefulShutdownSync(
 ): void {
   // Set the exit code that will be used when process naturally exits. Note that we do it
   // here inside the sync version too so that it is possible to determine if
-  // gracefulShutdownSync was called by checking process.exitCode.
+  // gracefulShutdownSync was called by checking process.exitCode. That exitCode
+  // heuristic is no longer reliable (bun cannot unset process.exitCode), so the
+  // explicit winding-down flag is the authoritative signal; exitCode is kept in
+  // sync for the process exit itself.
+  markProcessWindingDown()
   process.exitCode = exitCode
 
   pendingShutdown = gracefulShutdown(exitCode, reason, options)
@@ -453,7 +458,10 @@ export async function gracefulShutdown(
   )
   failsafeTimer.unref()
 
-  // Set the exit code that will be used when process naturally exits
+  // Set the exit code that will be used when process naturally exits. As in
+  // gracefulShutdownSync above, the winding-down flag is the authoritative
+  // "shutdown was initiated" signal; exitCode serves the process exit itself.
+  markProcessWindingDown()
   process.exitCode = exitCode
 
   // Exit alt screen and print resume hint FIRST, before any async operations.

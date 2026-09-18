@@ -334,6 +334,7 @@ import {
   clearQueryProfile,
 } from 'src/utils/queryProfiler.js'
 import { asSessionId } from 'src/types/ids.js'
+import { isProcessWindingDown } from '../utils/lifecycleState.js'
 import { jsonStringify } from '../utils/slowOperations.js'
 import { skillChangeDetector } from '../utils/skills/skillChangeDetector.js'
 import { getCommands, clearCommandsCache } from '../commands.js'
@@ -816,10 +817,13 @@ export async function runHeadless(
     }
   }
 
-  // gracefulShutdownSync schedules an async shutdown and sets process.exitCode.
-  // If a loadInitialMessages error path triggered it, bail early to avoid
-  // unnecessary work while the process winds down.
-  if (initialMessages.length === 0 && process.exitCode !== undefined) {
+  // gracefulShutdownSync schedules an async shutdown and marks the process as
+  // winding down. If a loadInitialMessages error path triggered it, bail early
+  // to avoid unnecessary work while the process winds down. The explicit flag
+  // is the signal: exitCode cannot serve (bun cannot unset process.exitCode,
+  // so any unrelated component setting it would permanently suppress headless
+  // runs in this process).
+  if (initialMessages.length === 0 && isProcessWindingDown()) {
     heartbeat?.stop()
     return
   }
