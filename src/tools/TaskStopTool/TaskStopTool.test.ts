@@ -183,10 +183,43 @@ test('a bare name carried by two teams is reported as ambiguous, not silently pi
   expect(message).toContain('ambiguous')
   expect(message).toContain('codex-a@team-one')
   expect(message).toContain('codex-a@team-two')
+  // Pinned so a refactor cannot silently renumber the vocabulary. errorCode is
+  // analytics-only — the SDK stop_task path forwards errorMessage() and never
+  // reads the code — so this pins the word, not a behavior.
+  const errorCode = validation.result ? -1 : validation.errorCode
+  expect(errorCode).toBe(4)
 
   // Neither teammate was stopped by the ambiguous ask.
   expect(state().tasks['t-one']?.status).toBe('running')
   expect(state().tasks['t-two']?.status).toBe('running')
+})
+
+test('a bare name with no local rows but two teams on disk reports both owners', async () => {
+  // explainMiss's owners.length > 1 branch: nothing matches in this session,
+  // and the only place the name exists is two team files. Both owners are
+  // reported, with the same ambiguity vocabulary as the in-session case —
+  // same situation, same code, not a not-found.
+  writeTeam('team-one', '11111111-1111-4111-8111-111111111111', [
+    { name: 'codex-a' },
+  ])
+  writeTeam('team-two', '22222222-2222-4222-8222-222222222222', [
+    { name: 'codex-a' },
+  ])
+  const { context, state } = world([])
+
+  const validation = await validate('codex-a', context)
+  expect(validation.result).toBe(false)
+  const message = validation.result ? '' : validation.message
+  expect(message).toContain('ambiguous')
+  expect(message).toContain('member of 2 teams')
+  expect(message).toContain('codex-a@team-one')
+  expect(message).toContain('codex-a@team-two')
+  expect(message).toContain('name@team')
+  const errorCode = validation.result ? -1 : validation.errorCode
+  expect(errorCode).toBe(4)
+
+  // Nothing to stop, so nothing changed.
+  expect(state().tasks).toEqual({})
 })
 
 test('an unknown name is a not-found that names what IS stoppable', async () => {

@@ -78,7 +78,8 @@ export async function resolveStoppableTask(
     }
   }
 
-  return { ok: false, code: 'not_found', message: await explainMiss(id, rows) }
+  const miss = await explainMiss(id, rows)
+  return { ok: false, code: miss.code, message: miss.message }
 }
 
 /**
@@ -100,6 +101,9 @@ function matchingAgentIds(
   return [...matches].sort()
 }
 
+/** What to tell the caller when nothing in this session answers to `id`. */
+type ExplainedMiss = { code: 'not_found' | 'ambiguous'; message: string }
+
 /**
  * Why `id` resolved to nothing. Checks the team files on disk before
  * concluding the name is unknown: a member recorded there with no row here is
@@ -109,29 +113,35 @@ function matchingAgentIds(
 async function explainMiss(
   id: string,
   tasks: Record<string, TaskStateBase>,
-): Promise<string> {
+): Promise<ExplainedMiss> {
   const owners = await findTeamMembersNamed(id)
 
   if (owners.length > 1) {
-    return (
-      `"${id}" is ambiguous: it names a member of ${owners.length} teams ` +
-      `(${owners.map(o => o.agentId).join(', ')}). ` +
-      `Use the full name@team form.`
-    )
+    return {
+      // The same situation as the in-session ambiguity above, discovered on
+      // disk instead: same code, so both paths answer identically downstream.
+      code: 'ambiguous',
+      message:
+        `"${id}" is ambiguous: it names a member of ${owners.length} teams ` +
+        `(${owners.map(o => o.agentId).join(', ')}). ` +
+        `Use the full name@team form.`,
+    }
   }
 
   const owner = owners[0]
   if (owner) {
-    return describeForeignTeammate(owner)
+    return { code: 'not_found', message: describeForeignTeammate(owner) }
   }
 
   const addressable = listAddressable(tasks)
-  return (
-    `No task found with ID: ${id}. ` +
-    (addressable.length > 0
-      ? `Stoppable in this session: ${addressable.join(', ')}.`
-      : `No task is running in this session.`)
-  )
+  return {
+    code: 'not_found',
+    message:
+      `No task found with ID: ${id}. ` +
+      (addressable.length > 0
+        ? `Stoppable in this session: ${addressable.join(', ')}.`
+        : `No task is running in this session.`),
+  }
 }
 
 type ForeignTeammate = {
