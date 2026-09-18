@@ -1,4 +1,4 @@
-import { beforeEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, test } from 'bun:test'
 import {
   captureRateLimitHeaders,
   clearProviderUsageRegistry,
@@ -9,6 +9,13 @@ import {
 const FIXED_NOW = new Date('2026-09-15T10:00:00Z').getTime()
 
 beforeEach(() => {
+  clearProviderUsageRegistry()
+})
+
+// The registry is a process-global: without this, the last test's snapshot
+// (openrouter with the raw-string 'Infinity') survives the file and renders
+// as a stray section in any later UsageTool suite in the same process.
+afterEach(() => {
   clearProviderUsageRegistry()
 })
 
