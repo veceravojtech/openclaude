@@ -149,8 +149,10 @@ export class PaneBackendExecutor implements TeammateExecutor {
       const flagsStr = inheritedFlags ? ` ${inheritedFlags}` : ''
       const workingDir = config.cwd
 
-      // Build environment variables to forward to teammate
-      const envStr = buildInheritedEnvVars()
+      // Build environment variables to forward to teammate. A provider-profile
+      // binding (config.providerEnv) rides after the inherited allowlist so it
+      // overrides it (POSIX `env` applies left-to-right).
+      const envStr = buildInheritedEnvVars(config.providerEnv)
 
       const spawnCommand = `cd ${quote([workingDir])} && env ${envStr} ${quote([binaryPath])} ${teammateArgs}${flagsStr}`
 

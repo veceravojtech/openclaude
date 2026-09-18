@@ -255,6 +255,12 @@ export type TeammateSpawnConfig = TeammateIdentity & {
   /** Whether this teammate can show permission prompts for unlisted tools.
    * When false (default), unlisted tools are auto-denied. */
   allowPermissionPrompts?: boolean
+  /** Provider-profile env the teammate must run under instead of the
+   *  leader's. Appended after the inherited env allowlist in the spawn
+   *  command so it overrides (POSIX `env` applies left-to-right).
+   *  Pane/window execution only — in-process spawns share the leader
+   *  process and have no child env to inject. */
+  providerEnv?: Record<string, string>
 }
 
 /**

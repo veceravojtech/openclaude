@@ -57,6 +57,7 @@ import {
   spawnInProcessTeammate,
 } from '../../utils/swarm/spawnInProcess.js'
 import { buildInheritedEnvVars } from '../../utils/swarm/spawnUtils.js'
+import { PROVIDER_PROFILE_IN_PROCESS_ERROR } from '../AgentTool/providerProfileBinding.js'
 import {
   getParentTeamName,
   getTeamFilePath,
@@ -177,13 +178,20 @@ export type SpawnTeammateConfig = {
   modelWasToolSpecified?: boolean
   agent_type?: string
   description?: string
+  /** Provider-profile env (from AgentTool's provider_profile param) that the
+   *  spawned teammate must run under instead of the leader's. Appended AFTER
+   *  the inherited env allowlist in the spawn command so it overrides it
+   *  (POSIX `env` applies left-to-right). Pane/window spawns only. */
+  providerEnv?: Record<string, string>
   /** request_id of the API call whose response contained the tool_use that
    *  spawned this teammate. Threaded through to TeammateAgentContext for
    *  lineage tracing on tengu_api_* events. */
   invokingRequestId?: string
 }
 
-// Internal input type matching TeammateTool's spawn parameters
+// Internal input type matching TeammateTool's spawn parameters.
+// Must stay structurally in sync with SpawnTeammateConfig: spawnTeammate
+// passes its config straight through to handleSpawn under this input type.
 type SpawnInput = {
   name: string
   prompt?: string
@@ -195,6 +203,7 @@ type SpawnInput = {
   modelWasToolSpecified?: boolean
   agent_type?: string
   description?: string
+  providerEnv?: Record<string, string>
   invokingRequestId?: string
 }
 
@@ -581,7 +590,8 @@ export async function handleSpawnSplitPane(
   const flagsStr = inheritedFlags ? ` ${inheritedFlags}` : ''
   // Propagate env vars that teammates need but may not inherit from tmux split-window shells.
   // Includes CLAUDECODE, CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, and API provider vars.
-  const envStr = buildInheritedEnvVars()
+  // A provider-profile binding rides after the allowlist so it overrides.
+  const envStr = buildInheritedEnvVars(input.providerEnv)
   const spawnCommand = `cd ${quote([workingDir])} && env ${envStr} ${quote([binaryPath])} ${teammateArgs}${flagsStr}`
 
   // Send the command to the new pane
@@ -786,7 +796,8 @@ async function handleSpawnSeparateWindow(
   const flagsStr = inheritedFlags ? ` ${inheritedFlags}` : ''
   // Propagate env vars that teammates need but may not inherit from tmux split-window shells.
   // Includes CLAUDECODE, CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS, and API provider vars.
-  const envStr = buildInheritedEnvVars()
+  // A provider-profile binding rides after the allowlist so it overrides.
+  const envStr = buildInheritedEnvVars(input.providerEnv)
   const spawnCommand = `cd ${quote([workingDir])} && env ${envStr} ${quote([binaryPath])} ${teammateArgs}${flagsStr}`
 
   // Send the command to the new window
@@ -1015,6 +1026,14 @@ async function handleSpawnInProcess(
 ): Promise<{ data: SpawnOutput }> {
   const { setAppState, getAppState } = context
   const { name, prompt, agent_type, plan_mode_required } = input
+
+  // An in-process teammate shares the leader's process; there is no child
+  // environment to inject a provider profile into. Reject by name instead
+  // of silently ignoring the binding — silent fall-through is the original
+  // hang this feature exists to prevent.
+  if (input.providerEnv !== undefined) {
+    throw new Error(PROVIDER_PROFILE_IN_PROCESS_ERROR)
+  }
 
   // Resolve model: 'inherit' → leader's model; undefined → default Opus
   const model = resolveTeammateModel(input.model, getLeaderModel(getAppState()))

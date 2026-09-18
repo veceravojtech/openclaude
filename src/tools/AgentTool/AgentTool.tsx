@@ -567,12 +567,6 @@ export const AgentTool = buildTool({
           throw new Error(PROVIDER_PROFILE_IN_PROCESS_ERROR);
         }
         providerProfileEnv = resolveProviderProfileEnv(providerProfileRef);
-        // TODO: thread providerProfileEnv into spawnTeammate as
-        // SpawnTeammateConfig.providerEnv once that field lands in
-        // src/tools/shared/spawnMultiAgent.ts (concurrently owned —
-        // left unwired here by design). Resolving now already fixes the
-        // failure modes that produced silent hangs.
-        void providerProfileEnv;
       }
       const spawnOne = (spawnName: string) => spawnTeammate({
         name: spawnName,
@@ -584,6 +578,7 @@ export const AgentTool = buildTool({
         model: routedTeammateProvider?.model ?? routedTeammateModelOnly ?? resolvedTeammateModel,
         modelWasToolSpecified: model !== undefined,
         agent_type: subagent_type,
+        providerEnv: providerProfileEnv,
         invokingRequestId: assistantMessage?.requestId
       }, toolUseContext);
 
