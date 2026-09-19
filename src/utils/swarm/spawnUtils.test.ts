@@ -5,6 +5,7 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
+import { quote } from '../bash/shellQuote.js'
 import {
   applyTeammateModelFlag,
   buildInheritedCliFlags,
@@ -220,6 +221,99 @@ test('applyTeammateModelFlag leaves an unbound modelless spawn untouched', () =>
       providerEnv: { OPENAI_BASE_URL: 'https://example.invalid' },
     }),
   ).toBe(inherited)
+})
+
+/** The argv a real /bin/sh produces from a flag string. */
+function shellArgvOf(flags: string): string[] {
+  const printed = execFileSync(
+    '/bin/sh',
+    ['-c', `/usr/bin/printf '%s\\n' ${flags}`],
+    { encoding: 'utf8', env: {} },
+  )
+  return printed.split('\n').filter(line => line !== '')
+}
+
+test('applyTeammateModelFlag strips a quoted inherited model without corrupting the command', () => {
+  // Regression: the strip split on ' ' and dropped ONE token after --model,
+  // so a value containing a space left its tail plus an unbalanced quote
+  // spliced into the spawn command. quote() emits this form for any model
+  // whose value contains whitespace.
+  const inherited = `--model ${quote(['my custom model'])} --teammate-mode tmux`
+
+  const flags = applyTeammateModelFlag(inherited, {
+    providerEnv: CODEX_PROVIDER_ENV,
+  })
+
+  expect(flags).toBe('--teammate-mode tmux')
+  expect(flags).not.toContain('custom')
+  expect(flags).not.toContain("'")
+  expect(shellArgvOf(flags)).toEqual(['--teammate-mode', 'tmux'])
+})
+
+test('applyTeammateModelFlag strips every quoting shape quote() can emit', () => {
+  // All four shapes, confirmed against shell-quote: bare, backslash-escaped,
+  // single-quoted, double-quoted. The last three defeated the space-split.
+  for (const value of [
+    'plain-model',
+    'claude-opus-5[1m]',
+    'my custom model',
+    "it's",
+    'o p u s[1m]',
+  ]) {
+    const inherited = `--permission-mode auto --model ${quote([value])} --teammate-mode tmux`
+
+    const flags = applyTeammateModelFlag(inherited, {
+      providerEnv: CODEX_PROVIDER_ENV,
+    })
+
+    expect(flags).toBe('--permission-mode auto --teammate-mode tmux')
+    expect(shellArgvOf(flags)).toEqual([
+      '--permission-mode',
+      'auto',
+      '--teammate-mode',
+      'tmux',
+    ])
+  }
+})
+
+test('applyTeammateModelFlag replaces a quoted inherited model with the teammate model', () => {
+  const inherited = `--model ${quote(['my custom model'])} --teammate-mode tmux`
+
+  const flags = applyTeammateModelFlag(inherited, { model: 'codex-target' })
+
+  expect(shellArgvOf(flags)).toEqual([
+    '--teammate-mode',
+    'tmux',
+    '--model',
+    'codex-target',
+  ])
+  expect(flags).not.toContain('custom')
+})
+
+test('applyTeammateModelFlag leaves a non-model value containing a space intact', () => {
+  // The value token is consumed positionally, so a --settings path with a
+  // space must survive the strip whole.
+  const inherited = `--settings ${quote(['/path with space/x.json'])} --model old-model`
+
+  const flags = applyTeammateModelFlag(inherited, {
+    providerEnv: CODEX_PROVIDER_ENV,
+  })
+
+  expect(shellArgvOf(flags)).toEqual(['--settings', '/path with space/x.json'])
+})
+
+test('applyTeammateModelFlag emits exactly one --model', () => {
+  const inherited = '--model a --teammate-mode tmux --model b'
+
+  const flags = applyTeammateModelFlag(inherited, { model: 'only-this' })
+
+  expect(flags.match(/--model/g)).toEqual(['--model'])
+  expect(shellArgvOf(flags)).toEqual([
+    '--teammate-mode',
+    'tmux',
+    '--model',
+    'only-this',
+  ])
 })
 
 test('applyTeammateModelFlag shell-quotes the model it emits', () => {

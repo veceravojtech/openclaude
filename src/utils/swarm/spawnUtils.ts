@@ -90,12 +90,88 @@ export function buildInheritedCliFlags(options?: {
   return flags.join(' ')
 }
 
-/** Removes every `--model <value>` pair from a flag string. */
+/**
+ * Splits a flag string into shell tokens, keeping each token's ORIGINAL text
+ * (quotes and escapes intact) so the tokens can be re-joined unchanged.
+ *
+ * Splitting on `' '` is not good enough here. These flags are built with
+ * `quote()` (shell-quote), which emits four different shapes depending on the
+ * value: bare `plain-model`, backslash-escaped `claude-opus-5\[1m\]`,
+ * single-quoted `'my custom model'`, and double-quoted `"it's"`. Two of those
+ * can contain spaces, so a space-split tears the value apart: dropping only
+ * the first fragment left the remainder, plus an unbalanced quote, spliced
+ * into the spawn command.
+ */
+function splitShellTokens(flags: string): string[] {
+  const tokens: string[] = []
+  let current = ''
+  let started = false
+  let quoteChar: "'" | '"' | null = null
+
+  for (let i = 0; i < flags.length; i++) {
+    const char = flags[i]!
+    // Backslash escapes the next character everywhere except inside single
+    // quotes, matching bash — and matching what quote() assumes when it emits
+    // an escaped form.
+    if (char === '\\' && quoteChar !== "'") {
+      current += char + (flags[i + 1] ?? '')
+      i++
+      started = true
+      continue
+    }
+    if (quoteChar) {
+      current += char
+      if (char === quoteChar) {
+        quoteChar = null
+      }
+      continue
+    }
+    if (char === "'" || char === '"') {
+      quoteChar = char
+      current += char
+      started = true
+      continue
+    }
+    if (/\s/.test(char)) {
+      if (started) {
+        tokens.push(current)
+        current = ''
+        started = false
+      }
+      continue
+    }
+    current += char
+    started = true
+  }
+  if (started) {
+    tokens.push(current)
+  }
+  return tokens
+}
+
+/**
+ * Removes every `--model <value>` pair from a flag string, where `<value>` is
+ * one whole shell token however it happens to be quoted.
+ */
 function stripModelFlag(flags: string): string {
-  return flags
-    .split(' ')
-    .filter((flag, i, arr) => flag !== '--model' && arr[i - 1] !== '--model')
-    .join(' ')
+  const tokens = splitShellTokens(flags)
+  const kept: string[] = []
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]!
+    if (token === '--model') {
+      // Drop the flag AND the value token that follows it.
+      i++
+      continue
+    }
+    // `--model=value` is not a shape buildInheritedCliFlags emits, but a
+    // survivor of that form would reintroduce the exact bug this strip exists
+    // to prevent, so it goes too.
+    if (token.startsWith('--model=')) {
+      continue
+    }
+    kept.push(token)
+  }
+  return kept.join(' ')
 }
 
 /**
