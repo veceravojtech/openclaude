@@ -11,6 +11,7 @@ import {
   setFlagSettingsInline,
   setFlagSettingsPath,
 } from '../../bootstrap/state.js'
+import { resetCostState } from '../../cost-tracker.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -534,6 +535,10 @@ beforeEach(async () => {
 
 afterEach(() => {
   try {
+    // Driving the real streaming pipeline records each response's usage into
+    // bootstrap/state's session cost store; zero it so later files don't
+    // inherit this file's token totals.
+    resetCostState()
     for (const key of envKeys) {
       if (originalEnv[key] === undefined) {
         delete process.env[key]

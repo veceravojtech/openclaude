@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync } from 'fs'
 import { mock } from 'bun:test'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { resetCostState } from '../../cost-tracker.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -263,6 +264,10 @@ beforeEach(async () => {
 
 afterEach(() => {
   try {
+    // Draining the real streaming pipeline records each response's usage into
+    // bootstrap/state's session cost store; zero it so later files don't
+    // inherit this file's token totals.
+    resetCostState()
     restoreClientSpy?.()
     restoreClientSpy = undefined
     createHandler = undefined

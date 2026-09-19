@@ -14,6 +14,7 @@ import type { Stream } from '@anthropic-ai/sdk/streaming.mjs'
 import { mkdtempSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { resetCostState } from '../../cost-tracker.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -383,6 +384,10 @@ beforeEach(async () => {
 
 afterEach(async () => {
   try {
+    // The real streaming pipeline records each completed/fallback response's
+    // usage into bootstrap/state's session cost store; zero it so later files
+    // (e.g. UsageTool's report tests) don't inherit this file's token totals.
+    resetCostState()
     restoreClientSpy?.()
     restoreClientSpy = undefined
     createHandler = undefined
