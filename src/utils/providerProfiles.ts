@@ -679,6 +679,49 @@ export function findProviderProfileRouteForModel(
   return null
 }
 
+/**
+ * The OAuth mirror of findProviderProfileRouteForModel: the saved profile
+ * that serves the requested model but can never be turned into a model-only
+ * route, because OAuth profiles carry no API key (the `!apiKey` skip at the
+ * route lookup's top). Matches only a profile that is OpenAI-compatible,
+ * points at the Codex backend, and explicitly lists the model.
+ *
+ * Together those are positive knowledge — the user configured THIS model on
+ * THIS provider — which is what lets a caller distinguish "provably
+ * unroutable through model routing" from the merely unknown (a model id no
+ * profile mentions stays none of the caller's business; see the refusal
+ * history in 4962e860).
+ *
+ * Also the discovery seam for auto-binding the profile instead of refusing:
+ * same lookup, different action at the decision point. It deliberately
+ * returns the full profile so that future caller needs no second lookup.
+ */
+export function findCodexOAuthProfileForModel(
+  requestedModel: string,
+  profiles: readonly ProviderProfile[] = getProviderProfiles(),
+): ProviderProfile | null {
+  const wanted = requestedModel.trim().toLowerCase()
+  if (!wanted) return null
+  for (const profile of profiles) {
+    if (
+      resolveProfileCompatibility(profile.provider).compatibilityMode !== 'openai'
+    ) {
+      continue
+    }
+    const baseURL = profile.baseUrl?.trim()
+    if (!baseURL || !isCodexBaseUrl(baseURL)) continue
+    if (sanitizeApiKey(profile.apiKey)) continue // routable — not our case
+    if (
+      parseModelList(profile.model ?? '').some(
+        model => model.toLowerCase() === wanted,
+      )
+    ) {
+      return profile
+    }
+  }
+  return null
+}
+
 function hasProviderSelectionFlags(
   processEnv: NodeJS.ProcessEnv = process.env,
 ): boolean {

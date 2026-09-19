@@ -9,7 +9,11 @@ import {
   getAPIProvider,
   isFirstPartyAnthropicBaseUrl,
 } from '../../utils/model/providers.js'
-import { findProviderProfileRouteForModel } from '../../utils/providerProfiles.js'
+import {
+  findCodexOAuthProfileForModel,
+  findProviderProfileRouteForModel,
+} from '../../utils/providerProfiles.js'
+import type { ProviderProfile } from '../../utils/config.js'
 
 /**
  * Provider override resolved from agent routing config.
@@ -169,6 +173,41 @@ export function resolveAgentModelProvider(
     ? toAgentRoute(trimmedModelName, settings.agentModels[trimmedModelName])
     : null
   return configured ?? resolveProviderProfileRoute(trimmedModelName)
+}
+
+/**
+ * Positive-knowledge guard for model-only pane/window teammate spawns:
+ * returns the saved OAuth Codex profile when ALL of the following hold —
+ * the session runs on Anthropic's own API, the requested model is not a
+ * Claude model (so first-party provably cannot serve it), nothing routes it
+ * (no agentModels entry, no API-key provider profile), and an OAuth Codex
+ * profile explicitly lists it (findCodexOAuthProfileForModel). That last
+ * match is the point: it proves both the user's intended provider and that
+ * model routing structurally cannot carry it — OAuth profiles have no API
+ * key, the one thing a route needs.
+ *
+ * Deliberately NARROWER than the up-front refusal tried and removed with
+ * 4962e860: that one rejected ANY unservable model and broke existing
+ * contracts that spawn placeholder/custom ids as-is. Under the conditions
+ * above a null return means "none of the caller's business", and only the
+ * positive OAuth match means "refuse with guidance" — so 'forbidden-model',
+ * 'allowed-model', 'custom-provider-model' and 'gpt-5-mini' (the removed
+ * attempt's casualties) still spawn untouched.
+ *
+ * This is also the seam a future auto-bind would use: the same lookup,
+ * binding the returned profile instead of refusing.
+ */
+export function findUnroutableCodexOAuthProfile(
+  modelName: string | undefined,
+  settings: SettingsJson | null,
+): ProviderProfile | null {
+  if (!modelName) return null
+  const trimmed = modelName.trim()
+  if (!trimmed) return null
+  if (!isAnthropicFirstPartySession()) return null
+  if (isPossiblyClaudeModel(trimmed)) return null
+  if (resolveAgentModelProvider(trimmed, settings) !== null) return null
+  return findCodexOAuthProfileForModel(trimmed)
 }
 
 /**

@@ -57,6 +57,8 @@ import {
   spawnInProcessTeammate,
 } from '../../utils/swarm/spawnInProcess.js'
 import { buildInheritedEnvVars } from '../../utils/swarm/spawnUtils.js'
+import { findUnroutableCodexOAuthProfile } from '../../services/api/agentRouting.js'
+import { getInitialSettings } from '../../utils/settings/settings.js'
 import { PROVIDER_PROFILE_IN_PROCESS_ERROR } from '../AgentTool/providerProfileBinding.js'
 import {
   getParentTeamName,
@@ -440,6 +442,30 @@ async function ensureTeamFileExists(
 // ============================================================================
 
 /**
+ * Positive-knowledge refusal for model-only pane/window spawns (see
+ * findUnroutableCodexOAuthProfile): a model an OAuth Codex profile lists,
+ * with no route anywhere and a first-party session that provably cannot
+ * serve it, used to silently degrade to "send it to Anthropic" — the child
+ * then 404'd on its first turn and reported nothing (Stop hooks are skipped
+ * on API-error turns), leaving a 'running' task row until the watchdog
+ * fired 30 minutes later. Refuse instead, loudly, before any pane or task
+ * exists. A spawn carrying providerEnv (provider_profile) bypasses this:
+ * it has its own env, and its failure modes are handled at binding time.
+ */
+function assertModelOnlySpawnRoutable(input: SpawnInput): void {
+  if (input.providerEnv !== undefined || !input.model) return
+  const unroutable = findUnroutableCodexOAuthProfile(
+    input.model,
+    getInitialSettings(),
+  )
+  if (unroutable) {
+    throw new Error(
+      `Model '${input.model.trim()}' is served by provider profile '${unroutable.name}' (OAuth), which model-only routing cannot use — OAuth profiles have no API key to route with. Bind it explicitly with provider_profile, or configure agentModels routing to an API-key provider. On this session's provider the model would 404 on its first request.`,
+    )
+  }
+}
+
+/**
  * Handle spawn operation using split-pane view (default).
  * When inside tmux: Creates teammates in a shared window with leader on left, teammates on right.
  * When outside tmux: Creates a claude-swarm session with all teammates in a tiled layout.
@@ -462,6 +488,7 @@ export async function handleSpawnSplitPane(
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
   }
+  assertModelOnlySpawnRoutable(input)
 
   // Get team name from input or inherit from leader's team context
   const appState = getAppState()
@@ -692,7 +719,9 @@ export async function handleSpawnSplitPane(
  * Handle spawn operation using separate windows (legacy behavior).
  * Creates each teammate in its own tmux window.
  */
-async function handleSpawnSeparateWindow(
+// Exported for testing (the spawn-guard suite drives it like the split-pane
+// handler, with every boundary mocked).
+export async function handleSpawnSeparateWindow(
   input: SpawnInput,
   context: ToolUseContext,
 ): Promise<{ data: SpawnOutput }> {
@@ -708,6 +737,7 @@ async function handleSpawnSeparateWindow(
   if (!name || !prompt) {
     throw new Error('name and prompt are required for spawn operation')
   }
+  assertModelOnlySpawnRoutable(input)
 
   // Get team name from input or inherit from leader's team context
   const appState = getAppState()
