@@ -7,6 +7,7 @@ import { logForDebugging } from '../../../utils/debug.js'
 import { jsonStringify } from '../../../utils/slowOperations.js'
 import { writeToMailbox } from '../../../utils/teammateMailbox.js'
 import {
+  applyTeammateModelFlag,
   buildInheritedCliFlags,
   buildInheritedEnvVars,
   getTeammateCommand,
@@ -128,23 +129,16 @@ export class PaneBackendExecutor implements TeammateExecutor {
 
       // Build CLI flags to propagate to teammate
       const appState = this.context.getAppState()
-      let inheritedFlags = buildInheritedCliFlags({
-        planModeRequired: config.planModeRequired,
-        permissionMode: appState.toolPermissionContext.mode,
-      })
-
-      // If teammate has a custom model, add --model flag (or replace inherited one)
-      if (config.model) {
-        inheritedFlags = inheritedFlags
-          .split(' ')
-          .filter(
-            (flag, i, arr) => flag !== '--model' && arr[i - 1] !== '--model',
-          )
-          .join(' ')
-        inheritedFlags = inheritedFlags
-          ? `${inheritedFlags} --model ${quote([config.model])}`
-          : `--model ${quote([config.model])}`
-      }
+      // A custom model replaces any inherited --model; with no model but a
+      // provider-profile binding, no --model is emitted at all so the child
+      // resolves from OPENAI_MODEL (a flag would beat the env var).
+      const inheritedFlags = applyTeammateModelFlag(
+        buildInheritedCliFlags({
+          planModeRequired: config.planModeRequired,
+          permissionMode: appState.toolPermissionContext.mode,
+        }),
+        { model: config.model, providerEnv: config.providerEnv },
+      )
 
       const flagsStr = inheritedFlags ? ` ${inheritedFlags}` : ''
       const workingDir = config.cwd

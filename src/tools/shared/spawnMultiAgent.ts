@@ -56,7 +56,10 @@ import {
   type InProcessSpawnConfig,
   spawnInProcessTeammate,
 } from '../../utils/swarm/spawnInProcess.js'
-import { buildInheritedEnvVars } from '../../utils/swarm/spawnUtils.js'
+import {
+  applyTeammateModelFlag,
+  buildInheritedEnvVars,
+} from '../../utils/swarm/spawnUtils.js'
 import { findUnroutableCodexOAuthProfile } from '../../services/api/agentRouting.js'
 import { getInitialSettings } from '../../utils/settings/settings.js'
 import { PROVIDER_PROFILE_IN_PROCESS_ERROR } from '../AgentTool/providerProfileBinding.js'
@@ -143,6 +146,48 @@ export function resolveTeammateModel(
   return preferOneMillionContext(
     inputModel ?? getDefaultTeammateModel(leaderModel),
   )
+}
+
+/**
+ * The model a pane/window teammate is LAUNCHED with, i.e. the value that
+ * becomes `--model` on its spawn command. Same as resolveTeammateModel except
+ * it can answer "none".
+ *
+ * A provider-profile binding (AgentTool's `provider_profile`) injects
+ * `OPENAI_MODEL` into the child's env, and the documented way to use it is to
+ * bind the profile and pass NO model — the profile's model resolves on the
+ * bound provider. resolveTeammateModel cannot express that: with no input it
+ * falls through to the LEADER's model, so the child was launched with
+ * `env OPENAI_MODEL=<profile model> ... --model <leader model>`, the flag beat
+ * the env var, and the leader's Anthropic model was sent to Codex — measured
+ * as `400 The 'claude-opus-5' model is not supported when using Codex with a
+ * ChatGPT account`, with the feature used exactly as its runbook prescribes.
+ *
+ * So: when the binding supplies a model and the caller asked for a
+ * leader-derived one (nothing, or the 'inherit' alias, which literally means
+ * "the leader's model"), launch with no model and let the child read
+ * OPENAI_MODEL. Substituting the profile's model through resolveTeammateModel
+ * would not do: preferOneMillionContext appends the Anthropic-only `[1m]`
+ * context tag, which a codex model has no meaning for.
+ *
+ * An EXPLICIT model is still honoured, binding or not. Refusing it would
+ * contradict the spawn guard added in c1bf55c3, whose whole remedy for a codex
+ * model with no route is "Bind it explicitly with provider_profile" — that
+ * advice only works if profile + model is a supported combination. The env
+ * var is a default; an explicit argument overrides a default.
+ *
+ * Exported for testing.
+ */
+export function resolveTeammateLaunchModel(
+  inputModel: string | undefined,
+  leaderModel: string | null,
+  providerEnv: Record<string, string> | undefined,
+): string | undefined {
+  const leaderDerived = inputModel === undefined || inputModel === 'inherit'
+  if (providerEnv?.OPENAI_MODEL && leaderDerived) {
+    return undefined
+  }
+  return resolveTeammateModel(inputModel, leaderModel)
 }
 
 // ============================================================================
@@ -479,8 +524,17 @@ export async function handleSpawnSplitPane(
   const { setAppState, getAppState } = context
   const { name, prompt, agent_type, cwd, plan_mode_required } = input
 
-  // Resolve model: 'inherit' → leader's model; undefined → default Opus
-  const model = resolveTeammateModel(input.model, getLeaderModel(getAppState()))
+  // Resolve model: 'inherit' → leader's model; undefined → default Opus.
+  // Undefined when a provider-profile binding owns the model (see
+  // resolveTeammateLaunchModel) — then no --model is emitted at all.
+  const launchModel = resolveTeammateLaunchModel(
+    input.model,
+    getLeaderModel(getAppState()),
+    input.providerEnv,
+  )
+  // What this teammate will actually run on, for the roster and the tool
+  // result. With a binding and no --model that is the profile's model.
+  const model = launchModel ?? input.providerEnv?.OPENAI_MODEL
 
   if (prompt === undefined) {
     throw new Error(IDLE_SPAWN_UNSUPPORTED_ERROR)
@@ -596,23 +650,13 @@ export async function handleSpawnSplitPane(
 
   // Build CLI flags to propagate to teammate
   // Pass plan_mode_required to prevent inheriting bypass permissions
-  let inheritedFlags = buildInheritedCliFlags({
-    planModeRequired: plan_mode_required,
-    permissionMode: appState.toolPermissionContext.mode,
-  })
-
-  // If teammate has a custom model, add --model flag (or replace inherited one)
-  if (model) {
-    // Remove any inherited --model flag first
-    inheritedFlags = inheritedFlags
-      .split(' ')
-      .filter((flag, i, arr) => flag !== '--model' && arr[i - 1] !== '--model')
-      .join(' ')
-    // Add the teammate's model
-    inheritedFlags = inheritedFlags
-      ? `${inheritedFlags} --model ${quote([model])}`
-      : `--model ${quote([model])}`
-  }
+  const inheritedFlags = applyTeammateModelFlag(
+    buildInheritedCliFlags({
+      planModeRequired: plan_mode_required,
+      permissionMode: appState.toolPermissionContext.mode,
+    }),
+    { model: launchModel, providerEnv: input.providerEnv },
+  )
 
   const flagsStr = inheritedFlags ? ` ${inheritedFlags}` : ''
   // Propagate env vars that teammates need but may not inherit from tmux split-window shells.
@@ -728,8 +772,17 @@ export async function handleSpawnSeparateWindow(
   const { setAppState, getAppState } = context
   const { name, prompt, agent_type, cwd, plan_mode_required } = input
 
-  // Resolve model: 'inherit' → leader's model; undefined → default Opus
-  const model = resolveTeammateModel(input.model, getLeaderModel(getAppState()))
+  // Resolve model: 'inherit' → leader's model; undefined → default Opus.
+  // Undefined when a provider-profile binding owns the model (see
+  // resolveTeammateLaunchModel) — then no --model is emitted at all.
+  const launchModel = resolveTeammateLaunchModel(
+    input.model,
+    getLeaderModel(getAppState()),
+    input.providerEnv,
+  )
+  // What this teammate will actually run on, for the roster and the tool
+  // result. With a binding and no --model that is the profile's model.
+  const model = launchModel ?? input.providerEnv?.OPENAI_MODEL
 
   if (prompt === undefined) {
     throw new Error(IDLE_SPAWN_UNSUPPORTED_ERROR)
@@ -805,23 +858,13 @@ export async function handleSpawnSeparateWindow(
 
   // Build CLI flags to propagate to teammate
   // Pass plan_mode_required to prevent inheriting bypass permissions
-  let inheritedFlags = buildInheritedCliFlags({
-    planModeRequired: plan_mode_required,
-    permissionMode: appState.toolPermissionContext.mode,
-  })
-
-  // If teammate has a custom model, add --model flag (or replace inherited one)
-  if (model) {
-    // Remove any inherited --model flag first
-    inheritedFlags = inheritedFlags
-      .split(' ')
-      .filter((flag, i, arr) => flag !== '--model' && arr[i - 1] !== '--model')
-      .join(' ')
-    // Add the teammate's model
-    inheritedFlags = inheritedFlags
-      ? `${inheritedFlags} --model ${quote([model])}`
-      : `--model ${quote([model])}`
-  }
+  const inheritedFlags = applyTeammateModelFlag(
+    buildInheritedCliFlags({
+      planModeRequired: plan_mode_required,
+      permissionMode: appState.toolPermissionContext.mode,
+    }),
+    { model: launchModel, providerEnv: input.providerEnv },
+  )
 
   const flagsStr = inheritedFlags ? ` ${inheritedFlags}` : ''
   // Propagate env vars that teammates need but may not inherit from tmux split-window shells.

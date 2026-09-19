@@ -5,7 +5,18 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
-import { buildInheritedCliFlags, buildInheritedEnvVars } from './spawnUtils.js'
+import {
+  applyTeammateModelFlag,
+  buildInheritedCliFlags,
+  buildInheritedEnvVars,
+} from './spawnUtils.js'
+
+/** Codex/OAuth provider env as resolveProviderProfileEnv emits it. */
+const CODEX_PROVIDER_ENV = {
+  OPENAI_BASE_URL: 'https://chatgpt.com/backend-api/codex',
+  OPENAI_MODEL: 'codexplan',
+  CLAUDE_CODE_USE_OPENAI: '1',
+}
 
 const ORIGINAL_ENV = { ...process.env }
 
@@ -164,4 +175,61 @@ test('buildInheritedCliFlags preserves fullAccess mode for spawned teammates', (
 
   expect(flags).toContain('--permission-mode fullAccess')
   expect(flags).not.toContain('--dangerously-skip-permissions')
+})
+
+test('applyTeammateModelFlag replaces an inherited --model with the teammate model', () => {
+  const flags = applyTeammateModelFlag(
+    '--model leader-model --teammate-mode tmux',
+    { model: 'glm-5.3-flash' },
+  )
+
+  expect(flags).toBe('--teammate-mode tmux --model glm-5.3-flash')
+})
+
+test('applyTeammateModelFlag emits no --model for a profile-bound spawn with no model', () => {
+  // The binding's OPENAI_MODEL is the child's model. A --model on the command
+  // line beats the env var, so there must be none — not even the inherited
+  // one a leader started with --model would otherwise propagate.
+  const flags = applyTeammateModelFlag(
+    '--model claude-opus-5 --teammate-mode tmux',
+    { providerEnv: CODEX_PROVIDER_ENV },
+  )
+
+  expect(flags).toBe('--teammate-mode tmux')
+  expect(flags).not.toContain('--model')
+})
+
+test('applyTeammateModelFlag honours an explicit model alongside a binding', () => {
+  // An explicit argument overrides the binding's default: the spawn guard's
+  // remedy for an unroutable codex model is "bind it with provider_profile",
+  // which requires profile + model to be a working combination.
+  const flags = applyTeammateModelFlag('--teammate-mode tmux', {
+    model: 'gpt-5.6-sol',
+    providerEnv: CODEX_PROVIDER_ENV,
+  })
+
+  expect(flags).toBe('--teammate-mode tmux --model gpt-5.6-sol')
+})
+
+test('applyTeammateModelFlag leaves an unbound modelless spawn untouched', () => {
+  const inherited = '--model leader-model --teammate-mode tmux'
+
+  expect(applyTeammateModelFlag(inherited, {})).toBe(inherited)
+  expect(
+    applyTeammateModelFlag(inherited, {
+      providerEnv: { OPENAI_BASE_URL: 'https://example.invalid' },
+    }),
+  ).toBe(inherited)
+})
+
+test('applyTeammateModelFlag shell-quotes the model it emits', () => {
+  const flags = applyTeammateModelFlag('', { model: 'weird model$HOME' })
+
+  const printed = execFileSync(
+    '/bin/sh',
+    ['-c', `/bin/echo ${flags.replace('--model ', '')}`],
+    { encoding: 'utf8', env: {} },
+  )
+
+  expect(printed).toBe('weird model$HOME\n')
 })

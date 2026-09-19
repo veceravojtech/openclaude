@@ -314,6 +314,132 @@ test('PaneBackendExecutor command threads providerEnv after the inherited allowl
   expect(result.success).toBe(true)
   expect(paneCommands).toHaveLength(1)
   assertProviderEnvThreaded(paneCommands[0]!)
+  // No model in the config and a binding that carries one: the child must
+  // resolve from OPENAI_MODEL, so the command carries no --model.
+  expect(/--model (\S+)/.exec(paneCommands[0]!)?.[1]).toBeUndefined()
+})
+
+/** The `--model <value>` a spawn command carries, or undefined for none. */
+function modelFlagOf(command: string): string | undefined {
+  return /--model (\S+)/.exec(command)?.[1]
+}
+
+test('profile-bound split-pane spawn with no model emits no --model', async () => {
+  // The bug: with `model` omitted — the documented way to use the binding —
+  // the leader's model was resolved as the default and passed as --model,
+  // which beats OPENAI_MODEL. The child then asked Codex for the leader's
+  // Anthropic model and died with a 400 on its first request.
+  const spawnMultiAgent = await importSpawnMultiAgentWithMocks()
+
+  const result = await spawnMultiAgent.handleSpawnSplitPane(
+    {
+      name: 'codex-worker',
+      prompt: 'do work',
+      team_name: 'codex-team',
+      cwd: '/tmp/codex-worker',
+      providerEnv: CODEX_PROVIDER_ENV,
+    },
+    makeToolUseContext(),
+  )
+
+  expect(capturedCommands).toHaveLength(1)
+  expect(modelFlagOf(capturedCommands[0]!)).toBeUndefined()
+  expect(capturedCommands[0]!).not.toContain('test-model')
+  // The env still carries the model the child will resolve, and the roster
+  // records it rather than a model nothing is running.
+  expect(capturedCommands[0]!).toContain('OPENAI_MODEL=codexplan')
+  expect(result.data.model).toBe('codexplan')
+})
+
+test('profile-bound separate-window spawn with no model emits no --model', async () => {
+  const spawnMultiAgent = await importSpawnMultiAgentWithMocks()
+
+  const result = await spawnMultiAgent.spawnTeammate(
+    {
+      name: 'codex-window',
+      prompt: 'do work',
+      team_name: 'codex-team',
+      cwd: '/tmp/codex-window',
+      use_splitpane: false,
+      providerEnv: CODEX_PROVIDER_ENV,
+    },
+    makeToolUseContext(),
+  )
+
+  expect(capturedCommands).toHaveLength(1)
+  expect(modelFlagOf(capturedCommands[0]!)).toBeUndefined()
+  expect(result.data.model).toBe('codexplan')
+})
+
+test("profile-bound spawn with model 'inherit' emits no --model", async () => {
+  // 'inherit' means "the leader's model" — the exact value the binding exists
+  // to keep away from the bound provider.
+  const spawnMultiAgent = await importSpawnMultiAgentWithMocks()
+
+  await spawnMultiAgent.handleSpawnSplitPane(
+    {
+      name: 'codex-inherit',
+      prompt: 'do work',
+      team_name: 'codex-team',
+      cwd: '/tmp/codex-inherit',
+      model: 'inherit',
+      providerEnv: CODEX_PROVIDER_ENV,
+    },
+    makeToolUseContext(),
+  )
+
+  expect(capturedCommands).toHaveLength(1)
+  expect(modelFlagOf(capturedCommands[0]!)).toBeUndefined()
+})
+
+test('profile-bound spawn honours an explicit model', async () => {
+  const spawnMultiAgent = await importSpawnMultiAgentWithMocks()
+
+  await spawnMultiAgent.handleSpawnSplitPane(
+    {
+      name: 'codex-pinned',
+      prompt: 'do work',
+      team_name: 'codex-team',
+      cwd: '/tmp/codex-pinned',
+      model: 'gpt-5.6-sol',
+      modelWasToolSpecified: true,
+      providerEnv: CODEX_PROVIDER_ENV,
+    },
+    makeToolUseContext(),
+  )
+
+  expect(capturedCommands).toHaveLength(1)
+  expect(modelFlagOf(capturedCommands[0]!)).toBe('gpt-5.6-sol')
+})
+
+test('an unbound sibling spawn still gets the leader-derived --model', async () => {
+  // Isolation property: suppressing --model is scoped to the binding. A plain
+  // teammate must keep inheriting the leader's model exactly as before.
+  const spawnMultiAgent = await importSpawnMultiAgentWithMocks()
+
+  await spawnMultiAgent.handleSpawnSplitPane(
+    {
+      name: 'codex-worker',
+      prompt: 'do work',
+      team_name: 'codex-team',
+      cwd: '/tmp/codex-worker',
+      providerEnv: CODEX_PROVIDER_ENV,
+    },
+    makeToolUseContext(),
+  )
+  await spawnMultiAgent.handleSpawnSplitPane(
+    {
+      name: 'plain-worker',
+      prompt: 'do work',
+      team_name: 'codex-team',
+      cwd: '/tmp/plain-worker',
+    },
+    makeToolUseContext(),
+  )
+
+  expect(capturedCommands).toHaveLength(2)
+  expect(modelFlagOf(capturedCommands[0]!)).toBeUndefined()
+  expect(modelFlagOf(capturedCommands[1]!)).toBe('test-model')
 })
 
 test('in-process spawn rejects providerEnv with the named error', async () => {

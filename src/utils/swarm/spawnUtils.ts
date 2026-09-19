@@ -90,6 +90,52 @@ export function buildInheritedCliFlags(options?: {
   return flags.join(' ')
 }
 
+/** Removes every `--model <value>` pair from a flag string. */
+function stripModelFlag(flags: string): string {
+  return flags
+    .split(' ')
+    .filter((flag, i, arr) => flag !== '--model' && arr[i - 1] !== '--model')
+    .join(' ')
+}
+
+/**
+ * Settle the `--model` flag of a pane/window teammate's spawn command.
+ *
+ * Three outcomes, in precedence order:
+ *
+ * 1. `model` given → it replaces any inherited `--model` (the leader's own
+ *    `--model` override is not the teammate's model).
+ * 2. no `model`, but a provider-profile binding that carries `OPENAI_MODEL` →
+ *    NO `--model` at all, including the inherited one. The child resolves its
+ *    model from `OPENAI_MODEL`, which is the whole point of the binding: a
+ *    `--model` on the command line wins over the env var, so leaving one there
+ *    sent the leader's Anthropic model to a Codex/ChatGPT backend and the
+ *    child died on its first request with `400 ... model is not supported when
+ *    using Codex with a ChatGPT account`. Stripping the INHERITED flag matters
+ *    as much as not adding one: a leader started with `--model` propagates it
+ *    through buildInheritedCliFlags and would reintroduce the same failure.
+ * 3. neither → flags pass through untouched.
+ */
+export function applyTeammateModelFlag(
+  inheritedFlags: string,
+  options: {
+    /** The teammate's resolved model, or undefined to let the binding decide. */
+    model?: string
+    /** Provider-profile env for this spawn (AgentTool's provider_profile). */
+    providerEnv?: Record<string, string>
+  },
+): string {
+  const { model, providerEnv } = options
+  if (model) {
+    const stripped = stripModelFlag(inheritedFlags)
+    return stripped ? `${stripped} --model ${quote([model])}` : `--model ${quote([model])}`
+  }
+  if (providerEnv?.OPENAI_MODEL) {
+    return stripModelFlag(inheritedFlags)
+  }
+  return inheritedFlags
+}
+
 /**
  * Environment variables that must be explicitly forwarded to tmux-spawned
  * teammates. Tmux may start a new login shell that doesn't inherit the
