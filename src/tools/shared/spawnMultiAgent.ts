@@ -61,6 +61,7 @@ import {
   buildInheritedEnvVars,
 } from '../../utils/swarm/spawnUtils.js'
 import { findUnroutableCodexOAuthProfile } from '../../services/api/agentRouting.js'
+import { isCodexBaseUrl } from '../../services/api/providerConfig.js'
 import { getInitialSettings } from '../../utils/settings/settings.js'
 import { PROVIDER_PROFILE_IN_PROCESS_ERROR } from '../AgentTool/providerProfileBinding.js'
 import {
@@ -230,6 +231,10 @@ export type SpawnTeammateConfig = {
    *  the inherited env allowlist in the spawn command so it overrides it
    *  (POSIX `env` applies left-to-right). Pane/window spawns only. */
   providerEnv?: Record<string, string>
+  /** The provider_profile id/name the binding came from. Carried for error
+   *  messages only — providerEnv holds no profile identity, and a refusal
+   *  that cannot name the profile is most of the message gone. */
+  providerProfileRef?: string
   /** request_id of the API call whose response contained the tool_use that
    *  spawned this teammate. Threaded through to TeammateAgentContext for
    *  lineage tracing on tengu_api_* events. */
@@ -251,6 +256,7 @@ type SpawnInput = {
   agent_type?: string
   description?: string
   providerEnv?: Record<string, string>
+  providerProfileRef?: string
   invokingRequestId?: string
 }
 
@@ -511,6 +517,42 @@ function assertModelOnlySpawnRoutable(input: SpawnInput): void {
 }
 
 /**
+ * The sibling of assertModelOnlySpawnRoutable for the case that one hands
+ * off: a spawn that DOES carry a provider_profile binding, plus an explicit
+ * model. applyTeammateModelFlag honours that model (an explicit argument
+ * beats the binding's OPENAI_MODEL default), so a model the bound provider
+ * cannot serve reaches the wire and the child dies on its first request —
+ * `400 The 'claude-opus-5' model is not supported when using Codex with a
+ * ChatGPT account`, measured, with nothing reported and a 'running' task row
+ * until the watchdog fires. The two guards partition the input space by
+ * `providerEnv` and never both fire.
+ *
+ * Positive knowledge only, and deliberately narrow: refuse when the bound
+ * profile is Codex/ChatGPT AND the requested model is a first-party Anthropic
+ * model — a combination the Codex backend itself rejects in the text above.
+ * Everything else passes, including the profile's own `codexplan` default,
+ * `gpt-5.6-sol` (measured working on this exact path) and any model this
+ * build has never heard of. Absence from a profile's model list is NOT proof
+ * of non-service and is not used here.
+ *
+ * The model is normalised through parseUserSpecifiedModel first, which is
+ * load-bearing rather than cosmetic: it resolves aliases, so `opus` becomes
+ * `claude-opus-5` and cannot slip past a check on the raw argument.
+ */
+function assertProfileBoundModelServable(input: SpawnInput): void {
+  const { providerEnv, model } = input
+  if (!providerEnv || !model) return
+  // Only codex bindings are knowable here; every other profile type is
+  // rejected at binding time by resolveProviderProfileEnv.
+  if (!isCodexBaseUrl(providerEnv.OPENAI_BASE_URL)) return
+  const requested = parseUserSpecifiedModel(model)
+  if (!requested.toLowerCase().includes('claude-')) return
+  throw new Error(
+    `Model '${model.trim()}'${requested === model.trim() ? '' : ` (resolves to '${requested}')`} is an Anthropic model, and this spawn is bound to the Codex (OAuth) provider profile '${input.providerProfileRef ?? providerEnv.OPENAI_MODEL}' — a ChatGPT account cannot serve it, so the teammate would fail on its first request with "model is not supported when using Codex with a ChatGPT account". Drop the model argument to use the profile's own model, pass a model that profile serves, or drop provider_profile to run the teammate on this session's provider.`,
+  )
+}
+
+/**
  * Handle spawn operation using split-pane view (default).
  * When inside tmux: Creates teammates in a shared window with leader on left, teammates on right.
  * When outside tmux: Creates a claude-swarm session with all teammates in a tiled layout.
@@ -543,6 +585,7 @@ export async function handleSpawnSplitPane(
     throw new Error('name and prompt are required for spawn operation')
   }
   assertModelOnlySpawnRoutable(input)
+  assertProfileBoundModelServable(input)
 
   // Get team name from input or inherit from leader's team context
   const appState = getAppState()
@@ -791,6 +834,7 @@ export async function handleSpawnSeparateWindow(
     throw new Error('name and prompt are required for spawn operation')
   }
   assertModelOnlySpawnRoutable(input)
+  assertProfileBoundModelServable(input)
 
   // Get team name from input or inherit from leader's team context
   const appState = getAppState()

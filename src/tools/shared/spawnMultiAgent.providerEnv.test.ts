@@ -24,6 +24,8 @@ type PaneWatchdogModule = typeof import(
 )
 type TaskFrameworkModule = typeof import('../../utils/task/framework.js')
 type ExecFileModule = typeof import('../../utils/execFileNoThrow.js')
+type BootstrapStateModule = typeof import('../../bootstrap/state.js')
+type ModelModule = typeof import('../../utils/model/model.js')
 
 const SENTINEL_BINARY = '/opt/sentinel-openclaude-binary'
 
@@ -44,6 +46,8 @@ let actualRegistry: RegistryModule | undefined
 let actualPaneWatchdog: PaneWatchdogModule | undefined
 let actualTaskFramework: TaskFrameworkModule | undefined
 let actualExecFile: ExecFileModule | undefined
+let actualBootstrapState: BootstrapStateModule | undefined
+let actualModelModule: ModelModule | undefined
 
 /** Commands captured from every send path (pane + tmux send-keys). */
 let capturedCommands: string[] = []
@@ -95,6 +99,16 @@ afterEach(() => {
         ...actualExecFile!,
       }))
     }
+    if (actualBootstrapState) {
+      mock.module('../../bootstrap/state.js', () => ({
+        ...actualBootstrapState!,
+      }))
+    }
+    if (actualModelModule) {
+      mock.module('../../utils/model/model.js', () => ({
+        ...actualModelModule!,
+      }))
+    }
   } finally {
     releaseSharedMutationLock()
   }
@@ -102,7 +116,40 @@ afterEach(() => {
 
 async function importSpawnMultiAgentWithMocks(options?: {
   inProcessEnabled?: boolean
+  /** Value for getMainLoopModelOverride, i.e. the leader's own CLI --model,
+   *  which buildInheritedCliFlags propagates into every teammate's flags. */
+  mainLoopModelOverride?: string
+  /** Alias table for parseUserSpecifiedModel. Stubbed rather than relying on
+   *  the real one because alias resolution reads global model/settings state
+   *  that other suites in a full run legitimately mutate — `opus` resolved to
+   *  `claude-opus-5` alone and to something else in the sweep. The guard's
+   *  contract is "normalise, then judge", so the table is the part worth
+   *  pinning; the resolver's own behaviour is model.ts's to test. */
+  modelAliases?: Record<string, string>
 }): Promise<SpawnMultiAgentModule> {
+  if (options?.modelAliases) {
+    actualModelModule ??= await import(
+      `../../utils/model/model.ts?providerEnvActual=${Date.now()}-${Math.random()}`
+    )
+    const aliases = options.modelAliases
+    mock.module('../../utils/model/model.js', () => ({
+      ...actualModelModule!,
+      parseUserSpecifiedModel: (model: string) =>
+        aliases[model] ?? actualModelModule!.parseUserSpecifiedModel(model),
+    }))
+  }
+
+  actualBootstrapState ??= await import(
+    `../../bootstrap/state.ts?providerEnvActual=${Date.now()}-${Math.random()}`
+  )
+  // Full export shape preserved via spread: in bun a mocked module's shape is
+  // frozen at first registration process-wide, so a partial stub would break
+  // every later importer of bootstrap/state.
+  mock.module('../../bootstrap/state.js', () => ({
+    ...actualBootstrapState!,
+    getMainLoopModelOverride: () => options?.mainLoopModelOverride,
+  }))
+
   actualLayoutManager ??= await import(
     `../../utils/swarm/teammateLayoutManager.ts?providerEnvActual=${Date.now()}-${Math.random()}`
   )
@@ -319,9 +366,20 @@ test('PaneBackendExecutor command threads providerEnv after the inherited allowl
   expect(/--model (\S+)/.exec(paneCommands[0]!)?.[1]).toBeUndefined()
 })
 
-/** The `--model <value>` a spawn command carries, or undefined for none. */
+/** EVERY `--model <value>` a spawn command carries, in order.
+ *
+ * All occurrences, not the first: an assertion that reads only the first
+ * match cannot fail on a duplicated `--model`, which is one of the
+ * regressions these tests exist to catch. */
+function modelFlagsOf(command: string): string[] {
+  return [...command.matchAll(/--model (\S+)/g)].map(match => match[1]!)
+}
+
+/** The single `--model` value, asserting the command carries at most one. */
 function modelFlagOf(command: string): string | undefined {
-  return /--model (\S+)/.exec(command)?.[1]
+  const flags = modelFlagsOf(command)
+  expect(flags).not.toHaveLength(2)
+  return flags[0]
 }
 
 test('profile-bound split-pane spawn with no model emits no --model', async () => {
@@ -412,6 +470,52 @@ test('profile-bound spawn honours an explicit model', async () => {
   expect(modelFlagOf(capturedCommands[0]!)).toBe('gpt-5.6-sol')
 })
 
+test('profile-bound spawn strips the --model the leader inherited from its own CLI', async () => {
+  // The subtlest path in the change: buildInheritedCliFlags propagates the
+  // leader's own `--model` into every teammate's flags. Emitting no new
+  // --model is not enough — the inherited one has to be removed, or a leader
+  // started with `--model` reintroduces the original bug verbatim.
+  const spawnMultiAgent = await importSpawnMultiAgentWithMocks({
+    mainLoopModelOverride: 'claude-opus-5[1m]',
+  })
+
+  await spawnMultiAgent.handleSpawnSplitPane(
+    {
+      name: 'codex-worker',
+      prompt: 'do work',
+      team_name: 'codex-team',
+      cwd: '/tmp/codex-worker',
+      providerEnv: CODEX_PROVIDER_ENV,
+    },
+    makeToolUseContext(),
+  )
+
+  expect(capturedCommands).toHaveLength(1)
+  expect(modelFlagsOf(capturedCommands[0]!)).toEqual([])
+  expect(capturedCommands[0]!).not.toContain('claude-opus-5')
+})
+
+test('unbound spawn keeps the inherited --model when the leader set one', async () => {
+  // Isolation for the strip above: without a binding the inherited flag is
+  // replaced by the teammate's resolved model, never dropped.
+  const spawnMultiAgent = await importSpawnMultiAgentWithMocks({
+    mainLoopModelOverride: 'claude-opus-5[1m]',
+  })
+
+  await spawnMultiAgent.handleSpawnSplitPane(
+    {
+      name: 'plain-worker',
+      prompt: 'do work',
+      team_name: 'plain-team',
+      cwd: '/tmp/plain-worker',
+    },
+    makeToolUseContext(),
+  )
+
+  expect(capturedCommands).toHaveLength(1)
+  expect(modelFlagsOf(capturedCommands[0]!)).toHaveLength(1)
+})
+
 test('an unbound sibling spawn still gets the leader-derived --model', async () => {
   // Isolation property: suppressing --model is scoped to the binding. A plain
   // teammate must keep inheriting the leader's model exactly as before.
@@ -440,6 +544,103 @@ test('an unbound sibling spawn still gets the leader-derived --model', async () 
   expect(capturedCommands).toHaveLength(2)
   expect(modelFlagOf(capturedCommands[0]!)).toBeUndefined()
   expect(modelFlagOf(capturedCommands[1]!)).toBe('test-model')
+})
+
+test('profile-bound spawn refuses an explicit Anthropic model', async () => {
+  // The combination applyTeammateModelFlag honours and Codex rejects: the
+  // explicit model wins over OPENAI_MODEL, reaches a ChatGPT account, and
+  // 400s on the first request with nothing reported.
+  const spawnMultiAgent = await importSpawnMultiAgentWithMocks()
+
+  await expect(
+    spawnMultiAgent.handleSpawnSplitPane(
+      {
+        name: 'codex-mismatch',
+        prompt: 'do work',
+        team_name: 'codex-team',
+        cwd: '/tmp/codex-mismatch',
+        model: 'claude-opus-5[1m]',
+        modelWasToolSpecified: true,
+        providerEnv: CODEX_PROVIDER_ENV,
+        providerProfileRef: 'Codex OAuth',
+      },
+      makeToolUseContext(),
+    ),
+  ).rejects.toThrow(/Codex \(OAuth\) provider profile 'Codex OAuth'/)
+
+  // Refused before any pane, task or roster entry exists.
+  expect(capturedCommands).toHaveLength(0)
+})
+
+test('profile-bound refusal resolves an alias before judging it', async () => {
+  // `opus` is not literally an Anthropic model id, so a check on the raw
+  // argument would wave it through to the same 400.
+  const spawnMultiAgent = await importSpawnMultiAgentWithMocks({
+    modelAliases: { opus: 'claude-opus-5' },
+  })
+
+  await expect(
+    spawnMultiAgent.handleSpawnSplitPane(
+      {
+        name: 'codex-alias',
+        prompt: 'do work',
+        team_name: 'codex-team',
+        cwd: '/tmp/codex-alias',
+        model: 'opus',
+        modelWasToolSpecified: true,
+        providerEnv: CODEX_PROVIDER_ENV,
+        providerProfileRef: 'Codex OAuth',
+      },
+      makeToolUseContext(),
+    ),
+  ).rejects.toThrow(/resolves to 'claude-opus-5'/)
+})
+
+test('profile-bound spawn allows every model it cannot disprove', async () => {
+  // Narrowness is the point: the profile's own default, a codex model
+  // measured working on this path, and an unknown model all pass.
+  for (const model of ['codexplan', 'gpt-5.6-sol', 'some-future-model']) {
+    const spawnMultiAgent = await importSpawnMultiAgentWithMocks()
+    capturedCommands = []
+
+    await spawnMultiAgent.handleSpawnSplitPane(
+      {
+        name: `codex-ok-${model}`,
+        prompt: 'do work',
+        team_name: 'codex-team',
+        cwd: '/tmp/codex-ok',
+        model,
+        modelWasToolSpecified: true,
+        providerEnv: CODEX_PROVIDER_ENV,
+        providerProfileRef: 'Codex OAuth',
+      },
+      makeToolUseContext(),
+    )
+
+    expect(capturedCommands).toHaveLength(1)
+    expect(modelFlagOf(capturedCommands[0]!)).toBe(model)
+  }
+})
+
+test('an Anthropic model is untouched without a binding', async () => {
+  // The guard partitions on providerEnv: no binding, no refusal, so ordinary
+  // Anthropic teammates are unaffected.
+  const spawnMultiAgent = await importSpawnMultiAgentWithMocks()
+
+  await spawnMultiAgent.handleSpawnSplitPane(
+    {
+      name: 'plain-opus',
+      prompt: 'do work',
+      team_name: 'plain-team',
+      cwd: '/tmp/plain-opus',
+      model: 'claude-opus-5[1m]',
+      modelWasToolSpecified: true,
+    },
+    makeToolUseContext(),
+  )
+
+  expect(capturedCommands).toHaveLength(1)
+  expect(modelFlagOf(capturedCommands[0]!)).toBe('claude-opus-5\\[1m\\]')
 })
 
 test('in-process spawn rejects providerEnv with the named error', async () => {

@@ -579,6 +579,7 @@ export const AgentTool = buildTool({
         modelWasToolSpecified: model !== undefined,
         agent_type: subagent_type,
         providerEnv: providerProfileEnv,
+        providerProfileRef,
         invokingRequestId: assistantMessage?.requestId
       }, toolUseContext);
 
