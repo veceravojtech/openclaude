@@ -30,6 +30,55 @@ const actualSettingsModule = (await import(
 const actualProviderStartupOverridesModule = (await import(
   `../utils/providerStartupOverrides.ts?providerManagerStartupOverridesActual=${Date.now()}-${Math.random()}`
 )) as ProviderStartupOverridesModule
+
+// Captured before any mock registers: the modules below are mock.module'd in
+// beforeEach and test bodies, and every one of them must be restored in
+// afterEach. providerProfiles.js is the one that bit for real: its leaked
+// stub served `getProviderProfiles: () => []` to every later file in the
+// process, so spawnMultiAgent.spawnGuard.test.ts's fires-cases silently
+// lost the OAuth codex profile their refusal depends on and flipped to
+// not-fires in the full sweep.
+type ProviderProfilesModule = typeof import('../utils/providerProfiles.js')
+type ProviderDiscoveryModule = typeof import('../utils/providerDiscovery.js')
+type DiscoveryServiceModule = typeof import(
+  '../integrations/discoveryService.js'
+)
+type GithubModelsCredentialsModule = typeof import(
+  '../utils/githubModelsCredentials.js'
+)
+type CodexCredentialsModule = typeof import('../utils/codexCredentials.js')
+type ProviderProfileModule = typeof import('../utils/providerProfile.js')
+type ProviderManagerAimlapiModule = typeof import(
+  './providerManagerAimlapi.js'
+)
+type UseCodexOAuthFlowModule = typeof import('./useCodexOAuthFlow.js')
+
+const providerManagerActualImports = `${Date.now()}-${Math.random()}`
+const actualProviderProfilesModule = (await import(
+  `../utils/providerProfiles.ts?providerManagerActual=${providerManagerActualImports}`
+)) as ProviderProfilesModule
+const actualProviderDiscoveryModule = (await import(
+  `../utils/providerDiscovery.ts?providerManagerActual=${providerManagerActualImports}`
+)) as ProviderDiscoveryModule
+const actualDiscoveryServiceModule = (await import(
+  `../integrations/discoveryService.ts?providerManagerActual=${providerManagerActualImports}`
+)) as DiscoveryServiceModule
+const actualGithubModelsCredentialsModule = (await import(
+  `../utils/githubModelsCredentials.ts?providerManagerActual=${providerManagerActualImports}`
+)) as GithubModelsCredentialsModule
+const actualCodexCredentialsModule = (await import(
+  `../utils/codexCredentials.ts?providerManagerActual=${providerManagerActualImports}`
+)) as CodexCredentialsModule
+const actualProviderProfileModule = (await import(
+  `../utils/providerProfile.ts?providerManagerActual=${providerManagerActualImports}`
+)) as ProviderProfileModule
+const actualProviderManagerAimlapiModule = (await import(
+  `./providerManagerAimlapi.ts?providerManagerActual=${providerManagerActualImports}`
+)) as ProviderManagerAimlapiModule
+const actualUseCodexOAuthFlowModule = (await import(
+  `./useCodexOAuthFlow.ts?providerManagerActual=${providerManagerActualImports}`
+)) as UseCodexOAuthFlowModule
+
 const SYNC_START = '\x1B[?2026h'
 const SYNC_END = '\x1B[?2026l'
 
@@ -857,6 +906,16 @@ afterEach(() => {
     mock.restore()
     mock.module('../utils/settings/settings.js', () => ({ ...actualSettingsModule }))
     mock.module('../utils/providerStartupOverrides.js', () => ({ ...actualProviderStartupOverridesModule }))
+    // Restore everything mockProviderProfilesModule and friends stub out;
+    // leaving any of these registered poisons later files in the process.
+    mock.module('../utils/providerProfiles.js', () => ({ ...actualProviderProfilesModule }))
+    mock.module('../utils/providerDiscovery.js', () => ({ ...actualProviderDiscoveryModule }))
+    mock.module('../integrations/discoveryService.js', () => ({ ...actualDiscoveryServiceModule }))
+    mock.module('../utils/githubModelsCredentials.js', () => ({ ...actualGithubModelsCredentialsModule }))
+    mock.module('../utils/codexCredentials.js', () => ({ ...actualCodexCredentialsModule }))
+    mock.module('../utils/providerProfile.js', () => ({ ...actualProviderProfileModule }))
+    mock.module('./providerManagerAimlapi.js', () => ({ ...actualProviderManagerAimlapiModule }))
+    mock.module('./useCodexOAuthFlow.js', () => ({ ...actualUseCodexOAuthFlowModule }))
 
     for (const [key, value] of Object.entries(ORIGINAL_ENV)) {
       if (value === undefined) {
