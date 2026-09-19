@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 
+import { useHermeticEnv } from '../test/hermeticEnv.js'
 import { getWebFetchUserAgent } from './http.js'
+
+// Ambient provider env (e.g. a mid-session /provider switch exporting OPENAI_*)
+// changes what these assertions see; scrub it per test and let hermeticEnv
+// restore the ambient values afterwards.
+useHermeticEnv({ scrubProviderEnv: true })
+
 
 const ROUTING_ENV_KEYS = [
   'ANTHROPIC_BASE_URL',

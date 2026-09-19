@@ -3,7 +3,14 @@ import { z } from 'zod/v4'
 import { getEmptyToolPermissionContext, type Tool, type Tools } from '../Tool.js'
 import { SkillTool } from '../tools/SkillTool/SkillTool.js'
 import { toolToAPISchema } from './api.js'
+import { useHermeticEnv } from '../test/hermeticEnv.js'
 import { EXPERIMENTAL_BETAS_DEFAULTED_ENV } from './experimentalBetasDefault.js'
+
+// Ambient provider env (e.g. a mid-session /provider switch exporting OPENAI_*)
+// changes what these assertions see; scrub it per test and let hermeticEnv
+// restore the ambient values afterwards.
+useHermeticEnv({ scrubProviderEnv: true })
+
 
 test('toolToAPISchema preserves provider-specific schema keywords in input_schema', async () => {
   const schema = await toolToAPISchema(

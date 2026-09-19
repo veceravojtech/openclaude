@@ -4,15 +4,22 @@ import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import React from 'react'
 import { stripVTControlCharacters as stripAnsi } from 'node:util'
 
+import { useHermeticEnv } from '../test/hermeticEnv.js'
 import { createRoot } from '../ink.js'
 import { KeybindingSetup } from '../keybindings/KeybindingProviderSetup.js'
 import { AppStateProvider } from '../state/AppState.js'
 import { AIMLAPI_MESSAGES } from '../integrations/aimlapi/messages.js'
 import { aimlapiByKeyIdentity } from '../integrations/aimlapi/topupState.js'
 import {
+
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../test/sharedMutationLock.js'
+
+// Ambient provider env (e.g. a mid-session /provider switch exporting OPENAI_*)
+// changes what these assertions see; scrub it per test and let hermeticEnv
+// restore the ambient values afterwards.
+useHermeticEnv({ scrubProviderEnv: true })
 
 type SettingsModule = typeof import('../utils/settings/settings.js')
 type ProviderStartupOverridesModule = typeof import('../utils/providerStartupOverrides.js')
