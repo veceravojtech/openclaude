@@ -7,8 +7,11 @@ import {
   SWEEP_STEP,
   TEST_FULL_STEPS,
   evaluateStep,
+  formatFileAttributionTable,
+  formatProviderEnvFingerprint,
   killProcessGroup,
   parseBunTestSummary,
+  parseFileAttributions,
   runStep,
   stepSpawnOptions,
   stripAnsi,
@@ -423,5 +426,178 @@ describe('process-group termination', () => {
     expect(process.listenerCount('SIGINT')).toBe(before.sigint)
     expect(process.listenerCount('SIGTERM')).toBe(before.sigterm)
     expect(process.listenerCount('exit')).toBe(before.exit)
+  })
+})
+
+/**
+ * A PASSING test that deliberately throws internally: its `error:` line sits inside a
+ * green block. Mechanism 2 of the false-attribution taxonomy (expected-throw-in-green) -
+ * an ad-hoc grep pipeline counted exactly this shape as a failure.
+ */
+const GREEN_EXPECTED_THROW = [
+  'bun test v1.3.9 (cf6cdbbb)',
+  '',
+  'src/utils/knowledgeGraph.test.ts:',
+  '(pass) leaves an unsupported JSON store live and retries after it is repaired',
+  'error: knowledgeGraph.ts:344 threw exactly as this test designed it to',
+  '',
+  ' 1 pass',
+  ' 0 fail',
+  ' 3 expect() calls',
+  'Ran 1 test across 1 file. [5.00ms]',
+  '',
+].join('\n')
+
+/**
+ * Mechanism 1 (window-bleed): a green file's error line sits immediately before a
+ * failing file. A grep with context lines attributed that error to the WRONG file; the
+ * parser must never look across a file-header boundary.
+ */
+const WINDOW_BLEED = [
+  'src/utils/knowledgeGraph.test.ts:',
+  '(pass) deliberate internal throw',
+  'error: expected internal throw from the green block',
+  'src/components/ProviderManager.test.tsx:',
+  '(fail) saves AI/ML API preset with OpenAI-compatible defaults',
+  'error: Timed out waiting for ProviderManager test condition',
+  '',
+  ' 1 pass',
+  ' 1 fail',
+  ' 2 expect() calls',
+  'Ran 2 tests across 2 files. [5.00ms]',
+  '',
+].join('\n')
+
+describe('provider-env fingerprint', () => {
+  test('prints NAMES ONLY - never values, not even a deliberately-set secret', () => {
+    const env = {
+      OPENAI_MODEL: 'glm-secret-model-name',
+      OPENAI_API_KEY: 'sk-definitely-not-real-abcdef',
+      CLAUDE_CODE_USE_OPENAI: '1',
+    } as NodeJS.ProcessEnv
+
+    const line = formatProviderEnvFingerprint(env)
+
+    expect(line).toBe(
+      'provider env present: CLAUDE_CODE_USE_OPENAI, OPENAI_API_KEY, OPENAI_MODEL',
+    )
+    expect(line).not.toContain('glm-secret-model-name')
+    expect(line).not.toContain('sk-definitely-not-real-abcdef')
+  })
+
+  test('picks up any CLAUDE_CODE_USE_* beyond the fixed list, deterministically sorted', () => {
+    const env = {
+      CLAUDE_CODE_USE_BEDROCK: '1',
+      CLAUDE_CODE_USE_VERTEX: '1',
+    } as NodeJS.ProcessEnv
+
+    expect(formatProviderEnvFingerprint(env)).toBe(
+      'provider env present: CLAUDE_CODE_USE_BEDROCK, CLAUDE_CODE_USE_VERTEX',
+    )
+  })
+
+  test('reports none when no provider env is set', () => {
+    expect(formatProviderEnvFingerprint({} as NodeJS.ProcessEnv)).toBe('provider env: none')
+  })
+
+  test('ignores unrelated environment entirely', () => {
+    const env = { PATH: '/usr/bin', HOME: '/home/x', TERM: 'xterm' } as NodeJS.ProcessEnv
+    expect(formatProviderEnvFingerprint(env)).toBe('provider env: none')
+  })
+})
+
+describe('parseFileAttributions', () => {
+  test('attributes error lines to the file whose own block carries the (fail) marker', () => {
+    const attributions = parseFileAttributions(ONE_FAILURE)
+
+    expect(attributions).toHaveLength(1)
+    expect(attributions[0]?.file).toBe('bad.test.ts')
+    expect(attributions[0]?.failCount).toBe(1)
+    expect(attributions[0]?.failingTests).toEqual(['this one fails on purpose'])
+    expect(attributions[0]?.errorLines).toEqual(['error: expect(received).toBe(expected)'])
+    expect(attributions[0]?.hasFailures).toBe(true)
+  })
+
+  test('EXPECTED-THROW-IN-GREEN: a green block\'s error line is never attributed', () => {
+    const attributions = parseFileAttributions(GREEN_EXPECTED_THROW)
+
+    expect(attributions).toHaveLength(1)
+    expect(attributions[0]?.file).toBe('src/utils/knowledgeGraph.test.ts')
+    expect(attributions[0]?.hasFailures).toBe(false)
+    expect(attributions[0]?.failCount).toBe(0)
+    expect(attributions[0]?.errorLines).toEqual([])
+  })
+
+  test('WINDOW-BLEED: a green file\'s error line never lands on the failing file after it', () => {
+    const attributions = parseFileAttributions(WINDOW_BLEED)
+
+    expect(attributions).toHaveLength(2)
+
+    const green = attributions[0]
+    expect(green?.file).toBe('src/utils/knowledgeGraph.test.ts')
+    expect(green?.hasFailures).toBe(false)
+    expect(green?.errorLines).toEqual([])
+
+    const failing = attributions[1]
+    expect(failing?.file).toBe('src/components/ProviderManager.test.tsx')
+    expect(failing?.failCount).toBe(1)
+    expect(failing?.failingTests).toEqual([
+      'saves AI/ML API preset with OpenAI-compatible defaults',
+    ])
+    // Only ITS OWN error line - the green block's error line must not bleed in.
+    expect(failing?.errorLines).toEqual([
+      'error: Timed out waiting for ProviderManager test condition',
+    ])
+  })
+
+  test('files with (fail) markers but no error block still report their failures', () => {
+    const attributions = parseFileAttributions(NO_SUMMARY)
+
+    expect(attributions).toHaveLength(2)
+    expect(attributions[0]?.file).toBe('src/memdir/autoExtractFacts.test.ts')
+    expect(attributions[0]?.failCount).toBe(2)
+    expect(attributions[1]?.file).toBe('src/components/ExportDialog.test.tsx')
+    expect(attributions[1]?.failCount).toBe(1)
+  })
+
+  test('an error line before any file header is attributed to no file', () => {
+    const orphan = ['error: nobody knows where this came from', '', ONE_FAILURE].join('\n')
+    const attributions = parseFileAttributions(orphan)
+
+    expect(attributions).toHaveLength(1)
+    expect(attributions[0]?.file).toBe('bad.test.ts')
+    expect(attributions[0]?.errorLines).toEqual(['error: expect(received).toBe(expected)'])
+  })
+
+  test('the Ran line closes the last file block - trailing errors are unattributed', () => {
+    const trailing = `${ONE_FAILURE}\nerror: script "test" exited with code 1\n`
+    const attributions = parseFileAttributions(trailing)
+
+    expect(attributions).toHaveLength(1)
+    expect(attributions[0]?.errorLines).toEqual(['error: expect(received).toBe(expected)'])
+  })
+
+  test('empty and garbage output yield no attributions', () => {
+    expect(parseFileAttributions('')).toEqual([])
+    expect(parseFileAttributions(`${CONTROL_GARBAGE} not test output at all`)).toEqual([])
+    expect(parseFileAttributions(CLEAN_PASS)).toEqual([])
+  })
+})
+
+describe('formatFileAttributionTable', () => {
+  test('renders per-file failures with failing tests and their own attributed error lines', () => {
+    const table = formatFileAttributionTable(parseFileAttributions(WINDOW_BLEED))
+
+    expect(table).toContain('per-file failures')
+    expect(table).toContain('src/components/ProviderManager.test.tsx - 1 failing test(s)')
+    expect(table).toContain('(fail) saves AI/ML API preset with OpenAI-compatible defaults')
+    expect(table).toContain('error: Timed out waiting for ProviderManager test condition')
+    expect(table).not.toContain('src/utils/knowledgeGraph.test.ts')
+    expect(table).not.toContain('expected internal throw from the green block')
+  })
+
+  test('renders nothing when no block actually failed', () => {
+    expect(formatFileAttributionTable(parseFileAttributions(GREEN_EXPECTED_THROW))).toBe('')
+    expect(formatFileAttributionTable([])).toBe('')
   })
 })

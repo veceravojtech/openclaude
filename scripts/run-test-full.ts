@@ -187,6 +187,156 @@ export function parseBunTestSummary(output: string): BunTestSummary | undefined 
   return undefined
 }
 
+/**
+ * Provider env names whose PRESENCE marks a sweep shell as provider-configured.
+ *
+ * This session attributed ~30 sweep failures to the wrong commits because the user's
+ * mid-session `/provider` switch had exported OPENAI_ and CLAUDE_CODE_USE_ vars into the
+ * shell the sweep ran from (mechanism 3 of the false-attribution taxonomy:
+ * VINTAGE-VS-SHELL-STATE). The fingerprint makes a future poisoned-shell sweep
+ * self-identifying in its own log.
+ *
+ * NAMES ONLY, never values: OPENAI_API_KEY can be set in a sweep environment and must
+ * never land in a log.
+ */
+export const PROVIDER_ENV_NAMES = [
+  'OPENAI_MODEL',
+  'OPENAI_BASE_URL',
+  'OPENAI_API_KEY',
+  'OPENAI_API_KEYS',
+  'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_MODEL',
+  'ANTHROPIC_API_KEY',
+  'ANTHROPIC_AUTH_TOKEN',
+] as const
+
+/** Which provider-env names are set in `env`, sorted. Names only - values are never read. */
+export function providerEnvNames(env: NodeJS.ProcessEnv = process.env): readonly string[] {
+  const names = new Set<string>()
+  for (const name of PROVIDER_ENV_NAMES) {
+    if (env[name] !== undefined) {
+      names.add(name)
+    }
+  }
+  for (const key of Object.keys(env)) {
+    if (/^CLAUDE_CODE_USE_/.test(key)) {
+      names.add(key)
+    }
+  }
+  return [...names].sort()
+}
+
+/** The one-line fingerprint the driver prints before its first step. */
+export function formatProviderEnvFingerprint(env: NodeJS.ProcessEnv = process.env): string {
+  const names = providerEnvNames(env)
+  return names.length > 0 ? `provider env present: ${names.join(', ')}` : 'provider env: none'
+}
+
+/** A bun file block header, e.g. `src/memdir/autoExtractFacts.test.ts:` on its own line. */
+const FILE_HEADER_PATTERN = /^(\S+\.[cm]?[jt]sx?):\s*$/
+
+/** A failing-test marker line; group 1 is the test name. */
+const FAIL_MARKER_PATTERN = /^\(fail\)\s?(.*)$/
+
+/** An `error:` detail line inside a file block. */
+const ERROR_LINE_PATTERN = /^error:/
+
+/** One file's slice of the output, with its failures and - only if it failed - its errors. */
+export type FileAttribution = {
+  /** File path as bun printed it (header minus the trailing colon). */
+  readonly file: string
+  /** How many `(fail)` markers this file's own block carried. */
+  readonly failCount: number
+  /** Names from this block's `(fail)` marker lines. */
+  readonly failingTests: readonly string[]
+  /**
+   * `error:` lines from THIS block, attributed only when the block itself carries a
+   * `(fail)` marker. A passing test that deliberately throws internally (an
+   * EXPECTED-THROW-IN-GREEN block) contributes nothing, and no error line is ever read
+   * across a file-header boundary (WINDOW-BLEED).
+   */
+  readonly errorLines: readonly string[]
+  /** Whether this block carried any `(fail)` marker. */
+  readonly hasFailures: boolean
+}
+
+/**
+ * Split captured output into bun's file-scoped blocks and attribute failures per file.
+ *
+ * The rule set exists to make ad-hoc greps unnecessary, because greps over this output
+ * produced two classes of false attribution: a context-window that crossed a file-header
+ * boundary pinned one file's error on its neighbour (WINDOW-BLEED), and a passing test's
+ * deliberate internal throw printed an `error:` line inside a green block that the
+ * pipeline counted as a failure (EXPECTED-THROW-IN-GREEN). Here an error line belongs to
+ * a file only when that file's OWN block carries a `(fail)` marker, and the walk never
+ * looks past a boundary: a new header or the `Ran` summary line closes the block.
+ */
+export function parseFileAttributions(output: string): readonly FileAttribution[] {
+  const attributions: FileAttribution[] = []
+  let file: string | undefined
+  let failingTests: string[] = []
+  let errorLines: string[] = []
+
+  const closeCurrent = (): void => {
+    if (file === undefined) {
+      return
+    }
+    attributions.push({
+      file,
+      failCount: failingTests.length,
+      failingTests: [...failingTests],
+      errorLines: failingTests.length > 0 ? [...errorLines] : [],
+      hasFailures: failingTests.length > 0,
+    })
+    file = undefined
+    failingTests = []
+    errorLines = []
+  }
+
+  for (const line of toLines(output)) {
+    if (RAN_LINE_PATTERN.test(line)) {
+      closeCurrent()
+      continue
+    }
+    const header = FILE_HEADER_PATTERN.exec(line)
+    if (header !== null) {
+      closeCurrent()
+      file = header[1] ?? ''
+      continue
+    }
+    if (file === undefined) {
+      continue
+    }
+    const fail = FAIL_MARKER_PATTERN.exec(line)
+    if (fail !== null) {
+      failingTests.push((fail[1] ?? '').trim())
+      continue
+    }
+    if (ERROR_LINE_PATTERN.test(line)) {
+      errorLines.push(line.trim())
+    }
+  }
+  closeCurrent()
+
+  return attributions
+}
+
+/** Render the per-file failure table printed after a failing step's verdict. Additive output. */
+export function formatFileAttributionTable(attributions: readonly FileAttribution[]): string {
+  const failing = attributions.filter(attribution => attribution.hasFailures)
+  if (failing.length === 0) {
+    return ''
+  }
+  return [
+    "run-test-full: per-file failures (an error: line is attributed only within its own file's failing block):",
+    ...failing.flatMap(attribution => [
+      `  ${attribution.file} - ${attribution.failCount} failing test(s)`,
+      ...attribution.failingTests.map(name => `    (fail) ${name}`),
+      ...attribution.errorLines.map(line => `    ${line}`),
+    ]),
+  ].join('\n')
+}
+
 /** Why a step was rejected. Every value means "do not let this pass". */
 export type StepFailureReason =
   | 'spawn-failed'
@@ -491,11 +641,19 @@ export async function runGuardedStep(step: StepSpec): Promise<number> {
   const { output, outcome } = await runStep(step)
   const verdict = evaluateStep(step, output, outcome)
   console.error(verdict.message)
+  // Additive diagnostics only - the verdict and exit code above are untouched.
+  const attributionTable = formatFileAttributionTable(parseFileAttributions(output))
+  if (attributionTable !== '') {
+    console.error(attributionTable)
+  }
   return verdict.exitCode
 }
 
 /** Run every step in order, stopping at the first failure. */
 export async function main(steps: readonly StepSpec[] = TEST_FULL_STEPS): Promise<number> {
+  // Names only, never values (see PROVIDER_ENV_NAMES). A sweep run from a
+  // provider-switched shell is self-identifying from its first line onward.
+  console.error(formatProviderEnvFingerprint())
   for (const step of steps) {
     const code = await runGuardedStep(step)
     if (code !== 0) {
