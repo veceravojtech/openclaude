@@ -382,6 +382,21 @@ function modelFlagOf(command: string): string | undefined {
   return flags[0]
 }
 
+/** Just the CLI flags of a spawn command — everything after the binary.
+ *
+ * Substring assertions must never be made against the whole command: the
+ * `env` prefix forwards the RUNNER's ambient provider vars, so a shell with
+ * (say) OPENAI_MODEL set to the very model a test is asserting absent would
+ * fail it for a reason that has nothing to do with the code under test. This
+ * repo has been chasing exactly that class of ambient-env sensitivity, and
+ * the flags are the only part these assertions mean. */
+function flagSegmentOf(command: string): string {
+  const marker = ` ${quote([SENTINEL_BINARY])} `
+  const at = command.indexOf(marker)
+  expect(at).toBeGreaterThan(-1)
+  return command.slice(at + marker.length)
+}
+
 test('profile-bound split-pane spawn with no model emits no --model', async () => {
   // The bug: with `model` omitted — the documented way to use the binding —
   // the leader's model was resolved as the default and passed as --model,
@@ -402,7 +417,7 @@ test('profile-bound split-pane spawn with no model emits no --model', async () =
 
   expect(capturedCommands).toHaveLength(1)
   expect(modelFlagOf(capturedCommands[0]!)).toBeUndefined()
-  expect(capturedCommands[0]!).not.toContain('test-model')
+  expect(flagSegmentOf(capturedCommands[0]!)).not.toContain('test-model')
   // The env still carries the model the child will resolve, and the roster
   // records it rather than a model nothing is running.
   expect(capturedCommands[0]!).toContain('OPENAI_MODEL=codexplan')
@@ -492,7 +507,7 @@ test('profile-bound spawn strips the --model the leader inherited from its own C
 
   expect(capturedCommands).toHaveLength(1)
   expect(modelFlagsOf(capturedCommands[0]!)).toEqual([])
-  expect(capturedCommands[0]!).not.toContain('claude-opus-5')
+  expect(flagSegmentOf(capturedCommands[0]!)).not.toContain('claude-opus-5')
 })
 
 test('unbound spawn keeps the inherited --model when the leader set one', async () => {
