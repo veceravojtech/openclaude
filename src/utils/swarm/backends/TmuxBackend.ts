@@ -23,6 +23,7 @@ import type {
   PaneBackend,
   PaneId,
   PaneLiveness,
+  PanePresence,
 } from './types.js'
 
 // Track whether the first pane has been used for external swarm session
@@ -174,6 +175,62 @@ export function interpretTmuxPaneProbe(
     return missingPane ? 'dead' : 'unknown'
   }
   return interpretTmuxPaneState(query.stdout, serverIdentityConfirmed)
+}
+
+/**
+ * Turns `<pane_id>,<pane_dead>,<pane_current_command>` into a PRESENCE verdict:
+ * does the pane still exist, ignoring what runs in its foreground.
+ *
+ * This is the destructive-decision twin of {@link interpretTmuxPaneState}. That
+ * function must answer "is the CLI running", so it folds "pane exists, shell in
+ * the foreground" into 'dead' — the sweep must not, because that pane is a
+ * still-standing record it would wrongly delete. Only an empty pane id on a
+ * positively-confirmed server, or a `remain-on-exit` pane (`pane_dead` 1), is
+ * 'absent'. A non-empty id with `pane_dead` 0 is 'present' no matter what the
+ * foreground command is.
+ */
+export function interpretTmuxPanePresence(
+  raw: string,
+  serverIdentityConfirmed: boolean,
+): PanePresence {
+  const trimmed = raw.trim()
+  if (!trimmed) {
+    return 'unknown'
+  }
+
+  const fields = trimmed.split(TMUX_PANE_STATE_SEPARATOR)
+  if (fields.length < 3) {
+    return 'unknown'
+  }
+
+  const paneId = fields[0]!.trim()
+  const deadFlag = fields[1]!.trim()
+
+  if (!paneId) {
+    return serverIdentityConfirmed ? 'absent' : 'unknown'
+  }
+  if (deadFlag === '1') {
+    return 'absent'
+  }
+  if (deadFlag !== '0') {
+    return 'unknown'
+  }
+  return 'present'
+}
+
+/**
+ * The full socket-explicit presence judgement, exported for hermetic tests.
+ * Mirrors {@link interpretTmuxPaneProbe} but answers absence rather than death.
+ */
+export function interpretTmuxPaneProbePresence(
+  query: TmuxPaneQueryResult,
+  serverIdentityConfirmed: boolean,
+): PanePresence {
+  if (query.code !== 0) {
+    const missingPane = /can't find pane|no such pane/i.test(query.stderr)
+    return missingPane ? 'absent' : 'unknown'
+  }
+  return interpretTmuxPanePresence(query.stdout, serverIdentityConfirmed)
 }
 
 /**
@@ -404,6 +461,50 @@ export class TmuxBackend implements PaneBackend {
   }
 
   /**
+   * Reports whether the pane still exists, independent of what runs in its
+   * foreground. The ghost sweep's probe: it must delete a roster record only
+   * for a pane that is genuinely gone, never for a pane whose CLI has exited
+   * but whose shell still keeps the pane standing.
+   *
+   * Same socket contract as {@link isPaneAliveOnSocket}: no recorded socket
+   * fails open as 'unknown', and an empty `pane_id` reply is only 'absent'
+   * once the named socket is confirmed reachable.
+   */
+  async isPanePresentOnSocket(
+    paneId: PaneId,
+    socketName?: string,
+  ): Promise<PanePresence> {
+    if (!socketName) {
+      logForDebugging(
+        `[TmuxBackend] isPanePresentOnSocket(${paneId}) has no recorded socket; answering unknown`,
+      )
+      return 'unknown'
+    }
+
+    const result = await runTmuxInSocket(socketName, [
+      'display-message',
+      '-p',
+      '-t',
+      paneId,
+      TMUX_PANE_QUERY_FORMAT,
+    ])
+
+    if (result.code !== 0) {
+      logForDebugging(
+        `[TmuxBackend] isPanePresentOnSocket(${paneId}) query failed (exit ${result.code}): ${result.stderr}`,
+      )
+      return interpretTmuxPaneProbePresence(result, false)
+    }
+
+    const needsIdentity = paneReplyHasEmptyId(result.stdout)
+    const serverIdentityConfirmed = needsIdentity
+      ? await this.socketServerReachable(socketName)
+      : false
+
+    return interpretTmuxPaneProbePresence(result, serverIdentityConfirmed)
+  }
+
+  /**
    * Whether the named socket answers `list-panes` — i.e. a server is actually
    * running on it. This is the positive-server-identity check an empty
    * `pane_id` reply requires before it may be read as death.
@@ -526,6 +627,25 @@ export class TmuxBackend implements PaneBackend {
   async killPane(paneId: PaneId, useExternalSession = false): Promise<boolean> {
     const runTmux = useExternalSession ? runTmuxInSwarm : runTmuxInUserSession
     const result = await runTmux(['kill-pane', '-t', paneId])
+    return result.code === 0
+  }
+
+  /**
+   * Kills a pane on an explicitly named socket (`-L <socketName>`), chosen
+   * from the roster's recorded value rather than the caller's environment.
+   *
+   * Without a recorded socket there is no positive proof of which server owns
+   * the pane, and a guessed socket could kill a pane on the wrong server — so
+   * an undefined socket fails closed as `false` instead of guessing.
+   */
+  async killPaneOnSocket(paneId: PaneId, socketName?: string): Promise<boolean> {
+    if (!socketName) {
+      logForDebugging(
+        `[TmuxBackend] killPaneOnSocket(${paneId}) has no recorded socket; refusing to kill on a guessed socket`,
+      )
+      return false
+    }
+    const result = await runTmuxInSocket(socketName, ['kill-pane', '-t', paneId])
     return result.code === 0
   }
 

@@ -1,4 +1,5 @@
 import type { SetAppState } from '../../../Task.js'
+import { getSessionId } from '../../../bootstrap/state.js'
 import { enqueueAgentNotification } from '../../../tasks/LocalAgentTask/LocalAgentTask.js'
 import { logForDebugging } from '../../debug.js'
 import {
@@ -18,7 +19,12 @@ import {
 import { retireTeammateFromLeaderView } from '../teammateRetirement.js'
 import { unassignTeammateTasks } from '../../tasks.js'
 import { getBackendByType } from './registry.js'
-import { isPaneBackend, type BackendType, type PaneLiveness } from './types.js'
+import {
+  isPaneBackend,
+  type BackendType,
+  type PaneLiveness,
+  type PanePresence,
+} from './types.js'
 
 /**
  * First-contact + absence-of-progress watchdog for out-of-process (pane)
@@ -158,6 +164,8 @@ export type PaneWatchdogMailboxMessage = {
 /** Team-file shape the watchdog needs. Subset of TeamFile. */
 export type PaneWatchdogTeamFile = {
   leadAgentId?: string
+  /** Session that owns this team; a sweep must never touch another session's. */
+  leadSessionId?: string
   members?: Array<{
     name: string
     agentId?: string
@@ -173,6 +181,8 @@ export type PaneWatchdogTeamFile = {
 /** Test seams. Every boundary of the watchdog, overridable per arm. */
 export type PaneTeammateWatchdogDeps = {
   now?: () => number
+  /** The session id to attribute this watchdog's sweep to. */
+  currentSessionId?: string
   readLeadMailbox?: (
     leadName: string,
     teamName: string,
@@ -185,10 +195,20 @@ export type PaneTeammateWatchdogDeps = {
     paneId: string,
     socketName?: string,
   ) => Promise<PaneLiveness>
+  /**
+   * Pane presence probe for the ghost sweep: absent/present/unknown. Distinct
+   * from `probeMemberPane` — the sweep must delete a record only for an
+   * ABSENT pane, never a pane that merely has a shell in the foreground.
+   */
+  probeMemberPanePresence?: (
+    backendType: BackendType,
+    paneId: string,
+    socketName?: string,
+  ) => Promise<PanePresence>
   /** Remove a member from the team file (the ghost sweep's roster edit). */
   removeMemberFromTeamFile?: (
     teamName: string,
-    member: { agentId: string; name: string },
+    member: { agentId: string },
   ) => boolean
   /** Unassign a swept teammate's open tasks; returns the lead-facing notice. */
   unassignMemberTasks?: (
@@ -253,6 +273,7 @@ export function armPaneTeammateWatchdog({
   deps?: PaneTeammateWatchdogDeps
 }): PaneTeammateWatchdogHandle {
   const now = deps?.now ?? Date.now
+  const currentSessionId = deps?.currentSessionId ?? getSessionId()
   const readLeadMailbox =
     deps?.readLeadMailbox ?? ((lead, team) => readMailbox(lead, team))
   const readTeamFile = deps?.readTeamFile ?? readTeamFileAsync
@@ -281,11 +302,42 @@ export function armPaneTeammateWatchdog({
       }
       return backend.isPaneAlive(memberPane)
     })
+  /**
+   * The presence probe the sweep uses to decide whether a roster member's pane
+   * is genuinely GONE. A backend without a presence probe has no foreground
+   * ambiguity (its liveness 'dead' means absent), so its liveness is mapped;
+   * anything else fails open as 'unknown' — the sweep must never delete blind.
+   */
+  const probeMemberPanePresence =
+    deps?.probeMemberPanePresence ??
+    (async (
+      memberBackend: BackendType,
+      memberPane: string,
+      memberSocket?: string,
+    ) => {
+      if (!isPaneBackend(memberBackend)) {
+        return 'unknown' satisfies PanePresence
+      }
+      try {
+        const backend = getBackendByType(memberBackend)
+        if (backend?.isPanePresentOnSocket) {
+          return await backend.isPanePresentOnSocket(memberPane, memberSocket)
+        }
+        if (backend?.isPaneAlive) {
+          const liveness = await backend.isPaneAlive(memberPane)
+          if (liveness === 'dead') return 'absent' satisfies PanePresence
+          if (liveness === 'alive') return 'present' satisfies PanePresence
+        }
+      } catch {
+        // Fail open: no evidence of absence.
+      }
+      return 'unknown' satisfies PanePresence
+    })
   const probePane =
     deps?.probePane ?? (() => probeMemberPane(backendType, paneId, tmuxSocket))
   const removeMember =
     deps?.removeMemberFromTeamFile ??
-    ((team: string, member: { agentId: string; name: string }) =>
+    ((team: string, member: { agentId: string }) =>
       removeTeammateFromTeamFile(team, member))
   const unassignMemberTasks =
     deps?.unassignMemberTasks ??
@@ -338,11 +390,11 @@ export function armPaneTeammateWatchdog({
   let disposed = false
   let leadName: string | null = null
   let timer: ReturnType<typeof setInterval> | undefined
-  // Ghost sweep: consecutive confirmed-dead scans per roster member, keyed by
+  // Ghost sweep: consecutive confirmed-ABSENT scans per roster member, keyed by
   // agent id and carrying the pane id that was judged — a roster row rewritten
   // by a respawn starts its count over rather than inheriting its
   // predecessor's.
-  const deadPaneScans = new Map<string, { paneId: string; count: number }>()
+  const absentPaneScans = new Map<string, { paneId: string; count: number }>()
 
   function dispose(): void {
     if (disposed) {
@@ -473,15 +525,28 @@ export function armPaneTeammateWatchdog({
    *
    * Only members the team file already calls idle (`isActive: false`, the
    * turn-end write) on a pane backend are candidates, and only a CONFIRMED
-   * 'dead' pane on two consecutive scans reaps one. 'alive' — including a
-   * healthy teammate sitting at its prompt, which is what most of the roster
-   * looks like between turns — and 'unknown' (tmux unreachable) both clear the
-   * count and touch nothing. A flaky tmux must never delete a teammate's row.
+   * 'absent' pane on two consecutive scans reaps one. 'present' — including a
+   * healthy teammate sitting at its prompt, or a pane whose CLI has exited and
+   * left a shell in the foreground — and 'unknown' (tmux unreachable) both
+   * clear the count and touch nothing. A flaky tmux must never delete a
+   * teammate's row, and neither may a watchdog of another session.
    */
   async function sweepDeadRosterMembers(): Promise<void> {
     const teamFile = await readTeamFile(teamName)
     const members = teamFile?.members
     if (!members) return
+
+    // Team files are shared across sessions; only the session that owns this
+    // team may reap its members. `leadSessionId` is the same field
+    // resolveStoppableTask uses to refuse cross-session stops. An absent value
+    // (a legacy file predating the field) is not "another session", so the
+    // sweep proceeds for it as before.
+    if (
+      teamFile.leadSessionId !== undefined &&
+      teamFile.leadSessionId !== currentSessionId
+    ) {
+      return
+    }
 
     const rosterIds = new Set<string>()
     for (const member of members) {
@@ -497,32 +562,35 @@ export function armPaneTeammateWatchdog({
       ) {
         // Not a ghost candidate — an active teammate, an in-process one, or a
         // row with no pane to judge. Any count it carried is stale.
-        deadPaneScans.delete(member.agentId)
+        absentPaneScans.delete(member.agentId)
         continue
       }
 
-      const liveness = await probeMemberPane(
+      const presence = await probeMemberPanePresence(
         memberBackend,
         tmuxPaneId,
         tmuxSocket,
       )
-      if (liveness !== 'dead') {
-        deadPaneScans.delete(member.agentId)
+      if (presence !== 'absent') {
+        absentPaneScans.delete(member.agentId)
         continue
       }
 
-      const seen = deadPaneScans.get(member.agentId)
+      const seen = absentPaneScans.get(member.agentId)
       const count = seen?.paneId === tmuxPaneId ? seen.count + 1 : 1
       if (count < PANE_TEAMMATE_GHOST_SWEEP_SCANS) {
-        deadPaneScans.set(member.agentId, { paneId: tmuxPaneId, count })
+        absentPaneScans.set(member.agentId, { paneId: tmuxPaneId, count })
         continue
       }
-      deadPaneScans.delete(member.agentId)
+      absentPaneScans.delete(member.agentId)
 
       const swept = { agentId: member.agentId, name: member.name }
       // Roster first: that is the part ListAgents reads, so a failure later in
-      // this sequence leaves the ghost gone rather than half-retired.
-      if (!removeMember(teamName, swept)) continue
+      // this sequence leaves the ghost gone rather than half-retired. Remove
+      // by agentId ONLY — removeTeammateFromTeamFile's name match is an OR, and
+      // a respawned member reusing the ghost's name (fresh agentId) must
+      // survive the sweep.
+      if (!removeMember(teamName, { agentId: member.agentId })) continue
       const notificationMessage = await unassignMemberTasks(teamName, swept)
       retireTeammateFromLeaderView({
         teammateId: swept.agentId,
@@ -531,14 +599,14 @@ export function armPaneTeammateWatchdog({
         now,
       })
       logForDebugging(
-        `[PaneWatchdog] swept ghost member ${swept.agentId} (pane ${tmuxPaneId} confirmed gone on ${count} consecutive scans)`,
+        `[PaneWatchdog] swept ghost member ${swept.agentId} (pane ${tmuxPaneId} confirmed absent on ${count} consecutive scans)`,
       )
     }
 
     // Drop counts for members that have left the roster entirely.
-    for (const key of deadPaneScans.keys()) {
+    for (const key of absentPaneScans.keys()) {
       if (!rosterIds.has(key)) {
-        deadPaneScans.delete(key)
+        absentPaneScans.delete(key)
       }
     }
   }

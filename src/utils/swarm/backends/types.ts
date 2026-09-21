@@ -32,6 +32,25 @@ export type PaneId = string
 export type PaneLiveness = 'alive' | 'dead' | 'unknown'
 
 /**
+ * Whether a pane still EXISTS, as opposed to what runs in its foreground — the
+ * narrower question the ghost sweep needs before it deletes a roster record.
+ *
+ * `PaneLiveness` deliberately folds "the pane exists with a shell in the
+ * foreground" into 'dead', because to a caller asking "is the CLI still
+ * running" the two are the same: no CLI. The sweep cannot use that answer: a
+ * pane whose CLI has exited but whose pane still stands is a record it must
+ * never delete, while a pane that is genuinely gone is the one it exists to
+ * reap.
+ *
+ * - 'absent': the pane itself is gone (empty pane id on a positively-confirmed
+ *   server, or a `remain-on-exit` pane whose process has finished).
+ * - 'present': the pane exists — regardless of whether the CLI or a shell has
+ *   the foreground.
+ * - 'unknown': no positive evidence; never treated as 'absent'.
+ */
+export type PanePresence = 'absent' | 'present' | 'unknown'
+
+/**
  * Result of creating a new teammate pane.
  */
 export type CreatePaneResult = {
@@ -133,6 +152,29 @@ export type PaneBackend = {
     paneId: PaneId,
     socketName?: string,
   ): Promise<PaneLiveness>
+
+  /**
+   * Whether the pane still exists, independent of what runs in its foreground.
+   * The socket-explicit twin of `isPaneAliveOnSocket`, for the ghost sweep's
+   * destructive decision. Implementations must never answer 'absent' without
+   * positive server identity, mirroring `isPaneAliveOnSocket`.
+   */
+  isPanePresentOnSocket?(
+    paneId: PaneId,
+    socketName?: string,
+  ): Promise<PanePresence>
+
+  /**
+   * Kills a pane on an explicitly named socket (tmux `-L <socketName>`).
+   *
+   * The socket-aware sibling of {@link killPane}, for callers that know the
+   * socket the pane was spawned on (the roster record) rather than deriving
+   * one from the caller's own environment. An implementation must return
+   * `false` — not claim success — when `socketName` is undefined, because
+   * without a recorded socket there is no positive proof of which server owns
+   * the pane, and a guessed socket could target the wrong server entirely.
+   */
+  killPaneOnSocket?(paneId: PaneId, socketName?: string): Promise<boolean>
 
   /**
    * Sets the border color for a pane.

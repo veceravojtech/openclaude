@@ -1,16 +1,30 @@
-import { expect, mock, test } from 'bun:test'
+import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { getTeammateStatuses } from './teamDiscovery.js'
 import * as realTeamHelpers from './swarm/teamHelpers.js'
 import type { TeamFile } from './swarm/teamHelpers.js'
 
-// `getTeammateStatuses` reads the team file through `readTeamFile`. Mock that
-// one export so the tests drive the roster contents and the pane probe directly,
-// without touching ~/.claude/teams or a live tmux.
+// Snapshot taken before any mock.module() call: mock.module() mutates the live
+// namespace object in place, so restoring from a spread of the namespace after
+// mocking would re-install the stub. `getTeammateStatuses` reads the team file
+// through `readTeamFile`; mock just that one export per-test and hand the real
+// module back afterwards, so no other file in this process inherits a stubbed
+// `readTeamFile`.
+const pristineTeamHelpers = { ...realTeamHelpers }
+
 let currentTeamFile: TeamFile | null = null
-mock.module('./swarm/teamHelpers.js', () => ({
-  ...realTeamHelpers,
-  readTeamFile: () => currentTeamFile,
-}))
+
+beforeEach(() => {
+  currentTeamFile = null
+  mock.module('./swarm/teamHelpers.js', () => ({
+    ...pristineTeamHelpers,
+    readTeamFile: () => currentTeamFile,
+  }))
+})
+
+afterEach(() => {
+  mock.restore()
+  mock.module('./swarm/teamHelpers.js', () => ({ ...pristineTeamHelpers }))
+})
 
 function member(
   overrides: Partial<TeamFile['members'][number]> = {},

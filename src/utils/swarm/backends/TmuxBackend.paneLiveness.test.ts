@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
 import {
+  interpretTmuxPanePresence,
   interpretTmuxPaneProbe,
   interpretTmuxPaneState,
   TmuxBackend,
@@ -132,6 +133,40 @@ test('a server that names a missing pane on stderr is dead', () => {
       false,
     ),
   ).toBe('dead')
+})
+
+/**
+ * THE PRESENCE SPLIT. Liveness folds "pane exists, shell in the foreground"
+ * into 'dead' — to a caller asking "is the CLI running" the two are the same.
+ * The ghost sweep must not: deleting a still-standing pane's roster record is
+ * the invisible-orphan outcome these tests exist to prevent. So presence
+ * answers the narrower question — does the pane exist — and only 'absent' may
+ * ever justify a removal.
+ */
+test('a shell in the foreground is present, not absent', () => {
+  for (const shell of ['bash', 'zsh', 'sh', 'fish', 'dash', 'ksh']) {
+    // Liveness reads this dead…
+    expect(interpretTmuxPaneState(`%7,0,${shell}`, false)).toBe('dead')
+    // …but the pane is still standing, so presence reads present.
+    expect(interpretTmuxPanePresence(`%7,0,${shell}`, false)).toBe('present')
+  }
+})
+
+test('a non-shell foreground is present too — existence, not liveness', () => {
+  expect(interpretTmuxPanePresence('%22,0,node', false)).toBe('present')
+  expect(interpretTmuxPanePresence('%22,0,node\n', false)).toBe('present')
+})
+
+test('an empty pane id is absent only with positive server identity', () => {
+  expect(interpretTmuxPanePresence(',,', false)).toBe('unknown')
+  expect(interpretTmuxPanePresence(',,\n', false)).toBe('unknown')
+  expect(interpretTmuxPanePresence(',,', true)).toBe('absent')
+  expect(interpretTmuxPanePresence(',0,node', true)).toBe('absent')
+})
+
+test('pane_dead is absent regardless of the command beside it', () => {
+  expect(interpretTmuxPanePresence('%7,1,node', false)).toBe('absent')
+  expect(interpretTmuxPanePresence('%7,1,bash', false)).toBe('absent')
 })
 
 test('a probe with no recorded socket fails open as unknown', async () => {
