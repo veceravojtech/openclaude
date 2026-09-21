@@ -8,9 +8,11 @@ import type {
   PanePresence,
 } from '../../utils/swarm/backends/types.js'
 import type { AppState } from '../../state/AppState.js'
-import type {
-  PaneTeammateWatchdogDeps,
-  PaneTeammateWatchdogHandle,
+import {
+  ensureTeamSweeper,
+  getTeamSweeper,
+  type PaneTeammateWatchdogDeps,
+  type PaneTeammateWatchdogHandle,
 } from '../../utils/swarm/backends/paneTeammateWatchdog.js'
 import type {
   PaneWatchdogMailboxMessage,
@@ -146,6 +148,11 @@ function watchdogDeps(world: World): PaneTeammateWatchdogDeps {
       // Defaults to a present pane: a sweep test has to say which pane is absent.
       return world.memberPresence.get(paneId) ?? 'present'
     },
+    // Hermetic discovery: one reachable socket, and a no-op backfill write, so
+    // socket-less members resolve through the injected presence map instead of
+    // touching the real /tmp/tmux-$UID directory.
+    discoverReachableSockets: async () => ['default'],
+    recordMemberSocket: () => true,
     scanIntervalMs: null,
     firstContactTimeoutMs: FIRST_CONTACT_TIMEOUT_MS,
     progressTimeoutMs: PROGRESS_TIMEOUT_MS,
@@ -206,6 +213,9 @@ function taskStatus(world: World): string | undefined {
 afterEach(() => {
   for (const handle of worldToDispose) handle.dispose()
   worldToDispose.length = 0
+  // The team sweeper is a module-level singleton keyed by team; without this a
+  // later test would inherit the previous test's sweeper (and its deps).
+  getTeamSweeper('team')?.dispose()
 })
 
 const worldToDispose: PaneTeammateWatchdogHandle[] = []
@@ -578,7 +588,15 @@ function makeSweepWorld(extraDeps: PaneTeammateWatchdogDeps = {}): World {
     readTeamFile: () => readTeamFileAsync('team'),
     ...extraDeps,
   })
+  // The watchdog handle goes into worldToDispose (its own dispose), but the
+  // sweep tests drive the TEAM sweeper: `world.handles[0]` is re-pointed at it
+  // so the existing `.scan()` calls exercise the sweep.
   worldToDispose.push(...world.handles)
+  const sweeper = getTeamSweeper('team')
+  if (!sweeper) {
+    throw new Error('team sweeper not armed')
+  }
+  world.handles = [sweeper as PaneTeammateWatchdogHandle]
   world.taskId = () =>
     Object.keys(world.state.tasks).find(id => id !== GHOST_TASK_ID)
   return world
@@ -904,12 +922,12 @@ test('a pane that exists with a shell in the foreground is never removed', async
   }
 })
 
-test('an active or in-process member is not a sweep candidate at all', async () => {
+test('an active member with a confirmed-absent pane is swept; an in-process member never is', async () => {
   acquireSharedMutationLock(LOCK_NAME)
   const dir = seedDiskRoster([
     rosterMember('team-lead', '', '', undefined),
-    // Mid-turn (isActive:true), pane dead: the roster says it is working, so
-    // its pane is none of the sweep's business.
+    // Mid-turn (isActive:true) but its pane is confirmed absent: isActive no
+    // longer gates the sweep — a genuinely absent pane is the evidence.
     rosterMember('busy', '%88', 'tmux', true),
     // An in-process teammate has no pane to judge, dead or otherwise.
     rosterMember('local', '', 'in-process', false),
@@ -921,19 +939,266 @@ test('an active or in-process member is not a sweep candidate at all', async () 
       readTeamFile: () => readTeamFileAsync('team'),
     })
     worldToDispose.push(...world.handles)
+    const sweeper = getTeamSweeper('team')
+    if (!sweeper) throw new Error('team sweeper not armed')
 
     world.memberPresence.set('%88', 'absent')
-    world.memberPresence.set('', 'absent')
-    await world.handles[0]!.scan()
+    await sweeper.scan()
+    await sweeper.scan()
+
+    // The active member's absent pane was reaped; the in-process member was
+    // never a candidate and survives.
+    expect((await teamFileOnDisk())?.members.map(m => m.name)).toEqual([
+      'team-lead',
+      'local',
+    ])
+    expect(world.memberPresenceCalls).toEqual(['%88', '%88'])
+  } finally {
+    releaseSharedMutationLock()
+    setClaudeConfigHomeDirForTesting(undefined)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a sole pane teammate that self-reports a failure still gets its roster reconciled', async () => {
+  acquireSharedMutationLock(LOCK_NAME)
+  const dir = seedDiskRoster([
+    rosterMember('team-lead', '', '', undefined),
+    // The sole pane teammate: its pane is still alive when it self-reports.
+    rosterMember('worker', WORKER_PANE, 'tmux', false),
+  ])
+  try {
+    const world = makeWorld()
+    registerTeammate(world, 'worker', {
+      ...watchdogDeps(world),
+      readTeamFile: () => readTeamFileAsync('team'),
+    })
+    worldToDispose.push(...world.handles)
+    const watchdog = world.handles[0]!
+    const sweeper = getTeamSweeper('team')
+    if (!sweeper) throw new Error('team sweeper not armed')
+
+    // Self-reported failure: the child is alive enough to report, but its turn
+    // failed. The watchdog transitions the task and disposes in the SAME scan
+    // (idleReason 'failed' never sets watchdogFailedTask).
+    world.mailbox.push(
+      idleNotification('worker', world.nowMs, 'failed', undefined, 'provider 400'),
+    )
+    await watchdog.scan()
+    expect(watchdog.disposed).toBe(true)
+
+    // The pane is then killed by hand. The team sweeper, which outlives the
+    // disposed watchdog, reconciles the roster on its own.
+    world.memberPresence.set(WORKER_PANE, 'absent')
+    await sweeper.scan()
+    await sweeper.scan()
+
+    expect((await teamFileOnDisk())?.members.map(m => m.name)).toEqual([
+      'team-lead',
+    ])
+  } finally {
+    releaseSharedMutationLock()
+    setClaudeConfigHomeDirForTesting(undefined)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the sweep survives its own watchdog being disposed', async () => {
+  acquireSharedMutationLock(LOCK_NAME)
+  const dir = seedDiskRoster([
+    rosterMember('team-lead', '', '', undefined),
+    rosterMember('ghost', GHOST_PANE, 'tmux', false),
+  ])
+  try {
+    const world = makeWorld()
+    seedGhostInAppState(world)
+    registerTeammate(world, 'worker', {
+      ...watchdogDeps(world),
+      readTeamFile: () => readTeamFileAsync('team'),
+    })
+    worldToDispose.push(...world.handles)
+    const watchdog = world.handles[0]!
+    const sweeper = getTeamSweeper('team')
+    if (!sweeper) throw new Error('team sweeper not armed')
+
+    // The watchdog is gone, but the sweep still runs and reaps the ghost.
+    watchdog.dispose()
+    world.memberPresence.set(GHOST_PANE, 'absent')
+    await sweeper.scan()
+    await sweeper.scan()
+
+    expect((await teamFileOnDisk())?.members.map(m => m.name)).toEqual([
+      'team-lead',
+    ])
+  } finally {
+    releaseSharedMutationLock()
+    setClaudeConfigHomeDirForTesting(undefined)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('exactly one team sweeper is armed per team', () => {
+  const world = makeWorld()
+  const deps = watchdogDeps(world)
+  const first = ensureTeamSweeper({
+    teamName: 'team',
+    currentSessionId: 's',
+    setAppState: world.setAppState,
+    deps,
+  })
+  const second = ensureTeamSweeper({
+    teamName: 'team',
+    currentSessionId: 's',
+    setAppState: world.setAppState,
+    deps,
+  })
+  expect(second).toBe(first)
+
+  first.dispose()
+  const third = ensureTeamSweeper({
+    teamName: 'team',
+    currentSessionId: 's',
+    setAppState: world.setAppState,
+    deps,
+  })
+  expect(third).not.toBe(first)
+  third.dispose()
+})
+
+test('an active member whose socket cannot be discovered is never swept', async () => {
+  acquireSharedMutationLock(LOCK_NAME)
+  const dir = seedDiskRoster([
+    rosterMember('team-lead', '', '', undefined),
+    rosterMember('busy', '%88', 'tmux', true),
+  ])
+  try {
+    const world = makeSweepWorld({
+      discoverReachableSockets: async () => {
+        throw new Error('enumeration failed')
+      },
+    })
+    world.memberPresence.set('%88', 'absent')
+
     await world.handles[0]!.scan()
     await world.handles[0]!.scan()
 
-    expect(world.memberPresenceCalls).toEqual([])
-    expect((await teamFileOnDisk())?.members.map(m => m.name)).toEqual([
-      'team-lead',
-      'busy',
-      'local',
-    ])
+    expect((await teamFileOnDisk())?.members.map(m => m.name)).toContain('busy')
+  } finally {
+    releaseSharedMutationLock()
+    setClaudeConfigHomeDirForTesting(undefined)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a socket-less member on exactly one server gets its socket recorded and stays present', async () => {
+  acquireSharedMutationLock(LOCK_NAME)
+  const dir = seedDiskRoster([
+    rosterMember('team-lead', '', '', undefined),
+    rosterMember('ghost', GHOST_PANE, 'tmux', false),
+  ])
+  try {
+    const recorded: Array<[string, string]> = []
+    const world = makeSweepWorld({
+      discoverReachableSockets: async () => ['default'],
+      recordMemberSocket: (team, agentId, socket) => {
+        recorded.push([agentId, socket])
+        return true
+      },
+    })
+    world.memberPresence.set(GHOST_PANE, 'present')
+
+    await world.handles[0]!.scan()
+
+    expect(recorded).toEqual([[GHOST_ID, 'default']])
+    expect((await teamFileOnDisk())?.members.map(m => m.name)).toContain('ghost')
+  } finally {
+    releaseSharedMutationLock()
+    setClaudeConfigHomeDirForTesting(undefined)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a pane present on two servers records nothing and stays unknown', async () => {
+  acquireSharedMutationLock(LOCK_NAME)
+  const dir = seedDiskRoster([
+    rosterMember('team-lead', '', '', undefined),
+    rosterMember('ghost', GHOST_PANE, 'tmux', false),
+  ])
+  try {
+    const recorded: Array<[string, string]> = []
+    const world = makeSweepWorld({
+      discoverReachableSockets: async () => ['s1', 's2'],
+      recordMemberSocket: (team, agentId, socket) => {
+        recorded.push([agentId, socket])
+        return true
+      },
+    })
+    // Present on both servers: ownership is ambiguous.
+    world.memberPresence.set(GHOST_PANE, 'present')
+
+    await world.handles[0]!.scan()
+    await world.handles[0]!.scan()
+
+    expect(recorded).toEqual([])
+    expect((await teamFileOnDisk())?.members.map(m => m.name)).toContain('ghost')
+  } finally {
+    releaseSharedMutationLock()
+    setClaudeConfigHomeDirForTesting(undefined)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a socket-less member with an unreachable server set stays unknown', async () => {
+  acquireSharedMutationLock(LOCK_NAME)
+  const dir = seedDiskRoster([
+    rosterMember('team-lead', '', '', undefined),
+    rosterMember('ghost', GHOST_PANE, 'tmux', false),
+  ])
+  try {
+    const world = makeSweepWorld({
+      discoverReachableSockets: async () => {
+        throw new Error('enumeration failed')
+      },
+    })
+    // Would be absent if ownership were provable — it is not.
+    world.memberPresence.set(GHOST_PANE, 'absent')
+
+    await world.handles[0]!.scan()
+    await world.handles[0]!.scan()
+
+    expect((await teamFileOnDisk())?.members.map(m => m.name)).toContain('ghost')
+  } finally {
+    releaseSharedMutationLock()
+    setClaudeConfigHomeDirForTesting(undefined)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('backfill never touches another session’s members', async () => {
+  acquireSharedMutationLock(LOCK_NAME)
+  const dir = seedDiskRoster(
+    [
+      rosterMember('team-lead', '', '', undefined),
+      rosterMember('ghost', GHOST_PANE, 'tmux', false),
+    ],
+    'other-session',
+  )
+  try {
+    const recorded: Array<[string, string]> = []
+    const world = makeSweepWorld({
+      currentSessionId: 'this-session',
+      discoverReachableSockets: async () => ['default'],
+      recordMemberSocket: (team, agentId, socket) => {
+        recorded.push([agentId, socket])
+        return true
+      },
+    })
+    world.memberPresence.set(GHOST_PANE, 'present')
+
+    await world.handles[0]!.scan()
+
+    expect(recorded).toEqual([])
+    expect((await teamFileOnDisk())?.members.map(m => m.name)).toContain('ghost')
   } finally {
     releaseSharedMutationLock()
     setClaudeConfigHomeDirForTesting(undefined)

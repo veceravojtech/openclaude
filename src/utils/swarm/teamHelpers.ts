@@ -611,6 +611,28 @@ export function removeMemberByAgentId(
 }
 
 /**
+ * Records a discovered tmux socket on a roster member — the discovery-backfill
+ * write the ghost sweep performs when a member predates socket recording.
+ *
+ * Idempotent: returns false (no write) when the team or member is gone, or when
+ * the value is already what was asked. Uses the same single-writer team-file
+ * path as the other roster edits in this module.
+ */
+export function recordMemberTmuxSocket(
+  teamName: string,
+  agentId: string,
+  socketName: string,
+): boolean {
+  const teamFile = readTeamFile(teamName)
+  if (!teamFile) return false
+  const member = teamFile.members.find(m => m.agentId === agentId)
+  if (!member || member.tmuxSocket === socketName) return false
+  member.tmuxSocket = socketName
+  writeTeamFile(teamName, teamFile)
+  return true
+}
+
+/**
  * Sets a team member's permission mode.
  * Called when the team leader changes a teammate's mode via the TeamsDialog.
  * @param teamName - The name of the team

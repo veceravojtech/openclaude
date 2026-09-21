@@ -1,4 +1,5 @@
 import { basename } from 'node:path'
+import { readdir } from 'node:fs/promises'
 import { env } from '../../../utils/env.js'
 import { execFileNoThrow } from '../../../utils/execFileNoThrow.js'
 import { TMUX_COMMAND } from '../constants.js'
@@ -82,6 +83,26 @@ export function getUserTmuxSocketName(): string | null {
   if (!ORIGINAL_USER_TMUX) return null
   const socketPath = ORIGINAL_USER_TMUX.split(',')[0]
   return socketPath ? basename(socketPath) : null
+}
+
+/**
+ * Enumerates the tmux socket names for this user: every file under
+ * `/tmp/tmux-$UID/`. These are the `-L` names of the servers this user might be
+ * attached to. A socket file whose server is dead is still returned — the
+ * per-socket pane probe answers 'unknown' for it, which the caller treats as
+ * "the set is incomplete", never as absence.
+ *
+ * Throws when enumeration itself fails (uid unknown, or the socket directory is
+ * unreadable/absent) — a caller must treat that as "the set of servers is
+ * unknown", never as "there are no servers".
+ */
+export async function discoverTmuxSockets(): Promise<string[]> {
+  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined
+  if (uid === undefined) {
+    throw new Error('cannot determine uid for tmux socket enumeration')
+  }
+  const entries = await readdir(`/tmp/tmux-${uid}`)
+  return entries.map(entry => basename(entry))
 }
 
 /**

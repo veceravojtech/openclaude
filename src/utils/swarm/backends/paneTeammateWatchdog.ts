@@ -14,6 +14,7 @@ import {
 import { TEAM_LEAD_NAME } from '../constants.js'
 import {
   readTeamFileAsync,
+  recordMemberTmuxSocket,
   removeTeammateFromTeamFile,
 } from '../teamHelpers.js'
 import { retireTeammateFromLeaderView } from '../teammateRetirement.js'
@@ -205,6 +206,14 @@ export type PaneTeammateWatchdogDeps = {
     paneId: string,
     socketName?: string,
   ) => Promise<PanePresence>
+  /** Enumerate reachable tmux socket names (for discovery-backfill). */
+  discoverReachableSockets?: () => Promise<string[]>
+  /** Record a discovered socket on a roster member (the backfill write). */
+  recordMemberSocket?: (
+    teamName: string,
+    agentId: string,
+    socketName: string,
+  ) => boolean
   /** Remove a member from the team file (the ghost sweep's roster edit). */
   removeMemberFromTeamFile?: (
     teamName: string,
@@ -238,6 +247,329 @@ function envPositiveInt(name: string): number | undefined {
   }
   const parsed = Number.parseInt(raw, 10)
   return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+}
+
+// ---------------------------------------------------------------------------
+// Team-scoped ghost sweeper.
+//
+// The sweep that reconciles the roster with pane reality must outlive any
+// single teammate's watchdog: a teammate that self-reports a failed turn
+// disposes its own watchdog inside the same scan (idleReason 'failed' →
+// dispose()), so a sweep owned by that watchdog would stop exactly when it is
+// most needed — the sole pane teammate of a team would never be reconciled. A
+// module-level Map arms exactly one sweeper per team, lazily, beside the
+// per-teammate watchdog; it runs its own interval and self-disposes once the
+// team file is gone (teardown: nothing left to mutate).
+// ---------------------------------------------------------------------------
+
+type SweepDeps = {
+  teamName: string
+  currentSessionId: string
+  readTeamFile: (teamName: string) => Promise<PaneWatchdogTeamFile | null>
+  probeMemberPanePresence: (
+    backendType: BackendType,
+    paneId: string,
+    socketName?: string,
+  ) => Promise<PanePresence>
+  discoverReachableSockets: () => Promise<string[]>
+  recordMemberSocket: (
+    teamName: string,
+    agentId: string,
+    socketName: string,
+  ) => boolean
+  removeMember: (teamName: string, member: { agentId: string }) => boolean
+  unassignMemberTasks: (
+    teamName: string,
+    member: { agentId: string; name: string },
+  ) => Promise<string>
+  setAppState: SetAppState
+  now: () => number
+}
+
+/**
+ * Discovery-backfill: resolve the socket a socket-less tmux member's pane
+ * lives on, on positive proof only.
+ *
+ * - exactly one reachable server owns the pane → record it, return `{ socketName }`
+ * - none owns it AND every enumerable server answered → `{ absent: true }`
+ * - anything else (enumeration failed, a server failed to answer, or more than
+ *   one owner) → `{}`, which keeps the verdict 'unknown'.
+ */
+async function resolveMemberSocket(
+  deps: SweepDeps,
+  member: { agentId: string; backendType: BackendType; tmuxPaneId: string },
+): Promise<PanePresence> {
+  let sockets: string[]
+  try {
+    sockets = await deps.discoverReachableSockets()
+  } catch {
+    return 'unknown'
+  }
+
+  const owners: string[] = []
+  for (const socket of sockets) {
+    const presence = await deps.probeMemberPanePresence(
+      member.backendType,
+      member.tmuxPaneId,
+      socket,
+    )
+    if (presence === 'unknown') {
+      // A socket whose server did not answer leaves the set incomplete.
+      return 'unknown'
+    }
+    if (presence === 'present') {
+      owners.push(socket)
+    }
+  }
+
+  if (owners.length === 1) {
+    deps.recordMemberSocket(deps.teamName, member.agentId, owners[0]!)
+    // The pane exists on exactly one server: present, so not a sweep target.
+    return 'present'
+  }
+  if (owners.length > 1) {
+    return 'unknown'
+  }
+  // None own it, and every enumerable server answered: the pane is gone.
+  return 'absent'
+}
+
+/** One sweep of the roster: retire members whose pane is confirmed absent. */
+async function sweepRosterOnce(
+  deps: SweepDeps,
+  absentPaneScans: Map<string, { paneId: string; count: number }>,
+): Promise<void> {
+  const teamFile = await deps.readTeamFile(deps.teamName)
+  const members = teamFile?.members
+  if (!members) return
+
+  // Team files are shared across sessions; only the session that owns this
+  // team may reap its members. `leadSessionId` is the same field
+  // resolveStoppableTask uses to refuse cross-session stops. An absent value
+  // (a legacy file predating the field) is not "another session".
+  if (
+    teamFile.leadSessionId !== undefined &&
+    teamFile.leadSessionId !== deps.currentSessionId
+  ) {
+    return
+  }
+
+  const rosterIds = new Set<string>()
+  for (const member of members) {
+    if (!member.agentId) continue
+    if (member.name === TEAM_LEAD_NAME) continue
+    rosterIds.add(member.agentId)
+
+    const backendType = member.backendType
+    const tmuxPaneId = member.tmuxPaneId
+    if (!backendType || !isPaneBackend(backendType) || !tmuxPaneId) {
+      // Not a sweep candidate — an in-process member or a row with no pane.
+      absentPaneScans.delete(member.agentId)
+      continue
+    }
+
+    let presence: PanePresence
+    if (!member.tmuxSocket && backendType === 'tmux') {
+      presence = await resolveMemberSocket(deps, {
+        agentId: member.agentId,
+        backendType,
+        tmuxPaneId,
+      })
+    } else {
+      presence = await deps.probeMemberPanePresence(
+        backendType,
+        tmuxPaneId,
+        member.tmuxSocket,
+      )
+    }
+
+    if (presence !== 'absent') {
+      absentPaneScans.delete(member.agentId)
+      continue
+    }
+
+    const seen = absentPaneScans.get(member.agentId)
+    const count = seen?.paneId === tmuxPaneId ? seen.count + 1 : 1
+    if (count < PANE_TEAMMATE_GHOST_SWEEP_SCANS) {
+      absentPaneScans.set(member.agentId, { paneId: tmuxPaneId, count })
+      continue
+    }
+    absentPaneScans.delete(member.agentId)
+
+    const swept = { agentId: member.agentId, name: member.name }
+    // Roster first, by agentId ONLY — removeTeammateFromTeamFile's name match
+    // is an OR, and a respawned member reusing the ghost's name must survive.
+    if (!deps.removeMember(deps.teamName, { agentId: member.agentId })) continue
+    const notificationMessage = await deps.unassignMemberTasks(
+      deps.teamName,
+      swept,
+    )
+    retireTeammateFromLeaderView({
+      teammateId: swept.agentId,
+      notificationMessage,
+      setAppState: deps.setAppState,
+      now: deps.now,
+    })
+    logForDebugging(
+      `[PaneWatchdog] swept ghost member ${swept.agentId} (pane ${tmuxPaneId} confirmed absent on ${count} consecutive scans)`,
+    )
+  }
+
+  // Drop counts for members that have left the roster entirely.
+  for (const key of absentPaneScans.keys()) {
+    if (!rosterIds.has(key)) {
+      absentPaneScans.delete(key)
+    }
+  }
+}
+
+export type TeamSweeperHandle = {
+  scan(): Promise<void>
+  dispose(): void
+  readonly disposed: boolean
+}
+
+const teamSweepers = new Map<string, TeamSweeperHandle>()
+
+/**
+ * Arm (idempotently) the team-scoped ghost sweeper for `teamName`. Exactly one
+ * sweeper runs per team; subsequent calls return the existing handle.
+ */
+export function ensureTeamSweeper({
+  teamName,
+  currentSessionId,
+  setAppState,
+  deps,
+}: {
+  teamName: string
+  currentSessionId: string
+  setAppState: SetAppState
+  deps?: PaneTeammateWatchdogDeps
+}): TeamSweeperHandle {
+  const existing = teamSweepers.get(teamName)
+  if (existing) return existing
+
+  const now = deps?.now ?? Date.now
+  const readTeamFile = deps?.readTeamFile ?? readTeamFileAsync
+  const probeMemberPanePresence =
+    deps?.probeMemberPanePresence ??
+    (async (
+      memberBackend: BackendType,
+      memberPane: string,
+      memberSocket?: string,
+    ) => {
+      if (!isPaneBackend(memberBackend)) {
+        return 'unknown' satisfies PanePresence
+      }
+      try {
+        const backend = getBackendByType(memberBackend)
+        if (backend?.isPanePresentOnSocket) {
+          return await backend.isPanePresentOnSocket(memberPane, memberSocket)
+        }
+        if (backend?.isPaneAlive) {
+          const liveness = await backend.isPaneAlive(memberPane)
+          if (liveness === 'dead') return 'absent' satisfies PanePresence
+          if (liveness === 'alive') return 'present' satisfies PanePresence
+        }
+      } catch {
+        // Fail open: no evidence of absence.
+      }
+      return 'unknown' satisfies PanePresence
+    })
+  const discoverReachableSockets =
+    deps?.discoverReachableSockets ??
+    (async () => {
+      const { discoverTmuxSockets } = await import('./detection.js')
+      return discoverTmuxSockets()
+    })
+  const recordMemberSocket =
+    deps?.recordMemberSocket ??
+    ((team: string, agentId: string, socketName: string) =>
+      recordMemberTmuxSocket(team, agentId, socketName))
+  const removeMember =
+    deps?.removeMemberFromTeamFile ??
+    ((team: string, member: { agentId: string }) =>
+      removeTeammateFromTeamFile(team, member))
+  const unassignMemberTasks =
+    deps?.unassignMemberTasks ??
+    (async (team: string, member: { agentId: string; name: string }) => {
+      const { notificationMessage } = await unassignTeammateTasks(
+        team,
+        member.agentId,
+        member.name,
+        'shutdown',
+      )
+      return notificationMessage
+    })
+  const scanInterval =
+    deps?.scanIntervalMs === undefined
+      ? PANE_TEAMMATE_WATCHDOG_SCAN_INTERVAL_MS
+      : deps.scanIntervalMs
+
+  const sweepDeps: SweepDeps = {
+    teamName,
+    currentSessionId,
+    readTeamFile,
+    probeMemberPanePresence,
+    discoverReachableSockets,
+    recordMemberSocket,
+    removeMember,
+    unassignMemberTasks,
+    setAppState,
+    now,
+  }
+  const absentPaneScans = new Map<string, { paneId: string; count: number }>()
+  let disposed = false
+  let timer: ReturnType<typeof setInterval> | undefined
+
+  async function scan(): Promise<void> {
+    if (disposed) return
+    // Teardown guard: once the team file is gone there is nothing to mutate,
+    // so the sweeper retires itself.
+    const teamFile = await readTeamFile(teamName)
+    if (!teamFile?.members) {
+      dispose()
+      return
+    }
+    await sweepRosterOnce(sweepDeps, absentPaneScans)
+  }
+
+  function dispose(): void {
+    if (disposed) return
+    disposed = true
+    if (timer !== undefined) {
+      clearInterval(timer)
+      timer = undefined
+    }
+    teamSweepers.delete(teamName)
+  }
+
+  if (scanInterval !== null) {
+    timer = setInterval(() => {
+      void scan().catch(error => {
+        logForDebugging(
+          `[PaneWatchdog] team sweep for ${teamName} failed: ${String(error)}`,
+        )
+      })
+    }, scanInterval)
+    // Never hold the event loop open for a sweeper.
+    ;(timer as { unref?: () => void }).unref?.()
+  }
+
+  const handle: TeamSweeperHandle = {
+    scan,
+    dispose,
+    get disposed() {
+      return disposed
+    },
+  }
+  teamSweepers.set(teamName, handle)
+  return handle
+}
+
+/** The team sweeper currently armed for `teamName`, if any (test seam). */
+export function getTeamSweeper(teamName: string): TeamSweeperHandle | undefined {
+  return teamSweepers.get(teamName)
 }
 
 /**
@@ -302,54 +634,8 @@ export function armPaneTeammateWatchdog({
       }
       return backend.isPaneAlive(memberPane)
     })
-  /**
-   * The presence probe the sweep uses to decide whether a roster member's pane
-   * is genuinely GONE. A backend without a presence probe has no foreground
-   * ambiguity (its liveness 'dead' means absent), so its liveness is mapped;
-   * anything else fails open as 'unknown' — the sweep must never delete blind.
-   */
-  const probeMemberPanePresence =
-    deps?.probeMemberPanePresence ??
-    (async (
-      memberBackend: BackendType,
-      memberPane: string,
-      memberSocket?: string,
-    ) => {
-      if (!isPaneBackend(memberBackend)) {
-        return 'unknown' satisfies PanePresence
-      }
-      try {
-        const backend = getBackendByType(memberBackend)
-        if (backend?.isPanePresentOnSocket) {
-          return await backend.isPanePresentOnSocket(memberPane, memberSocket)
-        }
-        if (backend?.isPaneAlive) {
-          const liveness = await backend.isPaneAlive(memberPane)
-          if (liveness === 'dead') return 'absent' satisfies PanePresence
-          if (liveness === 'alive') return 'present' satisfies PanePresence
-        }
-      } catch {
-        // Fail open: no evidence of absence.
-      }
-      return 'unknown' satisfies PanePresence
-    })
   const probePane =
     deps?.probePane ?? (() => probeMemberPane(backendType, paneId, tmuxSocket))
-  const removeMember =
-    deps?.removeMemberFromTeamFile ??
-    ((team: string, member: { agentId: string }) =>
-      removeTeammateFromTeamFile(team, member))
-  const unassignMemberTasks =
-    deps?.unassignMemberTasks ??
-    (async (team: string, member: { agentId: string; name: string }) => {
-      const { notificationMessage } = await unassignTeammateTasks(
-        team,
-        member.agentId,
-        member.name,
-        'shutdown',
-      )
-      return notificationMessage
-    })
   const firstContactTimeoutMs =
     deps?.firstContactTimeoutMs ??
     envPositiveInt(PANE_TEAMMATE_FIRST_CONTACT_TIMEOUT_ENV) ??
@@ -390,11 +676,6 @@ export function armPaneTeammateWatchdog({
   let disposed = false
   let leadName: string | null = null
   let timer: ReturnType<typeof setInterval> | undefined
-  // Ghost sweep: consecutive confirmed-ABSENT scans per roster member, keyed by
-  // agent id and carrying the pane id that was judged — a roster row rewritten
-  // by a respawn starts its count over rather than inheriting its
-  // predecessor's.
-  const absentPaneScans = new Map<string, { paneId: string; count: number }>()
 
   function dispose(): void {
     if (disposed) {
@@ -505,112 +786,6 @@ export function armPaneTeammateWatchdog({
     dispose()
   }
 
-  /**
-   * Reconcile the roster with pane reality (roadmap Step 3): retire the
-   * members the team file still lists whose pane is gone for good.
-   *
-   * WHY THE ROSTER NEEDS THIS. Only a kill or an idle-retire ever removes a
-   * member, and a pane teammate has neither: a failed child's pane is left
-   * running on purpose (resumability), and once that pane is gone — a human
-   * killing it, a machine crash — nothing in the session notices. The row then
-   * outlives its pane forever: `ListAgents` keeps offering a teammate that
-   * cannot answer, and the roster count never returns to zero.
-   *
-   * WHO SWEEPS. Whichever watchdogs are still armed. The failed ghost's own
-   * instance is not among them — it disposes as soon as its task row goes
-   * terminal — so in practice a live teammate's watchdog reconciles the team.
-   * That is also why the guardrail is a count of scans rather than a hook on
-   * the failure transition: the scan that observes the ghost belongs to a
-   * different instance than the one that failed it.
-   *
-   * Only members the team file already calls idle (`isActive: false`, the
-   * turn-end write) on a pane backend are candidates, and only a CONFIRMED
-   * 'absent' pane on two consecutive scans reaps one. 'present' — including a
-   * healthy teammate sitting at its prompt, or a pane whose CLI has exited and
-   * left a shell in the foreground — and 'unknown' (tmux unreachable) both
-   * clear the count and touch nothing. A flaky tmux must never delete a
-   * teammate's row, and neither may a watchdog of another session.
-   */
-  async function sweepDeadRosterMembers(): Promise<void> {
-    const teamFile = await readTeamFile(teamName)
-    const members = teamFile?.members
-    if (!members) return
-
-    // Team files are shared across sessions; only the session that owns this
-    // team may reap its members. `leadSessionId` is the same field
-    // resolveStoppableTask uses to refuse cross-session stops. An absent value
-    // (a legacy file predating the field) is not "another session", so the
-    // sweep proceeds for it as before.
-    if (
-      teamFile.leadSessionId !== undefined &&
-      teamFile.leadSessionId !== currentSessionId
-    ) {
-      return
-    }
-
-    const rosterIds = new Set<string>()
-    for (const member of members) {
-      if (!member.agentId) continue
-      if (member.name === TEAM_LEAD_NAME) continue
-      rosterIds.add(member.agentId)
-      const { backendType: memberBackend, tmuxPaneId, tmuxSocket } = member
-      if (
-        member.isActive !== false ||
-        !memberBackend ||
-        !isPaneBackend(memberBackend) ||
-        !tmuxPaneId
-      ) {
-        // Not a ghost candidate — an active teammate, an in-process one, or a
-        // row with no pane to judge. Any count it carried is stale.
-        absentPaneScans.delete(member.agentId)
-        continue
-      }
-
-      const presence = await probeMemberPanePresence(
-        memberBackend,
-        tmuxPaneId,
-        tmuxSocket,
-      )
-      if (presence !== 'absent') {
-        absentPaneScans.delete(member.agentId)
-        continue
-      }
-
-      const seen = absentPaneScans.get(member.agentId)
-      const count = seen?.paneId === tmuxPaneId ? seen.count + 1 : 1
-      if (count < PANE_TEAMMATE_GHOST_SWEEP_SCANS) {
-        absentPaneScans.set(member.agentId, { paneId: tmuxPaneId, count })
-        continue
-      }
-      absentPaneScans.delete(member.agentId)
-
-      const swept = { agentId: member.agentId, name: member.name }
-      // Roster first: that is the part ListAgents reads, so a failure later in
-      // this sequence leaves the ghost gone rather than half-retired. Remove
-      // by agentId ONLY — removeTeammateFromTeamFile's name match is an OR, and
-      // a respawned member reusing the ghost's name (fresh agentId) must
-      // survive the sweep.
-      if (!removeMember(teamName, { agentId: member.agentId })) continue
-      const notificationMessage = await unassignMemberTasks(teamName, swept)
-      retireTeammateFromLeaderView({
-        teammateId: swept.agentId,
-        notificationMessage,
-        setAppState,
-        now,
-      })
-      logForDebugging(
-        `[PaneWatchdog] swept ghost member ${swept.agentId} (pane ${tmuxPaneId} confirmed absent on ${count} consecutive scans)`,
-      )
-    }
-
-    // Drop counts for members that have left the roster entirely.
-    for (const key of absentPaneScans.keys()) {
-      if (!rosterIds.has(key)) {
-        absentPaneScans.delete(key)
-      }
-    }
-  }
-
   async function scan(): Promise<void> {
     if (disposed) {
       return
@@ -637,22 +812,6 @@ export function armPaneTeammateWatchdog({
     if (taskStatusNow !== 'running' && !watchingLateCompletion) {
       dispose()
       return
-    }
-
-    // Roster reconciliation comes before this instance's own signals: it is
-    // about OTHER members, so it must not be skipped by anything below — a
-    // parked, silent or unresponsive teammate's watchdog is still a live
-    // scanner of the team, and a ghost is exactly the case where waiting for
-    // the next healthy-looking scan would mean never sweeping at all. Its
-    // failures are its own: a roster that could not be read, or a tmux that
-    // could not be reached, must not stop this instance from failing a hung
-    // teammate of its own.
-    try {
-      await sweepDeadRosterMembers()
-    } catch (e) {
-      logForDebugging(
-        `[PaneWatchdog] ghost sweep for ${teammateName} failed: ${String(e)}`,
-      )
     }
 
     // Resolve the lead's mailbox name once, from the same team file the
@@ -794,6 +953,11 @@ export function armPaneTeammateWatchdog({
   }
 
   signal?.addEventListener('abort', () => dispose(), { once: true })
+
+  // The ghost sweep is owned by a team-scoped sweeper, not this watchdog — a
+  // teammate that self-reports a failure disposes its own watchdog in the same
+  // scan, so the sweep must outlive it. Arming is idempotent: one per team.
+  ensureTeamSweeper({ teamName, currentSessionId, setAppState, deps })
 
   if (scanInterval !== null) {
     timer = setInterval(() => {
