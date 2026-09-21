@@ -53,7 +53,7 @@ export default [
       supportsPreciseTokenCount: false,
     },
     contextWindow: 1_048_576,
-    maxOutputTokens: 65_536,
+    maxOutputTokens: 393_216,
   }),
   defineModel({
     id: 'deepseek-v4-pro',

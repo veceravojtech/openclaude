@@ -178,17 +178,17 @@ test('calculateContextPercentages preserves tiny nonzero usage', () => {
   })
 })
 
-test('deepseek-v4-flash uses the gateway-safe output cap by default', () => {
+test('deepseek-v4-flash uses the Flash-served output cap (retired alias)', () => {
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
   delete process.env.OPENAI_MODEL
 
   expect(getContextWindowForModel('deepseek-v4-flash')).toBe(1_048_576)
   expect(getModelMaxOutputTokens('deepseek-v4-flash')).toEqual({
-    default: 65_536,
-    upperLimit: 65_536,
+    default: 393_216,
+    upperLimit: 393_216,
   })
-  expect(getMaxOutputTokensForModel('deepseek-v4-flash')).toBe(65_536)
+  expect(getMaxOutputTokensForModel('deepseek-v4-flash')).toBe(393_216)
 })
 
 test('deepseek-v4-flash uses DeepSeek direct API max output cap on api.deepseek.com', () => {
