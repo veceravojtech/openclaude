@@ -49,11 +49,27 @@ The independent review's defects have now landed as follow-up commits. Distincti
 - `31ef3d98` — strict `leadSessionId !==` identity check, so a team file with no recorded owner is neither swept nor backfilled.
 - `8d875050` — the final fix round: `resolveMemberSocket` returns `'unknown'` (never `'absent'`) when no enumerated socket claims the pane — discovery can prove ownership but not non-existence over a socket space it does not fully see (`TMUX_TMPDIR`, `tmux -S /explicit/path`), so partial enumeration must never convict a live pane; recording on a positive hit is unchanged. Also adds an `isDisposed()` re-check at both mutation points (a `dispose()` landing mid-pass stops an in-flight scan from calling `removeMember`) and an in-flight `scanning` guard (a tick arriving mid-scan is skipped, so overlapping scans cannot share `absentPaneScans` and collapse the two-scan debounce). Each fix has a test that fails on revert; watchdog 29/0, five-path 388/0 across 42 files, typecheck clean. Consequence for the tests: reaping now seeds the member with a **recorded** socket (the proven path), discovery has its own dedicated tests, and reaping is only asserted where ownership was actually proven.
 
+**Pre-push validation (run once, 2026-09-21)**
+
+- `bun install` → PASS
+- `bun run build` → PASS (v0.30.0; 2 non-fatal "may be ok" warnings: web-tree-sitter, tree-sitter-wasms externals)
+- `bun run smoke` → PASS
+- `bun run check` → FAIL (smoke + deadcode pass; test:full 11002 pass / 11 skip / 1 fail)
+- `bun run typecheck` → PASS
+- `bun run typecheck:type-tests` → PASS (10 files)
+- `bun run docs:check` → PASS (14 docs, 8 mirrored, 18 urls)
+- `bun test --max-concurrency=1` → FAIL (11005 pass / 11 skip / 1 fail, 866 files, exited cleanly in 183.89s)
+
+The single failure is `src/utils/model/modelOptions.crossProfile.test.ts` — "getModelOptions: allowlist checks a non-switch custom id verbatim, not decoded", asserting `expect(values).toContain('__switch_profile__:sneaky:real-model')`. It passes in isolation (22/0) and fails only in the full run: another cross-file module-mock leak, the same class of defect as the `teamDiscovery.test.ts` leak fixed in `0c92cf01`, but in an unrelated area and not caused by this work. The leaking file is not yet identified; these leaks are order-dependent and invisible to single-file runs. Separately, the earlier "~5 DeepSeek model-cap failures (65,536 vs 393,216)" are **resolved, not remaining** — fixed by `b17b882c`, and the full run shows none.
+
 **Still open**
 
-- The full pre-push validation contract needs a re-run — the run made during this session predates `8d875050`.
-- The live six-symptom repro has **not** been run, so no ghost has been observed being reaped outside a test; it still requires a rebuilt lead and freshly spawned teammates (see Step 5).
-- Roughly 5 pre-existing DeepSeek model-cap test failures (65,536 vs 393,216) remain, unrelated to this work.
+- The live six-symptom repro has **not** been run — still the one thing nobody has demonstrated end to end; it requires a rebuilt lead and freshly spawned teammates (see Step 5).
+- A confirmatory pre-push re-run is advisable: this run overlapped the final commits landing and caught one transient typecheck error in `paneTeammateWatchdog.ts` (a mid-edit state) that disappeared on re-run. The tree is now clean and every file is committed, but the run was not against a fully frozen tree.
+
+**Reassuring result (measured, not assumed)**
+
+- The full suite exited normally in 183.89s with no hang, no timeout and no refusal to exit — so the `unref`'d interval introduced by the team-scoped sweeper in `1c0b047f` does not keep the process alive.
 
 **Notes still true**
 
@@ -322,7 +338,7 @@ A user reports context compaction firing at roughly **560k tokens**, while `deep
 
 ## Metadata instability worth knowing
 
-DeepSeek `maxOutputTokens` metadata is currently unstable: `deepseek-v4-pro` declares 65,536 while a sibling declares 393,216, and roughly 5 tests in the repo currently fail asserting 65,536 where the tree yields 393,216.
+DeepSeek `maxOutputTokens` metadata is currently unstable: `deepseek-v4-pro` declares 65,536 while a sibling declares 393,216. (An earlier "~5 tests fail asserting 65,536 where the tree yields 393,216" note is resolved — fixed by `b17b882c`; the full pre-push run shows no such failures.)
 
 ## Next step
 
