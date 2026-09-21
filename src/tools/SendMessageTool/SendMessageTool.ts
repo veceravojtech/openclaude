@@ -31,7 +31,11 @@ import { lazySchema } from '../../utils/lazySchema.js'
 import { parseAddress } from '../../utils/peerAddress.js'
 import { semanticBoolean } from '../../utils/semanticBoolean.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
-import { isPaneBackend, type BackendType } from '../../utils/swarm/backends/types.js'
+import {
+  isPaneBackend,
+  type BackendType,
+  type PaneLiveness,
+} from '../../utils/swarm/backends/types.js'
 import { TEAM_LEAD_NAME } from '../../utils/swarm/constants.js'
 import { readTeamFileAsync } from '../../utils/swarm/teamHelpers.js'
 import {
@@ -225,58 +229,81 @@ function undeliverableRefusal(address: string, status: TaskStatus): string {
 }
 
 /**
- * Whether a terminal task row still has a live reader behind it.
+ * The refusal for a shutdown_request to a roster member that has no task row
+ * but whose recorded pane is confirmed gone. The row was already evicted (the
+ * grace window), so there is no task status to name — the pane verdict is the
+ * whole story. Kept in the same shape as {@link undeliverableRefusal} (address
+ * + "is not running") so a model caller can key on the address the same way.
+ */
+function deadPaneRefusal(address: string): string {
+  return (
+    `Not delivered: ${address} is not running (its pane is gone). ` +
+    `Spawn or restart it, or send to a running teammate.`
+  )
+}
+
+/**
+ * Probes the pane backing a roster member and returns the backend's verdict,
+ * or `undefined` when the recipient is not a pane-backed roster member (or no
+ * probe is available, or the probe throws).
  *
- * `classifyTeammateDelivery` convicts a recipient on its `appState.tasks` row,
- * and for an in-process teammate that row IS the runner, so the conviction
- * holds. A pane teammate is different in the one way that matters here: what
- * drains its inbox is the CLI process inside its own pane, which the row does
- * not describe at all. `paneTeammateWatchdog` deliberately leaves a failed
- * child's pane running so it can be resumed, and that child keeps polling.
- * So for a pane roster member whose pane still has the CLI in the foreground,
- * `failed`/`completed`/`killed` says nothing about whether a write will be
- * read — which is the whole question this gate exists to answer.
- *
- * Only `'alive'` counts. `'dead'` is positive evidence of absence, and
- * `'unknown'` (tmux unreachable, nothing readable back) is a failure to prove
- * liveness at all: a refusal nobody needed is recoverable in a way that a
- * claimed delivery nobody read is not.
+ * The socket is the one recorded on the member at spawn (`member.tmuxSocket`)
+ * and is passed to `isPaneAliveOnSocket`, exactly as the two call sites
+ * `c0bb8621` already converted (teamDiscovery, the ghost sweep). It must come
+ * from the roster, never from this process's own environment: a live pane
+ * cannot be read as dead just because the probing process happens to be
+ * attached to a different tmux server. A member with no recorded socket is
+ * handed `undefined`, which the backend answers with 'unknown' (never 'dead').
  *
  * Probed through the backends rather than by shelling out, and imported
  * dynamically as `killOrphanedTeammatePanes` does — the registry pulls in the
  * backend implementations, and this module is loaded for every session while
- * the probe only ever runs for a terminal row.
+ * the probe only ever runs when a delivery needs evidence.
+ */
+async function probePaneRunner(
+  recipientName: string,
+  teamName: string | undefined,
+): Promise<PaneLiveness | undefined> {
+  if (!teamName) return undefined
+  try {
+    const teamFile = await readTeamFileAsync(teamName)
+    const member = teamFile?.members.find(m => m.name === recipientName)
+    if (!member?.tmuxPaneId || !member.backendType) return undefined
+    if (!isPaneBackend(member.backendType)) return undefined
+    const paneId = member.tmuxPaneId
+
+    const { ensureBackendsRegistered, getBackendByType } = await import(
+      '../../utils/swarm/backends/registry.js'
+    )
+    await ensureBackendsRegistered()
+    const backend = getBackendByType(member.backendType)
+    if (backend?.isPaneAliveOnSocket) {
+      return await backend.isPaneAliveOnSocket(paneId, member.tmuxSocket)
+    }
+    if (backend?.isPaneAlive) {
+      return await backend.isPaneAlive(paneId)
+    }
+    return undefined
+  } catch (e) {
+    logForDebugging(
+      `[SendMessageTool] pane liveness probe for ${recipientName} failed: ${errorMessage(e)}`,
+    )
+    return undefined
+  }
+}
+
+/**
+ * Whether a terminal task row still has a live reader behind it (Step 1's
+ * exemption). Only `'alive'` counts: `'dead'` is positive evidence of absence,
+ * and `'unknown'` (tmux unreachable, nothing readable back) is a failure to
+ * prove liveness at all — a refusal nobody needed is recoverable in a way that
+ * a claimed delivery nobody read is not.
  */
 async function hasLivePaneRunner(
   recipientName: string,
   teamName: string | undefined,
 ): Promise<boolean> {
-  if (!teamName) return false
-  try {
-    const teamFile = await readTeamFileAsync(teamName)
-    const member = teamFile?.members.find(m => m.name === recipientName)
-    if (!member?.tmuxPaneId || !member.backendType) return false
-    if (!isPaneBackend(member.backendType)) return false
-    const paneId = member.tmuxPaneId
-
-    const [{ ensureBackendsRegistered, getBackendByType }, { isInsideTmux }] =
-      await Promise.all([
-        import('../../utils/swarm/backends/registry.js'),
-        import('../../utils/swarm/backends/detection.js'),
-      ])
-    await ensureBackendsRegistered()
-    const backend = getBackendByType(member.backendType)
-    const probe = backend?.isPaneAlive
-    if (!probe) return false
-
-    const useExternalSession = !(await isInsideTmux())
-    return (await probe.call(backend, paneId, useExternalSession)) === 'alive'
-  } catch (e) {
-    logForDebugging(
-      `[SendMessageTool] pane liveness probe for ${recipientName} failed: ${errorMessage(e)}`,
-    )
-    return false
-  }
+  return (await probePaneRunner(recipientName, teamName)) === 'alive'
 }
 
 /**
@@ -488,6 +515,26 @@ async function handleShutdownRequest(
       data: {
         success: false,
         message: undeliverableRefusal(address, delivery.status),
+      },
+    }
+  }
+
+  // After the grace window evicts a terminal task row, the same teammate
+  // classifies as `untracked` and would otherwise skip the gate above
+  // entirely. A pane-backed roster member whose pane is confirmed gone must
+  // still be refused, or the false-success hole the gate closes reopens in
+  // exactly the case this whole fix exists for: the ghost with a dead pane.
+  // Only a confirmed `'dead'` refuses — `'unknown'` (an unprovable pane, e.g.
+  // a legacy member with no recorded socket) and `'alive'` both keep the
+  // optimistic delivery.
+  if (
+    delivery.state === 'untracked' &&
+    (await probePaneRunner(targetName, teamName)) === 'dead'
+  ) {
+    return {
+      data: {
+        success: false,
+        message: deadPaneRefusal(address),
       },
     }
   }

@@ -51,6 +51,8 @@ beforeEach(async () => {
   paneLiveness = 'alive'
   probeThrows = false
   probedPanes = []
+  probedSockets = []
+  aliveSocket = undefined
   await mockBackendRegistry()
   writeTeamFile()
 })
@@ -84,6 +86,14 @@ afterEach(() => {
 let paneLiveness: PaneLiveness = 'alive'
 let probeThrows = false
 let probedPanes: string[] = []
+let probedSockets: Array<string | undefined> = []
+/**
+ * When set, the mock answers `'alive'` only for a probe sent to this socket and
+ * `'dead'` for any other named socket — the way a live pane on one tmux server
+ * reads as gone when asked from a different one. This lets a test prove the
+ * probe used the socket recorded on the roster rather than a guessed one.
+ */
+let aliveSocket: string | undefined
 let pristineBackendRegistry: Record<string, unknown> | undefined
 
 async function mockBackendRegistry(): Promise<void> {
@@ -97,9 +107,19 @@ async function mockBackendRegistry(): Promise<void> {
     ...pristineBackendRegistry,
     ensureBackendsRegistered: async () => {},
     getBackendByType: () => ({
-      isPaneAlive: async (paneId: string) => {
+      isPaneAliveOnSocket: async (
+        paneId: string,
+        socketName?: string,
+      ): Promise<PaneLiveness> => {
         probedPanes.push(paneId)
+        probedSockets.push(socketName)
         if (probeThrows) throw new Error('tmux server not running')
+        // Mirror the real backend contract: without a recorded socket there is
+        // no positive server identity, so the probe is unprovable.
+        if (socketName === undefined) return 'unknown'
+        if (aliveSocket !== undefined) {
+          return socketName === aliveSocket ? 'alive' : 'dead'
+        }
         return paneLiveness
       },
     }),
@@ -110,6 +130,7 @@ async function mockBackendRegistry(): Promise<void> {
 function paneMember(
   name: string,
   paneId: string,
+  tmuxSocket?: string,
 ): TeamFile['members'][number] {
   return {
     agentId: `${name}@${TEAM}`,
@@ -120,6 +141,8 @@ function paneMember(
     subscriptions: [],
     backendType: 'tmux',
     isActive: false,
+    // Absent on legacy rows: a member written before the socket was recorded.
+    ...(tmuxSocket !== undefined && { tmuxSocket }),
   }
 }
 
@@ -602,7 +625,7 @@ test('a shutdown request reaches a failed teammate whose pane is still running',
   // The live repro's end state: a `failed` row from the lead's registry, and a
   // `%21` still running the child whose poller surfaces the request
   // (useInboxPoller) so the teammate can approve its own exit.
-  writeTeamFile([paneMember('coder', '%21')])
+  writeTeamFile([paneMember('coder', '%21', 'swarm-socket')])
   const lead = contextFor(appStateWith({}, [teammateTask('coder', 'failed')]))
 
   const result = await sendStructured(
@@ -624,7 +647,7 @@ test('a shutdown request to a failed teammate whose pane is gone is refused like
   // passed through the terminal-task gate at all, so a request into an inbox
   // with no poller was reported as sent and the lead waited for an approval
   // that could never arrive.
-  writeTeamFile([paneMember('coder', '%21')])
+  writeTeamFile([paneMember('coder', '%21', 'swarm-socket')])
   paneLiveness = 'dead'
   const lead = contextFor(appStateWith({}, [teammateTask('coder', 'failed')]))
 
@@ -654,7 +677,7 @@ test('an unreadable pane probe proves nothing, so the request is still refused',
   // a failure to prove liveness. Only a runner the probe actually saw counts,
   // and a refusal that was not needed costs a retry where a claimed delivery
   // nobody read costs the whole stop.
-  writeTeamFile([paneMember('coder', '%21')])
+  writeTeamFile([paneMember('coder', '%21', 'swarm-socket')])
   paneLiveness = 'unknown'
   const lead = contextFor(appStateWith({}, [teammateTask('coder', 'failed')]))
 
@@ -750,4 +773,93 @@ test('only the shutdown request is exempt — a plan response to a terminal team
 
   expect(result.success).toBe(true)
   expect(probedPanes).toEqual([])
+})
+
+/**
+ * DEFECT FIXES — the probe socket comes from the roster (not the probing
+ * process's environment), and the untracked path (task row evicted) still
+ * refuses a confirmed-dead pane.
+ */
+
+test('a live pane on a socket this process would not guess is still exempt — the recorded socket is used', async () => {
+  // The member records a socket that differs from what the probing process's
+  // own environment would derive. A probe that still guessed the socket would
+  // ask the wrong server and read the live pane as dead.
+  writeTeamFile([paneMember('coder', '%21', 'the-recorded-socket')])
+  aliveSocket = 'the-recorded-socket'
+  const lead = contextFor(appStateWith({}, [teammateTask('coder', 'failed')]))
+
+  const result = await sendStructured(
+    'coder',
+    { type: 'shutdown_request', reason: 'wrap up' },
+    lead.context,
+  )
+
+  expect(result.success).toBe(true)
+  expect(result.request_id).toBeTruthy()
+  expect(probedPanes).toEqual(['%21'])
+  // The probe was handed the socket recorded on the member — not one derived
+  // from this process's own environment.
+  expect(probedSockets).toEqual(['the-recorded-socket'])
+  expect(await lastSenderTo('coder')).toBe('team-lead')
+})
+
+test('a pane member with no recorded socket is unprovable and a shutdown request is refused', async () => {
+  // A legacy roster row: no `tmuxSocket`. Without a recorded socket the probe
+  // has no positive server identity, so it answers 'unknown' and the request
+  // is refused rather than falsely acknowledged.
+  writeTeamFile([paneMember('coder', '%21')])
+  const lead = contextFor(appStateWith({}, [teammateTask('coder', 'failed')]))
+
+  const result = await sendStructured(
+    'coder',
+    { type: 'shutdown_request' },
+    lead.context,
+  )
+
+  expect(result.success).toBe(false)
+  expect(result.message).toContain('Not delivered')
+  expect(probedPanes).toEqual(['%21'])
+  expect(probedSockets).toEqual([undefined])
+})
+
+test('an untracked delivery to a pane member with a confirmed-dead pane is refused and writes no envelope', async () => {
+  // The task row has been evicted (grace window), so the recipient is
+  // `untracked` — yet its recorded pane is confirmed gone, which must still
+  // refuse rather than report a false success.
+  writeTeamFile([paneMember('coder', '%21', 'swarm-socket')])
+  paneLiveness = 'dead'
+  const lead = contextFor(appStateWith())
+
+  const result = await sendStructured(
+    'coder',
+    { type: 'shutdown_request' },
+    lead.context,
+  )
+
+  expect(result.success).toBe(false)
+  expect(result.message).toContain('Not delivered')
+  expect(result.message).toContain(`coder@${TEAM}`)
+  expect(result.request_id).toBeUndefined()
+  expect(result.routing).toBeUndefined()
+  // A refused shutdown leaves no envelope behind (a command, not a message).
+  expect(await lastSenderTo('coder')).toBeUndefined()
+})
+
+test('an untracked delivery whose pane probe is unknown is not refused on that basis', async () => {
+  // Fail open: an unprovable pane must not be refused, and certainly not read
+  // as dead. The optimistic delivery survives.
+  writeTeamFile([paneMember('coder', '%21', 'swarm-socket')])
+  paneLiveness = 'unknown'
+  const lead = contextFor(appStateWith())
+
+  const result = await sendStructured(
+    'coder',
+    { type: 'shutdown_request' },
+    lead.context,
+  )
+
+  expect(result.success).toBe(true)
+  expect(result.request_id).toBeTruthy()
+  expect(await lastSenderTo('coder')).toBe('team-lead')
 })
