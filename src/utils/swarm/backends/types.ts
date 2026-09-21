@@ -118,6 +118,23 @@ export type PaneBackend = {
   ): Promise<PaneLiveness>
 
   /**
+   * Reports liveness by probing the pane on an explicitly named socket (tmux
+   * `-L <socketName>`). Unlike `isPaneAlive`, whose socket is derived from the
+   * caller's environment, this carries the socket the pane was spawned on, so
+   * a live pane cannot be misread as dead because the probing process happens
+   * to be attached to a different server.
+   *
+   * `socketName` is undefined for members written before the socket was
+   * recorded (and for non-tmux backends, which ignore it). An implementation
+   * must never return 'dead' for an undefined socket: without a recorded
+   * socket there is no positive proof of which server owns the pane.
+   */
+  isPaneAliveOnSocket?(
+    paneId: PaneId,
+    socketName?: string,
+  ): Promise<PaneLiveness>
+
+  /**
    * Sets the border color for a pane.
    *
    * @param paneId - The pane to style

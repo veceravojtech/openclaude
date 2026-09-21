@@ -34,6 +34,7 @@ export type TeammateStatus = {
   worktreePath?: string
   isHidden?: boolean // Whether the pane is currently hidden from the swarm view
   backendType?: PaneBackendType // The backend type used for this teammate
+  tmuxSocket?: string // tmux socket the pane was spawned on; absent on legacy rows
   mode?: string // Current permission mode for this teammate
 }
 
@@ -47,35 +48,39 @@ export type TeammateStatus = {
 export type TeammatePaneProbe = (
   backendType: PaneBackendType,
   paneId: string,
+  socketName?: string,
 ) => Promise<PaneLiveness>
 
 /**
- * The production probe: the pane backend's own `isPaneAlive`.
+ * The production probe: the pane backend's own liveness probe.
  *
  * Deliberately not a second implementation of pane liveness — TmuxBackend
  * already knows how to tell a killed pane from an unreachable tmux (the
  * tri-state `alive`/`dead`/`unknown` probe), and every other caller must not
- * diverge from it. The registry/detection imports are dynamic for the same
- * reason teamHelpers does it: they stay out of this module's static dep graph.
+ * diverge from it. The socket recorded on the roster is passed through so the
+ * probe is sent to the server that owns the pane, never a server re-derived
+ * from the probing process's own environment. The registry import is dynamic
+ * for the same reason teamHelpers does it: it stays out of this module's
+ * static dep graph.
  */
 async function probePane(
   backendType: PaneBackendType,
   paneId: string,
+  socketName?: string,
 ): Promise<PaneLiveness> {
   try {
-    const [
-      { ensureBackendsRegistered, getBackendByType },
-      { isInsideTmuxSync },
-    ] = await Promise.all([
-      import('./swarm/backends/registry.js'),
-      import('./swarm/backends/detection.js'),
-    ])
+    const { ensureBackendsRegistered, getBackendByType } = await import(
+      './swarm/backends/registry.js'
+    )
     await ensureBackendsRegistered()
     const backend = getBackendByType(backendType)
+    if (backend.isPaneAliveOnSocket) {
+      return await backend.isPaneAliveOnSocket(paneId, socketName)
+    }
     if (!backend.isPaneAlive) {
       return 'unknown'
     }
-    return await backend.isPaneAlive(paneId, !isInsideTmuxSync())
+    return await backend.isPaneAlive(paneId)
   } catch (error) {
     logForDebugging(
       `[teamDiscovery] pane probe for ${backendType} ${paneId} failed: ${String(error)}`,
@@ -87,15 +92,16 @@ async function probePane(
 /**
  * Get detailed teammate statuses for a team.
  *
- * Reads `isActive` from config for the running/idle split, and — for pane
- * (tmux/iTerm2) members — consults the pane probe to distinguish a member
- * whose pane is gone (`dead`) from one that is merely `idle`. Roster
- * `isActive` is not deterministically flipped on failure (a failed teammate
- * can stay `active: true`), so the probe is the authority for deadness. Only
- * `'dead'` changes the word: `'alive'` and `'unknown'` keep the existing
- * running/idle reading so resumability is unchanged and an unreachable tmux
- * never reports a healthy teammate as dead. In-process members (no pane
- * backend) are never probed and are unchanged.
+ * Reads `isActive` from config for the running/idle split, and — for idle
+ * pane (tmux/iTerm2) members — consults the pane probe to distinguish a member
+ * whose pane is gone (`dead`) from one that is merely `idle`. The dead verdict
+ * is deliberately no broader than the watchdog's destructive ghost sweep,
+ * which is gated to `isActive: false`: an active member is never probed, so a
+ * socket mismatch while a teammate is mid-turn can never paint a running
+ * teammate as `dead`/`killed`. Only `'dead'` changes the word: `'alive'` and
+ * `'unknown'` keep the idle reading so resumability is unchanged and an
+ * unreachable tmux never reports a healthy teammate as dead. In-process
+ * members (no pane backend) are never probed and are unchanged.
  */
 export async function getTeammateStatuses(
   teamName: string,
@@ -121,11 +127,16 @@ export async function getTeammateStatuses(
     let status: TeammateStatus['status'] = isActive ? 'running' : 'idle'
 
     if (
+      !isActive &&
       member.backendType &&
       isPaneBackend(member.backendType) &&
       member.tmuxPaneId
     ) {
-      const liveness = await probe(member.backendType, member.tmuxPaneId)
+      const liveness = await probe(
+        member.backendType,
+        member.tmuxPaneId,
+        member.tmuxSocket,
+      )
       if (liveness === 'dead') {
         status = 'dead'
       }
@@ -147,6 +158,7 @@ export async function getTeammateStatuses(
         member.backendType && isPaneBackend(member.backendType)
           ? member.backendType
           : undefined,
+      tmuxSocket: member.tmuxSocket,
       mode: member.mode,
     })
   }

@@ -1,3 +1,4 @@
+import { basename } from 'node:path'
 import { env } from '../../../utils/env.js'
 import { execFileNoThrow } from '../../../utils/execFileNoThrow.js'
 import { TMUX_COMMAND } from '../constants.js'
@@ -65,6 +66,22 @@ export async function isInsideTmux(): Promise<boolean> {
  */
 export function getLeaderPaneId(): string | null {
   return ORIGINAL_TMUX_PANE || null
+}
+
+/**
+ * The tmux socket name (`-L`) this process is attached to, or null when it is
+ * not inside tmux.
+ *
+ * `$TMUX` is `<socket path>,<session id>,<window id>`; the basename of the
+ * path is exactly the value `tmux -L` uses to reach that server. Recording it
+ * lets a pane be probed on the server that actually owns it, instead of
+ * re-deriving a server from the probing process's own (possibly different)
+ * environment.
+ */
+export function getUserTmuxSocketName(): string | null {
+  if (!ORIGINAL_USER_TMUX) return null
+  const socketPath = ORIGINAL_USER_TMUX.split(',')[0]
+  return socketPath ? basename(socketPath) : null
 }
 
 /**

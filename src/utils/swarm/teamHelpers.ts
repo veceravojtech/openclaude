@@ -124,6 +124,8 @@ export type TeamFile = {
     sessionId?: string
     subscriptions: string[]
     backendType?: BackendType
+    /** tmux socket name (`-L`) the pane was spawned on; absent on legacy rows. */
+    tmuxSocket?: string
     isActive?: boolean // false when idle, undefined/true when active
     mode?: PermissionMode // Current permission mode for this teammate
   }>

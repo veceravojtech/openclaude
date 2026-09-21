@@ -19,6 +19,7 @@ import { formatAgentId } from '../../utils/agentId.js'
 import { quote } from '../../utils/bash/shellQuote.js'
 import { isInBundledMode } from '../../utils/bundledMode.js'
 import { getGlobalConfig } from '../../utils/config.js'
+import { getProviderProfiles } from '../../utils/providerProfiles.js'
 import { getCwd } from '../../utils/cwd.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { errorMessage } from '../../utils/errors.js'
@@ -29,7 +30,10 @@ import {
   preferOneMillionContext,
 } from '../../utils/model/model.js'
 import type { PermissionMode } from '../../utils/permissions/PermissionMode.js'
-import { isTmuxAvailable } from '../../utils/swarm/backends/detection.js'
+import {
+  getUserTmuxSocketName,
+  isTmuxAvailable,
+} from '../../utils/swarm/backends/detection.js'
 import {
   detectAndGetBackend,
   getBackendByType,
@@ -46,6 +50,7 @@ import {
 import type { BackendType } from '../../utils/swarm/backends/types.js'
 import { isPaneBackend } from '../../utils/swarm/backends/types.js'
 import {
+  getSwarmSocketName,
   SWARM_SESSION_NAME,
   TEAM_LEAD_NAME,
   TEAMMATE_COMMAND_ENV_VAR,
@@ -184,6 +189,7 @@ export function resolveTeammateLaunchModel(
   leaderModel: string | null,
   providerEnv: Record<string, string> | undefined,
 ): string | undefined {
+  if (providerEnv?.OPENCLAUDE_TEAMMATE_PROFILE_ID) return providerEnv.OPENCLAUDE_TEAMMATE_MODEL
   const leaderDerived = inputModel === undefined || inputModel === 'inherit'
   if (providerEnv?.OPENAI_MODEL && leaderDerived) {
     return undefined
@@ -540,11 +546,15 @@ function assertModelOnlySpawnRoutable(input: SpawnInput): void {
  * `claude-opus-5` and cannot slip past a check on the raw argument.
  */
 function assertProfileBoundModelServable(input: SpawnInput): void {
-  const { providerEnv, model } = input
+  const { providerEnv } = input
+  const model = providerEnv?.OPENCLAUDE_TEAMMATE_MODEL ?? input.model
   if (!providerEnv || !model) return
   // Only codex bindings are knowable here; every other profile type is
   // rejected at binding time by resolveProviderProfileEnv.
-  if (!isCodexBaseUrl(providerEnv.OPENAI_BASE_URL)) return
+  const profile = providerEnv.OPENCLAUDE_TEAMMATE_PROFILE_ID
+    ? getProviderProfiles(getGlobalConfig()).find(profile => profile.id === providerEnv.OPENCLAUDE_TEAMMATE_PROFILE_ID)
+    : undefined
+  if (!isCodexBaseUrl(profile?.baseUrl ?? providerEnv.OPENAI_BASE_URL)) return
   const requested = parseUserSpecifiedModel(model)
   if (!requested.toLowerCase().includes('claude-')) return
   throw new Error(
@@ -656,6 +666,16 @@ export async function handleSpawnSplitPane(
   // Check if we're inside tmux to determine session naming
   const insideTmux = await isInsideTmux()
 
+  // Record the socket this pane is created on so probes can be sent to the
+  // server that actually owns it, instead of re-deriving a server from the
+  // probing process's environment (which may be a different tmux).
+  const tmuxSocket =
+    detectionResult.backend.type === 'tmux'
+      ? insideTmux
+        ? (getUserTmuxSocketName() ?? 'default')
+        : getSwarmSocketName()
+      : undefined
+
   // Assign a unique color to this teammate
   const teammateColor = assignTeammateColor(teammateId)
 
@@ -750,6 +770,7 @@ export async function handleSpawnSplitPane(
     plan_mode_required,
     paneId,
     insideTmux,
+    tmuxSocket,
     backendType: detectionResult.backend.type,
     toolUseId: context.toolUseId,
   })
@@ -769,6 +790,7 @@ export async function handleSpawnSplitPane(
     cwd: workingDir,
     subscriptions: [],
     backendType: detectionResult.backend.type,
+    ...(tmuxSocket !== undefined ? { tmuxSocket } : {}),
   })
   await writeTeamFileAsync(teamName, teamFile)
 
@@ -966,6 +988,7 @@ export async function handleSpawnSeparateWindow(
     plan_mode_required,
     paneId,
     insideTmux: false,
+    tmuxSocket: getSwarmSocketName(),
     backendType: 'tmux',
     toolUseId: context.toolUseId,
   })
@@ -985,6 +1008,7 @@ export async function handleSpawnSeparateWindow(
     cwd: workingDir,
     subscriptions: [],
     backendType: 'tmux', // This handler always uses tmux directly
+    tmuxSocket: getSwarmSocketName(),
   })
   await writeTeamFileAsync(teamName, teamFile)
 
@@ -1043,6 +1067,7 @@ export function registerOutOfProcessTeammateTask(
     plan_mode_required,
     paneId,
     insideTmux,
+    tmuxSocket,
     backendType,
     toolUseId,
   }: {
@@ -1054,6 +1079,7 @@ export function registerOutOfProcessTeammateTask(
     plan_mode_required?: boolean
     paneId: string
     insideTmux: boolean
+    tmuxSocket?: string
     backendType: BackendType
     toolUseId?: string
   },
@@ -1108,7 +1134,7 @@ export function registerOutOfProcessTeammateTask(
     teammateName: sanitizedName,
     teamName,
     paneId,
-    insideTmux,
+    tmuxSocket,
     backendType,
     toolUseId,
     setAppState,

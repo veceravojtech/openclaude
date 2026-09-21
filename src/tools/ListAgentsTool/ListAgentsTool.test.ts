@@ -50,7 +50,14 @@ beforeEach(async () => {
   mock.module('../../utils/teamDiscovery.js', () => ({
     ...pristineTeamDiscovery,
     getTeammateStatuses: (teamName: string) =>
-      realGetTeammateStatuses(teamName, { probePane: async () => 'unknown' }),
+      realGetTeammateStatuses(teamName, {
+        // Encode the socket-identity rule at the seam: a member with a
+        // recorded socket is a confirmed dead pane, one without (a foreign
+        // socket) cannot be proven dead. This restores coverage of the
+        // dead -> killed path that a blanket 'unknown' mock removed.
+        probePane: async (_backendType, _paneId, socketName) =>
+          socketName ? 'dead' : 'unknown',
+      }),
   }))
   // Teams are on by default; tests turn them off explicitly.
   delete process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS
@@ -270,6 +277,75 @@ test('call() merges the team file, in-process teammates and named background age
     'team-lead',
     'coder',
     'painter',
+  ])
+})
+
+test('call() reports a foreign-socket pane as unknown and a confirmed-dead pane as killed', async () => {
+  configDir = mkdtempSync(join(tmpdir(), 'openclaude-list-agents-dead-'))
+  setClaudeConfigHomeDirForTesting(configDir)
+
+  const teamName = 'alpha'
+  const teamFile: TeamFile = {
+    name: teamName,
+    createdAt: 0,
+    leadAgentId: 'lead-id',
+    members: [
+      {
+        agentId: 'lead-id',
+        name: 'team-lead',
+        joinedAt: 0,
+        tmuxPaneId: '%0',
+        cwd: '/work',
+        subscriptions: [],
+      },
+      {
+        agentId: `ghost@${teamName}`,
+        name: 'ghost',
+        joinedAt: 0,
+        tmuxPaneId: '%2',
+        cwd: '/work',
+        subscriptions: [],
+        backendType: 'tmux',
+        tmuxSocket: 'default',
+        isActive: false,
+      },
+      {
+        agentId: `foreign@${teamName}`,
+        name: 'foreign',
+        joinedAt: 0,
+        tmuxPaneId: '%3',
+        cwd: '/work',
+        subscriptions: [],
+        backendType: 'tmux',
+        isActive: false,
+      },
+    ],
+  }
+  const teamFilePath = getTeamFilePath(teamName)
+  mkdirSync(dirname(teamFilePath), { recursive: true })
+  writeFileSync(teamFilePath, JSON.stringify(teamFile))
+
+  const appState = {
+    tasks: {},
+    agentNameRegistry: new Map(),
+    teamContext: {
+      teamName,
+      teamFilePath,
+      leadAgentId: 'lead-id',
+      selfAgentId: 'lead-id',
+      selfAgentName: 'team-lead',
+      isLeader: true,
+      teammates: {},
+    },
+  } as unknown as AppState
+
+  const { data } = await ListAgentsTool.call({}, contextFor(appState))
+  // The confirmed-dead pane (recorded socket) reads killed; the pane whose
+  // socket was never recorded is a foreign socket and must not be reported
+  // dead — it reads unknown.
+  expect(data.agents.map(a => [a.name, a.status])).toEqual([
+    ['foreign', 'unknown'],
+    ['ghost', 'killed'],
   ])
 })
 

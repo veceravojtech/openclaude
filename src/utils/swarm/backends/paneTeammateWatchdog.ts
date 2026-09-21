@@ -5,9 +5,18 @@ import {
   TEAMMATE_GRACE_MS,
   updateTaskState,
 } from '../../task/framework.js'
-import { readMailbox, isIdleNotification } from '../../teammateMailbox.js'
+import {
+  readMailbox,
+  isIdleNotification,
+  isTeammateStartupNotification,
+} from '../../teammateMailbox.js'
 import { TEAM_LEAD_NAME } from '../constants.js'
-import { readTeamFileAsync } from '../teamHelpers.js'
+import {
+  readTeamFileAsync,
+  removeTeammateFromTeamFile,
+} from '../teamHelpers.js'
+import { retireTeammateFromLeaderView } from '../teammateRetirement.js'
+import { unassignTeammateTasks } from '../../tasks.js'
 import { getBackendByType } from './registry.js'
 import { isPaneBackend, type BackendType, type PaneLiveness } from './types.js'
 
@@ -103,6 +112,24 @@ export const PANE_TEAMMATE_PROGRESS_TIMEOUT_MS = 1_800_000
 /** How often the watchdog scans the lead's mailbox and deadlines. */
 export const PANE_TEAMMATE_WATCHDOG_SCAN_INTERVAL_MS = 5_000
 
+/**
+ * Consecutive scans that must confirm a roster member's pane is GONE before
+ * the ghost sweep retires it.
+ *
+ * Two, at the 5s cadence above, is the whole guard: roughly 5-10s of a pane
+ * reading dead. It has to be short because the point of the sweep is that the
+ * roster stops lying about a pane a human already killed, and the acceptance
+ * for this step is removal within one scan cycle of the kill. It must not be
+ * zero because a pane legitimately reads dead mid-lifecycle: a teammate pane
+ * runs a shell with the CLI typed into it, so between that CLI exiting and a
+ * respawn typing a new one in, the foreground command IS a shell — one scan
+ * of 'dead' is ordinary churn, two consecutive ones are a pane nobody is
+ * coming back to. A time-based grace instead of a count would either exceed
+ * the acceptance window or be too short to mean anything; a count is also
+ * deterministic to test.
+ */
+export const PANE_TEAMMATE_GHOST_SWEEP_SCANS = 2
+
 /** Spacing between pane-probe retries while the probe answers 'unknown'. */
 export const PANE_TEAMMATE_UNKNOWN_RETRY_DELAY_MS = 30_000
 
@@ -131,7 +158,16 @@ export type PaneWatchdogMailboxMessage = {
 /** Team-file shape the watchdog needs. Subset of TeamFile. */
 export type PaneWatchdogTeamFile = {
   leadAgentId?: string
-  members?: Array<{ name: string; agentId?: string; isActive?: boolean }>
+  members?: Array<{
+    name: string
+    agentId?: string
+    isActive?: boolean
+    /** Present on pane-backed members: needed by the ghost sweep. */
+    backendType?: BackendType
+    tmuxPaneId?: string
+    /** tmux socket the pane was spawned on; absent on legacy rows. */
+    tmuxSocket?: string
+  }>
 }
 
 /** Test seams. Every boundary of the watchdog, overridable per arm. */
@@ -143,6 +179,22 @@ export type PaneTeammateWatchdogDeps = {
   ) => Promise<PaneWatchdogMailboxMessage[]>
   readTeamFile?: (teamName: string) => Promise<PaneWatchdogTeamFile | null>
   probePane?: () => Promise<PaneLiveness>
+  /** Probe for any pane of the team, used by the ghost sweep. */
+  probeMemberPane?: (
+    backendType: BackendType,
+    paneId: string,
+    socketName?: string,
+  ) => Promise<PaneLiveness>
+  /** Remove a member from the team file (the ghost sweep's roster edit). */
+  removeMemberFromTeamFile?: (
+    teamName: string,
+    member: { agentId: string; name: string },
+  ) => boolean
+  /** Unassign a swept teammate's open tasks; returns the lead-facing notice. */
+  unassignMemberTasks?: (
+    teamName: string,
+    member: { agentId: string; name: string },
+  ) => Promise<string>
   /** null disables the interval — tests drive scan() manually. */
   scanIntervalMs?: number | null
   firstContactTimeoutMs?: number
@@ -181,7 +233,7 @@ export function armPaneTeammateWatchdog({
   teammateName,
   teamName,
   paneId,
-  insideTmux,
+  tmuxSocket,
   backendType,
   toolUseId,
   setAppState,
@@ -193,7 +245,7 @@ export function armPaneTeammateWatchdog({
   teammateName: string
   teamName: string
   paneId: string
-  insideTmux: boolean
+  tmuxSocket?: string
   backendType: BackendType
   toolUseId?: string
   setAppState: SetAppState
@@ -204,17 +256,47 @@ export function armPaneTeammateWatchdog({
   const readLeadMailbox =
     deps?.readLeadMailbox ?? ((lead, team) => readMailbox(lead, team))
   const readTeamFile = deps?.readTeamFile ?? readTeamFileAsync
-  const probePane =
-    deps?.probePane ??
-    (async () => {
-      if (!isPaneBackend(backendType)) {
+  /**
+   * The landed liveness probe, for ANY pane of the team — this watchdog's own
+   * and, for the ghost sweep, its teammates'. 'unknown' covers both a backend
+   * that cannot answer and a non-pane backend: no evidence either way, and the
+   * sweep only acts on positive evidence of death.
+   */
+  const probeMemberPane =
+    deps?.probeMemberPane ??
+    (async (
+      memberBackend: BackendType,
+      memberPane: string,
+      memberSocket?: string,
+    ) => {
+      if (!isPaneBackend(memberBackend)) {
         return 'unknown' satisfies PaneLiveness
       }
-      const backend = getBackendByType(backendType)
+      const backend = getBackendByType(memberBackend)
+      if (backend?.isPaneAliveOnSocket) {
+        return backend.isPaneAliveOnSocket(memberPane, memberSocket)
+      }
       if (!backend?.isPaneAlive) {
         return 'unknown' satisfies PaneLiveness
       }
-      return backend.isPaneAlive(paneId, !insideTmux)
+      return backend.isPaneAlive(memberPane)
+    })
+  const probePane =
+    deps?.probePane ?? (() => probeMemberPane(backendType, paneId, tmuxSocket))
+  const removeMember =
+    deps?.removeMemberFromTeamFile ??
+    ((team: string, member: { agentId: string; name: string }) =>
+      removeTeammateFromTeamFile(team, member))
+  const unassignMemberTasks =
+    deps?.unassignMemberTasks ??
+    (async (team: string, member: { agentId: string; name: string }) => {
+      const { notificationMessage } = await unassignTeammateTasks(
+        team,
+        member.agentId,
+        member.name,
+        'shutdown',
+      )
+      return notificationMessage
     })
   const firstContactTimeoutMs =
     deps?.firstContactTimeoutMs ??
@@ -256,6 +338,11 @@ export function armPaneTeammateWatchdog({
   let disposed = false
   let leadName: string | null = null
   let timer: ReturnType<typeof setInterval> | undefined
+  // Ghost sweep: consecutive confirmed-dead scans per roster member, keyed by
+  // agent id and carrying the pane id that was judged — a roster row rewritten
+  // by a respawn starts its count over rather than inheriting its
+  // predecessor's.
+  const deadPaneScans = new Map<string, { paneId: string; count: number }>()
 
   function dispose(): void {
     if (disposed) {
@@ -366,6 +453,96 @@ export function armPaneTeammateWatchdog({
     dispose()
   }
 
+  /**
+   * Reconcile the roster with pane reality (roadmap Step 3): retire the
+   * members the team file still lists whose pane is gone for good.
+   *
+   * WHY THE ROSTER NEEDS THIS. Only a kill or an idle-retire ever removes a
+   * member, and a pane teammate has neither: a failed child's pane is left
+   * running on purpose (resumability), and once that pane is gone — a human
+   * killing it, a machine crash — nothing in the session notices. The row then
+   * outlives its pane forever: `ListAgents` keeps offering a teammate that
+   * cannot answer, and the roster count never returns to zero.
+   *
+   * WHO SWEEPS. Whichever watchdogs are still armed. The failed ghost's own
+   * instance is not among them — it disposes as soon as its task row goes
+   * terminal — so in practice a live teammate's watchdog reconciles the team.
+   * That is also why the guardrail is a count of scans rather than a hook on
+   * the failure transition: the scan that observes the ghost belongs to a
+   * different instance than the one that failed it.
+   *
+   * Only members the team file already calls idle (`isActive: false`, the
+   * turn-end write) on a pane backend are candidates, and only a CONFIRMED
+   * 'dead' pane on two consecutive scans reaps one. 'alive' — including a
+   * healthy teammate sitting at its prompt, which is what most of the roster
+   * looks like between turns — and 'unknown' (tmux unreachable) both clear the
+   * count and touch nothing. A flaky tmux must never delete a teammate's row.
+   */
+  async function sweepDeadRosterMembers(): Promise<void> {
+    const teamFile = await readTeamFile(teamName)
+    const members = teamFile?.members
+    if (!members) return
+
+    const rosterIds = new Set<string>()
+    for (const member of members) {
+      if (!member.agentId) continue
+      if (member.name === TEAM_LEAD_NAME) continue
+      rosterIds.add(member.agentId)
+      const { backendType: memberBackend, tmuxPaneId, tmuxSocket } = member
+      if (
+        member.isActive !== false ||
+        !memberBackend ||
+        !isPaneBackend(memberBackend) ||
+        !tmuxPaneId
+      ) {
+        // Not a ghost candidate — an active teammate, an in-process one, or a
+        // row with no pane to judge. Any count it carried is stale.
+        deadPaneScans.delete(member.agentId)
+        continue
+      }
+
+      const liveness = await probeMemberPane(
+        memberBackend,
+        tmuxPaneId,
+        tmuxSocket,
+      )
+      if (liveness !== 'dead') {
+        deadPaneScans.delete(member.agentId)
+        continue
+      }
+
+      const seen = deadPaneScans.get(member.agentId)
+      const count = seen?.paneId === tmuxPaneId ? seen.count + 1 : 1
+      if (count < PANE_TEAMMATE_GHOST_SWEEP_SCANS) {
+        deadPaneScans.set(member.agentId, { paneId: tmuxPaneId, count })
+        continue
+      }
+      deadPaneScans.delete(member.agentId)
+
+      const swept = { agentId: member.agentId, name: member.name }
+      // Roster first: that is the part ListAgents reads, so a failure later in
+      // this sequence leaves the ghost gone rather than half-retired.
+      if (!removeMember(teamName, swept)) continue
+      const notificationMessage = await unassignMemberTasks(teamName, swept)
+      retireTeammateFromLeaderView({
+        teammateId: swept.agentId,
+        notificationMessage,
+        setAppState,
+        now,
+      })
+      logForDebugging(
+        `[PaneWatchdog] swept ghost member ${swept.agentId} (pane ${tmuxPaneId} confirmed gone on ${count} consecutive scans)`,
+      )
+    }
+
+    // Drop counts for members that have left the roster entirely.
+    for (const key of deadPaneScans.keys()) {
+      if (!rosterIds.has(key)) {
+        deadPaneScans.delete(key)
+      }
+    }
+  }
+
   async function scan(): Promise<void> {
     if (disposed) {
       return
@@ -392,6 +569,22 @@ export function armPaneTeammateWatchdog({
     if (taskStatusNow !== 'running' && !watchingLateCompletion) {
       dispose()
       return
+    }
+
+    // Roster reconciliation comes before this instance's own signals: it is
+    // about OTHER members, so it must not be skipped by anything below — a
+    // parked, silent or unresponsive teammate's watchdog is still a live
+    // scanner of the team, and a ghost is exactly the case where waiting for
+    // the next healthy-looking scan would mean never sweeping at all. Its
+    // failures are its own: a roster that could not be read, or a tmux that
+    // could not be reached, must not stop this instance from failing a hung
+    // teammate of its own.
+    try {
+      await sweepDeadRosterMembers()
+    } catch (e) {
+      logForDebugging(
+        `[PaneWatchdog] ghost sweep for ${teammateName} failed: ${String(e)}`,
+      )
     }
 
     // Resolve the lead's mailbox name once, from the same team file the
@@ -462,6 +655,14 @@ export function armPaneTeammateWatchdog({
         }
         dispose()
         return
+      }
+      for (const message of qualifying) {
+        const startup = isTeammateStartupNotification(message.text)
+        if (startup) {
+          logForDebugging(
+            `[PaneWatchdog] ${teammateName} ready: model=${startup.model}, provider=${startup.provider}, transport=${startup.transport}`,
+          )
+        }
       }
       // Non-idle traffic (DM, permission request) is proof of progress; the
       // deadline re-anchor above already accounts for it.

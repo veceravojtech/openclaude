@@ -13,6 +13,7 @@ import {
 } from '../constants.js'
 import {
   getLeaderPaneId,
+  getUserTmuxSocketName,
   isInsideTmux as isInsideTmuxFromDetection,
   isTmuxAvailable,
 } from './detection.js'
@@ -42,11 +43,27 @@ function waitForPaneShellReady(): Promise<void> {
 }
 
 /**
- * Separator between the two fields `isPaneAlive` asks tmux for. A comma is
- * safe: `#{pane_dead}` is 0 or 1 and `#{pane_current_command}` is a process
- * name, so neither field can contain one.
+ * Separator between the fields `isPaneAlive` asks tmux for. A comma is safe:
+ * a pane id is `%N`, `#{pane_dead}` is 0 or 1 and `#{pane_current_command}`
+ * is a process name, so none of them can contain one.
  */
 const TMUX_PANE_STATE_SEPARATOR = ','
+
+/**
+ * The fields `isPaneAlive` asks tmux for, in order.
+ *
+ * `#{pane_id}` comes FIRST because it is the existence proof. A query about a
+ * pane that is not there is not an error to tmux: it answers with an empty
+ * expansion and exit 0. On tmux 3.6b a killed pane and an id that never
+ * existed both answer with empty fields, which is why the two-field query
+ * this used to ask could not tell "the pane is gone" from "tmux cannot be
+ * reached" — both came back empty and both read as 'unknown'. Echoing the id
+ * back separates them: an empty id in an answer that arrived at all means the
+ * id resolved to nothing ON THE SERVER WE ASKED. Whether that is death or a
+ * foreign server is settled by the positive-server-identity check in
+ * `isPaneAliveOnSocket`, never by the empty id alone.
+ */
+const TMUX_PANE_QUERY_FORMAT = `#{pane_id}${TMUX_PANE_STATE_SEPARATOR}#{pane_dead}${TMUX_PANE_STATE_SEPARATOR}#{pane_current_command}`
 
 /**
  * Command names that mean "no child is running here".
@@ -69,35 +86,55 @@ const SHELL_COMMANDS = new Set([
 ])
 
 /**
- * Turns `#{pane_dead},#{pane_current_command}` into a liveness verdict.
+ * Turns `<pane_id>,<pane_dead>,<pane_current_command>` into a liveness verdict.
  *
- * Exported for testing: this is the whole judgement, and it must be provable
- * without a live tmux server.
+ * Exported for testing: this is the whole field-level judgement, and it must
+ * be provable without a live tmux server.
  *
+ * - a `pane_id` that is empty is tmux telling us the id resolved to nothing ON
+ *   THE SERVER WE ASKED. That is death only when the caller has positively
+ *   established that server is the one owning this pane (`serverIdentityConfirmed`);
+ *   otherwise it is doubt. A foreign socket answers exactly the same empty
+ *   fields for a live pane it does not host, so an empty id alone is never
+ *   enough to declare `'dead'`.
  * - `pane_dead` is 1 for a pane whose process finished under
  *   `remain-on-exit` — unambiguously dead.
  * - a shell in the foreground means the child is not running (see
- *   SHELL_COMMANDS).
+ *   SHELL_COMMANDS): the pane runs a shell and the CLI is typed into it, so
+ *   the shell is what the pane shows once that CLI has exited.
  * - anything unparseable is 'unknown', never 'dead'.
  */
-export function interpretTmuxPaneState(raw: string): PaneLiveness {
+export function interpretTmuxPaneState(
+  raw: string,
+  serverIdentityConfirmed: boolean,
+): PaneLiveness {
   const trimmed = raw.trim()
   if (!trimmed) {
+    // Not an answer at all — tmux could not be reached, or nothing came back.
+    // Never evidence of death.
     return 'unknown'
   }
 
-  const separatorIndex = trimmed.indexOf(TMUX_PANE_STATE_SEPARATOR)
-  if (separatorIndex === -1) {
+  const fields = trimmed.split(TMUX_PANE_STATE_SEPARATOR)
+  if (fields.length < 3) {
+    // Not the shape we asked for.
     return 'unknown'
   }
 
-  const deadFlag = trimmed.slice(0, separatorIndex).trim()
-  // A shell started as a login shell is reported with a leading '-'.
-  const command = trimmed
-    .slice(separatorIndex + TMUX_PANE_STATE_SEPARATOR.length)
+  const paneId = fields[0]!.trim()
+  const deadFlag = fields[1]!.trim()
+  // A pane id cannot contain a comma, so whatever follows the second one is
+  // the command — nothing is lost by not capping the split.
+  const command = fields
+    .slice(2)
+    .join(TMUX_PANE_STATE_SEPARATOR)
     .trim()
+    // A shell started as a login shell is reported with a leading '-'.
     .replace(/^-/, '')
 
+  if (!paneId) {
+    return serverIdentityConfirmed ? 'dead' : 'unknown'
+  }
   if (deadFlag === '1') {
     return 'dead'
   }
@@ -109,6 +146,45 @@ export function interpretTmuxPaneState(raw: string): PaneLiveness {
   }
 
   return SHELL_COMMANDS.has(command) ? 'dead' : 'alive'
+}
+
+/**
+ * The shape `isPaneAliveOnSocket` gets back from one `tmux` invocation.
+ */
+export type TmuxPaneQueryResult = {
+  code: number
+  stdout: string
+  stderr: string
+}
+
+/**
+ * The full socket-explicit probe judgement, exported for hermetic tests.
+ *
+ * Handles the non-zero exit path (an unreachable socket vs. a server that
+ * explicitly names a missing pane) and then defers the field judgement to
+ * {@link interpretTmuxPaneState} with the caller's positive-server-identity
+ * answer.
+ */
+export function interpretTmuxPaneProbe(
+  query: TmuxPaneQueryResult,
+  serverIdentityConfirmed: boolean,
+): PaneLiveness {
+  if (query.code !== 0) {
+    const missingPane = /can't find pane|no such pane/i.test(query.stderr)
+    return missingPane ? 'dead' : 'unknown'
+  }
+  return interpretTmuxPaneState(query.stdout, serverIdentityConfirmed)
+}
+
+/**
+ * Whether a successful 3-field reply carries an empty `pane_id` — the one
+ * answer that is ambiguous between "gone" and "asked a foreign server".
+ */
+function paneReplyHasEmptyId(stdout: string): boolean {
+  const trimmed = stdout.trim()
+  if (!trimmed) return false
+  const fields = trimmed.split(TMUX_PANE_STATE_SEPARATOR)
+  return fields.length >= 3 && fields[0]!.trim() === ''
 }
 
 /**
@@ -163,6 +239,19 @@ function runTmuxInSwarm(
   args: string[],
 ): Promise<{ stdout: string; stderr: string; code: number }> {
   return execFileNoThrow(TMUX_COMMAND, ['-L', getSwarmSocketName(), ...args])
+}
+
+/**
+ * Runs a tmux command against an explicitly named socket (`-L <socketName>`).
+ * This is the probe path: unlike the user-session/swarm runners, the socket is
+ * chosen by the caller from the roster's recorded value, never from the
+ * probing process's own environment.
+ */
+function runTmuxInSocket(
+  socketName: string,
+  args: string[],
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  return execFileNoThrow(TMUX_COMMAND, ['-L', socketName, ...args])
 }
 
 /**
@@ -241,36 +330,92 @@ export class TmuxBackend implements PaneBackend {
   /**
    * Reports whether the CLI that was typed into a pane is still running.
    *
-   * See `interpretTmuxPaneState` for why the pane's own existence is not the
-   * question and what the two format fields mean.
+   * See `interpretTmuxPaneState` for what the three format fields mean. A pane
+   * that no longer exists is 'dead' too: a caller asking "is this teammate
+   * still there" is answered by absence either way, and the shell-foreground
+   * rule below only covers the pane that is still standing.
+   *
+   * The socket is derived from the boolean, matching the historical contract.
+   * Callers that know the pane's backing socket (the roster) should use
+   * {@link isPaneAliveOnSocket} instead, so a probing process attached to a
+   * different server cannot misread a live pane.
    */
   async isPaneAlive(
     paneId: PaneId,
     useExternalSession = false,
   ): Promise<PaneLiveness> {
-    const runTmux = useExternalSession ? runTmuxInSwarm : runTmuxInUserSession
-    const result = await runTmux([
+    const socketName = useExternalSession
+      ? getSwarmSocketName()
+      : (getUserTmuxSocketName() ?? 'default')
+    return this.isPaneAliveOnSocket(paneId, socketName)
+  }
+
+  /**
+   * Reports liveness by probing the pane on an explicitly named socket — the
+   * socket the pane was spawned on, recorded in the roster. A live pane can
+   * never be read as 'dead' just because the probing process is attached to a
+   * different server: the empty `pane_id` reply is only treated as death once
+   * the named socket is confirmed reachable (positive server identity), and a
+   * missing socket fails open as 'unknown'.
+   */
+  async isPaneAliveOnSocket(
+    paneId: PaneId,
+    socketName?: string,
+  ): Promise<PaneLiveness> {
+    if (!socketName) {
+      // No recorded socket means we cannot prove which server owns this pane.
+      // A wrong-but-reachable server would answer the same empty fields for a
+      // live pane, so fail open rather than risk a destructive false 'dead'.
+      logForDebugging(
+        `[TmuxBackend] isPaneAliveOnSocket(${paneId}) has no recorded socket; answering unknown`,
+      )
+      return 'unknown'
+    }
+
+    const result = await runTmuxInSocket(socketName, [
       'display-message',
       '-p',
       '-t',
       paneId,
-      `#{pane_dead}${TMUX_PANE_STATE_SEPARATOR}#{pane_current_command}`,
+      TMUX_PANE_QUERY_FORMAT,
     ])
 
     if (result.code !== 0) {
       // Two very different failures share this exit path: the pane is gone
-      // (tmux says so by name), or tmux itself could not be reached — no
-      // server, wrong socket, a transient error. Only the first is evidence
-      // of death; the second must stay 'unknown' or a hiccup in the leader's
-      // environment would fail every healthy teammate at once.
-      const missingPane = /can't find pane|no such pane/i.test(result.stderr)
+      // (some tmux versions say so by name on stderr), or tmux itself could
+      // not be reached — no server, a transient error. Only the first is
+      // evidence of death; the second must stay 'unknown' or a hiccup in the
+      // leader's environment would fail every healthy teammate at once.
       logForDebugging(
-        `[TmuxBackend] isPaneAlive(${paneId}) query failed (exit ${result.code}): ${result.stderr}`,
+        `[TmuxBackend] isPaneAliveOnSocket(${paneId}) query failed (exit ${result.code}): ${result.stderr}`,
       )
-      return missingPane ? 'dead' : 'unknown'
+      return interpretTmuxPaneProbe(result, false)
     }
 
-    return interpretTmuxPaneState(result.stdout)
+    // The empty-id reply is the only answer that is ambiguous between "gone"
+    // and "asked a foreign server". A non-empty id already proves the pane
+    // resolved on this socket, so no second query is needed for those.
+    const needsIdentity = paneReplyHasEmptyId(result.stdout)
+    const serverIdentityConfirmed = needsIdentity
+      ? await this.socketServerReachable(socketName)
+      : false
+
+    return interpretTmuxPaneProbe(result, serverIdentityConfirmed)
+  }
+
+  /**
+   * Whether the named socket answers `list-panes` — i.e. a server is actually
+   * running on it. This is the positive-server-identity check an empty
+   * `pane_id` reply requires before it may be read as death.
+   */
+  private async socketServerReachable(socketName: string): Promise<boolean> {
+    const result = await runTmuxInSocket(socketName, [
+      'list-panes',
+      '-a',
+      '-F',
+      '#{pane_id}',
+    ])
+    return result.code === 0
   }
 
   /**

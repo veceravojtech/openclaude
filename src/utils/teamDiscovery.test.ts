@@ -46,14 +46,21 @@ test('a tmux member whose pane probe answers dead is reported dead, not idle', a
   expect(statuses[0]?.status).toBe('dead')
 })
 
-test('a dead pane wins over isActive: true (the flag is not authoritative)', async () => {
+test('an active member is never probed for deadness — the dead verdict is no broader than the sweep', async () => {
+  const probeCalls: Array<[string, string, string | undefined]> = []
   currentTeamFile = teamFile([
-    member({ name: 'ghost', backendType: 'tmux', tmuxPaneId: '%2', isActive: true }),
+    member({ name: 'busy', backendType: 'tmux', tmuxPaneId: '%2', isActive: true }),
   ])
   const statuses = await getTeammateStatuses('team', {
-    probePane: async () => 'dead',
+    probePane: async (backendType, paneId, socketName) => {
+      probeCalls.push([backendType, paneId, socketName])
+      return 'dead'
+    },
   })
-  expect(statuses[0]?.status).toBe('dead')
+  // The roster says the teammate is mid-turn, so a pane probe must not be able
+  // to paint it as dead/killed — even if the probe would answer dead.
+  expect(statuses[0]?.status).toBe('running')
+  expect(probeCalls).toEqual([])
 })
 
 test('a tmux member with a live pane stays idle', async () => {
@@ -72,6 +79,39 @@ test('an unknown probe is never reported dead', async () => {
   ])
   const statuses = await getTeammateStatuses('team', {
     probePane: async () => 'unknown',
+  })
+  expect(statuses[0]?.status).toBe('idle')
+})
+
+test('the member’s recorded socket is threaded to the probe', async () => {
+  const probeCalls: Array<[string, string, string | undefined]> = []
+  currentTeamFile = teamFile([
+    member({
+      name: 'worker',
+      backendType: 'tmux',
+      tmuxPaneId: '%5',
+      isActive: false,
+      tmuxSocket: 'default',
+    }),
+  ])
+  await getTeammateStatuses('team', {
+    probePane: async (backendType, paneId, socketName) => {
+      probeCalls.push([backendType, paneId, socketName])
+      return 'alive'
+    },
+  })
+  expect(probeCalls).toEqual([['tmux', '%5', 'default']])
+})
+
+test('an idle member without a recorded socket is never reported dead', async () => {
+  // Mirrors the production socket-identity rule at the seam: a foreign socket
+  // (no recorded socket) cannot prove death, so it answers unknown.
+  currentTeamFile = teamFile([
+    member({ name: 'legacy', backendType: 'tmux', tmuxPaneId: '%6', isActive: false }),
+  ])
+  const statuses = await getTeammateStatuses('team', {
+    probePane: async (_backendType, _paneId, socketName) =>
+      socketName ? 'dead' : 'unknown',
   })
   expect(statuses[0]?.status).toBe('idle')
 })
