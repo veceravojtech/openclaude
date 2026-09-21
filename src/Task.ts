@@ -69,10 +69,15 @@ export type LocalShellSpawnInput = {
 // What getTaskByType dispatches for: kill. spawn/render were never
 // called polymorphically (removed in #22546). All six kill implementations
 // use only setAppState — getAppState/abortController were dead weight.
+//
+// `kill` resolves with `false` only when a task type can positively report
+// that the kill did not terminate everything still alive (an in-process
+// teammate whose pane would not close). A `void` result means the task type
+// has no kill verdict of its own; callers then observe the row state instead.
 export type Task = {
   name: string
   type: TaskType
-  kill(taskId: string, setAppState: SetAppState): Promise<void>
+  kill(taskId: string, setAppState: SetAppState): Promise<boolean | void>
 }
 
 // Task ID prefixes

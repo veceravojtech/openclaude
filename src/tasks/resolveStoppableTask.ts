@@ -18,6 +18,7 @@
 
 import { readdir, readFile } from 'fs/promises'
 import { join } from 'path'
+import { getSessionId } from '../bootstrap/state.js'
 import type { TaskStateBase } from '../Task.js'
 import { parseAgentId } from '../utils/agentId.js'
 import { logForDebugging } from '../utils/debug.js'
@@ -80,6 +81,31 @@ export async function resolveStoppableTask(
 
   const miss = await explainMiss(id, rows)
   return { ok: false, code: miss.code, message: miss.message }
+}
+
+/**
+ * True when a terminal in-process teammate task is still killable by TaskStop.
+ *
+ * Only one terminal shape qualifies: a PANE teammate (real tmux/iTerm2 pane,
+ * not an in-process runner) that THIS session spawned and that FAILED. The
+ * failure path deliberately leaves the pane alive for resume, so the task row
+ * is terminal (`failed`) while the pane and its roster member still exist —
+ * that is the ghost TaskStop must be able to reach. A completed/killed row is
+ * done (nothing alive to kill), and an in-process teammate has no pane, so
+ * neither is killable here.
+ */
+export async function isKillableTerminalPaneTeammate(
+  task: TaskStateBase,
+): Promise<boolean> {
+  if (!isInProcessTeammateTask(task)) return false
+  if (task.status !== 'failed') return false
+  const teamFile = await readTeamFileAsync(task.identity.teamName)
+  if (teamFile?.leadSessionId !== getSessionId()) return false
+  const member = teamFile.members?.find(
+    m => m.agentId === task.identity.agentId,
+  )
+  if (!member?.backendType || !isPaneBackend(member.backendType)) return false
+  return Boolean(member.tmuxPaneId && member.tmuxPaneId !== 'in-process')
 }
 
 /**

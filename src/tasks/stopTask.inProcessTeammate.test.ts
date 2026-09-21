@@ -475,11 +475,11 @@ test('TaskStop still refuses a failed pane teammate of another session with the 
   expect(message).toContain('%42')
 })
 
-test('TaskStop on a failed pane teammate whose pane will not close leaves the member for the sweep', async () => {
+test('TaskStop on a failed pane teammate whose pane will not close reports failure and keeps the member for the sweep', async () => {
   // The pane is already gone, so the socket kill reports failure. The stop
-  // must not crash, and — crucially — must NOT orphan the member: leaving it
-  // in place keeps the ghost visible and sweepable rather than deleting the
-  // only record of its pane id.
+  // must surface as a failure — not a fabricated success — while the member
+  // is kept on purpose: leaving it in place keeps the ghost visible and
+  // sweepable rather than deleting the only record of its pane id.
   installFakeTmuxBackend(false)
   const abortController = new AbortController()
   const task = failedPaneTeammate(abortController, 'opus-worker@test')
@@ -506,8 +506,21 @@ test('TaskStop on a failed pane teammate whose pane will not close leaves the me
     },
   }
 
-  const result = await stopTask('opus-worker@test', context)
-  expect(result.taskId).toBe(task.id)
+  const error = await stopTask('opus-worker@test', context).catch(
+    (e: unknown) => e,
+  )
+  expect(error).toBeInstanceOf(StopTaskError)
+  expect((error as StopTaskError).code).toBe('not_terminated')
+  const message = (error as StopTaskError).message
+  // The failure must not claim the teammate was stopped.
+  expect(message).toContain('was not stopped')
+  // ...and it must say the member was kept on purpose and name the pane.
+  expect(message).toContain('kept deliberately')
+  expect(message).toContain('%21')
+  expect(message).toContain('opus-worker@test')
+
+  // The row moved to `killed`, but the roster member is preserved so the
+  // ghost sweep can still see and reconcile the pane.
   expect(state.tasks[task.id]?.status).toBe('killed')
   expect(readTeamFile('test')?.members.map(m => m.agentId)).toEqual([
     'opus-worker@test',

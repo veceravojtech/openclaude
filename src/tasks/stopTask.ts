@@ -2,11 +2,17 @@
 // Used by TaskStopTool (LLM-invoked) and SDK stop_task control request.
 
 import type { AppState } from '../state/AppState.js'
-import { isTerminalTaskStatus } from '../Task.js'
+import { isTerminalTaskStatus, type TaskStateBase } from '../Task.js'
 import { getTaskByType } from '../tasks.js'
 import { emitTaskTerminatedSdk } from '../utils/sdkEventQueue.js'
+import { isPaneBackend } from '../utils/swarm/backends/types.js'
+import { readTeamFileAsync } from '../utils/swarm/teamHelpers.js'
 import { isLocalShellTask } from './LocalShellTask/guards.js'
-import { resolveStoppableTask } from './resolveStoppableTask.js'
+import { isInProcessTeammateTask } from './InProcessTeammateTask/types.js'
+import {
+  isKillableTerminalPaneTeammate,
+  resolveStoppableTask,
+} from './resolveStoppableTask.js'
 
 export class StopTaskError extends Error {
   constructor(
@@ -62,10 +68,17 @@ export async function stopTask(
   const label = taskId === requestedId ? taskId : `${requestedId} (${taskId})`
 
   if (task.status !== 'running') {
-    throw new StopTaskError(
-      `Task ${label} is not running (status: ${task.status})`,
-      'not_running',
-    )
+    // A failed PANE teammate is the one terminal task still worth stopping:
+    // its pane stays alive for resume, so the row reads `failed` while the
+    // pane (and roster member) still exist. TaskStop reaches those through
+    // the same kill cascade a running teammate takes. Everything else —
+    // completed, killed, in-process — has nothing alive left to stop.
+    if (!(await isKillableTerminalPaneTeammate(task))) {
+      throw new StopTaskError(
+        `Task ${label} is not running (status: ${task.status})`,
+        'not_running',
+      )
+    }
   }
 
   const taskImpl = getTaskByType(task.type)
@@ -76,7 +89,7 @@ export async function stopTask(
     )
   }
 
-  await taskImpl.kill(taskId, setAppState)
+  const killFailed = (await taskImpl.kill(taskId, setAppState)) === false
 
   // Honesty rule, same one terminate() now follows: success is an observed
   // stop, not a request that was sent. Reading the row back is the
@@ -90,6 +103,16 @@ export async function stopTask(
         `it was not terminated (status: ${after.status}).`,
       'not_terminated',
     )
+  }
+
+  // A task type that reports a definitive kill verdict can fail even though
+  // the row already moved to a terminal status: a failed pane teammate whose
+  // pane would not close reads `killed` above while the pane is still alive.
+  // The cascade keeps the roster member on purpose in that case so the pane
+  // stays visible to the ghost sweep — surface that as a failure, not the
+  // fabricated success that hid the original orphan.
+  if (killFailed) {
+    throw new StopTaskError(await killFailureMessage(task, label), 'not_terminated')
   }
 
   // Bash: suppress the "exit code 137" notification (noise). Agent tasks: don't
@@ -125,4 +148,39 @@ export async function stopTask(
   const command = isLocalShellTask(task) ? task.command : task.description
 
   return { taskId, taskType: task.type, command }
+}
+
+/**
+ * What to tell the caller when the kill cascade reported a definitive
+ * failure. For a teammate this is a pane that would not close: the roster
+ * member was kept on purpose so the pane stays visible to the ghost sweep,
+ * and naming the pane is what lets a person act on it directly. The message
+ * deliberately does not claim the teammate was stopped — the whole point is
+ * that it was not.
+ */
+async function killFailureMessage(
+  task: TaskStateBase,
+  label: string,
+): Promise<string> {
+  let pane = ''
+  if (isInProcessTeammateTask(task)) {
+    const teamFile = await readTeamFileAsync(task.identity.teamName)
+    const member = teamFile?.members?.find(
+      m => m.agentId === task.identity.agentId,
+    )
+    if (
+      member?.backendType &&
+      isPaneBackend(member.backendType) &&
+      member.tmuxPaneId &&
+      member.tmuxPaneId !== 'in-process'
+    ) {
+      pane =
+        ` Its ${member.backendType} pane ${member.tmuxPaneId} is still running — ` +
+        `close it there if it should be gone.`
+    }
+  }
+  return (
+    `Teammate ${label} was not stopped. Its roster member was kept deliberately ` +
+    `so the still-running pane stays visible to the ghost sweep.` + pane
+  )
 }

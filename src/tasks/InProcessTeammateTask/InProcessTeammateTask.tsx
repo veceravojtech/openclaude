@@ -30,8 +30,10 @@ export const InProcessTeammateTask: Task = {
   async kill(taskId, setAppState) {
     // Awaited, not fire-and-forget: TaskStop resolves through here, and a
     // teammate that leads a sub-team is only really stopped once that
-    // sub-team's members are stopped and its directories are gone.
-    await killInProcessTeammateAndCascade(taskId, setAppState);
+    // sub-team's members are stopped and its directories are gone. The
+    // returned boolean is the cascade's own verdict: `false` means a pane
+    // could not be closed and the roster member was kept for the ghost sweep.
+    return await killInProcessTeammateAndCascade(taskId, setAppState);
   }
 };
 
