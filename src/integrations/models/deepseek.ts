@@ -73,4 +73,22 @@ export default [
     contextWindow: 1_048_576,
     maxOutputTokens: 65_536,
   }),
+  defineModel({
+    id: 'deepseek-flash',
+    label: 'DeepSeek Flash',
+    brandId: 'deepseek',
+    vendorId: 'deepseek',
+    classification: ['chat', 'coding'],
+    defaultModel: 'deepseek-flash',
+    capabilities: {
+      supportsVision: false,
+      supportsStreaming: true,
+      supportsFunctionCalling: true,
+      supportsJsonMode: true,
+      supportsReasoning: false,
+      supportsPreciseTokenCount: false,
+    },
+    contextWindow: 1_048_576,
+    maxOutputTokens: 393_216,
+  }),
 ]
