@@ -137,6 +137,7 @@ function makeWorld(teammateName = 'worker'): World {
 function watchdogDeps(world: World): PaneTeammateWatchdogDeps {
   return {
     now: () => world.nowMs,
+    currentSessionId: SESSION,
     readLeadMailbox: async () => world.mailbox,
     readTeamFile: async () => world.teamFile,
     probePane: async () => {
@@ -486,6 +487,8 @@ const GHOST_PANE = '%99'
 const GHOST_TASK_ID = 'task-ghost'
 const WORKER_PANE = '%42'
 const LOCK_NAME = 'tools/shared/spawnMultiAgent.paneWatchdog.test.ts'
+/** The session these sweep tests claim to own; seeded into the team file. */
+const SESSION = 'lead-session'
 
 function rosterMember(
   name: string,
@@ -508,7 +511,7 @@ function rosterMember(
 /** Team file + one owned task on disk, under a temp config home. */
 function seedDiskRoster(
   members: Array<Record<string, unknown>>,
-  leadSessionId?: string,
+  leadSessionId: string | null = SESSION,
 ): string {
   const dir = mkdtempSync(join(tmpdir(), 'openclaude-ghost-sweep-'))
   setClaudeConfigHomeDirForTesting(dir)
@@ -520,7 +523,7 @@ function seedDiskRoster(
       name: 'team',
       createdAt: 0,
       leadAgentId: 'team-lead@team',
-      ...(leadSessionId !== undefined ? { leadSessionId } : {}),
+      ...(leadSessionId !== null ? { leadSessionId } : {}),
       members,
     }),
   )
@@ -1199,6 +1202,52 @@ test('backfill never touches another session’s members', async () => {
 
     expect(recorded).toEqual([])
     expect((await teamFileOnDisk())?.members.map(m => m.name)).toContain('ghost')
+  } finally {
+    releaseSharedMutationLock()
+    setClaudeConfigHomeDirForTesting(undefined)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a team file with no leadSessionId is neither swept nor backfilled', async () => {
+  acquireSharedMutationLock(LOCK_NAME)
+  // Explicitly null: no leadSessionId recorded — a legacy file whose owner
+  // cannot be proven, so it must not be touched by any session.
+  const dir = seedDiskRoster(
+    [
+      rosterMember('team-lead', '', '', undefined),
+      // Has a recorded socket: it would be sweepable if ownership were provable.
+      {
+        agentId: GHOST_ID,
+        name: 'ghost',
+        joinedAt: 0,
+        tmuxPaneId: GHOST_PANE,
+        cwd: '/work',
+        subscriptions: [],
+        backendType: 'tmux',
+        tmuxSocket: 'default',
+        isActive: false,
+      },
+    ],
+    null,
+  )
+  try {
+    const recorded: Array<[string, string]> = []
+    const world = makeSweepWorld({
+      discoverReachableSockets: async () => ['default'],
+      recordMemberSocket: (team, agentId, socket) => {
+        recorded.push([agentId, socket])
+        return true
+      },
+    })
+    world.memberPresence.set(GHOST_PANE, 'absent')
+
+    await world.handles[0]!.scan()
+    await world.handles[0]!.scan()
+
+    // No owner to prove — nothing is swept, and nothing is backfilled.
+    expect((await teamFileOnDisk())?.members.map(m => m.name)).toContain('ghost')
+    expect(recorded).toEqual([])
   } finally {
     releaseSharedMutationLock()
     setClaudeConfigHomeDirForTesting(undefined)

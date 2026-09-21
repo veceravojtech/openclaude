@@ -344,13 +344,12 @@ async function sweepRosterOnce(
   if (!members) return
 
   // Team files are shared across sessions; only the session that owns this
-  // team may reap its members. `leadSessionId` is the same field
+  // team may reap or backfill its members. `leadSessionId` is the same field
   // resolveStoppableTask uses to refuse cross-session stops. An absent value
-  // (a legacy file predating the field) is not "another session".
-  if (
-    teamFile.leadSessionId !== undefined &&
-    teamFile.leadSessionId !== deps.currentSessionId
-  ) {
+  // (a legacy file predating the field) is unprovable ownership — the same
+  // class of doubt as an unrecorded socket — so it is neither swept nor
+  // backfilled: never destroy without proof.
+  if (teamFile.leadSessionId !== deps.currentSessionId) {
     return
   }
 
