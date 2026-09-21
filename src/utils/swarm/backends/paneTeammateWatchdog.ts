@@ -284,16 +284,25 @@ type SweepDeps = {
   ) => Promise<string>
   setAppState: SetAppState
   now: () => number
+  /**
+   * True once the owning sweeper has been disposed. Re-checked immediately
+   * before every mutation, because a scan awaits many probes and a dispose()
+   * landing mid-pass must stop the in-flight scan from writing.
+   */
+  isDisposed: () => boolean
 }
 
 /**
  * Discovery-backfill: resolve the socket a socket-less tmux member's pane
  * lives on, on positive proof only.
  *
- * - exactly one reachable server owns the pane → record it, return `{ socketName }`
- * - none owns it AND every enumerable server answered → `{ absent: true }`
- * - anything else (enumeration failed, a server failed to answer, or more than
- *   one owner) → `{}`, which keeps the verdict 'unknown'.
+ * - exactly one reachable server owns the pane → record it, return 'present'
+ * - anything else — enumeration failed, a server failed to answer, more than
+ *   one owner, or no owner at all — is 'unknown'. Discovery can prove
+ *   ownership but can never prove non-existence over a socket space it does
+ *   not fully see (a custom `-S` path, or a `TMUX_TMPDIR` elsewhere), so a
+ *   pane that lives on a server outside the enumerated directory must never
+ *   be mistaken for a dead one.
  */
 async function resolveMemberSocket(
   deps: SweepDeps,
@@ -323,6 +332,7 @@ async function resolveMemberSocket(
   }
 
   if (owners.length === 1) {
+    if (deps.isDisposed()) return 'unknown'
     deps.recordMemberSocket(deps.teamName, member.agentId, owners[0]!)
     // The pane exists on exactly one server: present, so not a sweep target.
     return 'present'
@@ -330,8 +340,11 @@ async function resolveMemberSocket(
   if (owners.length > 1) {
     return 'unknown'
   }
-  // None own it, and every enumerable server answered: the pane is gone.
-  return 'absent'
+  // No enumerated server owns it. Discovery cannot prove non-existence over a
+  // space it does not fully see (a custom `-S` path, or a `TMUX_TMPDIR`
+  // elsewhere), so the verdict is 'unknown', never 'absent' — an enumerable
+  // socket set that all disclaim the pane is not evidence the pane is gone.
+  return 'unknown'
 }
 
 /** One sweep of the roster: retire members whose pane is confirmed absent. */
@@ -394,6 +407,10 @@ async function sweepRosterOnce(
       continue
     }
     absentPaneScans.delete(member.agentId)
+
+    // Dispose landed while the probes above were awaiting: the sweeper is
+    // gone, so its in-flight scan must not mutate the roster.
+    if (deps.isDisposed()) return
 
     const swept = { agentId: member.agentId, name: member.name }
     // Roster first, by agentId ONLY — removeTeammateFromTeamFile's name match
@@ -505,6 +522,15 @@ export function ensureTeamSweeper({
       ? PANE_TEAMMATE_WATCHDOG_SCAN_INTERVAL_MS
       : deps.scanIntervalMs
 
+  const absentPaneScans = new Map<string, { paneId: string; count: number }>()
+  let disposed = false
+  // Re-entrancy guard: the interval fires whether or not the previous scan
+  // finished, and overlapping scans share `absentPaneScans` across their
+  // awaits — collapsing the two-scan debounce. Skip the tick rather than
+  // queueing.
+  let scanning = false
+  let timer: ReturnType<typeof setInterval> | undefined
+
   const sweepDeps: SweepDeps = {
     teamName,
     currentSessionId,
@@ -516,21 +542,24 @@ export function ensureTeamSweeper({
     unassignMemberTasks,
     setAppState,
     now,
+    isDisposed: () => disposed,
   }
-  const absentPaneScans = new Map<string, { paneId: string; count: number }>()
-  let disposed = false
-  let timer: ReturnType<typeof setInterval> | undefined
 
   async function scan(): Promise<void> {
-    if (disposed) return
-    // Teardown guard: once the team file is gone there is nothing to mutate,
-    // so the sweeper retires itself.
-    const teamFile = await readTeamFile(teamName)
-    if (!teamFile?.members) {
-      dispose()
-      return
+    if (disposed || scanning) return
+    scanning = true
+    try {
+      // Teardown guard: once the team file is gone there is nothing to mutate,
+      // so the sweeper retires itself.
+      const teamFile = await readTeamFile(teamName)
+      if (!teamFile?.members) {
+        dispose()
+        return
+      }
+      await sweepRosterOnce(sweepDeps, absentPaneScans)
+    } finally {
+      scanning = false
     }
-    await sweepRosterOnce(sweepDeps, absentPaneScans)
   }
 
   function dispose(): void {

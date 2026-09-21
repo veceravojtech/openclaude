@@ -13,6 +13,7 @@ import {
   getTeamSweeper,
   type PaneTeammateWatchdogDeps,
   type PaneTeammateWatchdogHandle,
+  type TeamSweeperHandle,
 } from '../../utils/swarm/backends/paneTeammateWatchdog.js'
 import type {
   PaneWatchdogMailboxMessage,
@@ -495,6 +496,7 @@ function rosterMember(
   paneId: string,
   backendType: string,
   isActive: boolean | undefined,
+  tmuxSocket?: string,
 ): Record<string, unknown> {
   return {
     agentId: `${name}@team`,
@@ -504,6 +506,7 @@ function rosterMember(
     cwd: '/work',
     subscriptions: [],
     backendType,
+    ...(tmuxSocket ? { tmuxSocket } : {}),
     ...(isActive === undefined ? {} : { isActive }),
   }
 }
@@ -614,7 +617,7 @@ test('a ghost member is swept only after two consecutive dead scans, and lands i
   const dir = seedDiskRoster([
     rosterMember('team-lead', '', '', undefined),
     rosterMember('worker', WORKER_PANE, 'tmux', false),
-    rosterMember('ghost', GHOST_PANE, 'tmux', false),
+    rosterMember('ghost', GHOST_PANE, 'tmux', false, 'default'),
   ])
   try {
     const world = makeSweepWorld()
@@ -741,7 +744,7 @@ test('a dead-pane run broken by an unreadable scan never reaps, and the count re
   acquireSharedMutationLock(LOCK_NAME)
   const dir = seedDiskRoster([
     rosterMember('team-lead', '', '', undefined),
-    rosterMember('ghost', GHOST_PANE, 'tmux', false),
+    rosterMember('ghost', GHOST_PANE, 'tmux', false, 'default'),
   ])
   try {
     const world = makeSweepWorld()
@@ -774,7 +777,7 @@ test('a respawn that rewrites the pane id starts the dead-pane count over', asyn
   acquireSharedMutationLock(LOCK_NAME)
   const dir = seedDiskRoster([
     rosterMember('team-lead', '', '', undefined),
-    rosterMember('ghost', GHOST_PANE, 'tmux', false),
+    rosterMember('ghost', GHOST_PANE, 'tmux', false, 'default'),
   ])
   try {
     const world = makeSweepWorld()
@@ -861,6 +864,7 @@ test('a respawned same-name member with a fresh agentId survives the sweep', asy
       cwd: '/work',
       subscriptions: [],
       backendType: 'tmux',
+      tmuxSocket: 'default',
       isActive: false,
     },
     // …and its healthy respawn: same name, fresh agentId, live pane.
@@ -931,7 +935,7 @@ test('an active member with a confirmed-absent pane is swept; an in-process memb
     rosterMember('team-lead', '', '', undefined),
     // Mid-turn (isActive:true) but its pane is confirmed absent: isActive no
     // longer gates the sweep — a genuinely absent pane is the evidence.
-    rosterMember('busy', '%88', 'tmux', true),
+    rosterMember('busy', '%88', 'tmux', true, 'default'),
     // An in-process teammate has no pane to judge, dead or otherwise.
     rosterMember('local', '', 'in-process', false),
   ])
@@ -968,7 +972,7 @@ test('a sole pane teammate that self-reports a failure still gets its roster rec
   const dir = seedDiskRoster([
     rosterMember('team-lead', '', '', undefined),
     // The sole pane teammate: its pane is still alive when it self-reports.
-    rosterMember('worker', WORKER_PANE, 'tmux', false),
+    rosterMember('worker', WORKER_PANE, 'tmux', false, 'default'),
   ])
   try {
     const world = makeWorld()
@@ -1010,7 +1014,7 @@ test('the sweep survives its own watchdog being disposed', async () => {
   acquireSharedMutationLock(LOCK_NAME)
   const dir = seedDiskRoster([
     rosterMember('team-lead', '', '', undefined),
-    rosterMember('ghost', GHOST_PANE, 'tmux', false),
+    rosterMember('ghost', GHOST_PANE, 'tmux', false, 'default'),
   ])
   try {
     const world = makeWorld()
@@ -1066,6 +1070,91 @@ test('exactly one team sweeper is armed per team', () => {
   })
   expect(third).not.toBe(first)
   third.dispose()
+})
+
+test('a tick that lands mid-scan is skipped, not queued', async () => {
+  let reads = 0
+  const resolvers: Array<(value: PaneWatchdogTeamFile | null) => void> = []
+  const world = makeWorld()
+  const sweeper = ensureTeamSweeper({
+    teamName: 'team',
+    currentSessionId: SESSION,
+    setAppState: world.setAppState,
+    deps: {
+      ...watchdogDeps(world),
+      readTeamFile: () => {
+        reads++
+        return new Promise(resolve => resolvers.push(resolve))
+      },
+    },
+  })
+  try {
+    const first = sweeper.scan()
+    const second = sweeper.scan()
+    // The first scan is awaiting its team-file read; the second call is
+    // skipped by the in-flight guard, so only one read has been issued.
+    expect(reads).toBe(1)
+    // Release the read: an empty roster retires the sweeper.
+    for (const resolve of resolvers) resolve(null)
+    await first
+    await second
+    expect(reads).toBe(1)
+  } finally {
+    sweeper.dispose()
+  }
+})
+
+test('a dispose that lands mid-scan stops the in-flight scan from mutating', async () => {
+  let removed = 0
+  let probeCalls = 0
+  const world = makeWorld()
+  seedGhostInAppState(world)
+  let sweeper: TeamSweeperHandle
+  sweeper = ensureTeamSweeper({
+    teamName: 'team',
+    currentSessionId: SESSION,
+    setAppState: world.setAppState,
+    deps: {
+      ...watchdogDeps(world),
+      readTeamFile: async () => ({
+        leadAgentId: 'team-lead@team',
+        leadSessionId: SESSION,
+        members: [
+          { name: 'team-lead', agentId: 'team-lead@team' },
+          {
+            name: 'ghost',
+            agentId: GHOST_ID,
+            backendType: 'tmux',
+            tmuxPaneId: GHOST_PANE,
+            tmuxSocket: 'default',
+            isActive: false,
+          },
+        ],
+      }),
+      probeMemberPanePresence: async () => {
+        probeCalls++
+        // Dispose on the second probe — the exact seam the guard must catch,
+        // after the presence probe resolves but before the roster write.
+        if (probeCalls === 2) sweeper.dispose()
+        return 'absent'
+      },
+      removeMemberFromTeamFile: () => {
+        removed++
+        return true
+      },
+      unassignMemberTasks: async () => '',
+    },
+  })
+  try {
+    // First 'absent' sighting seeds the count; no reap yet.
+    await sweeper.scan()
+    // The second sighting would reap, but dispose landed mid-probe: the guard
+    // returns before the roster edit.
+    await sweeper.scan()
+    expect(removed).toBe(0)
+  } finally {
+    sweeper.dispose()
+  }
 })
 
 test('an active member whose socket cannot be discovered is never swept', async () => {
@@ -1169,6 +1258,47 @@ test('a socket-less member with an unreachable server set stays unknown', async 
     await world.handles[0]!.scan()
     await world.handles[0]!.scan()
 
+    expect((await teamFileOnDisk())?.members.map(m => m.name)).toContain('ghost')
+  } finally {
+    releaseSharedMutationLock()
+    setClaudeConfigHomeDirForTesting(undefined)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a socket-less member whose pane is outside the enumerated set is never swept', async () => {
+  acquireSharedMutationLock(LOCK_NAME)
+  const dir = seedDiskRoster([
+    rosterMember('team-lead', '', '', undefined),
+    rosterMember('ghost', GHOST_PANE, 'tmux', false),
+  ])
+  try {
+    const recorded: Array<[string, string]> = []
+    const probed: Array<string | undefined> = []
+    const world = makeSweepWorld({
+      // The real server lives on a socket OUTSIDE the enumerated directory (a
+      // custom `-S` path, or a `TMUX_TMPDIR` elsewhere). Enumeration only sees
+      // stale sockets, and every one of them disclaims the pane.
+      discoverReachableSockets: async () => ['stale-1', 'stale-2'],
+      probeMemberPanePresence: async (_backendType, paneId, socketName) => {
+        probed.push(socketName)
+        return 'absent'
+      },
+      recordMemberSocket: (team, agentId, socket) => {
+        recorded.push([agentId, socket])
+        return true
+      },
+    })
+
+    await world.handles[0]!.scan()
+    await world.handles[0]!.scan()
+
+    // No enumerated server claimed it, but that is not proof of absence: the
+    // pane may sit on a server discovery cannot see, so the verdict is
+    // unknown — never a reaper's 'absent'. The member survives, and nothing
+    // was recorded (positive proof only).
+    expect(probed.length).toBeGreaterThan(0)
+    expect(recorded).toEqual([])
     expect((await teamFileOnDisk())?.members.map(m => m.name)).toContain('ghost')
   } finally {
     releaseSharedMutationLock()
