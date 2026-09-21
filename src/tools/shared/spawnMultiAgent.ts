@@ -769,7 +769,6 @@ export async function handleSpawnSplitPane(
     prompt,
     plan_mode_required,
     paneId,
-    insideTmux,
     tmuxSocket,
     backendType: detectionResult.backend.type,
     toolUseId: context.toolUseId,
@@ -987,7 +986,6 @@ export async function handleSpawnSeparateWindow(
     prompt,
     plan_mode_required,
     paneId,
-    insideTmux: false,
     tmuxSocket: getSwarmSocketName(),
     backendType: 'tmux',
     toolUseId: context.toolUseId,
@@ -1066,7 +1064,6 @@ export function registerOutOfProcessTeammateTask(
     prompt,
     plan_mode_required,
     paneId,
-    insideTmux,
     tmuxSocket,
     backendType,
     toolUseId,
@@ -1078,7 +1075,6 @@ export function registerOutOfProcessTeammateTask(
     prompt: string
     plan_mode_required?: boolean
     paneId: string
-    insideTmux: boolean
     tmuxSocket?: string
     backendType: BackendType
     toolUseId?: string
@@ -1142,16 +1138,26 @@ export function registerOutOfProcessTeammateTask(
     deps: watchdogDeps,
   })
 
-  // When abort is signaled, kill the pane using the backend that created it
-  // (tmux kill-pane for tmux panes, it2 session close for iTerm2 native panes).
-  // SDK task_notification bookend is emitted by killInProcessTeammate (the
-  // sole abort trigger for this controller).
+  // When abort is signaled, kill the pane on its recorded socket — never on a
+  // socket guessed from the spawning process's environment, which could land
+  // on a different reachable tmux server and destroy a pane this session does
+  // not own. killPaneOnSocket fails closed: with no recorded socket it returns
+  // false and leaves the pane running, still visible and sweepable, rather
+  // than killing blindly. A backend without a socket-aware kill (iTerm2) has
+  // no tmux server to mis-target, so its plain killPane is the correct
+  // fallback. The SDK task_notification bookend is emitted by
+  // killInProcessTeammate (the sole abort trigger for this controller).
   abortController.signal.addEventListener(
     'abort',
     () => {
-      if (isPaneBackend(backendType)) {
-        void getBackendByType(backendType).killPane(paneId, !insideTmux)
+      if (!isPaneBackend(backendType)) {
+        return
       }
+      const backend = getBackendByType(backendType)
+      const kill = backend.killPaneOnSocket
+        ? backend.killPaneOnSocket(paneId, tmuxSocket)
+        : backend.killPane(paneId, false)
+      void kill
     },
     { once: true },
   )
