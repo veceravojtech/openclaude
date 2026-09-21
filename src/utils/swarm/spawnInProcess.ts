@@ -51,14 +51,29 @@ import {
   cleanupTeamTree,
   collectDescendantTeamNames,
   readSubTeamLedBySync,
+  readTeamFile,
   removeMemberByAgentId,
 } from './teamHelpers.js'
+import { isPaneBackend, type PaneBackendType } from './backends/types.js'
 
 type SetAppStateFn = (updater: (prev: AppState) => AppState) => void
 
 export type InProcessTeammateKillTrace = {
   source: string
   causalEventId?: string
+}
+
+/**
+ * A live pane that a terminal (failed) pane teammate still owns, which the
+ * kill cascade must close on its recorded socket before removing the roster
+ * member. `socket` is undefined for legacy members written before the backing
+ * socket was recorded; in that case the kill must fail closed rather than
+ * guess.
+ */
+type TerminalPaneKill = {
+  backendType: PaneBackendType
+  paneId: string
+  socket?: string
 }
 
 /**
@@ -352,13 +367,20 @@ export async function killInProcessTeammateAndCascade(
   setAppState: SetAppStateFn,
   trace: InProcessTeammateKillTrace = { source: 'task_stop' },
 ): Promise<boolean> {
-  const { killed, teardown } = killTeammateAndSubTeam(
+  const { killed, identity, paneKill, teardown } = killTeammateAndSubTeam(
     taskId,
     setAppState,
     trace,
   )
+  // A terminal pane teammate still owns a live pane: close it on its recorded
+  // socket BEFORE the roster member goes, and never report a kill that left
+  // the pane running.
+  let paneKilled = true
+  if (killed && paneKill && identity) {
+    paneKilled = await killTerminalPaneAndRemoveMember(paneKill, identity)
+  }
   await teardown
-  return killed
+  return killed && paneKilled
 }
 
 /**
@@ -369,14 +391,16 @@ function killTeammateAndSubTeam(
   taskId: string,
   setAppState: SetAppStateFn,
   trace: InProcessTeammateKillTrace,
-): { killed: boolean; teardown: Promise<void> } {
-  const { killed, identity, appStateBefore } = killOneInProcessTeammate(
-    taskId,
-    setAppState,
-    trace,
-  )
+): {
+  killed: boolean
+  teardown: Promise<void>
+  paneKill?: TerminalPaneKill
+  identity?: TeammateIdentity
+} {
+  const { killed, identity, appStateBefore, paneKill } =
+    killOneInProcessTeammate(taskId, setAppState, trace)
   if (!killed || !identity || !appStateBefore) {
-    return { killed, teardown: Promise.resolve() }
+    return { killed, teardown: Promise.resolve(), paneKill, identity }
   }
   // The derived name alone is not enough: `email/supervisor` and a root team
   // literally named `email-supervisor` share a directory, so the team file's
@@ -387,7 +411,7 @@ function killTeammateAndSubTeam(
     isTeammate: true,
   })
   if (!subTeam) {
-    return { killed, teardown: Promise.resolve() }
+    return { killed, teardown: Promise.resolve(), paneKill, identity }
   }
   return {
     killed,
@@ -397,6 +421,8 @@ function killTeammateAndSubTeam(
       setAppState,
       trace,
     ),
+    paneKill,
+    identity,
   }
 }
 
@@ -500,12 +526,14 @@ function killOneInProcessTeammate(
   killed: boolean
   identity: TeammateIdentity | undefined
   appStateBefore: AppState | undefined
+  paneKill: TerminalPaneKill | undefined
 } {
   let killed = false
   let identity: TeammateIdentity | undefined
   let appStateBefore: AppState | undefined
   let toolUseId: string | undefined
   let description: string | undefined
+  let wasRunning = false
 
   setAppState((prev: AppState) => {
     const task = prev.tasks[taskId]
@@ -515,9 +543,19 @@ function killOneInProcessTeammate(
 
     const teammateTask = task as InProcessTeammateTaskState
 
-    if (teammateTask.status !== 'running') {
+    // A running teammate is the normal kill; a FAILED pane teammate is the
+    // one terminal shape still worth killing — its pane stays alive for
+    // resume, so TaskStop drives this same cascade to close the pane and
+    // remove the roster member. Completed/killed rows have nothing alive
+    // left, so they stay untouched.
+    if (
+      teammateTask.status !== 'running' &&
+      teammateTask.status !== 'failed'
+    ) {
       return prev
     }
+
+    wasRunning = teammateTask.status === 'running'
 
     // Capture identity for cleanup after state update
     identity = teammateTask.identity
@@ -525,8 +563,12 @@ function killOneInProcessTeammate(
     toolUseId = teammateTask.toolUseId
     description = teammateTask.description
 
-    // Abort the controller to stop execution
-    if (teammateTask.abortController) {
+    // Abort the controller to stop execution. Only a RUNNING row aborts: a
+    // running pane teammate kills its pane through the spawn-time abort
+    // listener, while a FAILED pane teammate must NOT abort — its abort
+    // listener still kills the pane, but on the guessed socket, and the
+    // terminal-pane kill below closes the pane on its recorded socket instead.
+    if (wasRunning && teammateTask.abortController) {
       requestAbort(teammateTask.abortController, undefined, {
         source: trace.source,
         subsystem: 'in_process_teammate',
@@ -585,21 +627,51 @@ function killOneInProcessTeammate(
     }
   })
 
-  // Remove from team file (outside state updater to avoid file I/O in callback)
-  if (identity) {
+  // A FAILED pane teammate has a live pane that still needs closing, and the
+  // roster member is the only record of which pane and socket to close — so
+  // read it BEFORE any removal. This runs after the state updater (file I/O
+  // stays out of the React callback).
+  let paneKill: TerminalPaneKill | undefined
+  if (identity && !wasRunning) {
+    const { teamName, agentId } = identity
+    const teamFile = readTeamFile(teamName)
+    const member = teamFile?.members?.find(m => m.agentId === agentId)
+    if (
+      member?.backendType &&
+      isPaneBackend(member.backendType) &&
+      member.tmuxPaneId &&
+      member.tmuxPaneId !== 'in-process'
+    ) {
+      paneKill = {
+        backendType: member.backendType,
+        paneId: member.tmuxPaneId,
+        socket: member.tmuxSocket,
+      }
+    }
+  }
+
+  // Remove the member synchronously only when there is no pane to close first.
+  // For a terminal PANE teammate the pane must be confirmed dead before the
+  // member goes — the async caller does that, so a failed kill leaves the
+  // member (and its pane id) in place for the ghost sweep instead of orphaning
+  // a pane nobody can name.
+  if (identity && !paneKill) {
     removeMemberByAgentId(identity.teamName, identity.agentId)
   }
 
   if (killed) {
     void evictTaskOutput(taskId)
-    // notified:true was pre-set so no XML notification fires; close the SDK
-    // task_started bookend directly. The in-process runner's own
-    // completion/failure emit guards on status==='running' so it won't
-    // double-emit after seeing status:killed.
-    emitTaskTerminatedSdk(taskId, 'stopped', {
-      toolUseId,
-      summary: description,
-    })
+    // A terminal event was already emitted when the task failed, so only a
+    // RUNNING row being stopped here is a NEW terminal transition and closes
+    // the SDK task_started bookend. notified:true was pre-set so no XML
+    // notification fires; the in-process runner's own completion/failure emit
+    // guards on status==='running' and won't double-emit after status:killed.
+    if (wasRunning) {
+      emitTaskTerminatedSdk(taskId, 'stopped', {
+        toolUseId,
+        summary: description,
+      })
+    }
   }
 
   // Release perfetto agent registry entry
@@ -607,5 +679,30 @@ function killOneInProcessTeammate(
     unregisterPerfettoAgent(identity.agentId)
   }
 
-  return { killed, identity, appStateBefore }
+  return { killed, identity, appStateBefore, paneKill }
+}
+
+/**
+ * Closes a failed pane teammate's still-live pane on its recorded socket, then
+ * removes the roster member only once the pane is confirmed dead. Returns
+ * whether the pane was actually killed; a `false` result leaves the member in
+ * place so the ghost sweep can still see and reconcile it.
+ */
+async function killTerminalPaneAndRemoveMember(
+  paneKill: TerminalPaneKill,
+  identity: TeammateIdentity,
+): Promise<boolean> {
+  const { getBackendByType } = await import('./backends/registry.js')
+  const backend = getBackendByType(paneKill.backendType)
+  const killed = backend.killPaneOnSocket
+    ? await backend.killPaneOnSocket(paneKill.paneId, paneKill.socket)
+    : await backend.killPane(paneKill.paneId, false)
+  if (killed) {
+    removeMemberByAgentId(identity.teamName, identity.agentId)
+  } else {
+    logForDebugging(
+      `[killInProcessTeammate] Could not kill pane ${paneKill.paneId} of ${identity.agentId} (${paneKill.backendType}); leaving the roster member in place for the ghost sweep`,
+    )
+  }
+  return killed
 }
