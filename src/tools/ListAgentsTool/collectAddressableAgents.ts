@@ -246,6 +246,16 @@ export function collectAddressableAgents(
     taskByAgentId.set(task.identity.agentId, task)
   }
 
+  // Members the pane probe has confirmed dead. Their task row can linger as
+  // running/idle after a pane is killed, so a dead verdict must beat the task's
+  // word wherever the row is produced — including the task-backed loop below,
+  // which otherwise wins the dedupe over memberRow.
+  const deadMemberAgentIds = new Set(
+    teamMembers
+      .filter(member => member.status === 'dead')
+      .map(member => member.agentId),
+  )
+
   const memberRow = (
     member: TeammateStatus,
     team: string | undefined,
@@ -254,11 +264,22 @@ export function collectAddressableAgents(
     // dedupe above has usually already placed them. What lands here without a
     // task is the interesting case: dead, or spawned by another session.
     const task = taskByAgentId.get(member.agentId)
+    // A pane probe that confirmed the member's pane is gone beats both the
+    // task (which can linger as `running`/`idle` after a pane is killed) and
+    // the file's default. It is the only place `dead` enters ListAgents, and
+    // the word it renders with is `killed` — the existing terminal status for
+    // a teammate whose pane is gone.
+    const status: AddressableAgentStatus =
+      member.status === 'dead'
+        ? 'killed'
+        : task
+          ? teammateTaskStatus(task)
+          : 'unknown'
     return {
       name: member.name,
       agentId: member.agentId,
       kind: 'teammate',
-      status: task ? teammateTaskStatus(task) : 'unknown',
+      status,
       description: member.prompt
         ? `${member.name}: ${summarizePrompt(member.prompt)}`
         : `${member.name}: ${member.agentType ?? 'teammate'}`,
@@ -310,7 +331,9 @@ export function collectAddressableAgents(
       name: task.identity.agentName,
       agentId: task.identity.agentId,
       kind: 'teammate',
-      status: teammateTaskStatus(task),
+      status: deadMemberAgentIds.has(task.identity.agentId)
+        ? 'killed'
+        : teammateTaskStatus(task),
       description: task.description,
       model: task.model,
       team: task.identity.teamName,

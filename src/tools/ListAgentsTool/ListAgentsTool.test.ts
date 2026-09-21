@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
@@ -25,6 +25,7 @@ import {
   TEAM_FILE_ONLY_MARKER,
 } from './collectAddressableAgents.js'
 import { ListAgentsTool, type Output } from './ListAgentsTool.js'
+import * as realTeamDiscovery from '../../utils/teamDiscovery.js'
 
 const originalEnv = {
   CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS:
@@ -33,10 +34,24 @@ const originalEnv = {
   USER_TYPE: process.env.USER_TYPE,
 }
 
+// Snapshots taken before any mock.module() call: mock.module() mutates the
+// live namespace object in place, so restoring from a spread of the namespace
+// after mocking would re-install the stub. The integration test drives the
+// merge/addressing logic, not tmux liveness, so `getTeammateStatuses` is
+// mocked to force every pane probe to 'unknown' — a tmux server on the host
+// (or its absence) must not change a fixture's verdict.
+const pristineTeamDiscovery = { ...realTeamDiscovery }
+const realGetTeammateStatuses = realTeamDiscovery.getTeammateStatuses
+
 let configDir: string | undefined
 
 beforeEach(async () => {
   await acquireSharedMutationLock('tools/ListAgentsTool/ListAgentsTool.test.ts')
+  mock.module('../../utils/teamDiscovery.js', () => ({
+    ...pristineTeamDiscovery,
+    getTeammateStatuses: (teamName: string) =>
+      realGetTeammateStatuses(teamName, { probePane: async () => 'unknown' }),
+  }))
   // Teams are on by default; tests turn them off explicitly.
   delete process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS
   delete process.env.USER_TYPE
@@ -44,6 +59,8 @@ beforeEach(async () => {
 
 afterEach(() => {
   try {
+    mock.restore()
+    mock.module('../../utils/teamDiscovery.js', () => ({ ...pristineTeamDiscovery }))
     restoreEnv('CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS')
     restoreEnv('CLAUDE_CODE_DISABLE_AGENT_TEAMS')
     restoreEnv('USER_TYPE')

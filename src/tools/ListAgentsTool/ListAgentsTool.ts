@@ -46,7 +46,7 @@ async function readTeamNeighbourhood(
   const subTeam = subTeamFile
     ? {
         teamName: subTeamFile.name,
-        members: getTeammateStatuses(subTeamFile.name),
+        members: await getTeammateStatuses(subTeamFile.name),
       }
     : undefined
 
@@ -145,11 +145,12 @@ export const ListAgentsTool = buildTool({
       identity.agentId === teamContext?.leadAgentId
 
     const tree = await readTeamNeighbourhood(identity, teamName)
+    const teamMembers = teamName ? await getTeammateStatuses(teamName) : []
 
     const agents = collectAddressableAgents({
       tasks: appState.tasks,
       agentNameRegistry: appState.agentNameRegistry,
-      teamMembers: teamName ? getTeammateStatuses(teamName) : [],
+      teamMembers,
       teamName,
       // Inside a sub-team the session's lead id is the ROOT lead's, so the
       // sub-team's own file says who leads the caller's team.

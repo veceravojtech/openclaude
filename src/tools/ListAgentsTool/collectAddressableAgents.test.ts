@@ -569,6 +569,24 @@ test('a team-file member with a live task takes the task status and its id', () 
   expect(renderAddressableAgents(agents)).not.toContain(TEAM_FILE_ONLY_MARKER)
 })
 
+test('a team-file member whose pane is dead reports killed, beating a stale running task', () => {
+  // The task can linger as running/idle after a human kills the pane, because
+  // the watchdog's progress deadline is minutes away. The pane probe's dead
+  // verdict is the authoritative fact, so it must win over the task's idle.
+  const agents = collectAddressableAgents({
+    ...state([teammate('ghost', { isIdle: true })]),
+    teamMembers: [member('ghost', { status: 'dead' })],
+    teamName: TEAM,
+    includeTeamLead: false,
+  })
+  expect(agents).toHaveLength(1)
+  expect(agents[0]).toMatchObject({
+    name: 'ghost',
+    status: 'killed',
+    to: `ghost@${TEAM}`,
+  })
+})
+
 test('the `to` address is identical whether a row is task-backed or file-only', () => {
   // Addressing is a separate, working concern: honesty about liveness must not
   // cost SendMessage its recipient.

@@ -25,6 +25,7 @@ import { ensureBackendsRegistered, getBackendByType, getCachedBackend } from '..
 import type { PaneBackendType } from '../../utils/swarm/backends/types.js';
 import { getSwarmSocketName, TMUX_COMMAND } from '../../utils/swarm/constants.js';
 import { addHiddenPaneId, removeHiddenPaneId, removeMemberFromTeam, setMemberMode, setMultipleMemberModes } from '../../utils/swarm/teamHelpers.js';
+import { retireTeammateFromLeaderView } from '../../utils/swarm/teammateRetirement.js';
 import { listTasks, type Task, unassignTeammateTasks } from '../../utils/tasks.js';
 import { getTeammateStatuses, type TeammateStatus, type TeamSummary } from '../../utils/teamDiscovery.js';
 import { createModeSetRequestMessage, sendShutdownRequestToMailbox, writeToMailbox } from '../../utils/teammateMailbox.js';
@@ -70,10 +71,20 @@ export function TeamsDialog({
   // initialTeams is now always provided from PromptInput (derived from teamContext)
   // No filesystem I/O needed here
 
-  const teammateStatuses = useMemo(() => {
-    return getTeammateStatuses(dialogLevel.teamName);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    // biome-ignore lint/correctness/useExhaustiveDependencies: intentional
+  // getTeammateStatuses is async now: it probes each pane-backed member so a
+  // roster ghost (member present, pane gone) reads `dead` instead of `idle`.
+  // The 1s refresh interval below re-runs the probe; `cancelled` guards the
+  // async resolution against out-of-order results across the refresh churn.
+  const [teammateStatuses, setTeammateStatuses] = useState<TeammateStatus[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    getTeammateStatuses(dialogLevel.teamName).then(statuses => {
+      if (cancelled) return;
+      setTeammateStatuses(statuses);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [dialogLevel.teamName, refreshKey]);
 
   // Periodically refresh to pick up mode changes from teammates
@@ -200,16 +211,27 @@ export function TeamsDialog({
       return;
     }
 
-    // Handle 'k' to kill teammate
+    // Handle 'k' to kill a teammate, or remove a ghost whose pane is already
+    // gone. Both share the roster-removal + task-retirement helpers; a ghost
+    // skips only the pane kill, because the dead probe already proved there is
+    // no pane to kill.
     if (input === 'k') {
       if (dialogLevel.type === 'teammateList' && teammateStatuses[selectedIndex]) {
-        void killTeammate(teammateStatuses[selectedIndex].tmuxPaneId, teammateStatuses[selectedIndex].backendType, dialogLevel.teamName, teammateStatuses[selectedIndex].agentId, teammateStatuses[selectedIndex].name, setAppState).then(() => {
+        const teammate = teammateStatuses[selectedIndex];
+        const remove = teammate.status === 'dead'
+          ? removeGhostTeammate(dialogLevel.teamName, teammate, setAppState)
+          : killTeammate(teammate.tmuxPaneId, teammate.backendType, dialogLevel.teamName, teammate.agentId, teammate.name, setAppState);
+        void remove.then(() => {
           setRefreshKey(k => k + 1);
           // Adjust selection if needed
           setSelectedIndex(prev => Math.max(0, Math.min(prev, teammateStatuses.length - 2)));
         });
       } else if (dialogLevel.type === 'teammateDetail' && currentTeammate) {
-        void killTeammate(currentTeammate.tmuxPaneId, currentTeammate.backendType, dialogLevel.teamName, currentTeammate.agentId, currentTeammate.name, setAppState);
+        if (currentTeammate.status === 'dead') {
+          void removeGhostTeammate(dialogLevel.teamName, currentTeammate, setAppState);
+        } else {
+          void killTeammate(currentTeammate.tmuxPaneId, currentTeammate.backendType, dialogLevel.teamName, currentTeammate.agentId, currentTeammate.name, setAppState);
+        }
         goBackToList();
       }
       return;
@@ -330,7 +352,7 @@ function TeamDetailView(t0) {
   }
   let t4;
   if ($[8] !== cycleModeShortcut) {
-    t4 = <Box marginLeft={1}><Text dimColor={true}>{figures.arrowUp}/{figures.arrowDown} select · Enter view · k kill · s shutdown · p prune idle{supportsHideShow && " \xB7 h hide/show \xB7 H hide/show all"}{" \xB7 "}{cycleModeShortcut} sync cycle modes for all · Esc close</Text></Box>;
+    t4 = <Box marginLeft={1}><Text dimColor={true}>{figures.arrowUp}/{figures.arrowDown} select · Enter view · k kill/remove · s shutdown · p prune idle{supportsHideShow && " \xB7 h hide/show \xB7 H hide/show all"}{" \xB7 "}{cycleModeShortcut} sync cycle modes for all · Esc close</Text></Box>;
     $[8] = cycleModeShortcut;
     $[9] = t4;
   } else {
@@ -357,8 +379,8 @@ function TeammateListItem(t0) {
     teammate,
     isSelected
   } = t0;
-  const isIdle = teammate.status === "idle";
-  const shouldDim = isIdle && !isSelected;
+  const isInactive = teammate.status === "idle" || teammate.status === 'dead';
+  const shouldDim = isInactive && !isSelected;
   let modeSymbol;
   let t1;
   if ($[0] !== teammate.mode) {
@@ -384,9 +406,9 @@ function TeammateListItem(t0) {
     t4 = $[4];
   }
   let t5;
-  if ($[5] !== isIdle) {
-    t5 = isIdle && <Text dimColor={true}>[idle] </Text>;
-    $[5] = isIdle;
+  if ($[5] !== isInactive) {
+    t5 = isInactive && <Text dimColor={true}>{teammate.status === 'dead' ? '[dead] ' : '[idle] '}</Text>;
+    $[5] = isInactive;
     $[6] = t5;
   } else {
     t5 = $[6];
@@ -577,7 +599,7 @@ function TeammateDetailView(t0) {
   }
   let t12;
   if ($[34] !== cycleModeShortcut) {
-    t12 = <Box marginLeft={1}><Text dimColor={true}>{figures.arrowLeft} back · Esc close · k kill · s shutdown{getCachedBackend()?.supportsHideShow && " \xB7 h hide/show"}{" \xB7 "}{cycleModeShortcut} cycle mode</Text></Box>;
+    t12 = <Box marginLeft={1}><Text dimColor={true}>{figures.arrowLeft} back · Esc close · k kill/remove · s shutdown{getCachedBackend()?.supportsHideShow && " \xB7 h hide/show"}{" \xB7 "}{cycleModeShortcut} cycle mode</Text></Box>;
     $[34] = cycleModeShortcut;
     $[35] = t12;
   } else {
@@ -599,6 +621,28 @@ function _temp2(task_0) {
 }
 function _temp(prev) {
   return !prev;
+}
+/**
+ * Remove a roster member whose pane is already gone (a ghost).
+ *
+ * The pane kill step is skipped — the dead probe already confirmed there is no
+ * pane to kill — but everything else reuses the retirement helpers: remove the
+ * member from the team file, unassign its open tasks, and force-complete its
+ * task row in the lead's view via `retireTeammateFromLeaderView`. That is the
+ * same sequence the pane watchdog's ghost sweep runs, so a ghost removed from
+ * the dialog leaves the same state a swept ghost does.
+ */
+async function removeGhostTeammate(teamName: string, teammate: TeammateStatus, setAppState: (f: (prev: AppState) => AppState) => void): Promise<void> {
+  removeMemberFromTeam(teamName, teammate.tmuxPaneId);
+  const {
+    notificationMessage
+  } = await unassignTeammateTasks(teamName, teammate.agentId, teammate.name, 'terminated');
+  retireTeammateFromLeaderView({
+    teammateId: teammate.agentId,
+    notificationMessage,
+    setAppState
+  });
+  logForDebugging(`[TeamsDialog] Removed ghost ${teammate.agentId} from team ${teamName}`);
 }
 async function killTeammate(paneId: string, backendType: PaneBackendType | undefined, teamName: string, teammateId: string, teammateName: string, setAppState: (f: (prev: AppState) => AppState) => void): Promise<void> {
   // Kill the pane using the backend that created it (handles -s / -L flags correctly).
