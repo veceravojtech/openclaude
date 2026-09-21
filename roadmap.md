@@ -5,7 +5,7 @@
 
 ## Implementation status (updated 2026-09-21, after the review fixes landed)
 
-Steps 0–4 are **committed** (`e9c1c94c`, `c0bb8621`, `511c8b59`), and the independent review's defect fixes have since landed (`637a5f4b`, `0c92cf01`, `1e3d35b6`, `5c25f885`, `9f3c3085`, `1c0b047f`, `31ef3d98`). A final small fix round, the full pre-push contract, and the live repro remain — see "Review findings & open items" below.
+Steps 0–4 are **committed** (`e9c1c94c`, `c0bb8621`, `511c8b59`), and the independent review's defect fixes have since landed (`637a5f4b`, `0c92cf01`, `1e3d35b6`, `5c25f885`, `9f3c3085`, `1c0b047f`, `31ef3d98`, `8d875050`). The full pre-push contract and the live repro remain — see "Review findings & open items" below.
 
 | Step | Owner | State | Tests |
 |---|---|---|---|
@@ -14,7 +14,7 @@ Steps 0–4 are **committed** (`e9c1c94c`, `c0bb8621`, `511c8b59`), and the inde
 | 3 — watchdog ghost sweep | deepseek-worker | ✅ committed; team-scoped sweeper + socket backfill landed (`1c0b047f`, `31ef3d98`) | paneWatchdog 14/0 (5 new), TmuxBackend.paneLiveness 6/0, swarm/shared/hooks/task 479/0 (52 files); typecheck clean |
 | 4 — dead-teammate UX | — | ✅ committed (`e9c1c94c`, `511c8b59`) | ListAgents/collectAddressableAgents/teamDiscovery tests extended |
 | Review defect fixes | — | ✅ landed (`637a5f4b`, `0c92cf01`…`31ef3d98`) | per-commit tests |
-| Final fix round (discovery enumeration) | — | 🔄 pending | — |
+| Final fix round (discovery enumeration) | — | ✅ landed (`8d875050`) | watchdog 29/0; five-path 388/0 (42 files); typecheck clean |
 | Cross-review, pre-push contract, live acceptance | — | ❌ pending | — |
 
 ### Premise corrections found while implementing
@@ -47,12 +47,12 @@ The independent review's defects have now landed as follow-up commits. Distincti
 - `9f3c3085` — the abort listener no longer guesses a socket: it uses the recorded one and skips the kill when ownership cannot be proven.
 - `1c0b047f` — the load-bearing change: the sweep is removed from the per-teammate `scan()` and given a module-level per-team sweeper (exactly one per team, `unref`'d interval, self-disposing), plus discovery-backfill of `tmuxSocket`, plus `isActive` relaxed in the sweep only under a full evidence chain.
 - `31ef3d98` — strict `leadSessionId !==` identity check, so a team file with no recorded owner is neither swept nor backfilled.
+- `8d875050` — the final fix round: `resolveMemberSocket` returns `'unknown'` (never `'absent'`) when no enumerated socket claims the pane — discovery can prove ownership but not non-existence over a socket space it does not fully see (`TMUX_TMPDIR`, `tmux -S /explicit/path`), so partial enumeration must never convict a live pane; recording on a positive hit is unchanged. Also adds an `isDisposed()` re-check at both mutation points (a `dispose()` landing mid-pass stops an in-flight scan from calling `removeMember`) and an in-flight `scanning` guard (a tick arriving mid-scan is skipped, so overlapping scans cannot share `absentPaneScans` and collapse the two-scan debounce). Each fix has a test that fails on revert; watchdog 29/0, five-path 388/0 across 42 files, typecheck clean. Consequence for the tests: reaping now seeds the member with a **recorded** socket (the proven path), discovery has its own dedicated tests, and reaping is only asserted where ownership was actually proven.
 
 **Still open**
 
-- A final fix round was in flight and has **not** landed: discovery must return `unknown` rather than `absent` when no enumerated socket claims a pane (`/tmp/tmux-$UID` is not exhaustive — `TMUX_TMPDIR` and `tmux -S` put sockets elsewhere, so concluding absence from partial enumeration could sweep a live teammate), plus two nits — a disposed sweeper can still mutate mid-pass (nothing re-checks after the awaits) and there is no re-entrancy guard on the scan interval.
-- The full pre-push validation contract needs a re-run covering the final commits.
-- The live six-symptom repro has **not** been run; it still requires a rebuilt lead and freshly spawned teammates (see Step 5).
+- The full pre-push validation contract needs a re-run — the run made during this session predates `8d875050`.
+- The live six-symptom repro has **not** been run, so no ghost has been observed being reaped outside a test; it still requires a rebuilt lead and freshly spawned teammates (see Step 5).
 - Roughly 5 pre-existing DeepSeek model-cap test failures (65,536 vs 393,216) remain, unrelated to this work.
 
 **Notes still true**
