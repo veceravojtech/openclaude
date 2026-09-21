@@ -31,7 +31,7 @@ import { lazySchema } from '../../utils/lazySchema.js'
 import { parseAddress } from '../../utils/peerAddress.js'
 import { semanticBoolean } from '../../utils/semanticBoolean.js'
 import { jsonStringify } from '../../utils/slowOperations.js'
-import type { BackendType } from '../../utils/swarm/backends/types.js'
+import { isPaneBackend, type BackendType } from '../../utils/swarm/backends/types.js'
 import { TEAM_LEAD_NAME } from '../../utils/swarm/constants.js'
 import { readTeamFileAsync } from '../../utils/swarm/teamHelpers.js'
 import {
@@ -210,6 +210,76 @@ function classifyTeammateDelivery(
 }
 
 /**
+ * The refusal a recipient with nothing reading its inbox gets, from either
+ * delivery path. One string, so the two cannot drift apart in wording, and so
+ * a model caller can key on the address and the status word rather than parse
+ * prose.
+ */
+function undeliverableRefusal(address: string, status: TaskStatus): string {
+  return (
+    `Not delivered: ${address} is not running (task status: ${status}). ` +
+    `The message was kept in its inbox, but nothing is reading it — it stays unread ` +
+    `until a teammate of that name runs again. Spawn or restart it, or send to a ` +
+    `running teammate.`
+  )
+}
+
+/**
+ * Whether a terminal task row still has a live reader behind it.
+ *
+ * `classifyTeammateDelivery` convicts a recipient on its `appState.tasks` row,
+ * and for an in-process teammate that row IS the runner, so the conviction
+ * holds. A pane teammate is different in the one way that matters here: what
+ * drains its inbox is the CLI process inside its own pane, which the row does
+ * not describe at all. `paneTeammateWatchdog` deliberately leaves a failed
+ * child's pane running so it can be resumed, and that child keeps polling.
+ * So for a pane roster member whose pane still has the CLI in the foreground,
+ * `failed`/`completed`/`killed` says nothing about whether a write will be
+ * read — which is the whole question this gate exists to answer.
+ *
+ * Only `'alive'` counts. `'dead'` is positive evidence of absence, and
+ * `'unknown'` (tmux unreachable, nothing readable back) is a failure to prove
+ * liveness at all: a refusal nobody needed is recoverable in a way that a
+ * claimed delivery nobody read is not.
+ *
+ * Probed through the backends rather than by shelling out, and imported
+ * dynamically as `killOrphanedTeammatePanes` does — the registry pulls in the
+ * backend implementations, and this module is loaded for every session while
+ * the probe only ever runs for a terminal row.
+ */
+async function hasLivePaneRunner(
+  recipientName: string,
+  teamName: string | undefined,
+): Promise<boolean> {
+  if (!teamName) return false
+  try {
+    const teamFile = await readTeamFileAsync(teamName)
+    const member = teamFile?.members.find(m => m.name === recipientName)
+    if (!member?.tmuxPaneId || !member.backendType) return false
+    if (!isPaneBackend(member.backendType)) return false
+    const paneId = member.tmuxPaneId
+
+    const [{ ensureBackendsRegistered, getBackendByType }, { isInsideTmux }] =
+      await Promise.all([
+        import('../../utils/swarm/backends/registry.js'),
+        import('../../utils/swarm/backends/detection.js'),
+      ])
+    await ensureBackendsRegistered()
+    const backend = getBackendByType(member.backendType)
+    const probe = backend?.isPaneAlive
+    if (!probe) return false
+
+    const useExternalSession = !(await isInsideTmux())
+    return (await probe.call(backend, paneId, useExternalSession)) === 'alive'
+  } catch (e) {
+    logForDebugging(
+      `[SendMessageTool] pane liveness probe for ${recipientName} failed: ${errorMessage(e)}`,
+    )
+    return false
+  }
+}
+
+/**
  * The name a message is signed with, and the `to` a reply comes back on.
  *
  * A subagent spawned inside a teammate's turn runs in that teammate's ambient
@@ -275,11 +345,7 @@ async function handleMessage(
     return {
       data: {
         success: false,
-        message:
-          `Not delivered: ${address} is not running (task status: ${delivery.status}). ` +
-          `The message was kept in its inbox, but nothing is reading it — it stays unread ` +
-          `until a teammate of that name runs again. Spawn or restart it, or send to a ` +
-          `running teammate.`,
+        message: undeliverableRefusal(address, delivery.status),
       },
     }
   }
@@ -382,7 +448,7 @@ async function handleShutdownRequest(
   to: string,
   reason: string | undefined,
   context: ToolUseContext,
-): Promise<{ data: RequestOutput }> {
+): Promise<{ data: RequestOutput | MessageOutput }> {
   const appState = context.getAppState()
   const senderName = resolveSenderName(context)
   const { recipientName: targetName, teamName } = await resolveRecipient(
@@ -390,6 +456,7 @@ async function handleShutdownRequest(
     resolveCallerIdentity(context),
     getTeamName(appState.teamContext),
   )
+  const address = formatRecipientAddress(targetName, teamName)
   const requestId = generateRequestId('shutdown', targetName)
 
   const shutdownMessage = createShutdownRequestMessage({
@@ -398,6 +465,41 @@ async function handleShutdownRequest(
     reason,
   })
 
+  const delivery = classifyTeammateDelivery(
+    appState.tasks,
+    targetName,
+    teamName,
+  )
+
+  // A cooperative stop is the one delivery a terminal task row must not block
+  // on its own. The row is written by the LEAD's registry; what answers this
+  // request is the child's poller inside its own pane, and a failed pane
+  // teammate keeps that pane running on purpose so it can be resumed
+  // (`paneTeammateWatchdog`: failure is not teardown). So the exemption is
+  // narrow and paired with evidence that a reader exists: a roster member on a
+  // pane backend whose pane still has the CLI in the foreground. Everything
+  // else keeps the honest refusal, because a request "sent" into an inbox no
+  // process polls leaves the lead waiting on an approval that can never come.
+  if (
+    delivery.state === 'undeliverable' &&
+    !(await hasLivePaneRunner(targetName, teamName))
+  ) {
+    return {
+      data: {
+        success: false,
+        message: undeliverableRefusal(address, delivery.status),
+      },
+    }
+  }
+
+  // The write happens only after the refusal gate, and only for a
+  // shutdown_request. An ordinary message is written BEFORE the gate
+  // (handleMessage) because the inbox is durable and a stale message a respawn
+  // later reads is harmless. A shutdown_request is a *command*, not a message:
+  // its request_id keys on the target name alone — no agent id, session id or
+  // spawn epoch — so a refused request that was persisted would be executed by
+  // a later respawn under the same name with no basis to know it is stale. A
+  // refused shutdown must leave no envelope behind.
   await writeToMailbox(
     targetName,
     {

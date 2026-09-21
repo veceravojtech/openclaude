@@ -246,12 +246,15 @@ export function collectAddressableAgents(
     taskByAgentId.set(task.identity.agentId, task)
   }
 
-  // Members the pane probe has confirmed dead. Their task row can linger as
-  // running/idle after a pane is killed, so a dead verdict must beat the task's
-  // word wherever the row is produced — including the task-backed loop below,
-  // which otherwise wins the dedupe over memberRow.
+  // Members the pane probe has confirmed dead, across the caller's own team
+  // AND the sub-team it leads. Their task row can linger as running/idle after
+  // a pane is killed, so a dead verdict must beat the task's word wherever the
+  // row is produced — including the task-backed loop below, which otherwise
+  // wins the dedupe over memberRow. Sub-team members come from
+  // `tree.subTeam.members` (not `teamMembers`), so they must be folded in here
+  // or the override misses them one level down.
   const deadMemberAgentIds = new Set(
-    teamMembers
+    [...teamMembers, ...(tree?.subTeam?.members ?? [])]
       .filter(member => member.status === 'dead')
       .map(member => member.agentId),
   )

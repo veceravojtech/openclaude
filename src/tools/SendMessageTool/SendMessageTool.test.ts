@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 import type { CanUseToolFn } from '../../hooks/useCanUseTool.js'
+import type { PaneLiveness } from '../../utils/swarm/backends/types.js'
 import type { AppState } from '../../state/AppState.js'
 import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js'
 import type { LocalAgentTaskState } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
@@ -47,11 +48,23 @@ beforeEach(async () => {
   setDynamicTeamContext(null)
   configDir = mkdtempSync(join(tmpdir(), 'openclaude-send-message-'))
   setClaudeConfigHomeDirForTesting(configDir)
+  paneLiveness = 'alive'
+  probeThrows = false
+  probedPanes = []
+  await mockBackendRegistry()
   writeTeamFile()
 })
 
 afterEach(() => {
   try {
+    // `mock.restore()` does not undo `mock.module()` (bun 1.3.9), so the real
+    // registry has to be handed back explicitly or every later suite in this
+    // process would get this file's fake pane probe.
+    if (pristineBackendRegistry) {
+      mock.module('../../utils/swarm/backends/registry.js', () => ({
+        ...pristineBackendRegistry,
+      }))
+    }
     setDynamicTeamContext(originalDynamicTeamContext)
     setClaudeConfigHomeDirForTesting(undefined)
     if (configDir) {
@@ -63,7 +76,54 @@ afterEach(() => {
   }
 })
 
-function writeTeamFile(): string {
+/**
+ * What the pane probe answers, and which panes it was asked about. The probe
+ * is the only part of liveness that needs a tmux server, so it is the only
+ * part faked; everything else here runs the product code.
+ */
+let paneLiveness: PaneLiveness = 'alive'
+let probeThrows = false
+let probedPanes: string[] = []
+let pristineBackendRegistry: Record<string, unknown> | undefined
+
+async function mockBackendRegistry(): Promise<void> {
+  // Cache-busted specifier so this captures the REAL module, not the fake
+  // installed by an earlier test in this file.
+  const nonce = `sendMessagePristine=${Date.now()}-${Math.random()}`
+  pristineBackendRegistry ??= await import(
+    `../../utils/swarm/backends/registry.js?${nonce}`
+  )
+  mock.module('../../utils/swarm/backends/registry.js', () => ({
+    ...pristineBackendRegistry,
+    ensureBackendsRegistered: async () => {},
+    getBackendByType: () => ({
+      isPaneAlive: async (paneId: string) => {
+        probedPanes.push(paneId)
+        if (probeThrows) throw new Error('tmux server not running')
+        return paneLiveness
+      },
+    }),
+  }))
+}
+
+/** A roster member spawned into its own tmux pane. */
+function paneMember(
+  name: string,
+  paneId: string,
+): TeamFile['members'][number] {
+  return {
+    agentId: `${name}@${TEAM}`,
+    name,
+    joinedAt: 0,
+    tmuxPaneId: paneId,
+    cwd: '/work',
+    subscriptions: [],
+    backendType: 'tmux',
+    isActive: false,
+  }
+}
+
+function writeTeamFile(extraMembers: TeamFile['members'] = []): string {
   const teamFile: TeamFile = {
     name: TEAM,
     createdAt: 0,
@@ -96,6 +156,16 @@ function writeTeamFile(): string {
         backendType: 'in-process',
       },
     ],
+  }
+  // Overrides, not appends: a name appears once on a real roster, and the two
+  // defaults are in-process members, so a pane teammate has to displace one.
+  for (const member of extraMembers) {
+    const at = teamFile.members.findIndex(m => m.name === member.name)
+    if (at === -1) {
+      teamFile.members.push(member)
+    } else {
+      teamFile.members[at] = member
+    }
   }
   const teamFilePath = getTeamFilePath(TEAM)
   mkdirSync(dirname(teamFilePath), { recursive: true })
@@ -175,6 +245,7 @@ function appStateWith(
     agentNameRegistry: new Map(
       Object.entries(registry).map(([name, id]) => [name, id as AgentId]),
     ),
+    toolPermissionContext: { mode: 'default' },
     teamContext: {
       teamName: TEAM,
       teamFilePath: getTeamFilePath(TEAM),
@@ -221,6 +292,34 @@ async function send(
     undefined as unknown as AssistantMessage,
   )
   return data as MessageOutput & BroadcastOutput
+}
+
+/**
+ * The protocol half of SendMessage — `{type: ...}` envelopes, which take the
+ * switch in `call()` rather than `handleMessage`. Its fields are read
+ * defensively: a refusal deliberately carries neither `request_id` nor
+ * `routing`, which is itself one of the things these tests pin.
+ */
+type StructuredResult = {
+  success: boolean
+  message: string
+  request_id?: string
+  target?: string
+  routing?: unknown
+}
+
+async function sendStructured(
+  to: string,
+  message: Parameters<typeof SendMessageTool.call>[0]['message'],
+  context: ToolUseContext,
+): Promise<StructuredResult> {
+  const { data } = await SendMessageTool.call(
+    { to, message },
+    context,
+    canUseTool,
+    undefined as unknown as AssistantMessage,
+  )
+  return data as StructuredResult
 }
 
 /**
@@ -468,4 +567,187 @@ test('a live teammate is messaged exactly as before, in every direction', async 
   )
   expect(broadcast.success).toBe(true)
   expect(broadcast.recipients).toEqual(['supervisor', 'coder'])
+})
+
+/**
+ * STEP 0a — characterisation of the delivery gate as it stands, so the Step 1
+ * exemption is diff-visible rather than argued about.
+ *
+ * The gate is `classifyTeammateDelivery`, and it reads exactly one thing: the
+ * `appState.tasks` row for the recipient. A pane teammate's row is not its
+ * runner — the process in the pane is, and the watchdog deliberately keeps
+ * that process running after a failure — so "the row says failed" and "nothing
+ * is reading the inbox" are not the same claim for a pane teammate.
+ */
+
+test('a plain message to a terminal task is refused even when its pane still runs', async () => {
+  // The state the live repro left behind: a `failed` row for a teammate whose
+  // tmux pane was still running the CLI, and still polling its inbox.
+  writeTeamFile([paneMember('coder', '%21')])
+  const lead = contextFor(appStateWith({}, [teammateTask('coder', 'failed')]))
+
+  const result = await send(
+    { to: 'coder', message: 'status?', summary: 'status' },
+    lead.context,
+  )
+
+  expect(result.success).toBe(false)
+  expect(result.message).toContain('Not delivered')
+  expect(result.message).toContain('failed')
+  // The row alone convicted it: a plain message never spends a tmux probe.
+  expect(probedPanes).toEqual([])
+})
+
+test('a shutdown request reaches a failed teammate whose pane is still running', async () => {
+  // The live repro's end state: a `failed` row from the lead's registry, and a
+  // `%21` still running the child whose poller surfaces the request
+  // (useInboxPoller) so the teammate can approve its own exit.
+  writeTeamFile([paneMember('coder', '%21')])
+  const lead = contextFor(appStateWith({}, [teammateTask('coder', 'failed')]))
+
+  const result = await sendStructured(
+    'coder',
+    { type: 'shutdown_request', reason: 'wrap up' },
+    lead.context,
+  )
+
+  expect(result.success).toBe(true)
+  expect(result.request_id).toBeTruthy()
+  // The exemption is an exception, not the removal of the check: it is granted
+  // on evidence, so the pane was actually asked.
+  expect(probedPanes).toEqual(['%21'])
+  expect(await lastSenderTo('coder')).toBe('team-lead')
+})
+
+test('a shutdown request to a failed teammate whose pane is gone is refused like any dead recipient', async () => {
+  // Step 1's other half, and a behaviour change: before it, the envelope never
+  // passed through the terminal-task gate at all, so a request into an inbox
+  // with no poller was reported as sent and the lead waited for an approval
+  // that could never arrive.
+  writeTeamFile([paneMember('coder', '%21')])
+  paneLiveness = 'dead'
+  const lead = contextFor(appStateWith({}, [teammateTask('coder', 'failed')]))
+
+  const result = await sendStructured(
+    'coder',
+    { type: 'shutdown_request', reason: 'wrap up' },
+    lead.context,
+  )
+
+  expect(result.success).toBe(false)
+  expect(result.message).toContain('Not delivered')
+  expect(result.message).toContain(`coder@${TEAM}`)
+  expect(result.message).toContain('failed')
+  // No `request_id` and no `routing`: there is no request in flight to answer
+  // and this was not a delivery. The UI renders neither, so the text is what
+  // the caller and the human see.
+  expect(result.request_id).toBeUndefined()
+  expect(result.routing).toBeUndefined()
+  // Unlike a refused plain message, a refused shutdown leaves no envelope: it
+  // is a command a respawn under the same name would execute, so it is never
+  // persisted. The mailbox stays empty.
+  expect(await lastSenderTo('coder')).toBeUndefined()
+})
+
+test('an unreadable pane probe proves nothing, so the request is still refused', async () => {
+  // 'unknown' is tmux unreachable or an answer with nothing readable in it —
+  // a failure to prove liveness. Only a runner the probe actually saw counts,
+  // and a refusal that was not needed costs a retry where a claimed delivery
+  // nobody read costs the whole stop.
+  writeTeamFile([paneMember('coder', '%21')])
+  paneLiveness = 'unknown'
+  const lead = contextFor(appStateWith({}, [teammateTask('coder', 'failed')]))
+
+  const result = await sendStructured(
+    'coder',
+    { type: 'shutdown_request' },
+    lead.context,
+  )
+
+  expect(result.success).toBe(false)
+  expect(result.message).toContain('Not delivered')
+  expect(probedPanes).toEqual(['%21'])
+})
+
+test('a shutdown request to a terminal teammate with no live pane to check is refused', async () => {
+  // `coder` is in-process on this roster: no pane, so no evidence of a reader,
+  // and its terminal row is the whole story (the row IS an in-process
+  // teammate's runner). Refused rather than falsely acknowledged.
+  const lead = contextFor(appStateWith({}, [teammateTask('coder', 'completed')]))
+
+  const result = await sendStructured(
+    'coder',
+    { type: 'shutdown_request' },
+    lead.context,
+  )
+
+  expect(result.success).toBe(false)
+  expect(result.message).toContain('Not delivered')
+  expect(result.message).toContain('completed')
+  expect(probedPanes).toEqual([])
+})
+
+test('a shutdown request to a running teammate is delivered without spending a probe', async () => {
+  const lead = contextFor(appStateWith({}, [teammateTask('coder', 'running')]))
+
+  const result = await sendStructured(
+    'coder',
+    { type: 'shutdown_request' },
+    lead.context,
+  )
+
+  expect(result.success).toBe(true)
+  expect(result.request_id).toBeTruthy()
+  expect(probedPanes).toEqual([])
+  expect(await lastSenderTo('coder')).toBe('team-lead')
+})
+
+test('a shutdown request to a recipient with no task row keeps its optimistic success', async () => {
+  // Absence of a row is not evidence of death — the lead, another process, a
+  // roster name AppState has not caught up with. Unchanged by Step 1.
+  const lead = contextFor(appStateWith())
+
+  const result = await sendStructured(
+    'supervisor',
+    { type: 'shutdown_request' },
+    lead.context,
+  )
+
+  expect(result.success).toBe(true)
+  expect(result.request_id).toBeTruthy()
+  expect(probedPanes).toEqual([])
+})
+
+test('a probe that blows up is a refusal, not a failed tool call', async () => {
+  // Liveness probing reaches tmux, which can be missing, wedged or scoped to
+  // a socket this process cannot reach. None of that may turn a stop into an
+  // exception the lead has to interpret.
+  writeTeamFile([paneMember('coder', '%21')])
+  probeThrows = true
+  const lead = contextFor(appStateWith({}, [teammateTask('coder', 'failed')]))
+
+  const result = await sendStructured(
+    'coder',
+    { type: 'shutdown_request' },
+    lead.context,
+  )
+
+  expect(result.success).toBe(false)
+  expect(result.message).toContain('Not delivered')
+})
+
+test('only the shutdown request is exempt — a plan response to a terminal teammate is unchanged', async () => {
+  // Scope check for the exemption: it is granted by message type, so the other
+  // structured message a lead sends keeps whichever behaviour it had.
+  writeTeamFile([paneMember('coder', '%21')])
+  const lead = contextFor(appStateWith({}, [teammateTask('coder', 'failed')]))
+
+  const result = await sendStructured(
+    'coder',
+    { type: 'plan_approval_response', request_id: 'plan-1', approve: true },
+    lead.context,
+  )
+
+  expect(result.success).toBe(true)
+  expect(probedPanes).toEqual([])
 })

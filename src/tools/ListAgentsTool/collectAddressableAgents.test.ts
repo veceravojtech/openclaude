@@ -587,6 +587,34 @@ test('a team-file member whose pane is dead reports killed, beating a stale runn
   })
 })
 
+test('a dead sub-team member with a lingering running task reports killed, not busy', () => {
+  // The sub-team's member comes from `tree.subTeam.members`, a different source
+  // than `teamMembers`. Its running task is admitted by `isNeighbour` (the
+  // caller leads that sub-team) and loop (a) runs before (b2), so without the
+  // dead verdict folded in from the sub-team members the stale running row
+  // wins the dedupe and reads `busy`.
+  const agents = collectAddressableAgents({
+    ...state([inTeam(teammate('child'), SUB_TEAM)]),
+    teamMembers: [],
+    teamName: TEAM,
+    includeTeamLead: false,
+    tree: {
+      subTeam: {
+        teamName: SUB_TEAM,
+        members: [
+          member('child', { agentId: `child@${SUB_TEAM}`, status: 'dead' }),
+        ],
+      },
+    },
+  })
+  expect(agents).toHaveLength(1)
+  expect(agents[0]).toMatchObject({
+    name: 'child',
+    agentId: `child@${SUB_TEAM}`,
+    status: 'killed',
+  })
+})
+
 test('the `to` address is identical whether a row is task-backed or file-only', () => {
   // Addressing is a separate, working concern: honesty about liveness must not
   // cost SendMessage its recipient.
