@@ -3,51 +3,63 @@
 > Created 2026-09-21 from a live failure investigation (team `test`, teammate `opus-worker`, tmux pane `%21`).
 > The prior routing roadmap is preserved verbatim below this section.
 
-## Implementation status (updated 2026-09-21, after Steps 0–4 landed and an independent review)
+## Implementation status (updated 2026-09-21, after the review fixes landed)
 
-Steps 0–4 are **committed** (`e9c1c94c`, `c0bb8621`, `511c8b59`). An independent review has since run and found substantial defects — see "Review findings & open items" below. Those fixes are uncommitted and in progress; full validation is not started.
+Steps 0–4 are **committed** (`e9c1c94c`, `c0bb8621`, `511c8b59`), and the independent review's defect fixes have since landed (`637a5f4b`, `0c92cf01`, `1e3d35b6`, `5c25f885`, `9f3c3085`, `1c0b047f`, `31ef3d98`). A final small fix round, the full pre-push contract, and the live repro remain — see "Review findings & open items" below.
 
 | Step | Owner | State | Tests |
 |---|---|---|---|
 | 0a+1 — shutdown_request delivery | deepseek-worker | ✅ committed | SendMessageTool 31/0 (154 assertions); +swarm/mailbox/inboxPoller 203/0; typecheck clean |
 | 0b+2 — TaskStop from lead session | deepseek-pro-worker | ✅ committed | tasks 129/0 (stopTask 11), TaskStopTool 7/0, swarm 170/0; typecheck + `git diff --check` clean |
-| 3 — watchdog ghost sweep | deepseek-worker | ✅ committed, but inert for socket-less members (see findings) | paneWatchdog 14/0 (5 new), TmuxBackend.paneLiveness 6/0, swarm/shared/hooks/task 479/0 (52 files); typecheck clean |
+| 3 — watchdog ghost sweep | deepseek-worker | ✅ committed; team-scoped sweeper + socket backfill landed (`1c0b047f`, `31ef3d98`) | paneWatchdog 14/0 (5 new), TmuxBackend.paneLiveness 6/0, swarm/shared/hooks/task 479/0 (52 files); typecheck clean |
 | 4 — dead-teammate UX | — | ✅ committed (`e9c1c94c`, `511c8b59`) | ListAgents/collectAddressableAgents/teamDiscovery tests extended |
-| Independent review + defect fixes | — | 🔄 in progress | review defects below, uncommitted |
+| Review defect fixes | — | ✅ landed (`637a5f4b`, `0c92cf01`…`31ef3d98`) | per-commit tests |
+| Final fix round (discovery enumeration) | — | 🔄 pending | — |
 | Cross-review, pre-push contract, live acceptance | — | ❌ pending | — |
 
 ### Premise corrections found while implementing
 
 - **Symptom 3 was inverted for structured calls.** The `"…is not running (task status: …)"` refusal lives only in the plain-text `handleMessage` path (`SendMessageTool.ts:271-284`). A structured `{type:'shutdown_request'}` routed straight to `handleShutdownRequest` with **no delivery check at all** — it returned false success even to a dead pane. Step 1 therefore did two things: added the live-pane exemption *and* closed the false-success hole (dead pane now refused).
 - **Step 2 had two phases, not one.** Within `TEAMMATE_GRACE_MS` (30s) the terminal row stays in `AppState.tasks` and `resolveStoppableTask` already resolves it — the in-window refusal was `stopTask.ts:64` throwing `not_running`, *not* the roster fallback. The `"belongs to session <leadSessionId>"` mislabel only appears after the row is evicted (`explainMiss`, `resolveStoppableTask.ts:159-174`) — that ghost is Step 3's domain, not Step 2's.
-- **Step 3 hit a real probe bug.** On tmux 3.6b, `display-message -p -t <missing-pane>` returns `,` with **exit 0 and empty stderr** (it does not say "can't find pane"), so `isPaneAlive` returned `unknown` — identical to unreachable tmux. With the fail-open rule (never sweep `unknown`), real ghosts would never be reaped. Fixed by echoing `#{pane_id}` first; an empty id in a successful reply now means `dead`. This also makes Step 1's `hasLivePaneRunner` correct against real tmux (only `alive` exempts, so it was already safe; the mocked-probe review risk is now resolved — see review findings item 3, though `hasLivePaneRunner` still derives its socket from the caller's environment rather than the roster's recorded socket).
+- **Step 3 hit a real probe bug.** On tmux 3.6b, `display-message -p -t <missing-pane>` returns `,` with **exit 0 and empty stderr** (it does not say "can't find pane"), so `isPaneAlive` returned `unknown` — identical to unreachable tmux. With the fail-open rule (never sweep `unknown`), real ghosts would never be reaped. Fixed by echoing `#{pane_id}` first; an empty id in a successful reply now means `dead`. This also makes Step 1's `hasLivePaneRunner` correct against real tmux (only `alive` exempts, so it was already safe; both the mocked-probe review risk and the socket-derivation gap are now resolved — `637a5f4b` re-pointed the probe at the recorded socket — see review findings).
 
 ### Deviations from the original spec (each deliberate)
 
-- **Step 1 (4 deviations):** D1 extended the terminal-task gate to the structured path (required to make the exemption reachable; dead pane is now refused instead of falsely succeeding). D2 fail-closed — probe `unknown` refuses. D3 refusal is returned in the plain-message shape because `UI.tsx` renders nothing when `request_id`+`target` are present. D4 the envelope is still written on refusal (durable-inbox semantics), which meant a refused shutdown_request would stay as a live command for a future respawn under the same name — since resolved by `511c8b59`, which moved the shutdown write below the refusal gate (see review findings item 6).
+- **Step 1 (4 deviations):** D1 extended the terminal-task gate to the structured path (required to make the exemption reachable; dead pane is now refused instead of falsely succeeding). D2 fail-closed — probe `unknown` refuses. D3 refusal is returned in the plain-message shape because `UI.tsx` renders nothing when `request_id`+`target` are present. D4 the envelope is still written on refusal (durable-inbox semantics), which meant a refused shutdown_request would stay as a live command for a future respawn under the same name — since resolved by `511c8b59`, which moved the shutdown write below the refusal gate (see the `clearMailbox` note in review findings).
 - **Step 2:** also touched `spawnInProcess.ts` (10-line relaxation of `killOneInProcessTeammate` to abort a `failed` row). Required because the existing kill cascade itself early-returned on non-running tasks.
 - **Step 3:** blocker fix in `TmuxBackend.ts` (probe format 2→3 fields) + new `src/utils/swarm/teammateRetirement.ts` extracting the poller's retirement block; `useInboxPoller.ts` now delegates to it (behavior unchanged).
 
-### Review findings & open items (post-review, 2026-09-21)
+### Review findings & open items (updated 2026-09-21, after the review fixes landed)
 
-The independent review has now run. It proved the Step 1 probe fix real (item 3), confirmed the "who sweeps" risk as a live bug (item 2), and found a set of further defects now being fixed but not yet landed. Distinctions are preserved: **proved by execution**, **proved by code reading**, and **reasoned but unreproduced**.
+The independent review's defects have now landed as follow-up commits. Distinctions are preserved: **proved by execution**, **proved by code reading**, and **reasoned but unreproduced**.
 
-1. **Ghost sweep is currently inert for every member.** `isPaneAliveOnSocket` deliberately returns `unknown` when a member has no recorded `tmuxSocket` (a wrong-but-reachable server answers identically for a live pane, so it fails open rather than risk a destructive false `dead`). But no member in any live team file has that field: the running lead is pre-change code and does not record it — including teammates spawned minutes ago. Since `unknown` never reaps, the sweep is a no-op for 100% of current members, and stays one until the lead is rebuilt, restarted, **and** fresh teammates are spawned under it. The trade is documented in the code comment and `c0bb8621`'s message but was missing here. Consequence: Step 3's acceptance holds only for members spawned by rebuilt code. A discovery backfill for socket-less members is being implemented — **in progress, not done**. (Proved by code reading.)
-2. **"Who sweeps" is confirmed broken, not merely structural.** In `paneTeammateWatchdog.ts scan()`, the dispose guard (`if (taskStatusNow !== 'running' && !watchingLateCompletion) { dispose(); return }`) sits **above** the `sweepDeadRosterMembers()` call, so a watchdog stops sweeping the moment its own task row goes terminal. The exemption covers only a task *this* watchdog failed on a deadline, so a **self-reported** failure — the roadmap's own motivating incident — disposes immediately. A single-teammate team never reconciles. (Proved by code reading.)
-3. **Resolved: the Step 1 probe fix is proven, not self-referential.** The review reconstructed the buggy pre-fix logic and ran the new test against it: it fails on all four inputs, so the fix is demonstrated rather than a test agreeing with its own implementation. (Proved by execution.) Trap for future archaeology: against the *committed parent* the test passes both before and after, because the older two-field parser returned `unknown` for unrelated reasons — so a `git bisect` or "does it fail on the parent commit" check will wrongly suggest the test is vacuous.
-4. **Live acceptance still needs a rebuild/restart** — the running lead is pre-change code, so the live roster ghosts (`opus-worker` `%21` etc.) survive until a rebuild; and because no member has a recorded socket, the sweep reads `unknown` for them (item 1).
-5. **Defects found by review, fixes in progress** (file references for the fix team):
-   - `TaskStop` on a failed pane teammate reports success but never kills the pane: the task row's `abortController` is cleared (`abortController: undefined` at `inProcessRunner.ts:3003`), and the abort listener is the only `killPane` caller. It then deletes the roster row holding the pane id, turning a visible ghost into an invisible orphan.
-   - `src/utils/teamDiscovery.test.ts:10-13` leaks a module mock (no per-test `mock.restore()`); adding that one file to four clean suites turns 368 pass / 0 fail into 339 pass / 37 fail, casualties including Step 2's own acceptance tests. Ordering-dependent, so the failing set varies between runs.
-   - `sweepDeadRosterMembers` had no `leadSessionId` check, so one session's watchdog could delete another session's live member from the shared roster — bypassing the cross-session refusal Step 2 preserves. (An uncommitted fix adds the check.)
-   - The sweep's `removeMember` was called with `{agentId, name}` against an OR-matching filter (`teamHelpers.ts:472-474`), so a ghost's name respawned with a fresh agentId during the debounce window gets the healthy member deleted too. (An uncommitted fix narrows it to `agentId` only.)
-   - `dead` covers both "pane absent" and "pane exists running a shell", so the sweep can delete the record of a pane it leaves running, under a log line claiming "confirmed gone".
-   - `hasLivePaneRunner` (`SendMessageTool.ts`) still derives its own socket from the probing process's environment — `c0bb8621` did not touch that file.
-   - The shutdown delivery gate fires only on `undeliverable`, so once the 30s grace evicts the task row the delivery classifies as `untracked`, skips the gate, and returns false success against a confirmed-dead pane — reopening the hole Step 1 closed, in exactly the roster-ghost state this roadmap addresses.
-   - `socketServerReachable` proves a server *answers* on a socket, not that it *owns* the pane; the commit message's "positive server identity" overstates it. Correctness now rests on the recorded socket name being right, and a user running tmux on an explicit `-S /elsewhere/default` would record just `"default"` and could convict a live pane. (Reasoned, not reproduced.)
-6. **`clearMailbox` has no production callers**, so nothing would ever have cleared a stale queued envelope. That is why moving the shutdown write below the refusal gate (`511c8b59`) was a correctness fix rather than a defensive one.
-7. **`[1m]` tag preserved verbatim** in the roster binding (`claude-opus-5[1m]`); whether the child re-parses `OPENCLAUDE_TEAMMATE_MODEL` at startup is unverified because no request ever reached a servable route.
-8. **Roster `isActive` is not deterministically flipped on failure** — `opus5-worker` stayed `active:true` after its failed task while `opus-worker` flipped to `false` (watchdog timing). Step 3's sweep reconciles this only when the pane is confirmed dead; Step 4's probe-based `dead` verdict narrows the damage.
+**The session's two conclusions**
+
+1. **"Who sweeps" is fixed by `1c0b047f`.** The earlier diagnosis was that a self-reported failure hit an unconditional `dispose()` inside the same `scan()`, leaving a single-teammate team with no sweeper. The sweep no longer lives in `scan()` — it is a module-level, one-per-team sweeper with its own lifetime — so that path no longer governs reconciliation. (Proved by code reading.)
+2. **The legacy-socket cost is now mitigated, not merely accepted.** Discovery-backfill resolves a socket-less member's socket on positive proof (exactly one enumerated owner), so the feature is no longer inert for members spawned before the change — but only where ownership can be proven (`31ef3d98`: an absent `leadSessionId` is neither swept nor backfilled). (Proved by code reading.)
+
+**What landed, in order**
+
+- `637a5f4b` (earlier) — re-pointed the SendMessage pane probe at the recorded socket (`isPaneAliveOnSocket`) and closed the untracked-gate hole: a `shutdown_request` to a confirmed-dead pane is refused even after the grace window evicts its task row.
+- `0c92cf01` — sweep hardening: `leadSessionId` cross-session check, `removeMember` narrowed to `{agentId}`, a new `PanePresence` (`absent`/`present`/`unknown`) so a pane running a shell is never removed, and the `teamDiscovery.test.ts` module-mock leak fixed (that leak turned 388/0 into 339/37 when the file joined a run).
+- `1e3d35b6` — the kill cascade kills the pane on the recorded socket and defers member removal until the kill succeeds, so a failed kill leaves a visible ghost rather than an invisible orphan.
+- `5c25f885` — `TaskStop` surfaces a failed pane kill as a `not_terminated` failure instead of reporting success; also carries the previously-uncommitted Step 2 prerequisite `isKillableTerminalPaneTeammate`.
+- `9f3c3085` — the abort listener no longer guesses a socket: it uses the recorded one and skips the kill when ownership cannot be proven.
+- `1c0b047f` — the load-bearing change: the sweep is removed from the per-teammate `scan()` and given a module-level per-team sweeper (exactly one per team, `unref`'d interval, self-disposing), plus discovery-backfill of `tmuxSocket`, plus `isActive` relaxed in the sweep only under a full evidence chain.
+- `31ef3d98` — strict `leadSessionId !==` identity check, so a team file with no recorded owner is neither swept nor backfilled.
+
+**Still open**
+
+- A final fix round was in flight and has **not** landed: discovery must return `unknown` rather than `absent` when no enumerated socket claims a pane (`/tmp/tmux-$UID` is not exhaustive — `TMUX_TMPDIR` and `tmux -S` put sockets elsewhere, so concluding absence from partial enumeration could sweep a live teammate), plus two nits — a disposed sweeper can still mutate mid-pass (nothing re-checks after the awaits) and there is no re-entrancy guard on the scan interval.
+- The full pre-push validation contract needs a re-run covering the final commits.
+- The live six-symptom repro has **not** been run; it still requires a rebuilt lead and freshly spawned teammates (see Step 5).
+- Roughly 5 pre-existing DeepSeek model-cap test failures (65,536 vs 393,216) remain, unrelated to this work.
+
+**Notes still true**
+
+- The Step 1 probe fix was proven by execution: the review reconstructed the buggy pre-fix logic and the new test fails against it on all four inputs. Trap for future archaeology: against the *committed parent* the test passes both before and after (the older two-field parser returned `unknown` for unrelated reasons), so a `git bisect` or "does it fail on the parent commit" check will wrongly suggest the test is vacuous.
+- `clearMailbox` has no production callers, so nothing would ever have cleared a stale queued envelope — which is why moving the shutdown write below the refusal gate (`511c8b59`) was a correctness fix rather than a defensive one.
+- The `[1m]` roster-binding tag (`claude-opus-5[1m]`) is preserved verbatim; whether the child re-parses `OPENCLAUDE_TEAMMATE_MODEL` at startup remains unverified.
 
 ### Cross-provider dispatch results (same session)
 
@@ -111,7 +123,7 @@ Net effect: **a failed pane teammate can be neither cooperatively stopped, hard-
   - remove the roster member,
   - unassign and force-complete its task rows (reuse the removal helpers from `useInboxPoller.ts:781-806`).
 - Guardrails: debounce (e.g. require two consecutive scans or a grace interval after failure) so a pane mid-respawn is not reaped; never touch members with live panes (resumability unchanged).
-- **Acceptance:** after a manual `tmux kill-pane`, the member disappears from `config.json` and `ListAgents` within one scan cycle, without touching healthy teammates. **Conditional:** this holds only for members spawned by rebuilt code (a recorded `tmuxSocket`); socket-less members read `unknown` and are never reaped — see review findings.
+- **Acceptance:** after a manual `tmux kill-pane`, the member disappears from `config.json` and `ListAgents` within one scan cycle, without touching healthy teammates. Socket-less members are now backfilled on positive proof (`1c0b047f`) and swept only under a full evidence chain with proven ownership (`31ef3d98`) — see review findings.
 - **Tests:** dead-pane member swept; live-pane member untouched; sweep is idempotent; grace period respected.
 
 ### Step 4 — Surface dead teammates honestly in ListAgents / TeamsDialog
@@ -125,7 +137,7 @@ Net effect: **a failed pane teammate can be neither cooperatively stopped, hard-
 
 - Focused suites: `SendMessageTool`, `resolveStoppableTask`/`stopTask`, `paneTeammateWatchdog`, `teamDiscovery`, `teammateMailbox`.
 - Then the full pre-push contract from `CONTRIBUTING.md § Validation` (`bun run build`, `smoke`, `check`, `typecheck`, `typecheck:type-tests`, plus `docs:check` if docs change).
-- Live re-run of the original repro to confirm all six symptoms are gone. **The live acceptance re-run must spawn *fresh* teammates under a rebuilt lead** — otherwise the sweep reads `unknown` for socket-less members and appears broken when it is merely inert (see review findings).
+- Live re-run of the original repro to confirm all six symptoms are gone. **Not yet run.** It must spawn *fresh* teammates under a rebuilt lead — the currently running lead is pre-change code, and its live roster ghosts persist until a rebuild (see review findings).
 
 ## Suggested order & dependencies
 
@@ -135,8 +147,7 @@ Net effect: **a failed pane teammate can be neither cooperatively stopped, hard-
 
 - Spawn-time provider/model compatibility checks — three live repros this session (`opus-5`, `claude-opus-5`, `claude-opus-5[1m]`) each accepted at spawn then died on first request because no saved profile serves Anthropic models — separate work.
 - Auto-killing panes on failure — resumability is intended; this roadmap only makes stopping *possible*, not automatic.
-- Cross-session stopping of another session's teammates — stays unsupported by design.
-- `paneTeammateWatchdog.ts` currently has uncommitted edits in the working tree; coordinate Step 3 with that work before touching the file.
+- Cross-session stopping of another session's teammates — stays unsupported by design (reinforced by `31ef3d98`, which refuses to sweep or backfill a team file with no recorded owner).
 
 ---
 
@@ -292,3 +303,27 @@ binding, spawn security, startup protocol, and pane-watchdog suites.
 | Live provider smoke tests | ⚠️ Attempted; no teammate evidence |
 | Commits / PR | ❌ None — all work uncommitted |
 | Original Codex OAuth usage research | ❌ Researcher timed out; unanswered |
+
+---
+
+# Auto-Compaction Fires Too Early on `deepseek-v4-pro`
+
+> Status: **unresolved and uninvestigated** (2026-09-21). An investigation was started and deliberately stopped before it produced findings, so there is no diagnosis.
+
+## Symptom
+
+A user reports context compaction firing at roughly **560k tokens**, while `deepseek-v4-pro` declares `contextWindow: 1_048_576` and `maxOutputTokens: 65_536` in `src/integrations/models/deepseek.ts`. 560k is about **53%** of the declared window, so roughly half the usable context is being discarded.
+
+## Untested hypotheses (none concluded)
+
+- A percentage threshold that is too conservative for million-token windows.
+- The compaction logic not receiving the declared 1M window at runtime, substituting a smaller provider default or fallback — DeepSeek is reachable both as a first-party provider and through an OpenAI-compatible route, and those paths may resolve model metadata differently.
+- An output-token reserve being subtracted from the threshold.
+
+## Metadata instability worth knowing
+
+DeepSeek `maxOutputTokens` metadata is currently unstable: `deepseek-v4-pro` declares 65,536 while a sibling declares 393,216, and roughly 5 tests in the repo currently fail asserting 65,536 where the tree yields 393,216.
+
+## Next step
+
+Find where the auto-compact threshold is computed, determine what context-window value it actually receives for this model at runtime, and reconcile the arithmetic against ~560k.
