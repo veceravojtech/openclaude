@@ -41,6 +41,7 @@ import {
   renderDefaultModelSetting,
   type ModelSetting,
 } from './model.js'
+import { parseOpusVersion } from './opusVersion.js'
 import { has1mContext } from '../context.js'
 import { getGlobalConfig } from '../config.js'
 import {
@@ -881,8 +882,11 @@ function getModelFamilyInfo(
     }
   }
 
-  // Opus family
-  if (canonical.includes('claude-opus-4')) {
+  // Opus family. Version-parsed rather than a `claude-opus-4` substring: that
+  // test silently excluded the entire 5.x line, so a user pinned to an older
+  // Opus saw no "newer version available" hint at all. parseOpusVersion still
+  // rejects the Claude 3 era (`claude-3-opus-*`), which has no modern alias.
+  if (parseOpusVersion(canonical) !== null) {
     const currentName = getMarketingNameForModel(getDefaultOpusModel())
     if (currentName) {
       return { alias: 'Opus', currentVersionName: currentName }
