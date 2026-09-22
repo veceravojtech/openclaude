@@ -19,6 +19,18 @@ const CODEX_PROVIDER_ENV = {
   CLAUDE_CODE_USE_OPENAI: '1',
 }
 
+test('bound launch serializes identity only and strips inherited provider/model flags', () => {
+  process.env.OPENAI_API_KEY = 'SECRET_KEY'
+  process.env.HTTPS_PROXY = 'https://user:SECRET_PROXY@proxy.test'
+  process.env.OPENAI_AUTH_HEADER_VALUE = 'SECRET_HEADER'
+  const providerEnv = { OPENCLAUDE_TEAMMATE_PROFILE_ID: 'child', OPENCLAUDE_TEAMMATE_MODEL: 'child-model', EVIL: 'SECRET_EXTRA' }
+  const command = buildInheritedEnvVars(providerEnv)
+  expect(command).not.toContain('SECRET')
+  expect(command).toContain('OPENCLAUDE_TEAMMATE_PROFILE_ID=child')
+  const flags = applyTeammateModelFlag('--model "leader model" --provider openai --provider-env-file "secret path" --verbose', { providerEnv })
+  expect(flags).toBe('--verbose --model child-model')
+})
+
 const ORIGINAL_ENV = { ...process.env }
 
 beforeEach(async () => {

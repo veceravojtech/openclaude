@@ -8,6 +8,80 @@ import { acquireEnvMutex, releaseEnvMutex } from '../entrypoints/sdk/shared.js'
 import { resolveRouteCredentialValue } from '../integrations/routeMetadata.js'
 import type { ProviderProfile } from './config.js'
 
+test('findProviderProfilesForModel returns all positive profile matches for ambiguity checks', async () => {
+  const { findProviderProfilesForModel } = await import('./providerProfiles.js')
+  const profiles: ProviderProfile[] = [
+    {
+      id: 'native',
+      name: 'Native',
+      provider: 'anthropic',
+      baseUrl: 'https://api.anthropic.com',
+      model: 'claude-sonnet-4',
+      apiKey: 'native-key',
+    },
+    {
+      id: 'codex',
+      name: 'Codex',
+      provider: 'openai',
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      model: 'codexplan',
+    },
+    {
+      id: 'duplicate',
+      name: 'Duplicate',
+      provider: 'openai',
+      baseUrl: 'https://gateway.example/v1',
+      model: 'codexplan',
+      apiKey: 'gateway-key',
+    },
+  ]
+
+  expect(findProviderProfilesForModel('claude-sonnet-4', profiles).map(p => p.id)).toEqual(['native'])
+  expect(findProviderProfilesForModel('codexplan', profiles).map(p => p.id)).toEqual(['codex', 'duplicate'])
+  expect(findProviderProfilesForModel('unknown-model', profiles)).toEqual([])
+})
+
+test('child binding applies native profile and wins refresh without changing global selection', async () => {
+  const { applySessionBoundProviderProfileFromEnv, applyActiveProviderProfileFromConfig } = await import('./providerProfiles.js')
+  const config = { activeProviderProfileId: 'leader', providerProfiles: [{ id: 'child', name: 'Child', provider: 'anthropic', baseUrl: 'https://api.anthropic.com', model: 'claude-sonnet-4', apiKey: 'selected-key' }] } as any
+  const before = JSON.stringify(config)
+  process.env.OPENCLAUDE_TEAMMATE_PROFILE_ID = 'child'
+  process.env.OPENCLAUDE_TEAMMATE_MODEL = 'claude-custom'
+  process.env.OPENAI_API_KEY = 'leader-secret'
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  applySessionBoundProviderProfileFromEnv(config)
+  expect(process.env.ANTHROPIC_MODEL).toBe('claude-custom')
+  expect(process.env.ANTHROPIC_API_KEY).toBe('selected-key')
+  expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  expect(process.env.CLAUDE_CODE_USE_OPENAI).toBeUndefined()
+  process.env.OPENAI_API_KEY = 'wrong-refresh-key'
+  applyActiveProviderProfileFromConfig(config)
+  expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  expect(process.env.ANTHROPIC_MODEL).toBe('claude-custom')
+  expect(JSON.stringify(config)).toBe(before)
+})
+
+for (const entry of [
+  { provider: 'openai', baseUrl: 'https://custom.example/v1', modelKey: 'OPENAI_MODEL', key: 'OPENAI_API_KEY' },
+  { provider: 'gemini', baseUrl: 'https://generativelanguage.googleapis.com', modelKey: 'GEMINI_MODEL', key: 'GEMINI_API_KEY' },
+  { provider: 'mistral', baseUrl: 'https://api.mistral.ai/v1', modelKey: 'MISTRAL_MODEL', key: 'MISTRAL_API_KEY' },
+  { provider: 'openai', baseUrl: 'http://localhost:11434/v1', modelKey: 'OPENAI_MODEL', key: undefined },
+  { provider: 'openai', baseUrl: 'https://chatgpt.com/backend-api/codex', modelKey: 'OPENAI_MODEL', key: undefined },
+]) test(`bound ${entry.provider} ${entry.baseUrl} uses selected auth without ambient fallback`, async () => {
+  const { applySessionBoundProviderProfileFromEnv } = await import('./providerProfiles.js')
+  process.env.OPENCLAUDE_TEAMMATE_PROFILE_ID = 'selected'
+  process.env.OPENCLAUDE_TEAMMATE_MODEL = 'chosen-model'
+  process.env.OPENAI_API_KEY = 'wrong-leader-key'
+  process.env.ANTHROPIC_API_KEY = 'wrong-native-key'
+  const config = { providerProfiles: [{ id: 'selected', name: 'Selected', provider: entry.provider, baseUrl: entry.baseUrl, model: 'default', ...(entry.key ? { apiKey: 'selected-key' } : {}) }] } as any
+  applySessionBoundProviderProfileFromEnv(config)
+  expect(process.env[entry.modelKey]).toBe('chosen-model')
+  expect(process.env.ANTHROPIC_API_KEY).toBeUndefined()
+  if (entry.key) expect(process.env[entry.key]).toBe('selected-key')
+  else expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  if (entry.baseUrl.includes('chatgpt')) expect(process.env.CODEX_CREDENTIAL_SOURCE).toBe('oauth')
+})
+
 async function importFreshProvidersModule() {
   return import(`./model/providers.ts?ts=${Date.now()}-${Math.random()}`)
 }
@@ -16,6 +90,8 @@ const originalEnv = { ...process.env }
 const originalCwd = process.cwd()
 
 const RESTORED_KEYS = [
+  'OPENCLAUDE_TEAMMATE_PROFILE_ID',
+  'OPENCLAUDE_TEAMMATE_MODEL',
   'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED',
   'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID',
   'CLAUDE_CODE_PROVIDER_ROUTE_ID',
@@ -174,6 +250,7 @@ async function importFreshProviderProfileModules() {
   await import(`../integrations/index.js?ts=${nonce}`)
   const providers = await import(`./model/providers.js?ts=${nonce}`)
   const providerProfiles = await import(`./providerProfiles.js?ts=${nonce}`)
+  providerProfiles._setSavedModelOverrideForTesting('')
 
   return {
     ...providers,
@@ -3006,7 +3083,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     expect(saved?.model).toBe('glm-5.2')
   })
 
-  test('uses saved Codex /model choice when rehydrating the Codex OAuth profile', async () => {
+  test.each(['gpt-5.6-terra', 'gpt-6-astra'])('uses saved Codex /model choice %s when rehydrating the Codex OAuth profile', async model => {
     // Regression: the Codex OAuth profile is created with a single
     // `codexplan` model entry, so profileSupportsModel rejected any other
     // Codex model saved via /model (e.g. gpt-5.6-terra) and the next startup
@@ -3017,7 +3094,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
       applyActiveProviderProfileFromConfig,
       getProviderProfiles,
     } = await importFreshProviderProfileModules()
-    _setSavedModelOverrideForTesting('gpt-5.6-terra')
+    _setSavedModelOverrideForTesting(model)
     const activeProfile = buildProfile({
       id: 'saved_codex',
       provider: 'openai',
@@ -3034,7 +3111,7 @@ describe('applyActiveProviderProfileFromConfig', () => {
     expect(process.env.OPENAI_BASE_URL).toBe(
       'https://chatgpt.com/backend-api/codex',
     )
-    expect(process.env.OPENAI_MODEL).toBe('gpt-5.6-terra')
+    expect(process.env.OPENAI_MODEL).toBe(model)
     // The profile's configured model list is never mutated by /model.
     const saved = getProviderProfiles({
       providerProfiles: [activeProfile],

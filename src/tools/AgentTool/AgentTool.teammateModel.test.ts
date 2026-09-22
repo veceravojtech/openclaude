@@ -368,6 +368,56 @@ test('applies a model-only route to a teammate spawn without a cross-provider ov
   expect(getSpawnConfig(spawnTeammate).modelWasToolSpecified).toBe(false)
 })
 
+test('binds an agentModels provider_profile route by identity without passing credentials', async () => {
+  settingsForTest = {
+    agentModels: {
+      codex: { provider_profile: 'saved-codex' },
+    },
+    agentRouting: {
+      default: 'codex',
+    },
+  } as unknown as SettingsJson
+  allowedModelsForTest = new Set(['codexplan'])
+  providerProfileEnvForTest = {
+    OPENCLAUDE_TEAMMATE_PROFILE_ID: 'saved-codex',
+    OPENCLAUDE_TEAMMATE_MODEL: 'codexplan',
+  }
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+
+  await callTeammateAgentTool(
+    AgentTool,
+    { subagent_type: 'custom-codex-worker' },
+    { activeAgents: [createAgentDefinition('custom-codex-worker')] },
+  )
+
+  const config = getSpawnConfig(spawnTeammate)
+  expect(config.providerEnv).toEqual({
+    OPENCLAUDE_TEAMMATE_PROFILE_ID: 'saved-codex',
+    OPENCLAUDE_TEAMMATE_MODEL: 'codexplan',
+  })
+  expect(config.providerProfileRef).toBe('saved-codex')
+  expect(config.model).toBeUndefined()
+})
+
+test('explicit provider_profile skips model-only routing from the same settings', async () => {
+  settingsForTest = {
+    agentModels: {
+      requested: { model: 'unrelated-model' },
+    },
+  } as unknown as SettingsJson
+  allowedModelsForTest = new Set(['requested', 'codexplan'])
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+
+  await callTeammateAgentTool(
+    AgentTool,
+    { model: 'requested', provider_profile: 'codex-oauth' } as never,
+  )
+
+  const config = getSpawnConfig(spawnTeammate)
+  expect(config.providerProfileRef).toBe('codex-oauth')
+  expect(config.model).toBeUndefined()
+})
+
 test('uses default agentRouting only when no explicit teammate model is provided', async () => {
   settingsForTest = {
     agentModels: {

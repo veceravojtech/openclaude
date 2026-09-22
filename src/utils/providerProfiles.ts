@@ -371,6 +371,24 @@ function profileSupportsModel(profile: ProviderProfile, model: string): boolean 
   )
 }
 
+/**
+ * Return every saved profile that positively advertises a requested model.
+ *
+ * This is intentionally identity-only discovery. Callers that spawn a child
+ * use the returned profile id and resolve the credentials inside that child;
+ * this function never creates an API-key route or exposes profile secrets.
+ * Returning all matches lets the caller fail closed on ambiguity instead of
+ * silently choosing whichever profile happens to be first in the config.
+ */
+export function findProviderProfilesForModel(
+  requestedModel: string,
+  profiles: readonly ProviderProfile[] = getProviderProfiles(),
+): ProviderProfile[] {
+  const wanted = requestedModel.trim()
+  if (!wanted) return []
+  return profiles.filter(profile => profileSupportsModel(profile, wanted))
+}
+
 let savedModelOverrideForTesting: string | undefined
 
 export function _setSavedModelOverrideForTesting(model: string | undefined): void {
@@ -1396,6 +1414,24 @@ export function applyProviderProfileToProcessEnv(
   process.env[PROFILE_ENV_APPLIED_ID] = profile.id
 }
 
+/** Applies an explicit child-session binding, never persisting active selection.
+ * Deliberately actual-process only: provider builders read process.env.
+ */
+export function applySessionBoundProviderProfileFromEnv(config = getGlobalConfig()): ProviderProfile | undefined {
+  const id = process.env.OPENCLAUDE_TEAMMATE_PROFILE_ID
+  if (!id) return undefined
+  const profile = getProviderProfiles(config).find(profile => profile.id === id)
+  if (!profile) throw new Error('The bound provider profile is unavailable in this child process.')
+  const model = process.env.OPENCLAUDE_TEAMMATE_MODEL || getPrimaryModel(profile.model)
+  // Clear before building so ambient leader credentials cannot become fallbacks.
+  clearProviderProfileEnvFromProcessEnv()
+  applyProviderProfileToProcessEnv(profile, { primaryModel: model })
+  if (isCodexBaseUrl(profile.baseUrl) && !profile.apiKey) {
+    process.env.CODEX_CREDENTIAL_SOURCE = 'oauth'
+  }
+  return profile
+}
+
 export function applyActiveProviderProfileFromConfig(
   config = getGlobalConfig(),
   options?: {
@@ -1404,6 +1440,10 @@ export function applyActiveProviderProfileFromConfig(
   },
 ): ProviderProfile | undefined {
   const processEnv = options?.processEnv ?? process.env
+  if (processEnv.OPENCLAUDE_TEAMMATE_PROFILE_ID) {
+    if (processEnv !== process.env) throw new Error('Session profile binding requires the child process environment.')
+    return applySessionBoundProviderProfileFromEnv(config)
+  }
 
   // Built-in Anthropic is an explicit active state recorded as the sentinel,
   // not "no active profile". getActiveProviderProfile() resolves the sentinel

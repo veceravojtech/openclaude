@@ -1,7 +1,7 @@
 import type { PermissionMode } from '../../../utils/permissions/PermissionMode.js'
 import type { SettingsJson } from '../../../utils/settings/types.js'
 import type { SmartRoutingConfig } from '../smartModelRouting.js'
-import { isProviderOverride, resolveAgentModelProvider, resolveModelOnlyModel } from '../agentRouting.js'
+import { isProviderOverride, isProviderProfileRoute, resolveAgentModelProvider, resolveModelOnlyModel } from '../agentRouting.js'
 import { readSmartRouting } from './settings.js'
 
 export interface ResolveSmartRoutingConfigInput {
@@ -28,7 +28,7 @@ function resolveRoleToModelOnly(
   const route = resolveAgentModelProvider(roleKey, settings)
   if (route) {
     // Cross-provider override: discard the whole object, defer to strong default.
-    if (isProviderOverride(route)) return null
+    if (isProviderOverride(route) || isProviderProfileRoute(route)) return null
     return resolveModelOnlyModel(route.model, parentModel, permissionMode)
   }
   // Not an agentModels key — treat as a bare model id (alias/inherit aware).

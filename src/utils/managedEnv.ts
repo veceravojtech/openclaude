@@ -9,7 +9,7 @@ import {
 } from './managedEnvConstants.js'
 import { clearMTLSCache } from './mtls.js'
 import { clearProxyCache, configureGlobalAgents } from './proxy.js'
-import { applyActiveProviderProfileFromConfig } from './providerProfiles.js'
+import { applyActiveProviderProfileFromConfig, applySessionBoundProviderProfileFromEnv } from './providerProfiles.js'
 import { reapplyRememberedProviderFlag } from './providerFlag.js'
 import { isSettingSourceEnabled } from './settings/constants.js'
 import {
@@ -190,6 +190,7 @@ export function applySafeConfigEnvironmentVariables(): void {
   // highest precedence if both flags are present.
   reapplyRememberedEnvFileValues()
   reapplyRememberedProviderFlag()
+  applySessionBoundProviderProfileFromEnv()
 }
 
 /**
@@ -209,6 +210,7 @@ export function applyConfigEnvironmentVariables(): void {
   applyActiveProviderProfileFromConfig()
   reapplyRememberedEnvFileValues()
   reapplyRememberedProviderFlag()
+  applySessionBoundProviderProfileFromEnv()
 
   // Clear caches so agents are rebuilt with the new env vars
   clearCACertsCache()

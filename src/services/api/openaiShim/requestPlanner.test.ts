@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { convertToolsToResponsesTools } from '../codexShim.js'
 import {
   createRequestBodyPlanner,
   hydrateOpenAIShimCompatibilityEnv,
@@ -41,6 +42,16 @@ function createPlanner(
   }
   return createRequestBodyPlanner(context)
 }
+
+test('generic Responses planner keeps legacy optional schema encoding', () => {
+  const planner = createPlanner({
+    effectiveTransport: 'responses',
+    params: { messages: [], tools: [{ name: 'probe', input_schema: { type: 'object', properties: { optional: { type: 'string' } } } }] },
+    convertToolsToResponsesTools,
+  })
+  const body = planner.buildResponsesBody() as any
+  expect(body.tools[0].parameters.properties.optional).toEqual({ type: 'string' })
+})
 
 describe('compatibility environment hydration', () => {
   test('hydrates provider aliases without replacing explicit OpenAI credentials', () => {

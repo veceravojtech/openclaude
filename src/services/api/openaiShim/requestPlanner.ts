@@ -86,6 +86,7 @@ type RequestBodyPlannerContext = {
   convertSystemPrompt: (system: unknown) => string
   convertToolsToResponsesTools: (
     tools: ToolDefinition[],
+    restoreOptionalArguments?: boolean,
   ) => Array<Record<string, unknown>>
   maxTokensValue?: number
   maxCompletionTokensValue?: number
@@ -181,7 +182,7 @@ export function createRequestBodyPlanner(context: RequestBodyPlannerContext) {
     }
 
     if (!omitTools.responses && params.tools && params.tools.length > 0) {
-      const convertedTools = convertToolsToResponsesTools(params.tools)
+      const convertedTools = convertToolsToResponsesTools(params.tools, false)
       if (convertedTools.length > 0) {
         responsesBody.tools = convertedTools
       }

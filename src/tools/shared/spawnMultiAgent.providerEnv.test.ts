@@ -286,6 +286,28 @@ function assertProviderEnvThreaded(command: string): void {
   }
 }
 
+for (const split of [true, false]) test(`identity-bound ${split ? 'pane' : 'window'} command never carries inherited secrets`, async () => {
+  const spawnMultiAgent = await importSpawnMultiAgentWithMocks()
+  const previousKey = process.env.OPENAI_API_KEY
+  const previousProxy = process.env.HTTPS_PROXY
+  process.env.OPENAI_API_KEY = 'SENTINEL_SECRET_KEY'
+  process.env.HTTPS_PROXY = 'https://user:SENTINEL_SECRET_PROXY@proxy.test'
+  try {
+    await spawnMultiAgent.spawnTeammate({ name: 'bound-worker', prompt: 'do work', team_name: 'bound-team', cwd: '/tmp/bound-worker', use_splitpane: split,
+      providerEnv: { OPENCLAUDE_TEAMMATE_PROFILE_ID: 'saved-child', OPENCLAUDE_TEAMMATE_MODEL: 'child-custom' },
+    }, makeToolUseContext())
+    expect(capturedCommands).toHaveLength(1)
+    expect(capturedCommands[0]).not.toContain('SENTINEL_SECRET')
+    expect(capturedCommands[0]).toContain('OPENCLAUDE_TEAMMATE_PROFILE_ID=saved-child')
+    expect(capturedCommands[0]).toContain('--model child-custom')
+  } finally {
+    if (previousKey === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = previousKey
+    if (previousProxy === undefined) delete process.env.HTTPS_PROXY
+    else process.env.HTTPS_PROXY = previousProxy
+  }
+})
+
 test('split-pane command threads providerEnv after the inherited allowlist', async () => {
   const spawnMultiAgent = await importSpawnMultiAgentWithMocks()
 

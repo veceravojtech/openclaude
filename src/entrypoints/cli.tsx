@@ -464,16 +464,22 @@ export async function main(
   // --model must remain visible. parseRootOptionValue still stops at a real
   // end-of-options marker that was not consumed as an option value.
   const modelOptionArgs = argsBeforeModelOwningSubcommand(args)
-  const parsedRootModel =
-    (await importers.providerFlag()).parseModelFlag(modelOptionArgs) ?? undefined
+  const parsedRootModel = process.env.OPENCLAUDE_TEAMMATE_PROFILE_ID
+    ? process.env.OPENCLAUDE_TEAMMATE_MODEL
+    : (await importers.providerFlag()).parseModelFlag(modelOptionArgs) ?? undefined
   const hasRootModelOption = parsedRootModel !== undefined
 
+  const boundProfileId = process.env.OPENCLAUDE_TEAMMATE_PROFILE_ID
+  if (boundProfileId) {
+    const { applySessionBoundProviderProfileFromEnv } = await import('../utils/providerProfiles.js')
+    applySessionBoundProviderProfileFromEnv()
+  }
   const { applyStartupEnvFromProfile } = await importers.providerProfile()
   let startupProfileWarning: string | undefined
   // Built-in Anthropic has no positive CLAUDE_CODE_USE_* flag, so process-env
   // inference cannot preserve an explicit `--provider anthropic` selection.
   // Other providers retain their existing profile/credential recovery path.
-  const startupProfileError = appliedExplicitAnthropic
+  const startupProfileError = appliedExplicitAnthropic || boundProfileId
     ? null
     : await applyStartupEnvFromProfile({
         processEnv: process.env,
@@ -492,11 +498,15 @@ export async function main(
       getCommandcodeChatCompletionsModelError(parsedRootModel)
   }
   reapplyExplicitProviderInputs()
+  if (boundProfileId) {
+    const { applySessionBoundProviderProfileFromEnv } = await import('../utils/providerProfiles.js')
+    applySessionBoundProviderProfileFromEnv()
+  }
 
   // Pane/window teammates are launched as fresh CLI processes. If the parent
   // selected a configured agentModels key, apply that route before provider
   // validation and --model env routing run in this child process.
-  let appliedTeammateModel: string | undefined
+  let appliedTeammateModel: string | undefined = boundProfileId ? process.env.OPENCLAUDE_TEAMMATE_MODEL : undefined
   let appliedTeammateProviderOverride = false
   {
     const { eagerLoadSettingsFromArgs } = await importers.flagSettings()
@@ -520,7 +530,7 @@ export async function main(
       args,
       getInitialSettings(),
     )
-    if (providerOverride) {
+    if (providerOverride && !boundProfileId) {
       applyAgentProviderOverrideToEnv(providerOverride)
       appliedTeammateModel = providerOverride.model
       appliedTeammateProviderOverride = true

@@ -464,6 +464,7 @@ function getCodexSparkOption(): ModelOption {
 
 function getCodexModelOptions(): ModelOption[] {
   return [
+    { value: 'gpt-6-astra', label: 'gpt-6-astra', description: 'GPT-6 Astra · Complex reasoning and coding' },
     {
       value: 'gpt-5.6-sol',
       label: 'gpt-5.6-sol',

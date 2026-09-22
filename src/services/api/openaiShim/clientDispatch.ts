@@ -5,7 +5,7 @@ import {
   registerInterruptionSignal,
   requestAbort,
 } from '../../../utils/interruptionTrace.js'
-import type { AnthropicStreamEvent, ShimCreateParams } from '../codexShim.js'
+import type { AnthropicStreamEvent, CodexToolSchemas, ShimCreateParams } from '../codexShim.js'
 import {
   isLikelyOllamaEndpoint,
   resolveProviderRequest,
@@ -27,6 +27,7 @@ type StreamConverter = (
   response: Response,
   model: string,
   signal?: AbortSignal,
+  toolSchemas?: CodexToolSchemas,
 ) => AsyncGenerator<AnthropicStreamEvent>
 
 type OpenAIStreamConverter = (
@@ -194,6 +195,7 @@ function selectStreamConverter(
     | 'geminiSseToAnthropic'
     | 'openaiStreamToAnthropic'
   >,
+  toolSchemas?: CodexToolSchemas,
 ): (signal: AbortSignal) => AsyncGenerator<AnthropicStreamEvent> {
   const isResponsesStream = response.url?.includes('/responses')
   const isMessagesStream = response.url?.includes('/messages')
@@ -208,6 +210,7 @@ function selectStreamConverter(
       response,
       request.resolvedModel,
       signal,
+      request.transport === 'codex_responses' ? toolSchemas : undefined,
     )
   }
   if (isMessagesStream) {
@@ -231,6 +234,21 @@ function selectStreamConverter(
     isLikelyOllamaEndpoint(request.baseUrl),
     response.url || undefined,
   )
+}
+
+function collectCodexToolSchemas(params: ShimCreateParams): CodexToolSchemas | undefined {
+  if (!Array.isArray(params.tools)) return undefined
+  const schemas = new Map<string, Record<string, unknown>>()
+  for (const tool of params.tools) {
+    if (!tool || typeof tool !== 'object') continue
+    const record = tool as Record<string, unknown>
+    const name = typeof record.name === 'string' ? record.name : undefined
+    const schema = record.input_schema
+    if (name && schema && typeof schema === 'object' && !Array.isArray(schema)) {
+      schemas.set(name, schema as Record<string, unknown>)
+    }
+  }
+  return schemas.size ? schemas : undefined
 }
 
 export function createShimRequest(
@@ -258,7 +276,8 @@ export function createShimRequest(
 
     let httpResponse: Response | undefined
 
-    const promise = (async (): Promise<unknown> => {
+    const toolSchemas = collectCodexToolSchemas(params)
+  const promise = (async (): Promise<unknown> => {
       const request = resolveProviderRequest({
         model: providerOverride?.model ?? params.model,
         baseUrl: providerOverride?.baseURL,
@@ -278,7 +297,7 @@ export function createShimRequest(
             codexStreamToAnthropic,
             geminiSseToAnthropic,
             openaiStreamToAnthropic,
-          }),
+          }, toolSchemas),
           options?.signal,
           cancelBeforeIteration,
         )
@@ -289,6 +308,7 @@ export function createShimRequest(
         return convertCodexResponseToAnthropicMessage(
           data,
           request.resolvedModel,
+          toolSchemas,
         )
       }
 

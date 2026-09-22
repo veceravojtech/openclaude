@@ -33,3 +33,27 @@ test('agentModels rejects a non-URL base_url', () => {
   })
   expect(result.success).toBe(false)
 })
+
+test('agentModels accepts an identity-only saved provider profile route', () => {
+  const result = SettingsSchema().safeParse({
+    agentModels: {
+      codex: { provider_profile: 'codex-oauth' },
+      deepseek: { provider_profile: 'deepseek-profile', model: 'deepseek-chat' },
+    },
+    agentRouting: { verification: 'codex' },
+  })
+  expect(result.success).toBe(true)
+})
+
+test('agentModels rejects a saved provider profile mixed with inline credentials', () => {
+  const result = SettingsSchema().safeParse({
+    agentModels: {
+      invalid: {
+        provider_profile: 'saved-profile',
+        base_url: 'https://api.example.test/v1',
+        api_key: 'should-not-be-accepted',
+      },
+    },
+  })
+  expect(result.success).toBe(false)
+})

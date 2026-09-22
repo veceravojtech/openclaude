@@ -26,6 +26,7 @@ export type CurrentAgentRoute =
   | { kind: 'none' }
   | { kind: 'model-only'; routeKey: string; model: string; viaDefault?: boolean }
   | { kind: 'cross-provider'; routeKey: string; model: string; baseURL: string; viaDefault?: boolean }
+  | { kind: 'provider-profile'; routeKey: string; model: string; providerProfile: string; viaDefault?: boolean }
   | { kind: 'dangling'; routeKey: string; viaDefault?: boolean }
 
 /** Normalize a routing key the same way the runtime resolver does. */
@@ -127,6 +128,16 @@ function describeModelKey(
   const entry = settings?.agentModels?.[modelKey]
   if (!entry) return { kind: 'dangling', routeKey: modelKey, ...(viaDefault ? { viaDefault } : {}) }
   const model = entry.model?.trim() || modelKey
+  const providerProfile = entry.provider_profile?.trim()
+  if (providerProfile) {
+    return {
+      kind: 'provider-profile',
+      routeKey: modelKey,
+      model,
+      providerProfile,
+      ...(viaDefault ? { viaDefault } : {}),
+    }
+  }
   // Mirror the runtime resolver (toAgentRoute): cross-provider needs BOTH
   // base_url and api_key. A partial entry is skipped at runtime and inherits,
   // so surface it as unconfigured rather than claiming a route that won't run.
@@ -206,6 +217,8 @@ export function describeRouteLine(current: CurrentAgentRoute): string {
       return `Route: ${current.model} (current provider)${viaDefault}`
     case 'cross-provider':
       return `Route: ${current.model} (cross-provider)${viaDefault}`
+    case 'provider-profile':
+      return `Route: ${current.model} (saved profile: ${current.providerProfile})${viaDefault}`
     case 'dangling':
       return `Route: ${current.routeKey} (unconfigured, inherits)${viaDefault}`
   }
@@ -239,8 +252,10 @@ export function buildRouteOptions(
       // exactly one = unconfigured (skipped at runtime), neither = model-only.
       const hasBase = Boolean(entry?.base_url?.trim())
       const hasKey = Boolean(entry?.api_key?.trim())
+      const hasProfile = Boolean(entry?.provider_profile?.trim())
       let label = o.label
       if (shadowed?.has(o.value)) label = `${o.label} (shadowed by higher settings)`
+      else if (hasProfile) label = `${o.label} (saved profile)`
       else if (hasBase && hasKey) label = `${o.label} (cross-provider)`
       else if (hasBase || hasKey) label = `${o.label} (unconfigured, inherits)`
       return {

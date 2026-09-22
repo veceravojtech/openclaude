@@ -23,6 +23,20 @@ maxSteps: 8
 You are a focused research agent.
 ```
 
+## Explicit teammate provider profiles
+
+For pane/window teammates, Agent's `provider_profile` accepts a saved `/provider`
+profile ID or name (ID matches take precedence). It supports native Anthropic,
+OpenAI-compatible, OAuth Codex, and local profiles. The child loads the selected
+profile locally; credentials and custom authentication headers are not embedded
+in its launch command. This does not change the globally active profile.
+
+The selected profile's default model is used unless the Agent call supplies an
+explicit model. The binding takes precedence over inherited provider/model flags
+and persisted agent routing, and survives settings refreshes. Unknown profiles
+fail closed. In-process and idle teammates cannot use this binding because they
+share the leader's process environment.
+
 ## Agent routing
 
 OpenClaude can route different agents to different models through
@@ -88,6 +102,42 @@ no credential duplication:
   }
 }
 ```
+
+**Saved-profile routes:** Use `provider_profile` when the route should use a
+saved profile's native transport, OAuth, local endpoint, or custom headers.
+Only the profile identity crosses into the teammate process; credentials stay
+in the child's local profile store. `provider_profile` cannot be combined with
+`base_url` or `api_key`.
+
+```json
+{
+  "agentModels": {
+    "codex-worker": { "provider_profile": "codex-oauth" },
+    "deepseek-worker": {
+      "provider_profile": "deepseek-saved",
+      "model": "deepseek-chat"
+    }
+  },
+  "agentRouting": {
+    "reviewer": "codex-worker",
+    "default": "deepseek-worker"
+  }
+}
+```
+
+Pane and window teammates also discover a saved profile automatically when a
+requested model is explicitly listed by exactly one profile. This works across
+leader providers. A configured `agentModels` entry always wins; unknown model
+ids remain unchanged; multiple matching profiles produce an actionable error
+so account selection is never silent. In-process subagents cannot use saved
+profile routes because they share the leader process environment.
+
+After startup, the child sends a credential-free readiness message containing
+its resolved model, provider, and transport. If the first provider turn ends
+with an authentication, unsupported-model, or runtime error, the child sends a
+fixed failure notification even though normal Stop hooks are skipped for API
+errors. The leader can therefore fail the teammate task promptly instead of
+leaving it busy until the pane watchdog deadline.
 
 **Built-in agents are routable by their type name.** Useful keys:
 `verification` (the read-only auditor that runs before completion; **feature-gated**: requires `VERIFICATION_AGENT` and `tengu_hive_evidence` flag), `Explore`

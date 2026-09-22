@@ -5,6 +5,7 @@ import {
   resolveAgentModelProvider,
   resolveAgentProvider,
   resolveAgentRunModelRouting,
+  resolveOutOfProcessTeammateProviderProfile,
   resolveOutOfProcessTeammateModelOnly,
   resolveOutOfProcessTeammateProvider,
   resolveOutOfProcessTeammateProviderFromCliArgs,
@@ -961,5 +962,105 @@ describe('a saved provider profile serves a non-Claude model on an Anthropic ses
     onProvider('firstParty', false)
     expect(resolveAgentModelProvider('glm-5.3', {} as SettingsJson)).toBeNull()
     expect(profileLookup).not.toHaveBeenCalled()
+  })
+})
+
+describe('pane saved-profile auto-routing', () => {
+  const profile = (id: string, name = id) => ({
+    id,
+    name,
+    provider: 'openai',
+    baseUrl: `https://${id}.example/v1`,
+    model: 'shared-model',
+    apiKey: `${id}-key`,
+  })
+  let lookup: ReturnType<typeof spyOn>
+  let providerSpy: ReturnType<typeof spyOn> | undefined
+
+  beforeEach(() => {
+    lookup = spyOn(
+      providerProfilesModule,
+      'findProviderProfilesForModel',
+    ).mockReturnValue([profile('selected')])
+  })
+  afterEach(() => {
+    lookup.mockRestore()
+    providerSpy?.mockRestore()
+    providerSpy = undefined
+  })
+
+  test('discovers a saved profile regardless of the leader provider', () => {
+    providerSpy = spyOn(providersModule, 'getAPIProvider').mockReturnValue('firstParty' as never)
+    const route = resolveOutOfProcessTeammateProviderProfile({
+      cliModel: 'shared-model',
+      settings: {} as SettingsJson,
+    })
+    expect(route).toEqual({ providerProfile: 'selected', model: 'shared-model' })
+  })
+
+  test('configured agentModels routes win before saved-profile discovery', () => {
+    const settings = {
+      agentModels: {
+        'shared-model': {
+          base_url: 'https://configured.example/v1',
+          api_key: 'configured-key',
+        },
+      },
+    } as unknown as SettingsJson
+    expect(
+      resolveOutOfProcessTeammateProviderProfile({
+        cliModel: 'shared-model',
+        settings,
+      }),
+    ).toBeNull()
+    expect(lookup).not.toHaveBeenCalled()
+  })
+
+  test('model-only agentModels routes are not silently replaced by a profile', () => {
+    const settings = {
+      agentModels: { 'shared-model': { model: 'shared-model' } },
+    } as unknown as SettingsJson
+    expect(
+      resolveOutOfProcessTeammateProviderProfile({
+        cliModel: 'shared-model',
+        settings,
+      }),
+    ).toBeNull()
+    expect(lookup).not.toHaveBeenCalled()
+  })
+
+  test('ambiguous matches fail with candidate identities', () => {
+    lookup.mockReturnValue([profile('one', 'One'), profile('two', 'Two')])
+    expect(() =>
+      resolveOutOfProcessTeammateProviderProfile({
+        cliModel: 'shared-model',
+        settings: {} as SettingsJson,
+      }),
+    ).toThrow(/One \(one\).*Two \(two\)/)
+  })
+
+  test('unknown custom model ids pass through without profile discovery', () => {
+    lookup.mockReturnValue([])
+    expect(
+      resolveOutOfProcessTeammateProviderProfile({
+        cliModel: 'custom-unknown-model',
+        settings: {} as SettingsJson,
+      }),
+    ).toBeNull()
+  })
+
+  test('provider_profile agentModels entries resolve as identity-only routes', () => {
+    const settings = {
+      agentModels: {
+        codex: { provider_profile: 'saved-codex' },
+      },
+      agentRouting: { default: 'codex' },
+    } as unknown as SettingsJson
+    expect(
+      resolveOutOfProcessTeammateProviderProfile({
+        agentName: 'worker',
+        settings,
+      }),
+    ).toEqual({ providerProfile: 'saved-codex' })
   })
 })

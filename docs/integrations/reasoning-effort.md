@@ -61,3 +61,19 @@ Before adding `reasoning` metadata for a model:
 5. Add focused tests for the resolver and request serialization path.
 
 Do not use `supportsReasoning: true` alone as evidence that `reasoning_effort` or any other effort field is accepted.
+
+## OpenAI GPT-6 Astra
+
+Select `gpt-6-astra` in the OpenAI provider catalog or the Codex model picker.
+The model has a 1,050,000-token context window and a 128,000-token output limit,
+with text/image input, streaming, function calling, and structured output support.
+OpenClaude defaults its effort to `high`; `/effort` offers `low`, `medium`, `high`,
+`xhigh`, and `max`. `max` is sent unchanged, and disabling reasoning is not
+supported. These limits and effort levels follow the
+[OpenAI model documentation](https://developers.openai.com/api/docs/models/gpt-6-astra).
+
+On direct OpenAI endpoints, OpenClaude automatically uses the Responses API
+and serializes effort as `reasoning.effort`. An explicit API-format override
+still takes precedence. Custom gateways retain their existing routing and do
+not inherit Astra's first-party effort default. Availability on the Codex
+backend depends on the signed-in account.

@@ -81,6 +81,7 @@ const CODEX_ALIAS_MODELS: Record<
     reasoningEffort?: ReasoningEffort
   }
 > = {
+  'gpt-6-astra': { model: 'gpt-6-astra', reasoningEffort: 'high' },
   codexplan: {
     model: 'gpt-5.6-sol',
     reasoningEffort: 'high',
@@ -487,6 +488,8 @@ function shouldUseGithubResponsesApi(model: string): boolean {
 // gpt-5-mini, gpt-4.x, o-series, and claude-* stay on chat/completions.
 export function modelRequiresResponsesApi(model: string): boolean {
   const normalized = model.trim().toLowerCase().split('?', 1)[0] ?? ''
+  // Astra uses Responses for agent tool calls as recommended by OpenAI.
+  if (normalized === 'gpt-6-astra') return true
   return /^gpt-5\.[4-6](?!\d)/.test(normalized) &&
     !GPT5_MINI_NANO_RE.test(normalized)
 }
@@ -1177,8 +1180,8 @@ export function resolveProviderRequest(options?: {
         ? requestedApiFormat
         : 'chat_completions'
 
-  // Explicit gpt-5.6 alias defaults are Codex-transport-only: off the Codex
-  // transport the 5.6 family's effort metadata is owned by the route catalog
+  // Explicit GPT-5.6 and Astra alias defaults are Codex-transport-only: off the Codex
+  // transport their effort metadata is owned by the route catalog
   // (#1961), and an OPENAI_API_BASE gateway must not inherit the first-party
   // default. Explicit picks (the /effort override or a ?reasoning= query)
   // still flow on every transport, and codexplan keeps its existing behavior
@@ -1187,7 +1190,7 @@ export function resolveProviderRequest(options?: {
     ? { effort: options.reasoningEffortOverride }
     : descriptor.reasoningFromAlias &&
         transport !== 'codex_responses' &&
-        /^gpt-5\.6(?:-|$|[?[])/i.test(requestedModel.trim())
+        /^(?:gpt-5\.6(?:-|$|[?[])|gpt-6-astra(?:$|[?[]))/i.test(requestedModel.trim())
       ? undefined
       : descriptor.reasoning
   const catalogReasoningLevels =
@@ -1202,7 +1205,9 @@ export function resolveProviderRequest(options?: {
       ? { effort: KIMI_K3_REASONING_ALIASES[requestedReasoning.effort] }
       : requestedReasoning
   const supportsMaxReasoning =
-    catalogReasoningLevels?.includes('max') === true
+    catalogReasoningLevels?.includes('max') === true ||
+    (resolvedModel === 'gpt-6-astra' &&
+      (transport === 'codex_responses' || baseUrlSupportsResponsesAutoRoute(finalBaseUrl, processEnv)))
   const reasoning =
     (normalizedReasoning?.effort === 'max' && !supportsMaxReasoning) ||
       (catalogReasoningLevels !== undefined &&

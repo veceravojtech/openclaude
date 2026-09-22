@@ -454,6 +454,51 @@ export function isIdleNotification(
   return null
 }
 
+/** Sanitized child-startup report consumed by the pane watchdog/leader. */
+export type TeammateStartupNotification = {
+  type: 'teammate_startup'
+  from: string
+  timestamp: string
+  model: string
+  provider: string
+  transport: string
+}
+
+export function createTeammateStartupNotification(
+  from: string,
+  details: Omit<TeammateStartupNotification, 'type' | 'from' | 'timestamp'>,
+): TeammateStartupNotification {
+  return {
+    type: 'teammate_startup',
+    from,
+    timestamp: new Date().toISOString(),
+    model: details.model,
+    provider: details.provider,
+    transport: details.transport,
+  }
+}
+
+export function isTeammateStartupNotification(
+  messageText: string,
+): TeammateStartupNotification | null {
+  try {
+    const parsed = jsonParse(messageText)
+    if (
+      parsed &&
+      parsed.type === 'teammate_startup' &&
+      typeof parsed.from === 'string' &&
+      typeof parsed.model === 'string' &&
+      typeof parsed.provider === 'string' &&
+      typeof parsed.transport === 'string'
+    ) {
+      return parsed as TeammateStartupNotification
+    }
+  } catch {
+    // Not JSON or not a valid startup notification.
+  }
+  return null
+}
+
 /**
  * Permission request message sent from worker to leader via mailbox.
  * Field names align with SDK `can_use_tool` (snake_case).
@@ -1095,7 +1140,8 @@ export function isStructuredProtocolMessage(messageText: string): boolean {
       type === 'team_permission_update' ||
       type === 'mode_set_request' ||
       type === 'plan_approval_request' ||
-      type === 'plan_approval_response'
+      type === 'plan_approval_response' ||
+      type === 'teammate_startup'
     )
   } catch {
     return false

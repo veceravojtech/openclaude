@@ -645,6 +645,61 @@ test('auto-routes gpt-5.6 to /responses on api.openai.com with tools and nested 
   expect(capturedBody).not.toHaveProperty('reasoning_effort')
 })
 
+test('auto-routes gpt-6-astra to /responses on api.openai.com with tools and nested reasoning', async () => {
+  // No OPENAI_API_FORMAT set: the model+base predicate must pick responses.
+  process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
+  process.env.OPENAI_API_KEY = 'test-key'
+  let capturedUrl = ''
+  let capturedBody: Record<string, unknown> | undefined
+
+  globalThis.fetch = (async (input, init) => {
+    capturedUrl = String(input)
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+    return new Response(
+      JSON.stringify({
+        id: 'resp-1',
+        model: 'gpt-6-astra',
+        output: [
+          {
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'output_text', text: 'ok' }],
+          },
+        ],
+        usage: { input_tokens: 8, output_tokens: 3, total_tokens: 11 },
+      }),
+      { headers: { 'Content-Type': 'application/json' } },
+    )
+  }) as unknown as FetchType
+
+  const client = createOpenAIShimClient({ reasoningEffort: 'max' }) as OpenAIShimClient
+
+  await client.beta.messages.create({
+    model: 'gpt-6-astra',
+    messages: [{ role: 'user', content: 'hello' }],
+    tools: [
+      {
+        name: 'get_weather',
+        description: 'Get the weather',
+        input_schema: {
+          type: 'object',
+          properties: { location: { type: 'string' } },
+          required: ['location'],
+        },
+      },
+    ],
+    max_tokens: 64,
+    stream: false,
+  })
+
+  expect(capturedUrl).toBe('https://api.openai.com/v1/responses')
+  expect(Array.isArray(capturedBody?.tools)).toBe(true)
+  expect((capturedBody?.tools as unknown[]).length).toBe(1)
+  expect(JSON.stringify(capturedBody?.tools)).toContain('get_weather')
+  expect(capturedBody?.reasoning).toEqual({ effort: 'max', summary: 'auto' })
+  expect(capturedBody).not.toHaveProperty('reasoning_effort')
+})
+
 test('gpt-5.6 chat-completions escape hatch omits reasoning effort with tools', async () => {
   process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
   process.env.OPENAI_API_KEY = 'test-key'

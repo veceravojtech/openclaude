@@ -320,7 +320,7 @@ describe('Codex request translation', () => {
           properties: {
             description: { type: 'string' },
             prompt: { type: 'string' },
-            subagent_type: { type: 'string' },
+            subagent_type: { anyOf: [{ type: 'string' }, { type: 'null' }] },
           },
           required: ['description', 'prompt', 'subagent_type'],
           additionalProperties: false,
@@ -390,7 +390,7 @@ describe('Codex request translation', () => {
           type: 'object',
           properties: {
             pattern: { type: 'string', description: 'Search pattern' },
-            path: { type: 'string' },
+            path: { anyOf: [{ type: 'string' }, { type: 'null' }] },
           },
           required: ['pattern', 'path'],
           additionalProperties: false,
@@ -426,7 +426,7 @@ describe('Codex request translation', () => {
           type: 'object',
           properties: {
             pattern: { type: 'string', description: 'Glob pattern' },
-            path: { type: 'string' },
+            path: { anyOf: [{ type: 'string' }, { type: 'null' }] },
           },
           required: ['pattern', 'path'],
           additionalProperties: false,
@@ -539,9 +539,11 @@ describe('Codex request translation', () => {
           type: 'object',
           properties: {
             priority: {
-              type: 'integer',
-              description: 'Priority: 0=low, 1=medium, 2=high, 3=urgent',
-              enum: [0, 1, 2, 3],
+              anyOf: [{
+                type: 'integer',
+                description: 'Priority: 0=low, 1=medium, 2=high, 3=urgent',
+                enum: [0, 1, 2, 3],
+              }, { type: 'null' }],
             },
           },
           required: ['priority'],
@@ -612,7 +614,7 @@ describe('Codex request translation', () => {
     ])
 
     const payload = (tools[0].parameters as Record<string, Record<string, Record<string, unknown>>>).properties.payload
-    expect(payload.type).toBe('object')
+    expect(payload.anyOf).toEqual([{ type: 'object', properties: { name: { anyOf: [{ type: 'string' }, { type: 'null' }] } }, required: ['name'], additionalProperties: false }, { type: 'null' }])
   })
 
   test('infers array type for untyped schemas with items', () => {
@@ -629,7 +631,7 @@ describe('Codex request translation', () => {
     ])
 
     const tags = (tools[0].parameters as Record<string, Record<string, Record<string, unknown>>>).properties.tags
-    expect(tags.type).toBe('array')
+    expect(tags.anyOf).toEqual([{ type: 'array', items: { type: 'string' } }, { type: 'null' }])
   })
 
   test('infers type from enum values when type is missing', () => {
@@ -649,10 +651,10 @@ describe('Codex request translation', () => {
     ])
 
     const props = (tools[0].parameters as Record<string, Record<string, Record<string, unknown>>>).properties
-    expect(props.mode.type).toBe('string')
-    expect(props.level.type).toBe('integer')
-    expect(props.ratio.type).toBe('number')
-    expect(props.flag.type).toBe('boolean')
+    expect(props.mode.anyOf).toEqual([{ type: 'string', enum: ['fast', 'slow'] }, { type: 'null' }])
+    expect(props.level.anyOf).toEqual([{ type: 'integer', enum: [1, 2, 3] }, { type: 'null' }])
+    expect(props.ratio.anyOf).toEqual([{ type: 'number', enum: [0.5, 1.5] }, { type: 'null' }])
+    expect(props.flag.anyOf).toEqual([{ type: 'boolean', enum: [true, false] }, { type: 'null' }])
   })
 
   test('leaves combinator-only schemas untyped to preserve alternatives', () => {
@@ -672,7 +674,7 @@ describe('Codex request translation', () => {
 
     const either = (tools[0].parameters as Record<string, Record<string, Record<string, unknown>>>).properties.either
     expect(either.type).toBeUndefined()
-    expect(either.anyOf).toEqual([{ type: 'string' }, { type: 'number' }])
+    expect(either.anyOf).toEqual([{ anyOf: [{ type: 'string' }, { type: 'number' }] }, { type: 'null' }])
   })
 
   test('converts plain string user message into Codex input_text chunk type', () => {

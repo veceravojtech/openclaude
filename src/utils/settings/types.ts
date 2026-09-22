@@ -885,27 +885,50 @@ export const SettingsSchema = lazySchema(() =>
       agentModels: z
         .record(
           z.string(),
-          z.object({
-            model: z
-              .string()
-              .optional()
-              .describe('Actual model name to send to the API. Defaults to the surrounding agentModels key.'),
-            base_url: z
-              .string()
-              .url()
-              .optional()
-              .describe('OpenAI-compatible API endpoint (must be https:// or http://). Omit together with api_key to reuse the current provider (model-only route).'),
-            api_key: z
-              .string()
-              .optional()
-              .describe('API key for this provider. Omit together with base_url to reuse the current provider (model-only route).'),
-          }),
+          z.union([
+            z.object({
+              // A saved profile is resolved in the child process. The
+              // profile identity is the only value that may cross a spawn
+              // command; credentials and transport details stay local.
+              provider_profile: z
+                .string()
+                .trim()
+                .min(1)
+                .describe('Saved provider profile id or name. Cannot be combined with base_url or api_key.'),
+              model: z
+                .string()
+                .optional()
+                .describe('Optional model to use from the saved profile. Defaults to that profile\'s primary model.'),
+              base_url: z.never().optional(),
+              api_key: z.never().optional(),
+            }),
+            z.object({
+              // Keep the discriminator present as `never` on the legacy
+              // branch so the inferred SettingsJson type remains safely
+              // narrow when callers inspect provider_profile.
+              provider_profile: z.never().optional(),
+              model: z
+                .string()
+                .optional()
+                .describe('Actual model name to send to the API. Defaults to the surrounding agentModels key.'),
+              base_url: z
+                .string()
+                .url()
+                .optional()
+                .describe('OpenAI-compatible API endpoint (must be https:// or http://). Omit together with api_key to reuse the current provider (model-only route).'),
+              api_key: z
+                .string()
+                .optional()
+                .describe('API key for this provider. Omit together with base_url to reuse the current provider (model-only route).'),
+            }),
+          ]),
         )
         .optional()
         .describe(
           'Map of route key to provider connection info. ' +
             'Cross-provider: { "deepseek-chat": { "base_url": "https://api.deepseek.com/v1", "api_key": "sk-xxx" } }. ' +
             'Model-only (reuse current provider): { "mini": { "model": "gpt-5-mini" } }. ' +
+            'Saved profile: { "codex": { "provider_profile": "codex-oauth" } } (optionally add "model"). ' +
             'Use "model" when the route key is an alias for a different API model name.',
         ),
       agentRouting: z

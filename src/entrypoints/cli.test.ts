@@ -250,6 +250,15 @@ describe('cli.tsx — --provider startup ordering', () => {
     expect(dumpPath).not.toContain("args.indexOf('--model')")
   })
 
+  it('applies child binding before startup validation and protects it from agentModels overrides', async () => {
+    const src = await Bun.file(`${import.meta.dir}/cli.tsx`).text()
+    const binding = src.indexOf('applySessionBoundProviderProfileFromEnv()')
+    expect(binding).toBeGreaterThan(0)
+    expect(binding).toBeLessThan(src.indexOf('const startupProfileError'))
+    expect(src).toContain('if (providerOverride && !boundProfileId)')
+    expect(src).toContain('appliedExplicitAnthropic || boundProfileId')
+  })
+
   it('remembers provider env-file values so later managed settings env merges can restore them', async () => {
     const src = await Bun.file(`${import.meta.dir}/cli.tsx`).text()
     const envFileImportIndex = src.indexOf('rememberLoadedEnvFileValues')

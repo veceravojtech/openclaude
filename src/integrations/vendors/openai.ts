@@ -53,6 +53,8 @@ export default defineVendor({
   catalog: {
     source: 'static',
     models: [
+      // https://developers.openai.com/api/docs/models/gpt-6-astra
+      { id: 'gpt-6-astra', apiName: 'gpt-6-astra', label: 'GPT-6 Astra', modelDescriptorId: 'gpt-6-astra', contextWindow: 1_050_000, maxOutputTokens: 128_000, capabilities: { supportsReasoning: true }, reasoning: { mode: 'levels', levels: ['low', 'medium', 'high', 'xhigh', 'max'], defaultLevel: 'high', wireFormat: 'reasoning_effort' } },
       // gpt-5.6 (sol/terra/luna): reject function tools + reasoning_effort on
       // /v1/chat/completions, so modelRequiresResponsesApi routes them to
       // /v1/responses. The reasoning metadata here makes buildResponsesBody

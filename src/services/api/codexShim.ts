@@ -370,6 +370,17 @@ function ensureSchemaType(record: Record<string, unknown>): void {
     // would silently narrow the alternatives.
     return
   }
+  if (Array.isArray(record.enum) && record.enum.includes(null)) {
+    const types = [...new Set(record.enum.map(value => value === null ? 'null' :
+      typeof value === 'number' ? (Number.isInteger(value) ? 'integer' : 'number') :
+      Array.isArray(value) ? 'array' : typeof value))]
+    record.type = types.length === 1 ? types[0] : types
+    return
+  }
+  if (record.const === null) {
+    record.type = 'null'
+    return
+  }
   if (Array.isArray(record.enum) && record.enum.length > 0) {
     const sample = typeof record.enum[0]
     if (sample === 'string' || sample === 'boolean') {
@@ -405,7 +416,7 @@ function ensureSchemaType(record: Record<string, unknown>): void {
  * - All property keys are listed in `required`
  * - Nested schemas (properties, items, anyOf/oneOf/allOf) are processed too
  */
-function enforceStrictSchema(schema: unknown): Record<string, unknown> {
+function enforceStrictSchema(schema: unknown, restoreOptionalArguments = true): Record<string, unknown> {
   const record = sanitizeSchemaForOpenAICompat(schema)
 
   ensureSchemaType(record)
@@ -416,7 +427,7 @@ function enforceStrictSchema(schema: unknown): Record<string, unknown> {
     delete record.format
   }
 
-  if (record.type === 'object') {
+  if (record.type === 'object' || (Array.isArray(record.type) && record.type.includes('object'))) {
     // OpenAI structured outputs completely forbid dynamic additionalProperties.
     // They must be set to false unconditionally.
     record.additionalProperties = false
@@ -427,10 +438,20 @@ function enforceStrictSchema(schema: unknown): Record<string, unknown> {
       !Array.isArray(record.properties)
     ) {
       const props = record.properties as Record<string, unknown>
+      const originalRequired = new Set(
+        Array.isArray(record.required)
+          ? record.required.filter((key): key is string => typeof key === 'string')
+          : [],
+      )
 
       const enforcedProps: Record<string, unknown> = {}
       for (const [key, value] of Object.entries(props)) {
-        const strictValue = enforceStrictSchema(value)
+        const strictValue = enforceStrictSchema(value, restoreOptionalArguments)
+        if (restoreOptionalArguments && !originalRequired.has(key)) {
+          // Preserve the entire schema while allowing null in strict mode.
+          enforcedProps[key] = { anyOf: [strictValue, { type: 'null' }] }
+          continue
+        }
         // If the resulting schema is an empty object (no properties), OpenAI structured outputs will likely
         // strip it silently and then complain about a 'required' mismatch if it remains in the required list.
         // E.g. z.record() objects (like AskUserQuestion.answers) lose their schema due to additionalProperties 
@@ -458,16 +479,16 @@ function enforceStrictSchema(schema: unknown): Record<string, unknown> {
   // Recurse into array items
   if ('items' in record) {
     if (Array.isArray(record.items)) {
-      record.items = (record.items as unknown[]).map(item => enforceStrictSchema(item))
+      record.items = (record.items as unknown[]).map(item => enforceStrictSchema(item, restoreOptionalArguments))
     } else {
-      record.items = enforceStrictSchema(record.items)
+      record.items = enforceStrictSchema(record.items, restoreOptionalArguments)
     }
   }
 
   // Recurse into combinators
   for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
     if (key in record && Array.isArray(record[key])) {
-      record[key] = (record[key] as unknown[]).map(item => enforceStrictSchema(item))
+      record[key] = (record[key] as unknown[]).map(item => enforceStrictSchema(item, restoreOptionalArguments))
     }
   }
 
@@ -476,6 +497,7 @@ function enforceStrictSchema(schema: unknown): Record<string, unknown> {
 
 export function convertToolsToResponsesTools(
   tools: Array<{ name?: string; description?: string; input_schema?: Record<string, unknown> }>,
+  restoreOptionalArguments = true,
 ): ResponsesTool[] {
   // Note: ToolSearch (the deferral discovery tool) must reach the wire as a
   // regular function — claude.ts already removes it when tool search is off.
@@ -484,7 +506,7 @@ export function convertToolsToResponsesTools(
     .map(tool => {
       const rawParameters = tool.input_schema ?? { type: 'object', properties: {} }
       // Codex requires strict schemas: all properties must be required
-      const parameters = enforceStrictSchema(rawParameters)
+      const parameters = enforceStrictSchema(rawParameters, restoreOptionalArguments)
 
       return {
         type: 'function',
@@ -988,11 +1010,12 @@ async function* codexStreamToAnthropicWithReadOptions(
   model: string,
   signal?: AbortSignal,
   readOptions: CodexStreamReadOptions = {},
+  toolSchemas?: CodexToolSchemas,
 ): AsyncGenerator<AnthropicStreamEvent> {
   const messageId = makeMessageId()
   const toolBlocksByItemId = new Map<
     string,
-    { index: number; toolUseId: string; emittedArgs: string }
+    { index: number; toolUseId: string; emittedArgs: string; name: string; argumentsFinalized: boolean; emittedDelta: boolean }
   >()
   let activeTextBlockIndex: number | null = null
   const thinkFilter = createThinkTagFilter()
@@ -1081,6 +1104,9 @@ async function* codexStreamToAnthropicWithReadOptions(
           toolBlocksByItemId.set(String(item.id ?? toolUseId), {
             index: blockIndex,
             toolUseId,
+            name: item.name ?? 'tool',
+            argumentsFinalized: false,
+            emittedDelta: Boolean(initialArgs),
             emittedArgs: initialArgs,
           })
           sawToolUse = true
@@ -1097,15 +1123,11 @@ async function* codexStreamToAnthropicWithReadOptions(
             },
           }
 
-          if (initialArgs) {
+          if (initialArgs && !toolSchemas?.has(item.name ?? 'tool')) {
             throwIfStreamAborted(signal)
             yield {
-              type: 'content_block_delta',
-              index: blockIndex,
-              delta: {
-                type: 'input_json_delta',
-                partial_json: initialArgs,
-              },
+              type: 'content_block_delta', index: blockIndex,
+              delta: { type: 'input_json_delta', partial_json: initialArgs },
             }
           }
         }
@@ -1141,18 +1163,18 @@ async function* codexStreamToAnthropicWithReadOptions(
 
       if (event.event === 'response.function_call_arguments.delta') {
         const toolBlock = toolBlocksByItemId.get(String(payload.item_id ?? ''))
-        if (toolBlock) {
+        if (toolBlock && !toolBlock.argumentsFinalized) {
           const delta = typeof payload.delta === 'string' ? payload.delta : ''
           if (delta) {
             toolBlock.emittedArgs += delta
-            throwIfStreamAborted(signal)
-            yield {
-              type: 'content_block_delta',
-              index: toolBlock.index,
-              delta: {
-                type: 'input_json_delta',
-                partial_json: delta,
-              },
+            toolBlock.emittedDelta = true
+            if (!toolSchemas?.has(toolBlock.name)) {
+              throwIfStreamAborted(signal)
+              yield {
+                type: 'content_block_delta',
+                index: toolBlock.index,
+                delta: { type: 'input_json_delta', partial_json: delta },
+              }
             }
           }
         }
@@ -1167,19 +1189,16 @@ async function* codexStreamToAnthropicWithReadOptions(
       // tool validation failed with "required parameter X is missing" (#1259).
       if (event.event === 'response.function_call_arguments.done') {
         const toolBlock = toolBlocksByItemId.get(String(payload.item_id ?? ''))
-        if (toolBlock) {
-          const fullArgs =
-            typeof payload.arguments === 'string' ? payload.arguments : ''
-          if (fullArgs && !toolBlock.emittedArgs) {
-            toolBlock.emittedArgs = fullArgs
+        if (toolBlock && !toolBlock.argumentsFinalized) {
+          toolBlock.argumentsFinalized = true
+          const fullArgs = typeof payload.arguments === 'string' ? payload.arguments : ''
+          if (fullArgs) toolBlock.emittedArgs = fullArgs
+          if (fullArgs && !toolSchemas?.has(toolBlock.name) && !toolBlock.emittedDelta) {
+            toolBlock.emittedDelta = true
             throwIfStreamAborted(signal)
             yield {
-              type: 'content_block_delta',
-              index: toolBlock.index,
-              delta: {
-                type: 'input_json_delta',
-                partial_json: fullArgs,
-              },
+              type: 'content_block_delta', index: toolBlock.index,
+              delta: { type: 'input_json_delta', partial_json: fullArgs },
             }
           }
         }
@@ -1191,21 +1210,24 @@ async function* codexStreamToAnthropicWithReadOptions(
         if (item?.type === 'function_call') {
           const toolBlock = toolBlocksByItemId.get(String(item.id ?? ''))
           if (toolBlock) {
-            // Backstop for backends that skip the dedicated `function_call_arguments.done`
-            // event entirely and only put the full arguments on `output_item.done`.
-            // Same #1259 failure mode; trust whichever channel actually carried the data.
-            const finalArgs =
-              typeof item.arguments === 'string' ? item.arguments : ''
-            if (finalArgs && !toolBlock.emittedArgs) {
-              toolBlock.emittedArgs = finalArgs
+            if (toolSchemas?.has(toolBlock.name) && item.status !== 'completed') {
+              throw APIError.generate(500, undefined, `Codex function call ended with status ${item.status}`, new Headers())
+            }
+            if (toolSchemas?.has(toolBlock.name) && (typeof item.arguments !== 'string' || !item.arguments.trim())) {
+              throw APIError.generate(500, undefined, 'Codex completed a function call without authoritative arguments', new Headers())
+            }
+            const finalArgs = typeof item.arguments === 'string' ? item.arguments : ''
+            if (finalArgs) toolBlock.emittedArgs = finalArgs
+            toolBlock.argumentsFinalized = true
+            if (toolSchemas?.has(toolBlock.name) && !toolBlock.emittedArgs.trim()) {
+              throw APIError.generate(500, undefined, 'Codex completed a function call without arguments', new Headers())
+            }
+            const normalized = normalizeCodexArguments(toolBlock.emittedArgs || '{}', toolBlock.name, toolSchemas)
+            if (!toolBlock.emittedDelta || toolSchemas?.has(toolBlock.name)) {
               throwIfStreamAborted(signal)
               yield {
-                type: 'content_block_delta',
-                index: toolBlock.index,
-                delta: {
-                  type: 'input_json_delta',
-                  partial_json: finalArgs,
-                },
+                type: 'content_block_delta', index: toolBlock.index,
+                delta: { type: 'input_json_delta', partial_json: normalized },
               }
             }
             throwIfStreamAborted(signal)
@@ -1251,6 +1273,9 @@ async function* codexStreamToAnthropicWithReadOptions(
     yield* closeActiveTextBlock()
     for (const toolBlock of toolBlocksByItemId.values()) {
       throwIfStreamAborted(signal)
+      if (toolSchemas?.has(toolBlock.name)) {
+        throw APIError.generate(500, undefined, `Codex stream ended before function call ${toolBlock.toolUseId} completed`, new Headers())
+      }
       yield {
         type: 'content_block_stop',
         index: toolBlock.index,
@@ -1309,8 +1334,9 @@ export function codexStreamToAnthropic(
   response: Response,
   model: string,
   signal?: AbortSignal,
+  toolSchemas?: CodexToolSchemas,
 ): AsyncGenerator<AnthropicStreamEvent> {
-  return codexStreamToAnthropicWithReadOptions(response, model, signal)
+  return codexStreamToAnthropicWithReadOptions(response, model, signal, {}, toolSchemas)
 }
 
 /** Deterministic reader-deadline seam for interruption regressions only. */
@@ -1328,9 +1354,134 @@ export function __codexStreamToAnthropicForTests(
   )
 }
 
+export type CodexToolSchemas = ReadonlyMap<string, Record<string, unknown>>
+
+type CodexArgumentSchema = Record<string, unknown>
+
+const unsupportedArgumentAssertions = [
+  'if', 'then', 'else', 'dependentRequired', 'dependentSchemas', 'dependencies',
+  'not', 'patternProperties', 'additionalProperties', 'unevaluatedProperties',
+  'propertyNames', 'contains', 'prefixItems', 'unevaluatedItems',
+] as const
+
+function hasUnsupportedArgumentAssertions(schema: CodexArgumentSchema): boolean {
+  return unsupportedArgumentAssertions.some(key => key in schema &&
+    // Closing an object does not introduce requirements for existing fields.
+    !(key === 'additionalProperties' && typeof schema[key] === 'boolean'))
+}
+
+type SchemaProof = 'allow' | 'disallow' | 'unknown'
+
+function schemaRecord(value: unknown): value is CodexArgumentSchema {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function intersectProofs(proofs: SchemaProof[]): SchemaProof {
+  return proofs.includes('disallow') ? 'disallow' : proofs.includes('unknown') ? 'unknown' : 'allow'
+}
+
+// Prove only primitive/type constraints. Unsupported assertions and references
+// remain unknown, so they can never justify destructive omission.
+function schemaValueProof(schema: unknown, value: unknown, seen = new Set<unknown>()): SchemaProof {
+  if (schema === true) return 'allow'
+  if (schema === false) return 'disallow'
+  if (!schemaRecord(schema) || seen.has(schema)) return 'unknown'
+  const path = new Set(seen).add(schema)
+  const proofs: SchemaProof[] = []
+  if ('$ref' in schema || '$dynamicRef' in schema) return 'unknown'
+  if (hasUnsupportedArgumentAssertions(schema)) return 'unknown'
+  // Type compatibility does not prove properties, required, items or length
+  // assertions. In particular, oneOf must not count superficial type matches.
+  if (value !== null && typeof value === 'object' &&
+      ['properties', 'required', 'items', 'additionalProperties', 'minProperties',
+        'maxProperties', 'minItems', 'maxItems', 'uniqueItems'].some(key => key in schema)) {
+    proofs.push('unknown')
+  }
+  const types = Array.isArray(schema.type) ? schema.type : typeof schema.type === 'string' ? [schema.type] : []
+  if (types.length) {
+    const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value
+    proofs.push(types.includes(type) || (type === 'number' && Number.isInteger(value) && types.includes('integer')) ||
+      (value === null && schema.nullable === true) ? 'allow' : 'disallow')
+  }
+  if ('const' in schema) proofs.push(value !== null && typeof value === 'object' ? 'unknown' : Object.is(schema.const, value) ? 'allow' : 'disallow')
+  if (Array.isArray(schema.enum)) proofs.push(value !== null && typeof value === 'object' ? 'unknown' : schema.enum.some(entry => Object.is(entry, value)) ? 'allow' : 'disallow')
+  for (const keyword of ['allOf', 'anyOf', 'oneOf'] as const) {
+    const branches = schema[keyword]
+    if (!Array.isArray(branches)) continue
+    const results = branches.map(branch => schemaValueProof(branch, value, path))
+    if (keyword === 'allOf') proofs.push(intersectProofs(results))
+    else if (keyword === 'anyOf') proofs.push(results.includes('allow') ? 'allow' : results.includes('unknown') ? 'unknown' : 'disallow')
+    else {
+      const allowed = results.filter(result => result === 'allow').length
+      proofs.push(allowed > 1 ? 'disallow' : results.includes('unknown') ? 'unknown' : allowed === 1 ? 'allow' : 'disallow')
+    }
+  }
+  return intersectProofs(proofs)
+}
+
+// Collect conjunctions recursively without flattening away grandchildren or
+// overwriting items. A union is usable only when exactly one branch can apply.
+function collectArgumentConstraints(schema: unknown, value: unknown, seen = new Set<unknown>()): CodexArgumentSchema[] | undefined {
+  if (!schemaRecord(schema) || seen.has(schema)) return undefined
+  if ('$ref' in schema || '$dynamicRef' in schema || hasUnsupportedArgumentAssertions(schema)) return undefined
+  const path = new Set(seen).add(schema)
+  const constraints = [schema]
+  for (const keyword of ['allOf', 'anyOf', 'oneOf'] as const) {
+    const branches = schema[keyword]
+    if (!Array.isArray(branches)) continue
+    const applicable = keyword === 'allOf' ? branches : branches.filter(branch => schemaValueProof(branch, value) !== 'disallow')
+    if (keyword !== 'allOf' && applicable.length !== 1) return undefined
+    for (const branch of applicable) {
+      const nested = collectArgumentConstraints(branch, value, path)
+      if (!nested) return undefined
+      constraints.push(...nested)
+    }
+  }
+  return constraints
+}
+
+function normalizeCodexValue(value: unknown, schema: CodexArgumentSchema): unknown {
+  if (!value || typeof value !== 'object') return value
+  const constraints = collectArgumentConstraints(schema, value)
+  if (!constraints) return value
+  if (Array.isArray(value)) {
+    const items = constraints.map(constraint => constraint.items).filter(schemaRecord)
+    return items.length ? value.map(item => normalizeCodexValue(item, { allOf: items })) : value
+  }
+  const required = new Set<string>()
+  const properties = new Map<string, CodexArgumentSchema[]>()
+  for (const constraint of constraints) {
+    if (Array.isArray(constraint.required)) for (const key of constraint.required) {
+      if (typeof key === 'string') required.add(key)
+    }
+    if (schemaRecord(constraint.properties)) for (const [key, child] of Object.entries(constraint.properties)) {
+      if (schemaRecord(child)) properties.set(key, [...(properties.get(key) ?? []), child])
+    }
+  }
+  const output: Record<string, unknown> = { ...(value as Record<string, unknown>) }
+  for (const [key, children] of properties) {
+    const child = { allOf: children }
+    if (!required.has(key) && output[key] === null && schemaValueProof(child, null) === 'disallow') delete output[key]
+    else if (output[key] !== undefined && output[key] !== null) output[key] = normalizeCodexValue(output[key], child)
+  }
+  return output
+}
+
+function normalizeCodexArguments(argumentsText: string, toolName: string, schemas?: CodexToolSchemas): string {
+  if (!schemas) return argumentsText
+  const schema = schemas.get(toolName)
+  if (!schema) return argumentsText
+  const value = JSON.parse(argumentsText)
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Codex function arguments must be a JSON object')
+  }
+  return JSON.stringify(normalizeCodexValue(value, schema))
+}
+
 export function convertCodexResponseToAnthropicMessage(
   data: Record<string, any>,
   model: string,
+  toolSchemas?: CodexToolSchemas,
 ): Record<string, unknown> {
   const content: Array<Record<string, unknown>> = []
   const output = Array.isArray(data.output) ? data.output : []
@@ -1349,10 +1500,19 @@ export function convertCodexResponseToAnthropicMessage(
     }
 
     if (item?.type === 'function_call') {
+      if (toolSchemas?.has(item.name ?? 'tool') &&
+          ((item.status && item.status !== 'completed') ||
+           (data.status && data.status !== 'completed'))) {
+        throw APIError.generate(500, undefined, 'Codex returned an unfinished function call', new Headers())
+      }
+      if (toolSchemas?.has(item.name ?? 'tool') && typeof item.arguments !== 'string') {
+        throw new Error('Codex function call is missing authoritative arguments')
+      }
       let input: unknown
       try {
-        input = JSON.parse(item.arguments ?? '{}')
-      } catch {
+        input = JSON.parse(normalizeCodexArguments(item.arguments ?? '{}', item.name ?? 'tool', toolSchemas))
+      } catch (error) {
+        if (toolSchemas?.has(item.name ?? 'tool')) throw error
         input = { raw: item.arguments ?? '' }
       }
 

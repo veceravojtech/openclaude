@@ -45,6 +45,7 @@ import { isEnvTruthy } from '../utils/envUtils.js';
 import { formatTokens, truncateToWidth } from '../utils/format.js';
 import { consumeEarlyInput } from '../utils/earlyInput.js';
 import { setMemberActive } from '../utils/swarm/teamHelpers.js';
+import { reportTeammateTurnFailure } from '../utils/swarm/teammateInit.js';
 import { isSwarmWorker, generateSandboxRequestId, sendSandboxPermissionRequestViaMailbox, sendSandboxPermissionResponseViaMailbox } from '../utils/swarm/permissionSync.js';
 import { registerSandboxPermissionCallback } from '../hooks/useSwarmPermissionPoller.js';
 import { getTeamName, getAgentName } from '../utils/teammate.js';
@@ -1556,6 +1557,9 @@ export function REPL({
   const [inProgressToolUseIDs, setInProgressToolUseIDs] = useState<Set<string>>(new Set());
   const hasInterruptibleToolInProgressRef = useRef(false);
   const queryLifecycleTrackerRef = useRef(new QueryLifecycleOperationTracker());
+  // API-error turns intentionally skip Stop hooks. Keep a per-turn marker so
+  // pane teammates can report that terminal failure to their leader promptly.
+  const teammateApiErrorRef = useRef(false);
 
   // Remote session hook - manages WebSocket connection and message handling for --remote mode
   const remoteSession = useRemoteSession({
@@ -3108,6 +3112,12 @@ export function REPL({
   });
   const onQueryEvent = useCallback((event: Parameters<typeof handleMessageFromStream>[0]) => {
     handleMessageFromStream(event, newMessage => {
+      if (newMessage.type === 'assistant') {
+        // A later successful retry clears the marker; an API error that ends
+        // the turn remains set for the teammate failure report in onQuery's
+        // finally block.
+        teammateApiErrorRef.current = newMessage.isApiErrorMessage === true;
+      }
       if (isCompactBoundaryMessage(newMessage)) {
         // Fullscreen: keep pre-compact messages for scrollback. query.ts
         // slices at the boundary for API calls, Messages.tsx skips the
@@ -3412,6 +3422,7 @@ export function REPL({
       return false;
     }
     lifecycleTracker.clear();
+    teammateApiErrorRef.current = false;
     const thisGeneration = startResult.generation;
     backgroundHandoffStartedRef.current = false;
     const turnBudgetHandoff = createForegroundTurnBudgetHandoff(
@@ -3569,6 +3580,33 @@ export function REPL({
           });
         }
       };
+      const teammateFailureKind = modelTurnStarted
+        ? teammateApiErrorRef.current
+          ? 'provider'
+          : didThrow || queryTerminal?.reason === 'model_error'
+            ? 'runtime'
+            : undefined
+        : undefined;
+      if (teammateFailureKind) {
+        const teamName = getTeamName();
+        const agentName = getAgentName();
+        if (teamName && agentName) {
+          try {
+            await reportTeammateTurnFailure(
+              teamName,
+              agentName,
+              teammateFailureKind,
+            );
+          } catch (error) {
+            // Reporting is best effort. Keep the original query outcome and
+            // avoid putting provider error details into the mailbox/log.
+            logForDebugging(
+              `[TeammateInit] Failed to report terminal turn failure for ${agentName}: ${error instanceof Error ? error.name : 'unknown error'}`,
+            );
+          }
+        }
+      }
+      teammateApiErrorRef.current = false;
       // queryGuard.end() atomically checks generation and transitions
       // running→idle. Returns false if a newer query owns the guard
       // (cancel+resubmit race where the stale finally fires as a microtask).

@@ -202,6 +202,19 @@ export function applyTeammateModelFlag(
   },
 ): string {
   const { model, providerEnv } = options
+  if (providerEnv?.OPENCLAUDE_TEAMMATE_PROFILE_ID) {
+    const tokens = splitShellTokens(stripModelFlag(inheritedFlags))
+    const kept: string[] = []
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i]!
+      if (token === '--provider' || token === '--provider-env-file') { i++; continue }
+      if (token.startsWith('--provider=') || token.startsWith('--provider-env-file=')) continue
+      kept.push(token)
+    }
+    const effectiveModel = model ?? providerEnv.OPENCLAUDE_TEAMMATE_MODEL
+    if (effectiveModel) kept.push(`--model ${quote([effectiveModel])}`)
+    return kept.join(' ')
+  }
   if (model) {
     const stripped = stripModelFlag(inheritedFlags)
     return stripped ? `${stripped} --model ${quote([model])}` : `--model ${quote([model])}`
@@ -290,6 +303,18 @@ const TEAMMATE_ENV_VARS = [
  *   Empty values are skipped, matching the inherited-var guard.
  */
 export function buildInheritedEnvVars(extra?: Record<string, string>): string {
+  if (extra?.OPENCLAUDE_TEAMMATE_PROFILE_ID) {
+    const values: Record<string, string> = {
+      CLAUDECODE: '1', CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+      CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1',
+      OPENCLAUDE_TEAMMATE_PROFILE_ID: extra.OPENCLAUDE_TEAMMATE_PROFILE_ID,
+      OPENCLAUDE_TEAMMATE_MODEL: extra.OPENCLAUDE_TEAMMATE_MODEL ?? '',
+    }
+    for (const key of ['OPENCLAUDE_CONFIG_DIR', 'CLAUDE_CONFIG_DIR', 'PATH', 'CLAUDE_CODE_REMOTE', 'CLAUDE_CODE_REMOTE_MEMORY_DIR']) {
+      if (process.env[key]) values[key] = process.env[key]!
+    }
+    return Object.entries(values).map(([key, value]) => `${key}=${quote([value])}`).join(' ')
+  }
   const envVars = [
     'CLAUDECODE=1',
     'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1',

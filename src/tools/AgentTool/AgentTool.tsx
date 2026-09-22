@@ -13,7 +13,7 @@ import { startAgentSummarization } from '../../services/AgentSummary/agentSummar
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../../services/analytics/index.js';
 import { clearDumpState } from '../../services/api/dumpPrompts.js';
-import { resolveAgentRunModelRouting, resolveOutOfProcessTeammateProvider, resolveOutOfProcessTeammateModelOnly } from '../../services/api/agentRouting.js';
+import { resolveAgentRunModelRouting, resolveOutOfProcessTeammateProvider, resolveOutOfProcessTeammateProviderProfile, resolveOutOfProcessTeammateModelOnly } from '../../services/api/agentRouting.js';
 import { completeAgentTask as completeAsyncAgent, createActivityDescriptionResolver, createProgressTracker, enqueueAgentNotification, failAgentTask as failAsyncAgent, getProgressUpdate, getTokenCountFromTracker, isLocalAgentTask, killAsyncAgent, registerAgentForeground, registerAsyncAgent, unregisterAgentForeground, updateAgentProgress as updateAsyncAgentProgress, updateProgressFromMessage } from '../../tasks/LocalAgentTask/LocalAgentTask.js';
 import { assembleToolPool } from '../../tools.js';
 import { isBuiltInAgentType } from './builtInAgents.js';
@@ -112,7 +112,7 @@ export const fullInputSchema = lazySchema(() => {
     team_name: z.string().optional().describe('Team name for spawning. Uses current team context if omitted.'),
     mode: permissionModeSchema().optional().describe('Permission mode for spawned teammate (e.g., "plan" to require plan approval).'),
     replicas: z.number().int().min(1).optional().describe('Number of teammates to spawn from this call (default 1). Requires `name`; they are named <name>-1 ... <name>-N and all share the same prompt (or all start idle when prompt is omitted). Capped per call and by the live teammate pool size.'),
-    provider_profile: z.string().trim().min(1, 'provider_profile cannot be empty').optional().describe('Bind the teammate to a provider PROFILE (its id or name, e.g. a saved Codex/OAuth profile), NOT a model id. Only Codex OAuth profiles are supported; for API-key providers pass `model` and let model routing resolve the provider. Not valid for idle or in-process teammates.')
+    provider_profile: z.string().trim().min(1, 'provider_profile cannot be empty').optional().describe('Bind the teammate to a provider PROFILE (its id or name, e.g. a saved Codex/OAuth profile), NOT a model id. Saved provider profiles of any supported provider are resolved inside the child without placing credentials in the launch command. Not valid for idle or in-process teammates.')
   });
   return baseInputSchema().merge(multiAgentInputSchema).extend({
     isolation: z.enum(['worktree']).optional().describe('Isolation mode. "worktree" creates a temporary git worktree so the agent works on an isolated copy of the repo. When the session is outside a git repository (for example a parent of multiple repos), pass cwd set to the target repository root so the worktree is created from that repo.'),
@@ -523,13 +523,19 @@ export const AgentTool = buildTool({
               model,
               permissionMode
             );
-      const routedTeammateProvider = resolveOutOfProcessTeammateProvider({
-        cliModel: model,
-        agentName: name,
-        agentType: subagent_type,
-        agentDefinitionModel: agentDef?.model,
-        settings: getInitialSettings()
-      });
+      const settings = getInitialSettings();
+      // An explicitly supplied provider_profile is authoritative. Only run
+      // model/name discovery when the tool call did not already bind a child
+      // to a selected profile.
+      const routedTeammateProvider = providerProfileRef === undefined
+        ? resolveOutOfProcessTeammateProvider({
+            cliModel: model,
+            agentName: name,
+            agentType: subagent_type,
+            agentDefinitionModel: agentDef?.model,
+            settings
+          })
+        : null;
       if (routedTeammateProvider && !isModelAllowed(routedTeammateProvider.model)) {
         throw new Error(`Model '${routedTeammateProvider.model}' is not available. Your organization restricts model selection.`);
       }
@@ -537,17 +543,18 @@ export const AgentTool = buildTool({
       // provider resolver above, so resolve it separately and apply it on the next
       // spawn. The child inherits the parent provider env, so passing the model is
       // enough. Only consulted when there is no cross-provider override.
-      const routedTeammateModelOnly = routedTeammateProvider
-        ? undefined
-        : resolveOutOfProcessTeammateModelOnly({
-            cliModel: model,
-            agentName: name,
-            agentType: subagent_type,
-            agentDefinitionModel: agentDef?.model,
-            parentModel: toolUseContext.options.mainLoopModel,
-            permissionMode,
-            settings: getInitialSettings()
-          });
+      const routedTeammateModelOnly =
+        providerProfileRef === undefined && !routedTeammateProvider
+          ? resolveOutOfProcessTeammateModelOnly({
+              cliModel: model,
+              agentName: name,
+              agentType: subagent_type,
+              agentDefinitionModel: agentDef?.model,
+              parentModel: toolUseContext.options.mainLoopModel,
+              permissionMode,
+              settings
+            })
+          : undefined;
       if (
         routedTeammateModelOnly &&
         routedTeammateModelOnly !== toolUseContext.options.mainLoopModel &&
@@ -561,12 +568,37 @@ export const AgentTool = buildTool({
       // Idle (prompt-less) spawns are forced in-process by handleSpawn, as
       // is everything while the in-process backend is enabled; both share
       // the leader process and have no child env to inject.
+      const routedTeammateProfile = providerProfileRef === undefined
+        ? resolveOutOfProcessTeammateProviderProfile({
+            cliModel: model,
+            agentName: name,
+            agentType: subagent_type,
+            agentDefinitionModel: agentDef?.model,
+            settings
+          })
+        : null;
       let providerProfileEnv: Record<string, string> | undefined;
+      const effectiveProviderProfileRef =
+        providerProfileRef ?? routedTeammateProfile?.providerProfile;
       if (providerProfileRef !== undefined) {
         if (prompt === undefined || isInProcessEnabled()) {
           throw new Error(PROVIDER_PROFILE_IN_PROCESS_ERROR);
         }
-        providerProfileEnv = resolveProviderProfileEnv(providerProfileRef);
+        providerProfileEnv = resolveProviderProfileEnv(providerProfileRef, {
+          model: model && model !== 'inherit' ? resolvedTeammateModel : undefined,
+        });
+      } else if (routedTeammateProfile) {
+        if (prompt === undefined || isInProcessEnabled()) {
+          throw new Error(PROVIDER_PROFILE_IN_PROCESS_ERROR);
+        }
+        providerProfileEnv = resolveProviderProfileEnv(
+          routedTeammateProfile.providerProfile,
+          { model: routedTeammateProfile.model },
+        );
+      }
+      const boundModel = providerProfileEnv?.OPENCLAUDE_TEAMMATE_MODEL;
+      if (boundModel && !isModelAllowed(boundModel)) {
+        throw new Error(`Model '${boundModel}' is not available. Your organization restricts model selection.`);
       }
       const spawnOne = (spawnName: string) => spawnTeammate({
         name: spawnName,
@@ -575,11 +607,13 @@ export const AgentTool = buildTool({
         team_name: teamName,
         use_splitpane: true,
         plan_mode_required: spawnMode === 'plan',
-        model: routedTeammateProvider?.model ?? routedTeammateModelOnly ?? resolvedTeammateModel,
+        model: providerProfileEnv
+          ? undefined
+          : routedTeammateProvider?.model ?? routedTeammateModelOnly ?? resolvedTeammateModel,
         modelWasToolSpecified: model !== undefined,
         agent_type: subagent_type,
         providerEnv: providerProfileEnv,
-        providerProfileRef,
+        providerProfileRef: effectiveProviderProfileRef,
         invokingRequestId: assistantMessage?.requestId
       }, toolUseContext);
 

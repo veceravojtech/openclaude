@@ -6,6 +6,7 @@
  */
 
 import type { AppState } from '../../state/AppState.js'
+import { getInitialMainLoopModel } from '../../bootstrap/state.js'
 import { logForDebugging } from '../debug.js'
 import { addFunctionHook } from '../hooks/sessionHooks.js'
 import { applyPermissionUpdate } from '../permissions/PermissionUpdate.js'
@@ -13,9 +14,11 @@ import { jsonStringify } from '../slowOperations.js'
 import { getTeammateColor } from '../teammate.js'
 import {
   createIdleNotification,
+  createTeammateStartupNotification,
   getLastPeerDmSummary,
   writeToMailbox,
 } from '../teammateMailbox.js'
+import { getAPIProvider } from '../model/providers.js'
 import { readTeamFile, setMemberActive } from './teamHelpers.js'
 
 /**
@@ -90,6 +93,57 @@ export function initializeTeammateHooks(
     return
   }
 
+  // Report the resolved child route as soon as the teammate process has
+  // applied its provider environment. This is intentionally a small,
+  // credential-free protocol message: the leader can distinguish startup from
+  // a pane that merely exists, while endpoints, keys, and custom headers never
+  // enter the mailbox or task metadata.
+  const startupModel =
+    process.env.OPENCLAUDE_TEAMMATE_MODEL?.trim() ||
+    process.env.OPENAI_MODEL?.trim() ||
+    process.env.ANTHROPIC_MODEL?.trim() ||
+    process.env.GEMINI_MODEL?.trim() ||
+    process.env.MISTRAL_MODEL?.trim() ||
+    getInitialMainLoopModel()?.trim() ||
+    'unknown'
+  const provider = getAPIProvider()
+  const transport =
+    provider === 'firstParty'
+      ? 'anthropic-messages'
+      : provider === 'codex'
+        ? 'codex-responses'
+        : provider === 'gemini'
+          ? 'gemini'
+          : provider === 'mistral'
+            ? 'mistral'
+            : provider === 'bedrock'
+              ? 'bedrock'
+              : provider === 'vertex'
+                ? 'vertex'
+                : provider === 'foundry'
+                  ? 'foundry'
+                  : process.env.OPENAI_API_FORMAT === 'responses'
+                    ? 'openai-responses'
+                    : process.env.OPENAI_API_FORMAT === 'responses_compat'
+                      ? 'openai-responses-compat'
+                      : 'openai-chat-completions'
+  void writeToMailbox(leadAgentName, {
+    from: agentName,
+    text: jsonStringify(
+      createTeammateStartupNotification(agentName, {
+        model: startupModel,
+        provider,
+        transport,
+      }),
+    ),
+    timestamp: new Date().toISOString(),
+    color: getTeammateColor(),
+  }).catch(error => {
+    logForDebugging(
+      `[TeammateInit] Failed to report startup route for ${agentName}: ${error instanceof Error ? error.name : 'unknown error'}`,
+    )
+  })
+
   logForDebugging(
     `[TeammateInit] Registering Stop hook for teammate ${agentName} to notify leader ${leadAgentName}`,
   )
@@ -125,5 +179,52 @@ export function initializeTeammateHooks(
     {
       timeout: 10000,
     },
+  )
+}
+
+/**
+ * Report a provider/runtime failure that ended a teammate turn before the
+ * normal Stop hook could run. API-error turns intentionally skip Stop hooks
+ * to avoid retry loops, so pane tasks need the same failure signal through
+ * the mailbox or they remain marked busy until the watchdog deadline.
+ *
+ * The reason is deliberately selected from a small fixed vocabulary. Raw
+ * provider errors can contain credentials, proxy URLs, or request bodies and
+ * must never enter mailbox text or task metadata.
+ */
+export async function reportTeammateTurnFailure(
+  teamName: string,
+  agentName: string,
+  kind: 'provider' | 'runtime' = 'provider',
+): Promise<void> {
+  const teamFile = readTeamFile(teamName)
+  if (!teamFile) return
+
+  const member = teamFile.members.find(m => m.name === agentName)
+  if (!member || member.agentId === teamFile.leadAgentId) return
+
+  const leadMember = teamFile.members.find(
+    m => m.agentId === teamFile.leadAgentId,
+  )
+  const leadAgentName = leadMember?.name || 'team-lead'
+  const failureReason =
+    kind === 'provider'
+      ? 'Teammate provider request failed before completion.'
+      : 'Teammate runtime failed before completion.'
+
+  await setMemberActive(teamName, agentName, false)
+  await writeToMailbox(leadAgentName, {
+    from: agentName,
+    text: jsonStringify(
+      createIdleNotification(agentName, {
+        idleReason: 'failed',
+        failureReason,
+      }),
+    ),
+    timestamp: new Date().toISOString(),
+    color: getTeammateColor(),
+  })
+  logForDebugging(
+    `[TeammateInit] Reported ${kind} failure for ${agentName} to ${leadAgentName}`,
   )
 }

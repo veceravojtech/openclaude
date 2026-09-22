@@ -21,6 +21,10 @@ import {
 import { applyConfigEnvironmentVariables } from './managedEnv.js'
 
 const ENV_KEYS = [
+  'OPENCLAUDE_TEAMMATE_PROFILE_ID',
+  'OPENCLAUDE_TEAMMATE_MODEL',
+  'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED',
+  'CLAUDE_CODE_PROVIDER_PROFILE_ENV_APPLIED_ID',
   'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
   'CLAUDE_CODE_USE_GEMINI',
   'CLAUDE_CODE_USE_MISTRAL',
@@ -33,6 +37,21 @@ const ENV_KEYS = [
   'OPENAI_BASE_URL',
   'OPENAI_MODEL',
 ]
+
+it('explicit child binding wins remembered env inputs without changing active profile', () => {
+  saveGlobalConfig(current => ({ ...current, activeProviderProfileId: 'leader', providerProfiles: [
+    { id: 'leader', name: 'Leader', provider: 'openai', baseUrl: 'https://leader.example/v1', model: 'leader' },
+    { id: 'child', name: 'Child', provider: 'openai', baseUrl: 'http://localhost:11434/v1', model: 'child' },
+  ] }))
+  process.env.OPENCLAUDE_TEAMMATE_PROFILE_ID = 'child'
+  process.env.OPENCLAUDE_TEAMMATE_MODEL = 'child-custom'
+  rememberLoadedEnvFileValues({ OPENAI_BASE_URL: 'https://wrong.example/v1', OPENAI_API_KEY: 'wrong-secret', OPENAI_MODEL: 'wrong-model' })
+  applyConfigEnvironmentVariables()
+  expect(process.env.OPENAI_BASE_URL).toBe('http://localhost:11434/v1')
+  expect(process.env.OPENAI_MODEL).toBe('child-custom')
+  expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  expect(getGlobalConfig().activeProviderProfileId).toBe('leader')
+})
 
 const originalEnv = new Map<string, string | undefined>()
 let originalConfigEnv: Record<string, string> = {}

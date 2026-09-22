@@ -10,6 +10,7 @@ import {
   isFirstPartyAnthropicBaseUrl,
 } from '../../utils/model/providers.js'
 import {
+  findProviderProfilesForModel,
   findCodexOAuthProfileForModel,
   findProviderProfileRouteForModel,
 } from '../../utils/providerProfiles.js'
@@ -28,15 +29,30 @@ export interface ProviderOverride {
   apiKey: string
 }
 
+/** A saved provider profile route. The child resolves credentials by id. */
+export interface AgentProviderProfileRoute {
+  /** Saved profile id or name. Never a credential or endpoint. */
+  providerProfile: string
+  /** Optional model override; omitted means the profile's primary model. */
+  model?: string
+}
+
 /** A model-only route: reuse the session's current provider, just change the model. */
 export type AgentModelOnly = { model: string }
 
 /** A resolved agent route — a full cross-provider override or a model-only swap. */
-export type AgentRoute = ProviderOverride | AgentModelOnly
+export type AgentRoute = ProviderOverride | AgentModelOnly | AgentProviderProfileRoute
 
 /** Narrow an AgentRoute to a full cross-provider ProviderOverride. */
 export function isProviderOverride(route: AgentRoute): route is ProviderOverride {
   return 'apiKey' in route && 'baseURL' in route
+}
+
+/** Narrow an AgentRoute to an identity-only saved-profile route. */
+export function isProviderProfileRoute(
+  route: AgentRoute,
+): route is AgentProviderProfileRoute {
+  return 'providerProfile' in route
 }
 
 export interface AgentRunModelRouting {
@@ -87,12 +103,28 @@ function toAgentRoute(
 ): AgentRoute | null {
   if (!modelConfig) return null
 
-  const model = modelConfig.model?.trim() || configuredModelKey
+  const model = modelConfig.model?.trim()
   const baseURL = modelConfig.base_url?.trim()
   const apiKey = modelConfig.api_key?.trim()
 
+  const providerProfile = modelConfig.provider_profile?.trim()
+  if (providerProfile) {
+    if (baseURL || apiKey) {
+      console.error(
+        `[agentRouting] Warning: agentModels entry "${configuredModelKey}" cannot combine provider_profile with base_url/api_key. Skipping this route.`,
+      )
+      return null
+    }
+    return {
+      providerProfile,
+      ...(model ? { model } : {}),
+    }
+  }
+
+  const effectiveModel = model || configuredModelKey
+
   // Model-only route: no credentials → reuse the active provider, swap the model.
-  if (!baseURL && !apiKey) return { model }
+  if (!baseURL && !apiKey) return { model: effectiveModel }
 
   // Misconfiguration: a cross-provider route needs BOTH endpoint and key.
   if (!baseURL || !apiKey) {
@@ -102,7 +134,7 @@ function toAgentRoute(
     return null
   }
 
-  return { model, baseURL, apiKey }
+  return { model: effectiveModel, baseURL, apiKey }
 }
 
 /**
@@ -297,6 +329,11 @@ export function resolveAgentRunModelRouting({
     if (isProviderOverride(route)) {
       return { mainLoopModel: route.model, providerOverride: route }
     }
+    if (isProviderProfileRoute(route)) {
+      throw new Error(
+        'agentModels provider_profile routes require a pane/window teammate; in-process agents cannot switch provider environments.',
+      )
+    }
     return {
       mainLoopModel: resolveModelOnlyModel(route.model, parentModel, permissionMode),
     }
@@ -308,6 +345,11 @@ export function resolveAgentRunModelRouting({
   if (!route) return { mainLoopModel: resolvedAgentModel }
   if (isProviderOverride(route)) {
     return { mainLoopModel: route.model, providerOverride: route }
+  }
+  if (isProviderProfileRoute(route)) {
+    throw new Error(
+      'agentModels provider_profile routes require a pane/window teammate; in-process agents cannot switch provider environments.',
+    )
   }
   return {
     mainLoopModel: resolveModelOnlyModel(route.model, parentModel, permissionMode),
@@ -335,29 +377,82 @@ export function shouldEnforceModelAllowlist(
  * become the child process's main loop, so the child startup path must resolve
  * the same configured agentModels route from its CLI identity.
  */
-export function resolveOutOfProcessTeammateProvider({
-  cliModel,
-  agentName,
-  agentType,
-  agentDefinitionModel,
-  settings,
-}: {
+type OutOfProcessTeammateRouteInput = {
   cliModel?: string
   agentName?: string
   agentType?: string
   agentDefinitionModel?: string
   settings: SettingsJson | null
-}): ProviderOverride | null {
+}
+
+/**
+ * Discover a saved profile for a model only when the caller has not already
+ * selected an agentModels route. A positive profile match is safe to bind;
+ * an unknown model remains untouched, while multiple matches fail closed so a
+ * teammate never silently switches accounts.
+ */
+function resolveDiscoveredProviderProfileRoute(
+  model: string | undefined,
+): AgentProviderProfileRoute | null {
+  const requested = model?.trim()
+  if (!requested) return null
+
+  const matches = findProviderProfilesForModel(requested)
+  if (matches.length === 0) return null
+  if (matches.length > 1) {
+    const candidates = matches
+      .map(profile => `${profile.name} (${profile.id})`)
+      .join(', ')
+    throw new Error(
+      `Model '${requested}' is advertised by multiple saved provider profiles: ${candidates}. Select one with provider_profile or configure an explicit agentModels route.`,
+    )
+  }
+
+  return {
+    providerProfile: matches[0]!.id,
+    model: requested,
+  }
+}
+
+/** Resolve the complete route, including identity-only saved profile routes. */
+function resolveOutOfProcessTeammateRoute({
+  cliModel,
+  agentName,
+  agentType,
+  agentDefinitionModel,
+  settings,
+}: OutOfProcessTeammateRouteInput): AgentRoute | null {
   const requestedModel = cliModel?.trim()
   if (requestedModel) {
     const route = resolveAgentModelProvider(requestedModel, settings)
-    return route && isProviderOverride(route) ? route : null
+    return route ?? resolveDiscoveredProviderProfileRoute(requestedModel)
   }
 
   const route =
     resolveAgentProvider(agentName, agentType, settings) ??
     resolveAgentModelProvider(agentDefinitionModel, settings)
+  if (route) return route
+  return resolveDiscoveredProviderProfileRoute(agentDefinitionModel)
+}
+
+export function resolveOutOfProcessTeammateProvider({
+  ...input
+}: OutOfProcessTeammateRouteInput): ProviderOverride | null {
+  const route = resolveOutOfProcessTeammateRoute(input)
   return route && isProviderOverride(route) ? route : null
+}
+
+/**
+ * Resolve an identity-only saved profile for a pane/window teammate. The
+ * returned model is the requested model when auto-discovered; explicit
+ * provider_profile routes may omit it and let the child use the profile's
+ * primary model.
+ */
+export function resolveOutOfProcessTeammateProviderProfile({
+  ...input
+}: OutOfProcessTeammateRouteInput): AgentProviderProfileRoute | null {
+  const route = resolveOutOfProcessTeammateRoute(input)
+  return route && isProviderProfileRoute(route) ? route : null
 }
 
 /**
@@ -390,7 +485,7 @@ export function resolveOutOfProcessTeammateModelOnly({
   const requestedModel = cliModel?.trim()
   if (requestedModel) {
     const route = resolveAgentModelProvider(requestedModel, settings)
-    return route && !isProviderOverride(route)
+    return route && !isProviderOverride(route) && !isProviderProfileRoute(route)
       ? resolveModelOnlyModel(route.model, parentModel, permissionMode)
       : undefined
   }
@@ -398,7 +493,7 @@ export function resolveOutOfProcessTeammateModelOnly({
   const route =
     resolveAgentProvider(agentName, agentType, settings) ??
     resolveAgentModelProvider(agentDefinitionModel, settings)
-  return route && !isProviderOverride(route)
+  return route && !isProviderOverride(route) && !isProviderProfileRoute(route)
     ? resolveModelOnlyModel(route.model, parentModel, permissionMode)
     : undefined
 }

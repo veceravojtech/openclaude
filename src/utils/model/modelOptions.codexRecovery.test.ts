@@ -102,3 +102,10 @@ test('persisted untagged Codex model never degrades to a "Custom model" entry', 
   expect(recovered[0]!.description).not.toBe('Custom model')
   expect(recovered[0]!.label.toLowerCase()).toContain('gpt-5.6')
 })
+
+test('Codex picker offers GPT-6 Astra', async () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_BASE_URL = 'https://chatgpt.com/backend-api/codex'
+  const { getModelOptions } = await importFreshModelOptionsModule('codex')
+  expect(getModelOptions().some(option => option.value === 'gpt-6-astra')).toBe(true)
+})

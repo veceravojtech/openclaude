@@ -733,6 +733,7 @@ export function getPublicModelDisplayName(model: ModelName): string | null {
   ) {
     // Return display names for known GitHub Copilot models
     const copilotModelNames: Record<string, string> = {
+      'gpt-6-astra': 'GPT-6 Astra',
       'gpt-5.6-sol': 'GPT-5.6 Sol',
       'gpt-5.6-terra': 'GPT-5.6 Terra',
       'gpt-5.6-luna': 'GPT-5.6 Luna',
@@ -779,6 +780,8 @@ export function getPublicModelDisplayName(model: ModelName): string | null {
     return `${formatOpusMarketingName(opusVersion)}${has1m ? ' (1M context)' : ''}`
   }
   switch (model) {
+    case 'gpt-6-astra':
+      return 'GPT-6 Astra'
     case 'gpt-5.6-sol':
       return 'GPT-5.6 Sol'
     case 'gpt-5.6-terra':

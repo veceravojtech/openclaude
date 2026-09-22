@@ -12,7 +12,6 @@ import {
   useSetAppState,
 } from '../state/AppState.js'
 import { findToolByName } from '../Tool.js'
-import { isInProcessTeammateTask } from '../tasks/InProcessTeammateTask/types.js'
 import { getAllBaseTools } from '../tools.js'
 import type { PermissionUpdate } from '../types/permissions.js'
 import { logForDebugging } from '../utils/debug.js'
@@ -45,7 +44,7 @@ import {
   removeTeammateFromTeamFile,
   setMemberMode,
 } from '../utils/swarm/teamHelpers.js'
-import { TEAMMATE_GRACE_MS } from '../utils/task/framework.js'
+import { retireTeammateFromLeaderView } from '../utils/swarm/teammateRetirement.js'
 import { unassignTeammateTasks } from '../utils/tasks.js'
 import {
   getAgentName,
@@ -64,6 +63,7 @@ import {
   isSandboxPermissionResponse,
   isShutdownApproved,
   isShutdownRequest,
+  isTeammateStartupNotification,
   isTeamPermissionUpdate,
   markMessagesAsRead,
   readUnreadMessages,
@@ -232,6 +232,7 @@ export function useInboxPoller({
     const teamPermissionUpdates: TeammateMessage[] = []
     const modeSetRequests: TeammateMessage[] = []
     const planApprovalRequests: TeammateMessage[] = []
+    const startupNotifications: TeammateMessage[] = []
     const regularMessages: TeammateMessage[] = []
 
     for (const m of unread) {
@@ -244,6 +245,7 @@ export function useInboxPoller({
       const teamPermUpdate = isTeamPermissionUpdate(m.text)
       const modeSetReq = isModeSetRequest(m.text)
       const planApprovalReq = isPlanApprovalRequest(m.text)
+      const startup = isTeammateStartupNotification(m.text)
 
       if (permReq) {
         permissionRequests.push(m)
@@ -263,9 +265,19 @@ export function useInboxPoller({
         modeSetRequests.push(m)
       } else if (planApprovalReq) {
         planApprovalRequests.push(m)
+      } else if (startup) {
+        startupNotifications.push(m)
       } else {
         regularMessages.push(m)
       }
+    }
+
+    for (const message of startupNotifications) {
+      const startup = isTeammateStartupNotification(message.text)
+      if (!startup) continue
+      logForDebugging(
+        `[InboxPoller] Teammate ${startup.from} ready: model=${startup.model}, provider=${startup.provider}, transport=${startup.transport}`,
+      )
     }
 
     // Handle permission requests (leader side) - route to ToolUseConfirmQueue
@@ -781,76 +793,15 @@ export function useInboxPoller({
                 )
               : { notificationMessage: `${teammateToRemove} has shut down.` }
 
-            setAppState(prev => {
-              if (!prev.teamContext?.teammates) return prev
-              if (!(teammateId in prev.teamContext.teammates)) return prev
-              const { [teammateId]: _, ...remainingTeammates } =
-                prev.teamContext.teammates
-
-              // Mark the teammate's task as completed so hasRunningTeammates
-              // becomes false and the spinner stops. Without this, out-of-process
-              // (tmux) teammate tasks stay status:'running' forever because
-              // only in-process teammates have a runner that sets 'completed'.
-              const updatedTasks = { ...prev.tasks }
-              for (const [tid, task] of Object.entries(updatedTasks)) {
-                if (
-                  isInProcessTeammateTask(task) &&
-                  task.identity.agentId === teammateId
-                ) {
-                  updatedTasks[tid] = {
-                    ...task,
-                    status: 'completed' as const,
-                    // The completion IS delivered — the same setAppState below
-                    // appends the `teammate_terminated` system message the lead
-                    // reads — so this transition owes no further notification,
-                    // exactly like the three in-process terminal writers that
-                    // pre-set the flag (inProcessRunner's completion and failure
-                    // tails, killInProcessTeammate). Without it BOTH evictors
-                    // bail on `!task.notified`, so the task sat in AppState for
-                    // the rest of the session after its row left at the
-                    // deadline. Nothing else reads the flag for a teammate: the
-                    // per-type notification helpers that use it as a claim are
-                    // local_agent/shell/remote only, and the ", unread" suffix
-                    // in BackgroundTask is drawn only for tasks the dialog
-                    // LISTS — a completed teammate is not one (isListedTask is
-                    // isBackgroundTask, running/pending, or isPanelVisibleAgent,
-                    // which answers false for a terminal teammate).
-                    notified: true,
-                    endTime: Date.now(),
-                    // The same retention marker every in-process terminal
-                    // transition writes. Without it an out-of-process
-                    // (tmux/iTerm2) teammate's row vanished the instant it shut
-                    // down instead of keeping its place for the grace window,
-                    // and carried no deadline for the lazy GC to collect it by.
-                    retain: false,
-                    evictAfter: Date.now() + TEAMMATE_GRACE_MS,
-                  }
-                }
-              }
-
-              return {
-                ...prev,
-                tasks: updatedTasks,
-                teamContext: {
-                  ...prev.teamContext,
-                  teammates: remainingTeammates,
-                },
-                inbox: {
-                  messages: [
-                    ...prev.inbox.messages,
-                    {
-                      id: randomUUID(),
-                      from: 'system',
-                      text: jsonStringify({
-                        type: 'teammate_terminated',
-                        message: notificationMessage,
-                      }),
-                      timestamp: new Date().toISOString(),
-                      status: 'pending' as const,
-                    },
-                  ],
-                },
-              }
+            // Local bookkeeping only: drop the teammate from teamContext and
+            // force-complete its task row, which is what stops the spinner —
+            // an out-of-process teammate has no runner to write 'completed'.
+            // Shared with the pane watchdog's ghost sweep, which needs exactly
+            // this after finding a roster member whose pane is gone.
+            retireTeammateFromLeaderView({
+              teammateId,
+              notificationMessage,
+              setAppState,
             })
             logForDebugging(
               `[InboxPoller] Removed ${teammateToRemove} (${teammateId}) from teamContext`,

@@ -8,6 +8,7 @@ import {
   __resetInterruptionTraceForTests,
   __waitForInterruptionTraceFlushForTests,
 } from '../../../utils/interruptionTrace.js'
+import { codexStreamToAnthropic, convertCodexResponseToAnthropicMessage } from '../codexShim.js'
 import type { AnthropicStreamEvent, ShimCreateParams } from '../codexShim.js'
 import {
   createShimRequest,
@@ -70,6 +71,26 @@ function makeDependencies(
     makeMessageId: () => 'msg_test',
     ...overrides,
   }
+}
+
+for (const codex of [false, true]) for (const streaming of [false, true]) {
+  test(`optional restoration is Codex-only through dispatch: codex=${codex}, streaming=${streaming}`, async () => {
+    const item = { type: 'function_call', id: 'item', call_id: 'call', name: 'probe', status: 'completed', arguments: '{"optional":null}' }
+    const data = { status: 'completed', output: [item] }
+    const frame = (event: string, payload: unknown) => `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`
+    const sse = frame('response.output_item.added', { item: { ...item, arguments: '' } }) + frame('response.output_item.done', { item }) + frame('response.completed', { response: data })
+    const params = { ...makeParams(streaming, codex ? 'gpt-5.6-sol' : 'test-model'), tools: [{ name: 'probe', input_schema: { type: 'object', properties: { optional: { type: 'string' } } } }] }
+    const dependencies = makeDependencies(responseAt('https://provider.example/v1/responses', streaming ? sse : JSON.stringify(data), { headers: { 'content-type': streaming ? 'text/event-stream' : 'application/json' } }), [], {
+      ...(codex ? { providerOverride: undefined } : {}), processEnv: {}, codexStreamToAnthropic, convertCodexResponseToAnthropicMessage, collectCodexCompletedResponse: async () => data,
+    })
+    const result = await createShimRequest(params, undefined, dependencies)
+    let input: unknown
+    if (streaming) {
+      const events = await collect(result as AsyncIterable<AnthropicStreamEvent>)
+      input = JSON.parse(events.filter((event: any) => event.delta?.type === 'input_json_delta').map((event: any) => event.delta.partial_json).join(''))
+    } else input = (result as any).content[0].input
+    expect(input).toEqual(codex ? {} : { optional: null })
+  })
 }
 
 test('headersWithRequestUrl clones headers and preserves request routing metadata', () => {

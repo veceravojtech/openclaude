@@ -29,6 +29,11 @@ function gptModel(
 }
 
 export default [
+  defineModel({
+    ...gptModel('gpt-6-astra', 'GPT-6 Astra', 1_050_000, 128_000),
+    classification: ['chat', 'vision', 'coding', 'reasoning'],
+    capabilities: { ...gptCapabilities, supportsReasoning: true },
+  }),
   // gpt-5.6 (sol/terra/luna) reject /v1/chat/completions when function tools
   // are combined with reasoning_effort — they must use /v1/responses. The
   // openai-vendor catalog carries their reasoning metadata; the responses
