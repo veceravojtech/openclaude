@@ -39,11 +39,11 @@ test('getHardcodedTeammateModelFallback returns a Mistral fallback in mistral mo
 test('getHardcodedTeammateModelFallback returns the current default Opus for first party', async () => {
   // Regression for #1769: the fallback hardcoded Opus 4.6 while the default Opus
   // had moved on, so new teammates spawned on an older model. First-party now
-  // follows the `opus` alias; with nothing resolved that is the pinned Opus 5.
+  // follows the `opus` alias; with nothing resolved that is the pinned Opus 5.5.
   const { getHardcodedTeammateModelFallback } =
     await importFreshTeammateModelModule('firstParty')
 
-  expect(getHardcodedTeammateModelFallback()).toBe('claude-opus-5')
+  expect(getHardcodedTeammateModelFallback()).toBe('claude-opus-5-5')
 })
 
 test('getHardcodedTeammateModelFallback is provider-aware (Bedrock gets the Opus 4.8 Bedrock id)', async () => {
@@ -87,7 +87,7 @@ test('getHardcodedTeammateModelFallback ignores the leader model on dedicated pr
   // for that one provider, so a leader model must not override them.
   const firstParty = await importFreshTeammateModelModule('firstParty')
   expect(firstParty.getHardcodedTeammateModelFallback('glm-5.3')).toBe(
-    'claude-opus-5',
+    'claude-opus-5-5',
   )
 
   const bedrock = await importFreshTeammateModelModule('bedrock')

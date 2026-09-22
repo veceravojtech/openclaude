@@ -159,7 +159,7 @@ test('with no leader model at all, the provider default is the last resort', asy
     provider: 'firstParty',
   })
 
-  expect(resolveTeammateModel(undefined, null)).toBe('claude-opus-5[1m]')
+  expect(resolveTeammateModel(undefined, null)).toBe('claude-opus-5-5[1m]')
 })
 
 test('the leader model is what the leader actually runs: a session switch first, then the setting', async () => {

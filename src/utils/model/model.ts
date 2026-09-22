@@ -32,7 +32,7 @@ import {
 import { LIGHTNING_BOLT } from '../../constants/figures.js'
 import { isModelAllowed } from './modelAllowlist.js'
 import { type ModelAlias, isModelAlias } from './aliases.js'
-import { CLAUDE_OPUS_5_CONFIG } from './configs.js'
+import { CLAUDE_OPUS_5_5_CONFIG } from './configs.js'
 import { getResolvedLatestOpusModel } from './latestOpusModel.js'
 import {
   canonicalOpusId,
@@ -131,7 +131,8 @@ export function isNonCustomOpusModel(model: ModelName): boolean {
     model === getModelStrings().opus46 ||
     model === getModelStrings().opus47 ||
     model === getModelStrings().opus48 ||
-    model === getModelStrings().opus50
+    model === getModelStrings().opus50 ||
+    model === getModelStrings().opus55
   )
 }
 
@@ -273,7 +274,7 @@ export function getDefaultOpusModel(): ModelName {
   // previous startup, refreshed in the background — see latestOpusModel.ts),
   // and fall back to the pinned default when nothing has been resolved yet or
   // dynamic resolution is disabled.
-  return getResolvedLatestOpusModel() ?? getModelStrings().opus50
+  return getResolvedLatestOpusModel() ?? getModelStrings().opus55
 }
 
 // @[MODEL LAUNCH]: Update the default Sonnet model (3P providers may lag so keep defaults unchanged).
@@ -1109,7 +1110,7 @@ export function modelDisplayString(model: ModelSetting): string {
 export function getDefaultOpusMarketingName(): string {
   const version =
     parseOpusVersion(getDefaultOpusModel()) ??
-    parseOpusVersion(CLAUDE_OPUS_5_CONFIG.firstParty)
+    parseOpusVersion(CLAUDE_OPUS_5_5_CONFIG.firstParty)
   return version ? formatOpusMarketingName(version) : 'Opus'
 }
 

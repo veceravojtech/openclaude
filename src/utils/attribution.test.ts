@@ -202,7 +202,7 @@ describe('getDefaultCommitCoAuthorName', () => {
         apiProvider: 'firstParty',
         isInternalRepo: false,
       }),
-    ).toBe('Claude Opus 5')
+    ).toBe('Claude Opus 5.5')
   })
 
   it('sanitizes unknown internal Claude co-author names', () => {
