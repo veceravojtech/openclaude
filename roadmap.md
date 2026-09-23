@@ -1,5 +1,8 @@
 # Teammate Stop & Shutdown Fixes — Roadmap
 
+> For the 2026-09-23 audit results, current validation failures, and isolated
+> compaction/progress work, see [Unresolved branch follow-up](FOLLOW-UP.md).
+
 > Created 2026-09-21 from a live failure investigation (team `test`, teammate `opus-worker`, tmux pane `%21`).
 > The prior routing roadmap is preserved verbatim below this section.
 
