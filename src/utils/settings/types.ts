@@ -984,6 +984,12 @@ export const SettingsSchema = lazySchema(() =>
             })
             .optional()
             .describe('JEV role classifier: enabled (default true), timeout and acceptance thresholds.'),
+          excludeModels: z
+            .array(z.string())
+            .optional()
+            .describe(
+              'Exact model ids the dispatcher must never pick (e.g. a model your plan is not entitled to). Applied to JEV candidates and the tier-table fallback.',
+            ),
         })
         .optional()
         .describe(

@@ -18,6 +18,8 @@ const originalDefaultModelEnv = {
     process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES,
 }
 const allowedModelsRef: { value?: string[] } = { value: undefined }
+// Captured before any test stubs it, to restore after each test.
+const realCheck1m = { ...(await import('./check1mAccess.js')) }
 
 type MockProvider =
   | 'firstParty'
@@ -97,6 +99,9 @@ describe('getAgentModel provider-aware fallback', () => {
   afterEach(() => {
     try {
       mock.restore()
+      // mock.restore() does not undo mock.module: put the real 1M
+      // entitlement check back for the files that run after this one.
+      mock.module('./check1mAccess.js', () => ({ ...realCheck1m }))
       setAvailableModelsForTest()
       if (originalSubagentModel === undefined) {
         delete process.env.CLAUDE_CODE_SUBAGENT_MODEL
@@ -441,6 +446,12 @@ describe('getAgentModel provider-aware fallback', () => {
 
     test('preserves alias tier matching for tool-specified aliases', async () => {
       mockProvider('firstParty', true)
+      // Entitled to Sonnet 4.x 1M (API key / extra usage): the preference
+      // applies. The unentitled case is the next test.
+      mock.module('./check1mAccess.js', () => ({
+        ...realCheck1m,
+        checkSonnet1mAccess: () => true,
+      }))
 
       const { getAgentModel } = await importAgentModule()
 
@@ -462,6 +473,25 @@ describe('getAgentModel provider-aware fallback', () => {
           'default',
         ),
       ).toBe('claude-3-5-haiku-20241022')
+    })
+
+    test('an account not entitled to Sonnet 4.x 1M keeps the plain Sonnet id', async () => {
+      mockProvider('firstParty', true)
+      // A Claude.ai subscriber without extra usage (6010d5e7): Sonnet 4.x is
+      // not upgraded; frontier Opus is not gated.
+      mock.module('./check1mAccess.js', () => ({
+        ...realCheck1m,
+        checkSonnet1mAccess: () => false,
+      }))
+
+      const { getAgentModel } = await importAgentModule()
+
+      expect(
+        getAgentModel(undefined, 'claude-sonnet-4-6', 'sonnet', 'default'),
+      ).toBe('claude-sonnet-4-6')
+      expect(
+        getAgentModel(undefined, 'claude-opus-4-6', 'opus', 'default'),
+      ).toBe('claude-opus-4-6[1m]')
     })
 
     test('keeps existing direct alias parsing for non-Claude providers', async () => {

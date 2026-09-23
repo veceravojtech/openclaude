@@ -9,14 +9,18 @@
  * definitions plus `default`. Explicit models and types are never asked about.
  *
  * Hard rules hold before and after asking: a review/verify teammate never
- * gets a model family used by an implementer in the same team (every Claude
- * Sonnet version is one family), and computer_use needs vision. A pick that
+ * gets a model family used by an implementer in the same team (a family is
+ * a vendor model line — every Claude Opus version is one, every GPT-5.x is
+ * one; see separationFamilyOf), and computer_use needs vision. A pick that
  * breaks a rule or fails Rule A falls to the best rule-abiding option by
  * probability (Rule A on the renormalized rest), else to the heuristic: a
  * keyword role guess and the role → tier → family table.
  *
  * Never throws. Never blocks longer than the JEV timeout. When nothing
- * qualifies the teammate spawns on today's default model with a warning.
+ * qualifies the teammate spawns on today's default model with a warning —
+ * except a review/verify teammate with implementers to avoid, which gets a
+ * refusal: the default model may be the implementer's own family. The
+ * caller re-checks separation on the FINAL model whatever its source.
  */
 import type { ProviderProfile } from '../../../utils/config.js'
 import type { SettingsJson } from '../../../utils/settings/types.js'
@@ -109,6 +113,12 @@ export type TeammateRouteDecision = {
   /** Saved provider profile id to bind when the model is not on the leader's route. */
   providerProfile?: string
   source: 'jev' | 'heuristic' | 'explicit' | 'off'
+  /**
+   * Where the model came from, when it differs from the role's source:
+   * `jev` (JEV's pick), `tier` (the tier table, e.g. after JEV's pick was
+   * rejected), `explicit`, or `none` (nothing qualified).
+   */
+  modelSource?: 'jev' | 'tier' | 'explicit' | 'none'
   mode: TeammateDispatchMode
   reason: string
   complexity?: DispatchComplexity
@@ -128,7 +138,11 @@ export type TeammateRouteDecision = {
   excluded?: TeammateRouteExclusion[]
   /** Models removed from the candidate list, with why. */
   excludedModels?: ModelExclusion[]
-  /** Set when the separation rule refuses an explicit model. */
+  /**
+   * Set when the separation rule refuses the spawn: an explicit/inherited
+   * model in an implementer's family, or no allowed model for a
+   * review/verify teammate at all.
+   */
   refusal?: string
   /** Set when nothing qualified and the default model is used. */
   warning?: string
@@ -229,6 +243,8 @@ export type NormalizedTeammateDispatch = {
   roleTiers: Record<TeammateRole, DispatchTier>
   tierFamilies: Record<DispatchTier, DispatchFamily[]>
   jev: { enabled: boolean; timeoutMs?: number; minP?: number; minMargin?: number }
+  /** Lower-cased exact ids the user pruned (teammateDispatch.excludeModels). */
+  excludeModels: string[]
 }
 
 const warnedPolicyEntries = new Set<string>()
@@ -294,6 +310,11 @@ export function readTeammateDispatchSettings(
       minP: probability(jev?.minP),
       minMargin: probability(jev?.minMargin),
     },
+    excludeModels: Array.isArray(raw?.excludeModels)
+      ? raw.excludeModels
+          .filter((id): id is string => typeof id === 'string' && id.trim() !== '')
+          .map(id => id.trim().toLowerCase())
+      : [],
   }
 }
 
@@ -544,7 +565,7 @@ export type SpawnableModel = {
   provider: string
   /** Matrix family, when the id is one (display + tier-table ranking). */
   family?: DispatchFamily
-  /** Family for the separation rule: every Claude Sonnet version is one. */
+  /** Family for the separation rule: a vendor model line (separationFamilyOf). */
   separationFamily: string
   contextWindow?: number
   vision: boolean
@@ -610,9 +631,29 @@ function priceTierOf(id: string): PriceTier {
 }
 
 /**
- * Separation family: the matrix family, except that every Claude Sonnet
- * version counts as one (`sonnet-5`) and every GPT-5.6 tier as `gpt-5.6`.
- * Off-matrix ids are their own family.
+ * The bare vendor id: lower-cased, provider prefixes and suffixes removed
+ * (`accounts/fireworks/models/`, `deepseek-ai/`, `us.anthropic.`,
+ * `anthropic.`, `:cloud`, `[1m]`, Bedrock `-v1:0`, Vertex `@date`).
+ */
+function bareModelId(model: string): string {
+  let n = normalizeTeammateModelId(model)
+  n = n.split('/').pop() ?? n
+  n = n.replace(/:cloud$/, '')
+  n = n.replace(/^(?:[a-z]{2,4}\.)?anthropic\./, '')
+  n = n.replace(/-v\d+(?::\d+)?$/, '')
+  return n
+}
+
+/** A trailing release date: `-20250514`, `@20250514`, `-2025-05-14`. */
+const DATE_SUFFIX = /(?:[-@]\d{8}|-\d{4}-\d{2}-\d{2})$/
+
+/**
+ * The separation family of a model: its vendor model LINE. Every version of
+ * a line is one family, so a reviewer never runs on any version of the
+ * implementer's line:
+ *   claude-opus* · claude-sonnet* · claude-haiku* · claude-fable*
+ *   gpt-6* · gpt-5 (every 5.x tier and version) · glm · deepseek
+ * Anything else: the bare id without `[1m]` and a release date.
  */
 export function separationFamilyOf(model: string | undefined): string | undefined {
   if (!model || model === 'inherit') return undefined
@@ -622,15 +663,45 @@ export function separationFamilyOf(model: string | undefined): string | undefine
   } catch {
     // keep raw
   }
-  const n = normalizeTeammateModelId(resolved)
-  if (/claude-(?:[\d-]+-)?sonnet/.test(n) || /(?:^|[./])sonnet(?:$|[-.])/.test(n)) {
-    return 'sonnet-5'
+  const n = bareModelId(resolved)
+  const claude = n.match(/^claude-(?:[\d.-]+-)?(opus|sonnet|haiku|fable)(?:$|[-.@\d])/)
+    ?? n.match(/^(opus|sonnet|haiku|fable)(?:$|[-.@\d])/)
+  if (claude) return `claude-${claude[1]}`
+  if (/^gpt-6(?:$|[-.])/.test(n)) return 'gpt-6'
+  if (/^gpt-5(?:$|[-.])/.test(n)) return 'gpt-5'
+  if (/^glm-/.test(n)) return 'glm'
+  if (/^deepseek-/.test(n)) return 'deepseek'
+  return n.replace(DATE_SUFFIX, '')
+}
+
+/** Ids known unusable on a route even though its catalog lists them. */
+const ROUTE_UNSUPPORTED: Readonly<Record<string, readonly RegExp[]>> = {
+  // Codex Spark is refused on ChatGPT-account Codex auth ("not supported
+  // when using Codex with a ChatGPT account"); the catalog has no flag for
+  // plan entitlement, so it is excluded explicitly.
+  codex: [/codex-spark/, /^codexspark$/],
+}
+
+/**
+ * Prune a route's catalog to spawnable ids: drop ids the route cannot serve
+ * (ROUTE_UNSUPPORTED) and dated legacy Claude ids superseded by an undated
+ * id of the same line on the route (claude-opus-4-20250514 goes when
+ * claude-opus-5-5 is there; claude-haiku-4-5-20251001 stays while it is
+ * the only Haiku).
+ */
+export function pruneRouteCatalog<T extends { id: string }>(route: string, entries: readonly T[]): T[] {
+  const unsupported = ROUTE_UNSUPPORTED[route] ?? []
+  const usable = entries.filter(e => !unsupported.some(re => re.test(bareModelId(e.id))))
+  const undatedLines = new Set<string>()
+  for (const e of usable) {
+    const family = separationFamilyOf(e.id)
+    if (family?.startsWith('claude-') && !DATE_SUFFIX.test(bareModelId(e.id))) undatedLines.add(family)
   }
-  const family = familyOfModel(model)
-  if (family) return family
-  const bare = n.split('/').pop() ?? n
-  if (/^gpt-5\.6/.test(bare)) return 'gpt-5.6'
-  return `model:${bare}`
+  return usable.filter(e => {
+    const family = separationFamilyOf(e.id)
+    if (!family?.startsWith('claude-')) return true
+    return !(DATE_SUFFIX.test(bareModelId(e.id)) && undatedLines.has(family))
+  })
 }
 
 function allowedByTeammateAllowlist(
@@ -651,6 +722,8 @@ type RouteContext = {
   anthropicAuth: boolean
   profiles: readonly ProviderProfile[]
   allowProfileBinding: boolean
+  /** Lower-cased exact ids from teammateDispatch.excludeModels. */
+  excludeModels: ReadonlySet<string>
 }
 
 function buildRouteContext(
@@ -674,6 +747,7 @@ function buildRouteContext(
     anthropicAuth: leaderRoute === 'anthropic' && deps.hasAnthropicAuth(),
     profiles,
     allowProfileBinding: input.allowProfileBinding !== false,
+    excludeModels: new Set(readTeammateDispatchSettings(input.settings).excludeModels),
   }
 }
 
@@ -695,6 +769,10 @@ function listCandidates(
     const key = facts.id.toLowerCase()
     if (seen.has(key)) return
     seen.add(key)
+    if (ctx.excludeModels.has(key)) {
+      excluded.push({ model: facts.id, reason: 'teammateDispatch.excludeModels' })
+      return
+    }
     if (!allowedByTeammateAllowlist(route, facts.id, ctx.allowed, ctx.wildcard)) {
       excluded.push({ model: facts.id, reason: 'teammateModelAllowlist' })
       return
@@ -741,7 +819,7 @@ function listCandidates(
       const prior = byId.get(facts.id.toLowerCase())
       byId.set(facts.id.toLowerCase(), prior ? { ...facts, ...prior, contextWindow: prior.contextWindow ?? facts.contextWindow, vision: prior.vision ?? facts.vision, reasoning: prior.reasoning ?? facts.reasoning } : facts)
     }
-    for (const facts of byId.values()) {
+    for (const facts of pruneRouteCatalog(route, [...byId.values()])) {
       if (findProviderProfilesForModel(facts.id, [profile]).length === 0) continue
       let modelRoute = route
       try {
@@ -757,7 +835,7 @@ function listCandidates(
 
 function safeCatalog(deps: TeammateDispatchDeps, route: string): CatalogFacts[] {
   try {
-    return deps.routeCatalog(route)
+    return pruneRouteCatalog(route, deps.routeCatalog(route))
   } catch {
     return []
   }
@@ -1442,8 +1520,9 @@ async function chooseTeammateRouteInner(
         ...(family ? { family } : {}),
         model: explicit,
         source: 'explicit',
+        modelSource: 'explicit',
         reason: `${roleReason}; explicit ${explicit}`,
-        refusal: `Refusing to spawn ${role} teammate${input.name ? ` '${input.name}'` : ''} on '${explicit}' (${sep}): ${implementers.join(', ')} implemented with ${sep} in team '${input.teamName}'. A ${role} teammate must use a different model family than the implementer. Use ${suggestions.length > 0 ? `one of: ${suggestions.join(', ')}` : 'a different model family'}, or omit model to let the dispatcher choose.`,
+        refusal: `Refusing to spawn ${role} teammate${input.name ? ` '${input.name}'` : ''} on '${explicit}' (${sep}): ${implementers.join(', ')} implemented with ${sep} in team '${input.teamName}'. A ${role} teammate must use a different model family than the implementer. Pass model with a model from another family${suggestions.length > 0 ? ` (one of: ${suggestions.join(', ')})` : ''}, or omit model to let the dispatcher choose; if nothing else is allowed, widen teammateModelAllowlist.`,
       }
     }
     return {
@@ -1451,6 +1530,7 @@ async function chooseTeammateRouteInner(
       ...(family ? { family } : {}),
       model: explicit,
       source: 'explicit',
+      modelSource: 'explicit',
       reason: `${roleReason}; ${input.explicitModel !== undefined ? 'explicit model respected' : `model from ${agentType} definition`}${agentTypeNote}${exclusionNote}`,
     }
   }
@@ -1477,13 +1557,21 @@ async function chooseTeammateRouteInner(
         model: candidate.id,
         ...(candidate.providerProfile ? { providerProfile: candidate.providerProfile } : {}),
         source: 'jev',
-        reason: `jev p=${(picked.p ?? 0).toFixed(2)}${picked.corrected ? `; corrected from ${picked.corrected}` : ''}; role ${roleReason}${agentTypeNote}${exclusionNote}`,
+        modelSource: 'jev',
+        reason: `role ${roleReason}; model jev p=${(picked.p ?? 0).toFixed(2)}${picked.corrected ? ` (corrected from ${picked.corrected})` : ''}${agentTypeNote}${exclusionNote}`,
       }
     }
     const modelAnswer = answers.model
-    jevModelNote = modelAnswer?.type === 'choice'
-      ? `; jev model ${modelAnswer.choice} p=${(modelAnswer.probabilities[modelAnswer.choice] ?? 0).toFixed(2)} rejected`
-      : '; jev gave no model'
+    if (modelAnswer?.type === 'choice') {
+      const top = modelAnswer.choice
+      const p = modelAnswer.probabilities[top] ?? 0
+      const violation = modelViolation(top)
+      jevModelNote = violation
+        ? `, jev top ${top} rejected: ${violation}`
+        : `, jev top ${top} p=${p.toFixed(2)} < ${(config.jev.minP ?? 0.75).toFixed(2)}`
+    } else {
+      jevModelNote = ', jev gave no model'
+    }
   }
 
   // Fallback: the tier table.
@@ -1492,6 +1580,7 @@ async function chooseTeammateRouteInner(
     for (const family of config.tierFamilies[candidateTier]) {
       const candidate = resolveCandidate(family, candidateTier, ctx)
       if (!candidate) continue
+      if (ctx.excludeModels.has(candidate.model.toLowerCase())) continue
       const sep = separationFamilyOf(candidate.model) ?? family
       if (bindingExclusions.some(e => e.family === family || e.family === sep)) continue
       if (needsVision && !deps.supportsVision(candidate.model, family)) continue
@@ -1504,15 +1593,31 @@ async function chooseTeammateRouteInner(
         model: candidate.model,
         ...(candidate.providerProfile ? { providerProfile: candidate.providerProfile } : {}),
         source: roleSource,
-        reason: `${roleReason}${jevModelNote}${tierNote}${agentTypeNote}${exclusionNote}`,
+        modelSource: 'tier',
+        reason: `role ${roleReason}; model tier${jevModelNote}${tierNote}${agentTypeNote}${exclusionNote}`,
       }
     }
   }
-  const warning = `no configured${needsVision ? ' vision-capable' : ''} model is allowed for ${role}${bindingExclusions.length > 0 ? ` after excluding ${describeExclusions(bindingExclusions)}` : ''}; spawning on the default model`
+  if (bindingExclusions.length > 0) {
+    // A review/verify teammate with nothing rule-abiding to run on must not
+    // silently fall back to the default model: that may be the
+    // implementer's own family.
+    const implementers = describeExclusions(bindingExclusions)
+    const refusal = `Refusing to spawn ${role} teammate${input.name ? ` '${input.name}'` : ''}: no allowed${needsVision ? ' vision-capable' : ''} model outside the implementer's model family (${implementers}${input.teamName ? ` in team '${input.teamName}'` : ''}). A ${role} teammate must use a different model family than the implementer. Widen teammateModelAllowlist (e.g. add a model from another family, or "*"), or pass model with a model from another family.`
+    return {
+      ...base,
+      source: roleSource,
+      modelSource: 'none',
+      reason: `role ${roleReason}; model none${jevModelNote}${agentTypeNote}${exclusionNote}`,
+      refusal,
+    }
+  }
+  const warning = `no configured${needsVision ? ' vision-capable' : ''} model is allowed for ${role}; spawning on the default model`
   return {
     ...base,
     source: roleSource,
-    reason: `${roleReason}${jevModelNote}${agentTypeNote}; WARNING: ${warning}`,
+    modelSource: 'none',
+    reason: `role ${roleReason}; model none${jevModelNote}${agentTypeNote}; WARNING: ${warning}`,
     warning,
   }
 }

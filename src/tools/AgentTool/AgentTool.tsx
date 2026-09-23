@@ -678,8 +678,10 @@ export const AgentTool = buildTool({
         routedTeammateModelOnly ??
         resolvedTeammateModel ??
         toolUseContext.options.mainLoopModel;
-      if (dispatchMode !== 'off' && teammateModelIsExplicit) {
-        // Separation check on the explicit model, reusing the role (and the
+      if (dispatchMode !== 'off') {
+        // Separation check on the FINAL model, whatever its source (explicit,
+        // agent frontmatter, dispatched, agentRouting, or the leader's model
+        // inherited when nothing else applied), reusing the role (and the
         // type pick) from the first call rather than asking JEV again.
         const firstDecision = dispatchDecision;
         const recheck = await chooseTeammateRoute({
@@ -688,15 +690,23 @@ export const AgentTool = buildTool({
           explicitModel: effectiveTeammateModel,
           ...(firstDecision ? { prior: firstDecision } : {})
         });
-        dispatchDecision = firstDecision?.agentTypeProbabilities
-          ? { ...recheck, agentType: firstDecision.agentType, agentTypeP: firstDecision.agentTypeP, agentTypeProbabilities: firstDecision.agentTypeProbabilities }
-          : recheck;
-        if (dispatchDecision.refusal) {
-          if (dispatchMode === 'auto') {
-            throw new Error(dispatchDecision.refusal);
-          }
-          dispatchDecision = { ...dispatchDecision, reason: `${dispatchDecision.reason}; WOULD REFUSE: ${dispatchDecision.refusal}` };
+        let checked: TeammateRouteDecision;
+        if (teammateModelIsExplicit || !firstDecision) {
+          checked = firstDecision?.agentTypeProbabilities
+            ? { ...recheck, agentType: firstDecision.agentType, agentTypeP: firstDecision.agentTypeP, agentTypeProbabilities: firstDecision.agentTypeProbabilities }
+            : recheck;
+        } else {
+          // Keep the dispatcher's decision for the record; carry a refusal
+          // of the final model (e.g. an inherited leader model).
+          checked = recheck.refusal ? { ...firstDecision, refusal: recheck.refusal } : firstDecision;
         }
+        if (checked.refusal) {
+          if (dispatchMode === 'auto') {
+            throw new Error(checked.refusal);
+          }
+          checked = { ...checked, reason: `${checked.reason}; WOULD REFUSE: ${checked.refusal}` };
+        }
+        dispatchDecision = checked;
       }
       const dispatchRecord = dispatchDecision
         ? toDispatchRecord(dispatchDecision, {
@@ -966,6 +976,7 @@ export const AgentTool = buildTool({
     // candidates only). The fork path keeps the parent's model: its request
     // prefix must stay cache-identical.
     let subagentModel = isForkPath ? undefined : model;
+    let subagentDispatch: { decision: TeammateRouteDecision; mode: 'auto' | 'suggest'; settings: ReturnType<typeof getInitialSettings> } | undefined;
     if (!isForkPath) {
       const dispatchSettings = getInitialSettings();
       const subagentDispatchMode = readTeammateDispatchSettings(dispatchSettings).mode;
@@ -1007,9 +1018,13 @@ export const AgentTool = buildTool({
             ? { ...recheck, agentType: earlySubagentDecision.agentType, agentTypeP: earlySubagentDecision.agentTypeP, agentTypeProbabilities: earlySubagentDecision.agentTypeProbabilities }
             : recheck;
         }
-        if (subagentDecision.refusal && subagentDispatchMode === 'auto') {
-          throw new Error(subagentDecision.refusal);
+        if (subagentDecision.refusal) {
+          if (subagentDispatchMode === 'auto') {
+            throw new Error(subagentDecision.refusal);
+          }
+          subagentDecision = { ...subagentDecision, reason: `${subagentDecision.reason}; WOULD REFUSE: ${subagentDecision.refusal}` };
         }
+        subagentDispatch = { decision: subagentDecision, mode: subagentDispatchMode, settings: dispatchSettings };
         if (!subagentModelIsExplicit && subagentDispatchMode === 'auto' && subagentDecision.model) {
           subagentModel = subagentDecision.model;
         }
@@ -1027,6 +1042,30 @@ export const AgentTool = buildTool({
       settings: getInitialSettings(),
       permissionMode,
     });
+    if (subagentDispatch) {
+      // Separation check on the FINAL model — whatever resolved it (the
+      // dispatcher, frontmatter, agentRouting, or the parent model inherited
+      // when nothing else applied) — reusing the role without asking JEV.
+      const finalCheck = await chooseTeammateRoute({
+        description,
+        prompt,
+        name,
+        subagent_type: selectedAgent.agentType,
+        teamName,
+        settings: subagentDispatch.settings,
+        leaderModel: toolUseContext.options.mainLoopModel,
+        allowProfileBinding: false,
+        spawnPath: 'subagent',
+        prior: subagentDispatch.decision,
+        explicitModel: effectiveAgentModel
+      });
+      if (finalCheck.refusal) {
+        if (subagentDispatch.mode === 'auto') {
+          throw new Error(finalCheck.refusal);
+        }
+        logForDebugging(`[AgentTool] subagent ${name ?? selectedAgent.agentType}: WOULD REFUSE: ${finalCheck.refusal}`);
+      }
+    }
     logEvent('tengu_agent_tool_selected', {
       agent_type: selectedAgent.agentType as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       model: effectiveAgentModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,

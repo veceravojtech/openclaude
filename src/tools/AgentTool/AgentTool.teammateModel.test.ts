@@ -784,9 +784,9 @@ test('dispatch: a reviewer after a sonnet-5 implementer never gets sonnet-5', as
   expect(config.model).toBe('claude-opus-5-5')
   expect(config.dispatch?.role).toBe('review')
   expect(resultText(AgentTool, result.data)).toContain(
-    'dispatch: review → opus-5.5 as default (heuristic',
+    'dispatch: review → opus-5.5 as default (role heuristic',
   )
-  expect(resultText(AgentTool, result.data)).toContain('excluded sonnet-5 used by dev')
+  expect(resultText(AgentTool, result.data)).toContain('excluded claude-sonnet used by dev')
 })
 
 test('dispatch: an explicit same-family review model is refused with a clear error', async () => {
@@ -799,8 +799,74 @@ test('dispatch: an explicit same-family review model is refused with a clear err
       name: 'rev',
       model: 'claude-sonnet-5',
     }),
-  ).rejects.toThrow(/review teammate 'rev'.*'dev' implemented with sonnet-5.*fable-5\.1/)
+  ).rejects.toThrow(/review teammate 'rev'.*'dev' implemented with claude-sonnet.*fable-5\.1/)
   expect(spawnTeammate).not.toHaveBeenCalled()
+})
+
+test('dispatch: a reviewer with only the implementer family allowed is refused, not spawned on the default', async () => {
+  await setDispatchWorld([{ name: 'dev', role: 'implement', model: 'claude-sonnet-5' }])
+  settingsForTest = { teammateModelAllowlist: ['sonnet-5'] }
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+  await expect(
+    callDispatchTool(AgentTool, {
+      description: 'Review the retry diff',
+      prompt: 'Critique the diff.',
+      name: 'rev',
+    }),
+  ).rejects.toThrow(/review teammate 'rev'.*claude-sonnet used by dev.*Widen teammateModelAllowlist.*another family/)
+  expect(spawnTeammate).not.toHaveBeenCalled()
+})
+
+test('dispatch: an inherited leader model in the implementer family is refused for a reviewer', async () => {
+  await setDispatchWorld([{ name: 'dev', role: 'implement', model: 'claude-sonnet-5' }])
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+  await expect(
+    AgentTool.call(
+      { team_name: 'review-team', description: 'Review the retry diff', prompt: 'Critique the diff.', name: 'rev', model: 'inherit' },
+      makeToolUseContext({ mainLoopModel: 'claude-sonnet-4-6' }),
+      mock(async () => ({ behavior: 'allow' })) as never,
+      { requestId: 'req-1' } as never,
+    ),
+  ).rejects.toThrow(/Refusing to spawn review teammate 'rev' on 'claude-sonnet-4-6' \(claude-sonnet\)/)
+  expect(spawnTeammate).not.toHaveBeenCalled()
+})
+
+test('dispatch: suggest mode reports WOULD REFUSE for an inherited implementer-family model', async () => {
+  await setDispatchWorld([{ name: 'dev', role: 'implement', model: 'claude-sonnet-5' }])
+  settingsForTest = { teammateDispatch: { mode: 'suggest' } }
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+  const result = await AgentTool.call(
+    { team_name: 'review-team', description: 'Review the retry diff', prompt: 'Critique the diff.', name: 'rev' },
+    makeToolUseContext({ mainLoopModel: 'claude-sonnet-5' }),
+    mock(async () => ({ behavior: 'allow' })) as never,
+    { requestId: 'req-1' } as never,
+  )
+  expect(spawnTeammate).toHaveBeenCalled()
+  expect(resultText(AgentTool, result.data)).toContain('WOULD REFUSE: Refusing to spawn review teammate')
+})
+
+test('dispatch: suggest mode reports WOULD REFUSE when no allowed model exists for a reviewer', async () => {
+  await setDispatchWorld([{ name: 'dev', role: 'implement', model: 'claude-sonnet-5' }])
+  settingsForTest = { teammateModelAllowlist: ['sonnet-5'], teammateDispatch: { mode: 'suggest' } }
+  const { AgentTool } = await importAgentToolWithSpawnMock()
+  const result = await callDispatchTool(AgentTool, {
+    description: 'Review the retry diff',
+    prompt: 'Critique the diff.',
+    name: 'rev',
+  })
+  expect(resultText(AgentTool, result.data)).toContain('WOULD REFUSE: Refusing to spawn review teammate')
+})
+
+test('dispatch: a legitimate reviewer still spawns when the allowlist has another family', async () => {
+  await setDispatchWorld([{ name: 'dev', role: 'implement', model: 'claude-opus-5-5' }])
+  settingsForTest = { teammateModelAllowlist: ['sonnet-5'] }
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+  await callDispatchTool(AgentTool, {
+    description: 'Review the retry diff',
+    prompt: 'Critique the diff.',
+    name: 'rev',
+  })
+  expect(getSpawnConfig(spawnTeammate).model).toBe('claude-sonnet-5')
 })
 
 test('dispatch: an explicit non-review model is respected and its role recorded', async () => {

@@ -237,8 +237,13 @@ context. It also asks two choice questions:
 - `model`: every model this machine can spawn. That covers each catalog id on
   each configured route: the Claude ids when Anthropic is logged in, plus every
   saved profile's models, such as Z.AI, DeepSeek and Codex. The list is
-  filtered by `teammateModelAllowlist` (`["*"]` keeps all of them) and by the
-  organization's `availableModels`. Each option is described from catalog data:
+  filtered by `teammateModelAllowlist` (`["*"]` keeps all of them), by
+  `teammateDispatch.excludeModels` and by the organization's `availableModels`.
+  Ids a route cannot actually serve are dropped first: a dated legacy Claude id
+  (`claude-opus-4-20250514`, `claude-sonnet-4-5-20250929`, …) when an undated
+  id of the same line is on the route (a dated id that is its line's only one,
+  like `claude-haiku-4-5-20251001`, stays), and Codex Spark
+  (`gpt-5.3-codex-spark`), which Codex refuses on a ChatGPT-account login. Each option is described from catalog data:
   provider, context, price tier, vision and reasoning. The tier table below is
   sent as the preference.
 - `agent_type`: the loaded agent definitions plus `default`. Built-in types are
@@ -248,8 +253,8 @@ A model or agent type you pass explicitly is never asked about. A chosen
 type's `model` frontmatter counts as explicit.
 
 Hard rules are applied before the question and again to the answer. A review
-or verify teammate never uses an implementer's model family, and every Claude
-Sonnet version counts as one family. A `computer_use` teammate needs a vision
+or verify teammate never uses an implementer's model family (see the family
+table below). A `computer_use` teammate needs a vision
 model. An implementer's agent type must be able to edit files, and a
 `computer_use` teammate's type must be able to use a browser.
 
@@ -271,24 +276,54 @@ profile, which is bound to the teammate like `provider_profile`) and, for
 in the teammate matrix, so it is only a candidate with
 `"teammateModelAllowlist": ["*"]`. If a tier has nothing usable the dispatcher
 tries the lower tiers, then the higher ones; if nothing qualifies at all the
-teammate spawns on the default model and the result says so.
+teammate spawns on the default model and the result says so — except a
+`review`/`verify` teammate with an implementer to avoid, which is refused (the
+default model may be the implementer's own family).
 
 **Separation rule.** A `review` or `verify` teammate never gets a model family
-an `implement` teammate in the same team used. Each member's role and family are
-recorded in the team's `config.json`; for older members with no role, every
-non-review member's family is avoided. An explicit `model` that breaks the rule
-is refused:
+an `implement` teammate in the same team used. A family is a vendor model
+line, across every version and provider prefix (`us.anthropic.`,
+`accounts/fireworks/models/`, `deepseek-ai/`, `:cloud`, `[1m]`, dates):
+
+| Family | Ids |
+| --- | --- |
+| `claude-opus` | every `claude-opus*` (and `claude-3-opus*`) |
+| `claude-sonnet` | every `claude-sonnet*` |
+| `claude-haiku` | every `claude-haiku*` |
+| `claude-fable` | every `claude-fable*` |
+| `gpt-6` | every `gpt-6*` |
+| `gpt-5` | every `gpt-5.x` tier and version (`gpt-5.6-sol`, `gpt-5.5`, `gpt-5.3-codex`, …) |
+| `glm` | every `glm-*` / `GLM-*` |
+| `deepseek` | every `deepseek-*` |
+| anything else | the id without `[1m]` and its release date |
+
+Each member's role and family are recorded in the team's `config.json`; for
+older members with no role, every non-review member's family is avoided. The
+rule is checked on the model the teammate will actually run, whatever set it:
+the dispatcher, an explicit `model`, agent frontmatter, `agentRouting`, or the
+leader's model inherited when nothing else applied. A model that breaks it is
+refused:
 
 ```text
-Refusing to spawn review teammate 'rev' on 'claude-sonnet-5' (sonnet-5): 'dev' implemented with sonnet-5 in team 'auth-fix'. A review teammate must use a different model family than the implementer. Use one of: fable-5.1, opus-5.5, gpt-6, deepseek-v4-pro, glm-5.3, gpt-5.6, deepseek-v4.1-flash, or omit model to let the dispatcher choose.
+Refusing to spawn review teammate 'rev' on 'claude-sonnet-5' (claude-sonnet): 'dev' implemented with claude-sonnet in team 'auth-fix'. A review teammate must use a different model family than the implementer. Pass model with a model from another family (one of: fable-5.1, opus-5.5, gpt-6, deepseek-v4-pro, glm-5.3, gpt-5.6, deepseek-v4.1-flash), or omit model to let the dispatcher choose; if nothing else is allowed, widen teammateModelAllowlist.
 ```
+
+When no allowed model outside the implementer's family exists at all (for
+example `"teammateModelAllowlist": ["sonnet-5"]` with the implementer on
+Sonnet), the spawn is refused with the same advice: widen
+`teammateModelAllowlist` or pass a model from another family.
 
 Every teammate spawn result ends with the decision, and the same decision is
 added to the teammate's `teammate_startup` record:
 
 ```text
-dispatch: review → opus-5.5 (jev p=0.86; excluded sonnet-5 used by dev)
+dispatch: review → opus-5.5 (role jev p=0.90; model jev p=0.86; excluded claude-sonnet used by dev)
+dispatch: review → fable-5.1 as default (role jev p=1.00; model tier, jev top claude-fable-5-1 p=0.44 < 0.75)
 ```
+
+The first part says where the role came from, the second where the model came
+from: `model jev` (JEV's pick) or `model tier` (the tier table, with why JEV's
+pick was not used).
 
 Configure it with `teammateDispatch`:
 
@@ -300,7 +335,8 @@ Configure it with `teammateDispatch`:
       "roles": { "research": "fast" },
       "tiers": { "deep": ["opus-5.5", "fable-5.1"] }
     },
-    "jev": { "enabled": true, "timeoutMs": 3000, "minP": 0.75, "minMargin": 0.15 }
+    "jev": { "enabled": true, "timeoutMs": 3000, "minP": 0.75, "minMargin": 0.15 },
+    "excludeModels": ["gpt-5.4"]
   }
 }
 ```
@@ -312,6 +348,10 @@ Configure it with `teammateDispatch`:
   tiers or families log one warning and are ignored.
 - `jev`: `enabled` (default `true`), `timeoutMs`, and the acceptance thresholds
   `minP` / `minMargin`.
+- `excludeModels`: exact model ids the dispatcher must never pick, for example a
+  model your plan is not entitled to. Applied to the JEV candidates and the
+  tier-table fallback; each shows up in the debug line as excluded.
+- In `suggest` mode a refusal is reported as `WOULD REFUSE: …` instead.
 
 ## GitHub Copilot sub-agent optimization
 

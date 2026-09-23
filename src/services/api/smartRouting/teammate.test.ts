@@ -16,6 +16,8 @@ import {
   formatDispatchSummary,
   hasNamedAgentRouting,
   readTeammateDispatchSettings,
+  separationFamilyOf,
+  pruneRouteCatalog,
   type TeamMemberLike,
   type TeammateDispatchDeps,
 } from './teammate.js'
@@ -174,7 +176,7 @@ describe('JEV classification', () => {
     expect(decision.family).toBe('fable-5.1')
     expect(decision.costUsd).toBe(0.0004)
     expect(decision.probabilities?.review).toBe(0.86)
-    expect(formatDispatchSummary(decision)).toBe('dispatch: review → fable-5.1 (jev p=0.86; jev gave no model)')
+    expect(formatDispatchSummary(decision)).toBe('dispatch: review → fable-5.1 (role jev p=0.86; model tier, jev gave no model)')
   })
 
   test('an unconfident JEV answer falls back to the heuristic', async () => {
@@ -213,7 +215,7 @@ describe('JEV classification', () => {
     expect(decision.role).toBe('review')
     expect(decision.source).toBe('jev')
     expect(decision.model).toBe('claude-opus-5-5')
-    expect(formatDispatchSummary(decision)).toStartWith('dispatch: review → opus-5.5 (jev p=0.88')
+    expect(formatDispatchSummary(decision)).toStartWith('dispatch: review → opus-5.5 (role jev p=0.90; model jev p=0.88')
   })
 
   test('JEV failure is non-blocking', async () => {
@@ -396,8 +398,8 @@ describe('separation rule', () => {
       settings: settings({ teammateDispatch: { policy: { tiers: { deep: ['sonnet-5', 'opus-5.5'] } } } }),
     })
     expect(decision.family).toBe('opus-5.5')
-    expect(decision.excluded).toEqual([{ family: 'sonnet-5', by: 'dev' }])
-    expect(formatDispatchSummary(decision)).toContain('excluded sonnet-5 used by dev')
+    expect(decision.excluded).toEqual([{ family: 'claude-sonnet', by: 'dev' }])
+    expect(formatDispatchSummary(decision)).toContain('excluded claude-sonnet used by dev')
   })
 
   test('verify is separated too, falling to the next tier down when needed', async () => {
@@ -422,7 +424,7 @@ describe('separation rule', () => {
       explicitModel: 'claude-sonnet-5',
       settings: settings(),
     })
-    expect(decision.refusal).toContain("'dev' implemented with sonnet-5")
+    expect(decision.refusal).toContain("'dev' implemented with claude-sonnet")
     expect(decision.refusal).toContain("teammate 'rev'")
     expect(decision.refusal).toContain('fable-5.1')
   })
@@ -440,15 +442,52 @@ describe('separation rule', () => {
     expect(decision.model).toBe('claude-sonnet-5')
   })
 
-  test('nothing left at all spawns on the default with a warning', async () => {
-    members = [{ name: 'dev', role: 'implement', family: 'fable-5.1' }]
+  test('a reviewer with no allowed model outside the implementer family is refused, not defaulted', async () => {
+    members = [{ name: 'dev', role: 'implement', model: 'claude-sonnet-5' }]
     const decision = await chooseTeammateRoute({
       description: 'Review the diff',
+      name: 'rev',
       teamName: 't',
-      settings: settings({ teammateModelAllowlist: ['fable-5.1'] }),
+      settings: settings({ teammateModelAllowlist: ['sonnet-5'] }),
     })
+    expect(decision.role).toBe('review')
     expect(decision.model).toBeUndefined()
-    expect(decision.warning).toContain('after excluding fable-5.1 used by dev')
+    expect(decision.modelSource).toBe('none')
+    expect(decision.refusal).toContain("Refusing to spawn review teammate 'rev'")
+    expect(decision.refusal).toContain('claude-sonnet used by dev')
+    expect(decision.refusal).toContain('Widen teammateModelAllowlist')
+    expect(decision.refusal).toContain('model from another family')
+  })
+
+  test('a role without separation still spawns on the default with a warning when nothing is allowed', async () => {
+    const decision = await chooseTeammateRoute({
+      description: 'Implement the fix',
+      settings: settings({ teammateModelAllowlist: ['sonnet-5'] }),
+      prompt: 'Fix the bug and commit.',
+    })
+    // sonnet-5 is allowed and fits implement: no refusal.
+    expect(decision.refusal).toBeUndefined()
+    expect(decision.model).toBe('claude-sonnet-5')
+    setDeps({ hasAnthropicAuth: () => false })
+    const none = await chooseTeammateRoute({
+      description: 'Implement the fix',
+      settings: settings({ teammateModelAllowlist: ['sonnet-5'] }),
+    })
+    expect(none.refusal).toBeUndefined()
+    expect(none.model).toBeUndefined()
+    expect(none.warning).toContain('spawning on the default model')
+  })
+
+  test('an explicit (e.g. inherited leader) model in the implementer family is refused for a reviewer', async () => {
+    members = [{ name: 'dev', role: 'implement', model: 'claude-opus-5-5' }]
+    const decision = await chooseTeammateRoute({
+      description: 'Review the diff',
+      name: 'rev',
+      teamName: 't',
+      explicitModel: 'claude-opus-4-8',
+      settings: settings(),
+    })
+    expect(decision.refusal).toContain("'dev' implemented with claude-opus")
   })
 
   test('old teams without role data exclude every non-review member family', () => {
@@ -462,8 +501,8 @@ describe('separation rule', () => {
       'sonnet',
     )
     expect(excluded).toEqual([
-      { family: 'opus-5.5', by: 'worker' },
-      { family: 'sonnet-5', by: 'inheritor' },
+      { family: 'claude-opus', by: 'worker' },
+      { family: 'claude-sonnet', by: 'inheritor' },
     ])
   })
 })
@@ -609,7 +648,8 @@ describe('JEV model and agent-type choice', () => {
     const decision = await chooseTeammateRoute({ description: 'Handle it', settings: settings() })
     expect(decision.source).toBe('jev')
     expect(decision.model).toBe('claude-fable-5-1')
-    expect(decision.reason).toContain('jev model claude-opus-5-5 p=0.50 rejected')
+    expect(decision.modelSource).toBe('tier')
+    expect(decision.reason).toBe('role jev p=0.90; model tier, jev top claude-opus-5-5 p=0.50 < 0.75')
   })
 
   test('a JEV failure falls back to the heuristic', async () => {
@@ -707,5 +747,95 @@ describe('JEV model and agent-type choice', () => {
     expect(decision.model).toBe('claude-fable-5-1')
     expect(decision.source).toBe('explicit')
     expect(decision.refusal).toBeUndefined()
+  })
+})
+
+describe('separation families are vendor model lines', () => {
+  const table: Array<[string, string]> = [
+    ['claude-opus-5-5', 'claude-opus'],
+    ['claude-opus-4-8', 'claude-opus'],
+    ['claude-opus-4-20250514', 'claude-opus'],
+    ['claude-opus-4-6[1m]', 'claude-opus'],
+    ['us.anthropic.claude-opus-4-5-20251101-v1:0', 'claude-opus'],
+    ['anthropic.claude-opus-4-1-20250805-v1:0', 'claude-opus'],
+    ['claude-opus-4-1@20250805', 'claude-opus'],
+    ['claude-3-opus-20240229', 'claude-opus'],
+    ['claude-sonnet-5', 'claude-sonnet'],
+    ['claude-sonnet-4-6[1m]', 'claude-sonnet'],
+    ['claude-3-5-sonnet-20241022', 'claude-sonnet'],
+    ['eu.anthropic.claude-sonnet-4-5-20250929-v1:0', 'claude-sonnet'],
+    ['claude-haiku-4-5-20251001', 'claude-haiku'],
+    ['claude-fable-5-1', 'claude-fable'],
+    ['gpt-6-astra', 'gpt-6'],
+    ['gpt-6', 'gpt-6'],
+    ['gpt-5.6-sol', 'gpt-5'],
+    ['gpt-5.6-luna', 'gpt-5'],
+    ['gpt-5.5', 'gpt-5'],
+    ['gpt-5.4', 'gpt-5'],
+    ['gpt-5.3-codex', 'gpt-5'],
+    ['openai/gpt-5.5', 'gpt-5'],
+    ['glm-5.3', 'glm'],
+    ['GLM-4.5-Air', 'glm'],
+    ['z-ai/glm-5.3-flash', 'glm'],
+    ['glm-5.1:cloud', 'glm'],
+    ['accounts/fireworks/models/glm-5p1', 'glm'],
+    ['deepseek-v4-pro', 'deepseek'],
+    ['deepseek-flash', 'deepseek'],
+    ['deepseek-ai/deepseek-v4-pro', 'deepseek'],
+    ['accounts/fireworks/models/deepseek-v4-pro', 'deepseek'],
+    ['kimi-k2.5', 'kimi-k2.5'],
+    ['mistral-large-2025-06-01', 'mistral-large'],
+    ['some-model-20250101[1m]', 'some-model'],
+  ]
+  for (const [id, family] of table) {
+    test(`${id} → ${family}`, () => {
+      expect(separationFamilyOf(id)).toBe(family)
+    })
+  }
+  test('aliases resolve to their line', () => {
+    expect(separationFamilyOf('opus')).toBe('claude-opus')
+    expect(separationFamilyOf('sonnet')).toBe('claude-sonnet')
+    expect(separationFamilyOf('inherit')).toBeUndefined()
+  })
+})
+
+describe('spawnable candidates under "*"', () => {
+  const zaiAll: ProviderProfile = { ...zaiProfile, model: 'glm-5.3, glm-5.3-flash, glm-5.2, GLM-5.1, GLM-5-Turbo, GLM-4.7, GLM-4.5-Air' }
+  const WORKING = [
+    'claude-opus-5-5', 'claude-fable-5-1', 'claude-sonnet-5', 'claude-sonnet-4-6', 'claude-opus-5', 'claude-opus-4-8', 'claude-haiku-4-5-20251001',
+    'glm-5.3', 'glm-5.3-flash', 'glm-5.2', 'GLM-5.1', 'GLM-5-Turbo', 'GLM-4.7', 'GLM-4.5-Air',
+    'deepseek-v4-pro', 'deepseek-flash',
+    'gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5',
+  ]
+  const LEGACY = ['claude-sonnet-4-20250514', 'claude-sonnet-4-5-20250929', 'claude-opus-4-20250514', 'claude-opus-4-1-20250805', 'claude-opus-4-5-20251101']
+
+  test('drop dated legacy Claude ids, keep every verified working model', () => {
+    setDeps({ providerProfiles: () => [zaiAll, deepseekProfile, codexProfile] })
+    const ids = listSpawnableModels({ settings: settings({ teammateModelAllowlist: ['*'] }) }).candidates.map(c => c.id)
+    for (const id of LEGACY) expect(ids).not.toContain(id)
+    for (const id of WORKING) expect(ids).toContain(id)
+    expect(ids.some(id => /codex-spark|codexspark/.test(id))).toBe(false)
+  })
+
+  test('pruneRouteCatalog: dated ids stay when they are the only one of their line; spark is dropped on codex', () => {
+    expect(pruneRouteCatalog('anthropic', [{ id: 'claude-haiku-4-5-20251001' }, { id: 'claude-opus-4-20250514' }]).map(e => e.id))
+      .toEqual(['claude-haiku-4-5-20251001', 'claude-opus-4-20250514'])
+    expect(pruneRouteCatalog('anthropic', [{ id: 'claude-opus-4-20250514' }, { id: 'claude-opus-5-5' }]).map(e => e.id))
+      .toEqual(['claude-opus-5-5'])
+    expect(pruneRouteCatalog('codex', [{ id: 'gpt-5.3-codex-spark' }, { id: 'gpt-5.5' }]).map(e => e.id)).toEqual(['gpt-5.5'])
+    expect(pruneRouteCatalog('openai', [{ id: 'gpt-5.3-codex-spark' }]).map(e => e.id)).toEqual(['gpt-5.3-codex-spark'])
+  })
+
+  test('teammateDispatch.excludeModels prunes exact ids from candidates and the tier fallback', async () => {
+    const s = settings({ teammateModelAllowlist: ['*'], teammateDispatch: { excludeModels: ['claude-fable-5-1', 'claude-opus-4-8'] } })
+    const listing = listSpawnableModels({ settings: s })
+    const ids = listing.candidates.map(c => c.id)
+    expect(ids).not.toContain('claude-fable-5-1')
+    expect(ids).not.toContain('claude-opus-4-8')
+    expect(ids).toContain('claude-opus-5-5')
+    expect(listing.excluded).toContainEqual({ model: 'claude-fable-5-1', reason: 'teammateDispatch.excludeModels' })
+    const decision = await chooseTeammateRoute({ description: 'Review the diff', settings: s })
+    expect(decision.model).not.toBe('claude-fable-5-1')
+    expect(decision.model).toBe('claude-opus-5-5')
   })
 })

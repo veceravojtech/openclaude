@@ -148,7 +148,10 @@ function buildPayload(
   for (const [name, q] of Object.entries(req.questions)) {
     const wire: Record<string, unknown> = { type: q.type }
     if (instruction) wire.instructions = instruction
-    if (q.type === 'choice' || q.type === 'score') wire.criteria = q.criteria
+    // Criteria texts can carry user content (agent whenToUse, descriptions):
+    // redact them. Choice keys stay verbatim — answers are validated
+    // against them.
+    if (q.type === 'choice' || q.type === 'score') wire.criteria = redactValue(q.criteria, key)
     questions[name] = wire
   }
   const payload: Record<string, unknown> = {

@@ -372,6 +372,31 @@ describe('evaluateJev: redaction and key hygiene', () => {
     expect(sent.instruction ?? sent.questions.urgent.instructions).toContain('Route it.')
   })
 
+  test('criteria texts are redacted too; choice keys stay verbatim', async () => {
+    const { fetchImpl, calls } = mockFetch(() => jsonResponse(VALID_BODY))
+    const criteria = (REQUEST.questions.department as { criteria: Record<string, string> }).criteria
+    const [firstKey] = Object.keys(criteria)
+    await evaluateJev(
+      {
+        ...REQUEST,
+        questions: {
+          ...REQUEST.questions,
+          department: { type: 'choice', criteria: { ...criteria, [firstKey!]: `agent whenToUse: token ${FAKE_SECRET} and ${KEY}` } },
+          impact: { type: 'score', criteria: ['Low', `Medium ${FAKE_OPENAI}`, 'High'] },
+        },
+      },
+      { apiKey: KEY, fetchImpl },
+    )
+    const body = String(calls[0]!.init.body)
+    expect(body).not.toContain(FAKE_SECRET)
+    expect(body).not.toContain(FAKE_OPENAI)
+    expect(body).not.toContain(KEY)
+    const sent = JSON.parse(body)
+    expect(Object.keys(sent.questions.department.criteria)).toEqual(Object.keys(criteria))
+    expect(sent.questions.department.criteria[firstKey!]).toContain('agent whenToUse: token [REDACTED')
+    expect(sent.questions.impact.criteria[0]).toBe('Low')
+  })
+
   test('the gateway key itself is redacted if it appears in state', async () => {
     const { fetchImpl, calls } = mockFetch(() => jsonResponse(VALID_BODY))
     await evaluateJev(
