@@ -1,4 +1,4 @@
-import { isOpusAtLeast } from './model/opusVersion.js'
+import { isFableAtLeast, isOpusAtLeast } from './model/opusVersion.js'
 // biome-ignore-all assist/source/organizeImports: internal-only import markers must not be reordered
 import { isUltrathinkEnabled } from './thinking.js'
 import { getInitialSettings } from './settings/settings.js'
@@ -505,7 +505,8 @@ function modelMatchesNativeLegacyTransport(
   return transport === 'anthropic'
     ? normalized.includes('haiku') ||
       normalized.includes('sonnet') ||
-      normalized.includes('opus')
+      normalized.includes('opus') ||
+      normalized.includes('fable')
     : transport === 'gemini' && normalized.includes('gemini-')
 }
 
@@ -538,7 +539,9 @@ function legacyModelSupportsEffort(
   // variations (e.g. `claude-opus-4-7`, `opencode-claude-opus-4-8`).
   if (
     nativeTransport === 'anthropic' &&
-    (isOpusAtLeast(m, 4, 5) || m.includes('sonnet-4-6'))
+    (isOpusAtLeast(m, 4, 5) ||
+      isFableAtLeast(m, 5) ||
+      m.includes('sonnet-4-6'))
   ) {
     return true
   }
@@ -795,7 +798,7 @@ function legacyModelSupportsMaxEffort(
   if (supported3P !== undefined) {
     return supported3P
   }
-  if (isOpusAtLeast(model, 4, 6)) {
+  if (isOpusAtLeast(model, 4, 6) || isFableAtLeast(model, 5)) {
     return true
   }
   if (process.env.USER_TYPE === 'ant' && resolveAntModel(model)) {
@@ -825,7 +828,7 @@ function legacyModelSupportsXHighEffort(
   if (modelUsesOpenAIEffort(model, context)) {
     return true
   }
-  if (isOpusAtLeast(model, 4, 7)) {
+  if (isOpusAtLeast(model, 4, 7) || isFableAtLeast(model, 5)) {
     return true
   }
   return false

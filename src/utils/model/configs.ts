@@ -264,6 +264,24 @@ export const CLAUDE_OPUS_5_5_CONFIG = {
   xai: 'grok-4.6',
 } as const satisfies LegacyProviderModelConfig
 
+// Claude Fable 5.1. Bedrock has no `-v1` suffix for this model (unlike Opus
+// 5.5's `us.anthropic.claude-opus-5-5-v1`); verified against the AWS model card.
+export const CLAUDE_FABLE_5_1_CONFIG = {
+  firstParty: 'claude-fable-5-1',
+  bedrock: 'us.anthropic.claude-fable-5-1',
+  vertex: 'claude-fable-5-1',
+  foundry: 'claude-fable-5-1',
+  openai: 'gpt-4o',
+  gemini: 'gemini-2.5-pro',
+  mistral: 'devstral-latest',
+  github: 'github:copilot',
+  codex: 'gpt-5.6-sol',
+  'nvidia-nim': 'nvidia/llama-3.1-nemotron-70b-instruct',
+  minimax: 'MiniMax-M2.5',
+  'xiaomi-mimo': 'mimo-v2.5-pro',
+  xai: 'grok-4.6',
+} as const satisfies LegacyProviderModelConfig
+
 export const CLAUDE_SONNET_4_6_CONFIG = {
   firstParty: 'claude-sonnet-4-6',
   bedrock: 'us.anthropic.claude-sonnet-4-6',
@@ -297,6 +315,7 @@ export const LEGACY_PROVIDER_MODEL_CONFIGS = {
   opus48: CLAUDE_OPUS_4_8_CONFIG,
   opus50: CLAUDE_OPUS_5_CONFIG,
   opus55: CLAUDE_OPUS_5_5_CONFIG,
+  fable51: CLAUDE_FABLE_5_1_CONFIG,
 } as const satisfies Record<string, LegacyProviderModelConfig>
 
 // Backward-compatible alias for existing imports.

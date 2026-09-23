@@ -28,6 +28,7 @@ import { errorMessage } from '../errors.js'
 import { lazySchema } from '../lazySchema.js'
 import { extractTextContent } from '../messages.js'
 import { resolveAntModel } from '../model/antModels.js'
+import { modelRequiresAlwaysOnThinking } from '../model/opusVersion.js'
 import { getMainLoopModel } from '../model/model.js'
 import { getAutoModeConfig } from '../settings/settings.js'
 import { sideQuery } from '../sideQuery.js'
@@ -804,8 +805,9 @@ function getClassifierThinkingConfig(
   model: string,
 ): [false | undefined, number] {
   if (
-    process.env.USER_TYPE === 'ant' &&
-    resolveAntModel(model)?.alwaysOnThinking
+    (process.env.USER_TYPE === 'ant' &&
+      resolveAntModel(model)?.alwaysOnThinking) ||
+    modelRequiresAlwaysOnThinking(model)
   ) {
     return [undefined, 2048]
   }

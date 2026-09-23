@@ -1,4 +1,9 @@
-import { canonicalOpusId, parseOpusVersion } from './model/opusVersion.js'
+import {
+  canonicalFableId,
+  canonicalOpusId,
+  parseFableVersion,
+  parseOpusVersion,
+} from './model/opusVersion.js'
 import { createHash, randomUUID, type UUID } from 'crypto'
 import { stat } from 'fs/promises'
 import { isAbsolute, join, relative, sep } from 'path'
@@ -156,6 +161,8 @@ export function sanitizeModelName(shortName: string): string {
   // Map internal variants to public equivalents based on model family
   const opusVersion = parseOpusVersion(shortName)
   if (opusVersion && opusVersion.major >= 5) return canonicalOpusId(opusVersion)
+  const fableVersion = parseFableVersion(shortName)
+  if (fableVersion) return canonicalFableId(fableVersion)
   if (shortName.includes('opus-4-8')) return 'claude-opus-4-8'
   if (shortName.includes('opus-4-7')) return 'claude-opus-4-7'
   if (shortName.includes('opus-4-6')) return 'claude-opus-4-6'

@@ -57,7 +57,10 @@ import { logError } from '../../utils/log.js'
 import { isAutoMemFile } from '../../utils/memoryFileDetection.js'
 import { createUserMessage } from '../../utils/messages.js'
 import { getCanonicalName, getMainLoopModel } from '../../utils/model/model.js'
-import { isOpusAtLeast } from '../../utils/model/opusVersion.js'
+import {
+  isFableAtLeast,
+  isOpusAtLeast,
+} from '../../utils/model/opusVersion.js'
 import {
   mapNotebookCellsToToolResult,
   readNotebook,
@@ -835,10 +838,14 @@ export function shouldIncludeFileReadMitigation(): boolean {
     return false
   }
   const shortName = getCanonicalName(getMainLoopModel())
-  return !isOpusAtLeast(
-    shortName,
-    MITIGATION_EXEMPT_MIN_OPUS.major,
-    MITIGATION_EXEMPT_MIN_OPUS.minor,
+  // Fable 5+ ships with server-side blocking classifiers and gets the same
+  // exemption as the modern Opus line.
+  return !(
+    isOpusAtLeast(
+      shortName,
+      MITIGATION_EXEMPT_MIN_OPUS.major,
+      MITIGATION_EXEMPT_MIN_OPUS.minor,
+    ) || isFableAtLeast(shortName, 5)
   )
 }
 

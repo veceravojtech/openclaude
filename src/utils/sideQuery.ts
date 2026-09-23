@@ -20,6 +20,7 @@ import { applyAnthropicAttributionPolicy } from './anthropicAttribution.js'
 import { getModelBetas, modelSupportsStructuredOutputs } from './betas.js'
 import { computeFingerprint } from './fingerprint.js'
 import { normalizeModelStringForAPI } from './model/model.js'
+import { applyModelRequestConstraints } from '../services/api/modelRequestConstraints.js'
 
 type MessageParam = Anthropic.MessageParam
 type TextBlockParam = Anthropic.TextBlockParam
@@ -193,6 +194,7 @@ export async function sideQuery(opts: SideQueryOptions): Promise<BetaMessage> {
   const start = Date.now()
   // biome-ignore lint/plugin: this IS the wrapper that handles OAuth attribution
   const response = await client.beta.messages.create(
+    applyModelRequestConstraints(
     {
       model: normalizedModel,
       max_tokens,
@@ -207,6 +209,8 @@ export async function sideQuery(opts: SideQueryOptions): Promise<BetaMessage> {
       ...(betas.length > 0 && { betas }),
       metadata: getAPIMetadata(),
     },
+    model,
+    ),
     { signal },
   )
 

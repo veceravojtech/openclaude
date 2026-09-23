@@ -1,4 +1,8 @@
-import { isOpusAtLeast } from '../../../utils/model/opusVersion.js'
+import {
+  isFableAtLeast,
+  isOpusAtLeast,
+  modelSupportsForcedToolChoice,
+} from '../../../utils/model/opusVersion.js'
 export function hydrateOpenAIShimCompatibilityEnv(
   processEnv: NodeJS.ProcessEnv,
   dependencies: {
@@ -235,7 +239,13 @@ export function createRequestBodyPlanner(context: RequestBodyPlannerContext) {
       anthropicBody.tools = params.tools
     }
     if (!omitTools.anthropic && params.tool_choice) {
-      anthropicBody.tool_choice = params.tool_choice
+      const choiceType = (params.tool_choice as { type?: string }).type
+      // Claude Fable 5.1+ rejects forced tool use; downgrade to auto.
+      anthropicBody.tool_choice =
+        (choiceType === 'tool' || choiceType === 'any') &&
+        !modelSupportsForcedToolChoice(request.resolvedModel)
+          ? { type: 'auto' }
+          : params.tool_choice
     }
 
     if (request.reasoning?.effort) {
@@ -246,6 +256,7 @@ export function createRequestBodyPlanner(context: RequestBodyPlannerContext) {
       const modelLower = request.resolvedModel.toLowerCase()
       const isAdaptive =
         isOpusAtLeast(modelLower, 4, 6) ||
+        isFableAtLeast(modelLower, 5) ||
         modelLower.includes('sonnet-4-6') ||
         modelLower.includes('sonnet-4.6')
       const isOpus45 =

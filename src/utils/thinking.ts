@@ -1,4 +1,4 @@
-import { isOpusAtLeast } from './model/opusVersion.js'
+import { isModernFrontierClaude } from './model/opusVersion.js'
 // biome-ignore-all assist/source/organizeImports: internal-only import markers must not be reordered
 import type { Theme } from './theme.js'
 import { feature } from 'bun:bundle'
@@ -152,8 +152,14 @@ export function modelSupportsThinking(model: string): boolean {
       return false
     }
   }
-  // 3P (Bedrock/Vertex): only Opus 4+ and Sonnet 4+
-  return canonical.includes('sonnet-4') || canonical.includes('opus-4')
+  // 3P (Bedrock/Vertex): only Opus 4+, Sonnet 4+ and the version-parsed
+  // modern frontier family (Opus 5.x, Fable 5+). The substring test alone
+  // missed every non-4.x id.
+  return (
+    canonical.includes('sonnet-4') ||
+    canonical.includes('opus-4') ||
+    isModernFrontierClaude(canonical)
+  )
 }
 
 // @[MODEL LAUNCH]: Add the new model to the allowlist if it supports adaptive thinking.
@@ -164,7 +170,7 @@ export function modelSupportsAdaptiveThinking(model: string): boolean {
   }
   const canonical = getCanonicalName(model)
   // Supported by a subset of Claude 4 models
-  if (isOpusAtLeast(canonical, 4, 6) || canonical.includes('sonnet-4-6')) {
+  if (isModernFrontierClaude(canonical) || canonical.includes('sonnet-4-6')) {
     return true
   }
   // Exclude any other known legacy models (allowlist above catches 4-6 variants first)

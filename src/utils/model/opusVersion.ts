@@ -57,3 +57,88 @@ export function formatOpusMarketingName(version: OpusVersion): string {
     ? `Opus ${version.major}`
     : `Opus ${version.major}.${version.minor}`
 }
+
+// --- Fable family ----------------------------------------------------------
+//
+// Claude Fable is a separate family from Opus, so the Opus parser above must
+// not match it. It gets its own parser with the same shape and the same
+// digit-boundary rules (`claude-fable-5-1`, `us.anthropic.claude-fable-5-1`,
+// `fable-5.1`, `claude-fable-5`).
+
+export type FableVersion = { major: number; minor: number }
+
+const FABLE_VERSION_RE = /fable[-_.](\d{1,2})(?!\d)(?:[-_.](\d{1,2})(?!\d))?/
+
+export function parseFableVersion(model: string): FableVersion | null {
+  const match = FABLE_VERSION_RE.exec(model.toLowerCase())
+  if (!match) {
+    return null
+  }
+  return {
+    major: Number(match[1]),
+    minor: match[2] === undefined ? 0 : Number(match[2]),
+  }
+}
+
+/** True when `model` is a Fable id at or above `major.minor` (e.g. 5.1). */
+export function isFableAtLeast(
+  model: string,
+  major: number,
+  minor = 0,
+): boolean {
+  const version = parseFableVersion(model)
+  return version !== null && compareOpusVersions(version, { major, minor }) >= 0
+}
+
+/** `claude-fable-5`, `claude-fable-5-1` — the canonical first-party id shape. */
+export function canonicalFableId(version: FableVersion): string {
+  return version.minor === 0
+    ? `claude-fable-${version.major}`
+    : `claude-fable-${version.major}-${version.minor}`
+}
+
+/** `Fable 5`, `Fable 5.1` — the public marketing name shape. */
+export function formatFableMarketingName(version: FableVersion): string {
+  return version.minor === 0
+    ? `Fable ${version.major}`
+    : `Fable ${version.major}.${version.minor}`
+}
+
+/**
+ * Frontier-class Claude models that share the modern capability set: adaptive
+ * thinking, effort (including xhigh/max), 1M context and 128K output. That is
+ * Opus 4.6+ and every Fable 5+. Gates that previously read
+ * `isOpusAtLeast(m, 4, 6)` for these capabilities use this instead so Fable
+ * does not fall through to the legacy 200K / no-effort paths.
+ */
+export function isModernFrontierClaude(model: string): boolean {
+  return isOpusAtLeast(model, 4, 6) || isFableAtLeast(model, 5)
+}
+
+/**
+ * Whether the model accepts a forced `tool_choice` (`{type:'tool'}` or
+ * `{type:'any'}`). Claude Fable 5.1 and later reject forced tool use with an
+ * API error, so callers must downgrade to `{type:'auto'}` for them. Every
+ * other model keeps forced tool choice.
+ */
+export function modelSupportsForcedToolChoice(model: string): boolean {
+  return !isFableAtLeast(model, 5, 1)
+}
+
+/**
+ * Whether the model accepts a caller-chosen `temperature`. Claude Fable 5.1
+ * and later only accept `temperature: 1` (or unset), so callers that want a
+ * deterministic 0 must omit the field instead.
+ */
+export function modelSupportsCustomTemperature(model: string): boolean {
+  return !isFableAtLeast(model, 5, 1)
+}
+
+/**
+ * Whether the model always runs adaptive thinking and rejects
+ * `thinking: {type:'disabled'}` (and budgeted `{type:'enabled'}`). True for
+ * Claude Fable 5.1 and later.
+ */
+export function modelRequiresAlwaysOnThinking(model: string): boolean {
+  return isFableAtLeast(model, 5, 1)
+}

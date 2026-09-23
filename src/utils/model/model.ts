@@ -35,8 +35,11 @@ import { type ModelAlias, isModelAlias } from './aliases.js'
 import { CLAUDE_OPUS_5_5_CONFIG } from './configs.js'
 import { getResolvedLatestOpusModel } from './latestOpusModel.js'
 import {
+  canonicalFableId,
   canonicalOpusId,
+  formatFableMarketingName,
   formatOpusMarketingName,
+  parseFableVersion,
   parseOpusVersion,
 } from './opusVersion.js'
 import { capitalize } from '../stringUtils.js'
@@ -567,6 +570,12 @@ export function firstPartyNameToCanonical(name: ModelName): ModelShortName {
   if (opusVersion && opusVersion.major >= 5 && name.includes('claude-opus')) {
     return canonicalOpusId(opusVersion)
   }
+  // Claude Fable (5 and later): same version-derived canonicalization. Without
+  // this the generic fallback below collapses every Fable id to `claude-fable`.
+  const fableVersion = parseFableVersion(name)
+  if (fableVersion && name.includes('claude-fable')) {
+    return canonicalFableId(fableVersion)
+  }
   // Special cases for Claude 4+ models to differentiate versions
   // Order matters: check more specific versions first (4-8 before 4-7 before 4-6 before 4-5 before 4)
   if (name.includes('claude-opus-4-8')) {
@@ -778,6 +787,11 @@ export function getPublicModelDisplayName(model: ModelName): string | null {
   ) {
     const has1m = /\[1m]$/i.test(model)
     return `${formatOpusMarketingName(opusVersion)}${has1m ? ' (1M context)' : ''}`
+  }
+  const fableVersion = parseFableVersion(model)
+  if (fableVersion && model.toLowerCase().includes('claude-fable')) {
+    const has1m = /\[1m]$/i.test(model)
+    return `${formatFableMarketingName(fableVersion)}${has1m ? ' (1M context)' : ''}`
   }
   switch (model) {
     case 'gpt-6-astra':
@@ -1130,6 +1144,11 @@ export function getMarketingNameForModel(modelId: string): string | undefined {
   const opusVersion = parseOpusVersion(canonical)
   if (opusVersion && opusVersion.major >= 5) {
     const name = formatOpusMarketingName(opusVersion)
+    return has1m ? `${name} (with 1M context)` : name
+  }
+  const fableVersion = parseFableVersion(canonical)
+  if (fableVersion) {
+    const name = formatFableMarketingName(fableVersion)
     return has1m ? `${name} (with 1M context)` : name
   }
   if (canonical.includes('claude-opus-4-8')) {

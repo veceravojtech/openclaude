@@ -259,6 +259,11 @@ import {
   getAssistantMessageFromError,
   getErrorMessageIfRefusal,
 } from './errors.js'
+import { applyModelRequestConstraints } from './modelRequestConstraints.js'
+import {
+  modelRequiresAlwaysOnThinking,
+  modelSupportsCustomTemperature,
+} from '../../utils/model/opusVersion.js'
 import {
   EMPTY_USAGE,
   type GlobalCacheStrategy,
@@ -1844,7 +1849,11 @@ async function* queryModel(
       options.maxOutputTokensOverride ||
       getMaxOutputTokensForModel(options.model)
 
-    const hasThinking = shouldUseThinkingForModel(retryContext.model, thinkingConfig)
+    // Always-on-thinking models (Claude Fable 5.1+) reject a disabled
+    // thinking config, so they always take the adaptive path.
+    const hasThinking =
+      shouldUseThinkingForModel(retryContext.model, thinkingConfig) ||
+      modelRequiresAlwaysOnThinking(retryContext.model)
     let thinking: BetaMessageStreamParams['thinking'] | undefined = undefined
 
     // IMPORTANT: Do not change the adaptive-vs-budget thinking selection below
@@ -1989,13 +1998,19 @@ async function* queryModel(
 
     // Only send temperature when thinking is disabled — the API requires
     // temperature: 1 when thinking is enabled, which is already the default.
-    const temperature = !hasThinking
-      ? (options.temperatureOverride ?? 1)
-      : undefined
+    // Models that only accept temperature 1 (Claude Fable 5.1+) get the field
+    // omitted so a caller's deterministic 0 doesn't turn into an API error.
+    const temperature =
+      !hasThinking && modelSupportsCustomTemperature(retryContext.model)
+        ? (options.temperatureOverride ?? 1)
+        : undefined
 
     lastRequestBetas = betasParams
 
-    return {
+    // Per-model constraints (forced tool_choice downgrade, always-on
+    // thinking, sampling limits) live in one place so every queryModel
+    // caller — compaction, hooks, web search, side agents — is covered.
+    return applyModelRequestConstraints({
       model: normalizeModelStringForAPI(providerRequestModel),
       // IMPORTANT: `system` must appear before `messages` in the object literal.
       // JSON.stringify preserves insertion order. The native Bun attestation
@@ -2033,7 +2048,7 @@ async function* queryModel(
         output_config: outputConfig,
       }),
       ...(speed !== undefined && { speed }),
-    }
+    }, retryContext.model)
   }
 
   const newMessages: AssistantMessage[] = []

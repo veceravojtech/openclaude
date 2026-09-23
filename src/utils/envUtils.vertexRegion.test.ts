@@ -6,6 +6,7 @@ const VERTEX_ENV_KEYS = [
   'CLOUD_ML_REGION',
   'VERTEX_REGION_CLAUDE_5_0_OPUS',
   'VERTEX_REGION_CLAUDE_5_5_OPUS',
+  'VERTEX_REGION_CLAUDE_5_1_FABLE',
 ] as const
 
 const SAVED: Partial<Record<(typeof VERTEX_ENV_KEYS)[number], string>> = {}
@@ -49,4 +50,19 @@ test('each Opus 5 variant honours its own override independently', () => {
   process.env.VERTEX_REGION_CLAUDE_5_5_OPUS = 'europe-west1'
   expect(getVertexRegionForModel('claude-opus-5')).toBe('us-west4')
   expect(getVertexRegionForModel('claude-opus-5-5')).toBe('europe-west1')
+})
+
+test('claude-fable-5-1 reads its own Vertex region override', () => {
+  process.env.VERTEX_REGION_CLAUDE_5_1_FABLE = 'europe-west4'
+  expect(getVertexRegionForModel('claude-fable-5-1')).toBe('europe-west4')
+})
+
+test('claude-fable-5-1 is not shadowed by and does not shadow Opus rows', () => {
+  process.env.VERTEX_REGION_CLAUDE_5_0_OPUS = 'us-west4'
+  process.env.VERTEX_REGION_CLAUDE_5_5_OPUS = 'europe-west1'
+  expect(getVertexRegionForModel('claude-fable-5-1')).toBe('us-east5')
+  process.env.VERTEX_REGION_CLAUDE_5_1_FABLE = 'europe-west4'
+  expect(getVertexRegionForModel('claude-fable-5-1')).toBe('europe-west4')
+  expect(getVertexRegionForModel('claude-opus-5-5')).toBe('europe-west1')
+  expect(getVertexRegionForModel('claude-opus-5')).toBe('us-west4')
 })
