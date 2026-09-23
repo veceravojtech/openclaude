@@ -285,6 +285,84 @@ test("inherit-leader exception covers model 'inherit' and an explicit copy of th
   expect(paneCommands).toHaveLength(2)
 })
 
+const CODEX_ENV = {
+  CLAUDE_CODE_USE_OPENAI: '1',
+  OPENAI_BASE_URL: 'https://chatgpt.com/backend-api/codex',
+}
+
+// AgentTool hands the spawn `getAgentModel(...)`, which for 'inherit' (tool
+// argument or agent frontmatter) and for the non-native sonnet/haiku fallback
+// is the parent's RAW mainLoopModel setting — an alias when the leader's model
+// is one. getLeaderModel() is parsed, so the exception has to compare resolved
+// ids on both sides.
+test("inherit-leader exception with an ALIAS leader: Codex 'codexplan' + inherit, explicit alias, and the AgentTool paths", async () => {
+  Object.assign(process.env, CODEX_ENV)
+  const { getAgentModel } = await import('../../utils/model/agent.js')
+  const spawnMultiAgent = await load({})
+  const models = {
+    // Tool argument model: 'inherit' as AgentTool passes it on.
+    'tool-inherit': getAgentModel(undefined, 'codexplan', 'inherit'),
+    // Custom agent frontmatter `model: inherit`.
+    'frontmatter-inherit': getAgentModel('inherit', 'codexplan'),
+    // Custom agent `model: sonnet` falling back to the parent on a
+    // non-Claude-native provider.
+    'frontmatter-sonnet': getAgentModel('sonnet', 'codexplan'),
+    // The literal alias values that reach spawnTeammate.
+    'raw-inherit': 'inherit',
+    'explicit-alias': 'codexplan',
+  }
+  for (const [name, model] of Object.entries(models)) {
+    await spawnMultiAgent.spawnTeammate(
+      { name, prompt: 'work', team_name: 'matrix-team', model },
+      context('codexplan'),
+    )
+  }
+  expect(paneCommands).toHaveLength(Object.keys(models).length)
+})
+
+test("inherit-leader exception with an ALIAS leader: first-party 'sonnet' + inherit / explicit 'sonnet'", async () => {
+  const { getAgentModel } = await import('../../utils/model/agent.js')
+  const spawnMultiAgent = await load({})
+  const models = [
+    getAgentModel(undefined, 'sonnet', 'inherit'),
+    getAgentModel('inherit', 'sonnet'),
+    'inherit',
+    'sonnet',
+  ]
+  for (const [i, model] of models.entries()) {
+    await spawnMultiAgent.spawnTeammate(
+      { name: `s-${i}`, prompt: 'work', team_name: 'matrix-team', model },
+      context('sonnet'),
+    )
+  }
+  expect(paneCommands).toHaveLength(models.length)
+})
+
+test("the leader's resolved id bound to a different profile is still judged by the matrix", async () => {
+  // Leader runs 'codexplan' (→ gpt-5.6-sol) on the Codex env route; a teammate
+  // bound to a provider profile running the same resolved id is a different
+  // (route, profile) pair and gets no exemption.
+  Object.assign(process.env, CODEX_ENV)
+  const spawnMultiAgent = await load({})
+  await expect(
+    spawnMultiAgent.spawnTeammate(
+      {
+        name: 'bound-same-id',
+        prompt: 'work',
+        team_name: 'matrix-team',
+        providerEnv: {
+          OPENCLAUDE_TEAMMATE_PROFILE_ID: 'codex-oauth',
+          OPENCLAUDE_TEAMMATE_MODEL: 'gpt-5.6-sol',
+        },
+      },
+      context('codexplan'),
+    ),
+  ).rejects.toThrow(
+    "Model 'gpt-5.6-sol' is not allowed for teammates on provider 'codex'.",
+  )
+  expectNothingLeftBehind('matrix-team')
+})
+
 test('the exception does not extend to a different model on the leader\'s provider', async () => {
   const spawnMultiAgent = await load({})
   await expect(

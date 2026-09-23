@@ -644,8 +644,15 @@ export function assertTeammateModelAllowed(
       // teammates unusable for any leader not on a matrix model (custom and
       // local models included). An explicit `model` equal to the leader's is
       // the same pair and is treated the same.
+      //
+      // Compare RESOLVED ids on both sides: getLeaderModel() is already
+      // parsed, but the teammate value may still be an alias — AgentTool
+      // hands 'inherit' over as the parent's raw mainLoopModel setting (e.g.
+      // 'codexplan' or 'sonnet'), and an explicit copy of the leader's alias
+      // arrives raw too. Comparing the raw alias with the parsed leader id
+      // refused the very pair this exception exists for.
       isInheritingLeader =
-        normalizeTeammateModelId(resolvedModel) ===
+        normalizeTeammateModelId(parseUserSpecifiedModel(resolvedModel)) ===
         normalizeTeammateModelId(leaderModel)
       // The leader's provider as the session actually runs it: process.env,
       // which startup already populated from the active profile. Deliberately

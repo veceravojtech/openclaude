@@ -7,6 +7,7 @@ import type { Stream } from '@anthropic-ai/sdk/streaming.mjs'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { resetModelStringsForTestingOnly } from '../../bootstrap/state.js'
 import { resetCostState } from '../../cost-tracker.js'
 import {
   acquireSharedMutationLock,
@@ -249,6 +250,10 @@ beforeEach(async () => {
   for (const key of envKeys) {
     delete process.env[key]
   }
+  // getDefaultFableModel reads the process-global model-strings cache; an
+  // earlier file (e.g. client.test.ts under CLAUDE_CODE_USE_BEDROCK) can leave
+  // it holding Bedrock ids, which scrubbing env alone does not clear.
+  resetModelStringsForTestingOnly()
   installOAuthSubscriber()
   installClientSpy()
   await clearBetaCaches()
@@ -275,6 +280,7 @@ afterEach(async () => {
     mock.restore()
     mock.module('../../utils/auth.js', () => ({ ...realAuth }))
     await clearBetaCaches()
+    resetModelStringsForTestingOnly()
     for (const key of envKeys) {
       const envKey: string = key
       if (originalEnv[envKey] === undefined) {

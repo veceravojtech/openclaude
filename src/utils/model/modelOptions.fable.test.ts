@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { resetModelStringsForTestingOnly } from '../../bootstrap/state.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -33,6 +34,9 @@ beforeEach(async () => {
     savedEnv[key] = process.env[key]
     delete process.env[key]
   }
+  // Fable ids come from the process-global model-strings cache, which an
+  // earlier file can leave holding another provider's (e.g. Bedrock) ids.
+  resetModelStringsForTestingOnly()
 })
 
 afterEach(() => {
@@ -49,6 +53,7 @@ afterEach(() => {
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
     }
+    resetModelStringsForTestingOnly()
   } finally {
     releaseSharedMutationLock()
   }
