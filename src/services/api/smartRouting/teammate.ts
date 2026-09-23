@@ -1,15 +1,19 @@
 /**
  * Teammate dispatch: pick a model for each spawned teammate from its role.
  *
- * Two stages:
- *   1. ROLE — a cheap keyword heuristic first; when it is not confident, one
- *      JEV call (role / complexity / needs_long_context). JEV failure or a
- *      low-confidence answer falls back to the heuristic's best guess, then
- *      to `implement`.
- *   2. POLICY — role → tier → ordered family list, intersected with what this
- *      machine can actually serve (teammate allowlist ∩ configured routes),
- *      minus the SEPARATION RULE: a review/verify teammate never gets a model
- *      family used by an implementer in the same team.
+ * One JEV call per dispatch (auto and suggest mode) asks role, complexity,
+ * needs_long_context, `model` — a choice over EVERY spawnable model: each
+ * catalog id on each configured route (Anthropic OAuth Claude ids, every
+ * saved profile's models), filtered by teammateModelAllowlist and the
+ * organization allowlist — and `agent_type` — a choice over the loaded agent
+ * definitions plus `default`. Explicit models and types are never asked about.
+ *
+ * Hard rules hold before and after asking: a review/verify teammate never
+ * gets a model family used by an implementer in the same team (every Claude
+ * Sonnet version is one family), and computer_use needs vision. A pick that
+ * breaks a rule or fails Rule A falls to the best rule-abiding option by
+ * probability (Rule A on the renormalized rest), else to the heuristic: a
+ * keyword role guess and the role → tier → family table.
  *
  * Never throws. Never blocks longer than the JEV timeout. When nothing
  * qualifies the teammate spawns on today's default model with a warning.
@@ -30,7 +34,12 @@ import {
   findProviderProfilesForModel,
   getProviderProfiles,
 } from '../../../utils/providerProfiles.js'
-import { getModel as getCatalogModel } from '../../../integrations/registry.js'
+import {
+  getCatalogEntriesForRoute,
+  getModel as getCatalogModel,
+} from '../../../integrations/registry.js'
+import { LEGACY_PROVIDER_MODEL_CONFIGS } from '../../../utils/model/configs.js'
+import { parseModelList } from '../../../utils/providerModels.js'
 import { ensureIntegrationsLoaded } from '../../../integrations/index.js'
 import { parseUserSpecifiedModel } from '../../../utils/model/model.js'
 import { readTeamFile } from '../../../utils/swarm/teamHelpers.js'
@@ -74,6 +83,14 @@ export type TeammateRouteInput = {
   settings: SettingsJson | null | undefined
   /** The leader's resolved model, for members that inherit it. */
   leaderModel?: string
+  /** Loaded agent definitions; set to let JEV choose the agent type. */
+  agentTypes?: readonly AgentTypeOption[]
+  /** Teammates cannot be built-in types; subagents can. Default 'teammate'. */
+  spawnPath?: 'teammate' | 'subagent'
+  /** The caller resolves an explicit model later: ask role and type only. */
+  modelIsExplicit?: boolean
+  /** Reuse this decision's role (no JEV call) — the explicit-model recheck. */
+  prior?: TeammateRouteDecision
   /**
    * False for in-process spawns (subagents, in-process teammates): they share
    * the leader's provider env, so only leader-route candidates are usable.
@@ -81,7 +98,8 @@ export type TeammateRouteInput = {
   allowProfileBinding?: boolean
 }
 
-export type TeammateRouteExclusion = { family: DispatchFamily; by: string }
+/** An implementer's separation family (see separationFamilyOf). */
+export type TeammateRouteExclusion = { family: string; by: string }
 
 export type TeammateRouteDecision = {
   role: TeammateRole
@@ -94,10 +112,22 @@ export type TeammateRouteDecision = {
   mode: TeammateDispatchMode
   reason: string
   complexity?: DispatchComplexity
+  /** Where the role came from, and why. */
+  roleSource?: 'jev' | 'heuristic'
+  roleReason?: string
+  /** Role probabilities from JEV. */
   probabilities?: Record<string, number>
+  /** Model-choice probabilities from JEV. */
+  modelProbabilities?: Record<string, number>
+  /** Chosen agent type (`default` = none), and JEV's p for it. */
+  agentType?: string
+  agentTypeP?: number
+  agentTypeProbabilities?: Record<string, number>
   costUsd?: number
   latencyMs?: number
   excluded?: TeammateRouteExclusion[]
+  /** Models removed from the candidate list, with why. */
+  excludedModels?: ModelExclusion[]
   /** Set when the separation rule refuses an explicit model. */
   refusal?: string
   /** Set when nothing qualified and the default model is used. */
@@ -109,6 +139,8 @@ export type TeammateDispatchRecord = {
   role: TeammateRole
   family?: string
   model?: string
+  agentType?: string
+  agentTypeP?: number
   source: TeammateRouteDecision['source']
   mode: TeammateDispatchMode
   reason: string
@@ -422,18 +454,20 @@ export type TeammateDispatchDeps = {
   /** Whether the Anthropic OAuth/API route is actually authenticated. */
   hasAnthropicAuth: () => boolean
   providerProfiles: () => readonly ProviderProfile[]
-  supportsVision: (modelId: string, family: DispatchFamily) => boolean
+  supportsVision: (modelId: string, family?: DispatchFamily) => boolean
+  /** Catalog ids (with context/vision/reasoning) a route serves. */
+  routeCatalog: (route: string) => CatalogFacts[]
   /** Organization model allowlist (availableModels). */
   isModelAllowed: (model: string) => boolean
 }
 
-function catalogVision(modelId: string, family: DispatchFamily): boolean {
+function catalogVision(modelId: string, family?: DispatchFamily): boolean {
   ensureIntegrationsLoaded()
   const lookups = [
     modelId,
     modelId.split('/').pop() ?? modelId,
     (modelId.split('/').pop() ?? modelId).replace(/:cloud$/, ''),
-    DISPATCH_FAMILIES[family].entries[0]?.id,
+    family ? DISPATCH_FAMILIES[family].entries[0]?.id : undefined,
   ]
   for (const id of lookups) {
     if (!id) continue
@@ -476,6 +510,7 @@ const DEFAULT_DEPS: TeammateDispatchDeps = {
   hasAnthropicAuth: defaultHasAnthropicAuth,
   providerProfiles: () => getProviderProfiles(),
   supportsVision: catalogVision,
+  routeCatalog: route => defaultRouteCatalog(route),
   isModelAllowed: model => isModelAllowed(model),
 }
 
@@ -492,8 +527,370 @@ function getDeps(): TeammateDispatchDeps {
   return { ...DEFAULT_DEPS, ...depsOverride }
 }
 
+
 // ---------------------------------------------------------------------------
-// Stage 1b: JEV
+// Spawnable models: every catalog id on every configured route
+// ---------------------------------------------------------------------------
+
+export type PriceTier = 'low' | 'mid' | 'high'
+
+/** One model the teammate could be spawned on, with catalog facts for JEV. */
+export type SpawnableModel = {
+  id: string
+  route: string
+  /** Saved profile to bind; absent when the leader's own route serves it. */
+  providerProfile?: string
+  /** Human label of the serving provider (profile name or route id). */
+  provider: string
+  /** Matrix family, when the id is one (display + tier-table ranking). */
+  family?: DispatchFamily
+  /** Family for the separation rule: every Claude Sonnet version is one. */
+  separationFamily: string
+  contextWindow?: number
+  vision: boolean
+  reasoning: boolean
+  priceTier: PriceTier
+}
+
+export type ModelExclusion = { model: string; reason: string }
+
+/** Every route id whose Claude ids live in the legacy provider config. */
+const CLAUDE_CONFIG_KEY: Readonly<Record<string, 'firstParty' | 'vertex' | 'bedrock' | 'foundry'>> = {
+  anthropic: 'firstParty',
+  vertex: 'vertex',
+  bedrock: 'bedrock',
+  foundry: 'foundry',
+}
+
+type CatalogFacts = { id: string; contextWindow?: number; vision?: boolean; reasoning?: boolean }
+
+/** The catalog ids a route serves (codex → the openai catalog's GPT-5/6 ids). */
+function defaultRouteCatalog(route: string): CatalogFacts[] {
+  ensureIntegrationsLoaded()
+  const claudeKey = CLAUDE_CONFIG_KEY[route]
+  if (claudeKey) {
+    const ids = new Set<string>()
+    for (const config of Object.values(LEGACY_PROVIDER_MODEL_CONFIGS)) {
+      if (/^claude-3/.test(config.firstParty)) continue // retired
+      const id = (config as Record<string, string>)[claudeKey]
+      if (id) ids.add(id)
+    }
+    return [...ids].map(id => ({ id, ...factsFromDescriptor(id) }))
+  }
+  const catalogRoute = route === 'codex' ? 'openai' : route
+  return getCatalogEntriesForRoute(catalogRoute)
+    .filter(entry => route !== 'codex' || /^gpt-(?:5|6)/.test(entry.apiName))
+    .filter(entry => route !== 'codex' || !/mini|nano/.test(entry.apiName))
+    .map(entry => {
+      const descriptor = factsFromDescriptor(entry.modelDescriptorId ?? entry.apiName)
+      return {
+        id: entry.apiName,
+        contextWindow: entry.contextWindow ?? descriptor.contextWindow,
+        vision: entry.capabilities?.supportsVision ?? descriptor.vision,
+        reasoning: entry.capabilities?.supportsReasoning ?? descriptor.reasoning,
+      }
+    })
+}
+
+function factsFromDescriptor(id: string): Omit<CatalogFacts, 'id'> {
+  const found = getCatalogModel(id) ?? getCatalogModel(id.split('/').pop() ?? id)
+  if (!found) return {}
+  return {
+    contextWindow: found.contextWindow,
+    vision: found.capabilities?.supportsVision,
+    reasoning: found.capabilities?.supportsReasoning,
+  }
+}
+
+function priceTierOf(id: string): PriceTier {
+  const n = id.toLowerCase()
+  if (/opus|fable|gpt-6/.test(n)) return 'high'
+  if (/flash|luna|mini|nano|haiku|air|turbo|deepseek|glm|kimi|minimax/.test(n)) return 'low'
+  return 'mid'
+}
+
+/**
+ * Separation family: the matrix family, except that every Claude Sonnet
+ * version counts as one (`sonnet-5`) and every GPT-5.6 tier as `gpt-5.6`.
+ * Off-matrix ids are their own family.
+ */
+export function separationFamilyOf(model: string | undefined): string | undefined {
+  if (!model || model === 'inherit') return undefined
+  let resolved = model
+  try {
+    resolved = parseUserSpecifiedModel(model)
+  } catch {
+    // keep raw
+  }
+  const n = normalizeTeammateModelId(resolved)
+  if (/claude-(?:[\d-]+-)?sonnet/.test(n) || /(?:^|[./])sonnet(?:$|[-.])/.test(n)) {
+    return 'sonnet-5'
+  }
+  const family = familyOfModel(model)
+  if (family) return family
+  const bare = n.split('/').pop() ?? n
+  if (/^gpt-5\.6/.test(bare)) return 'gpt-5.6'
+  return `model:${bare}`
+}
+
+function allowedByTeammateAllowlist(
+  route: string,
+  id: string,
+  allowed: TeammateMatrixEntry[] | null,
+  wildcard: boolean,
+): boolean {
+  if (wildcard || allowed === null) return true
+  const n = normalizeTeammateModelId(id)
+  return allowed.some(a => a.route === route && normalizeTeammateModelId(a.id) === n)
+}
+
+type RouteContext = {
+  allowed: TeammateMatrixEntry[] | null
+  wildcard: boolean
+  leaderRoute: string
+  anthropicAuth: boolean
+  profiles: readonly ProviderProfile[]
+  allowProfileBinding: boolean
+}
+
+function buildRouteContext(
+  input: TeammateRouteInput,
+  deps: TeammateDispatchDeps,
+): RouteContext {
+  const wildcard = (input.settings?.teammateModelAllowlist ?? []).some(
+    item => item.trim() === TEAMMATE_MODEL_ALLOWLIST_WILDCARD,
+  )
+  const leaderRoute = deps.leaderRoute()
+  let profiles: readonly ProviderProfile[] = []
+  try {
+    profiles = deps.providerProfiles()
+  } catch {
+    profiles = []
+  }
+  return {
+    allowed: getAllowedTeammateEntries(input.settings?.teammateModelAllowlist),
+    wildcard,
+    leaderRoute,
+    anthropicAuth: leaderRoute === 'anthropic' && deps.hasAnthropicAuth(),
+    profiles,
+    allowProfileBinding: input.allowProfileBinding !== false,
+  }
+}
+
+/**
+ * Every model the teammate could run on: the leader route's catalog (Claude
+ * ids when Anthropic is authenticated), then — for out-of-process spawns —
+ * each saved profile's models and its route's catalog. Filtered by the
+ * teammate allowlist (under "*" everything) and the organization allowlist.
+ * First occurrence of an id wins, so the leader route (no binding) is preferred.
+ */
+function listCandidates(
+  ctx: RouteContext,
+  deps: TeammateDispatchDeps,
+): { candidates: SpawnableModel[]; excluded: ModelExclusion[] } {
+  const candidates: SpawnableModel[] = []
+  const excluded: ModelExclusion[] = []
+  const seen = new Set<string>()
+  const add = (facts: CatalogFacts, route: string, provider: string, profile?: string) => {
+    const key = facts.id.toLowerCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    if (!allowedByTeammateAllowlist(route, facts.id, ctx.allowed, ctx.wildcard)) {
+      excluded.push({ model: facts.id, reason: 'teammateModelAllowlist' })
+      return
+    }
+    if (!deps.isModelAllowed(facts.id)) {
+      excluded.push({ model: facts.id, reason: 'organization model allowlist' })
+      return
+    }
+    const family = familyOfModel(facts.id)
+    candidates.push({
+      id: facts.id,
+      route,
+      provider,
+      ...(profile ? { providerProfile: profile } : {}),
+      ...(family ? { family } : {}),
+      separationFamily: separationFamilyOf(facts.id) ?? `model:${key}`,
+      ...(facts.contextWindow ? { contextWindow: facts.contextWindow } : {}),
+      vision: facts.vision ?? deps.supportsVision(facts.id, family),
+      reasoning: facts.reasoning === true,
+      priceTier: priceTierOf(facts.id),
+    })
+  }
+
+  const leaderUsable = ctx.leaderRoute !== 'anthropic' || ctx.anthropicAuth
+  if (leaderUsable) {
+    for (const facts of safeCatalog(deps, ctx.leaderRoute)) {
+      add(facts, ctx.leaderRoute, ctx.leaderRoute)
+    }
+  }
+  if (!ctx.allowProfileBinding) return { candidates, excluded }
+  for (const profile of ctx.profiles) {
+    let route: string
+    try {
+      route = resolveTeammateProviderRoute({ profile })
+    } catch {
+      continue
+    }
+    const listed = parseModelList(profile.model ?? '')
+      .filter(id => !/^codex/i.test(id))
+      .map(id => ({ id, ...factsFromDescriptor(id) }))
+    const fromCatalog = safeCatalog(deps, route)
+    const byId = new Map<string, CatalogFacts>()
+    for (const facts of [...listed, ...fromCatalog]) {
+      const prior = byId.get(facts.id.toLowerCase())
+      byId.set(facts.id.toLowerCase(), prior ? { ...facts, ...prior, contextWindow: prior.contextWindow ?? facts.contextWindow, vision: prior.vision ?? facts.vision, reasoning: prior.reasoning ?? facts.reasoning } : facts)
+    }
+    for (const facts of byId.values()) {
+      if (findProviderProfilesForModel(facts.id, [profile]).length === 0) continue
+      let modelRoute = route
+      try {
+        modelRoute = resolveTeammateProviderRoute({ model: facts.id, profile })
+      } catch {
+        // keep profile route
+      }
+      add(facts, modelRoute, profile.name || modelRoute, profile.id)
+    }
+  }
+  return { candidates, excluded }
+}
+
+function safeCatalog(deps: TeammateDispatchDeps, route: string): CatalogFacts[] {
+  try {
+    return deps.routeCatalog(route)
+  } catch {
+    return []
+  }
+}
+
+/** Exported for tests and diagnostics: the model candidates for this spawn. */
+export function listSpawnableModels(
+  input: Pick<TeammateRouteInput, 'settings' | 'allowProfileBinding'>,
+): { candidates: SpawnableModel[]; excluded: ModelExclusion[] } {
+  const deps = getDeps()
+  return listCandidates(buildRouteContext(input as TeammateRouteInput, deps), deps)
+}
+
+function formatContext(tokens: number | undefined): string {
+  if (!tokens) return 'unknown context'
+  if (tokens >= 1_000_000) return `${Math.round(tokens / 100_000) / 10}M context`
+  return `${Math.round(tokens / 1000)}K context`
+}
+
+/** JEV criterion text for one model, built from catalog data. */
+export function describeSpawnableModel(model: SpawnableModel): string {
+  return [
+    `provider ${model.provider}`,
+    formatContext(model.contextWindow),
+    `price ${model.priceTier}`,
+    model.vision ? 'vision' : 'no vision',
+    model.reasoning ? 'reasoning' : 'no reasoning',
+    ...(model.family ? [`family ${model.family}`] : []),
+  ].join('; ')
+}
+
+/**
+ * Hard rules, independent of JEV: a review/verify teammate never shares an
+ * implementer's separation family; computer_use needs vision.
+ */
+function hardRuleViolation(
+  model: { separationFamily?: string; vision?: boolean },
+  role: TeammateRole | undefined,
+  excludedFamilies: ReadonlySet<string>,
+): string | undefined {
+  if (role && SEPARATED_ROLES.has(role) && model.separationFamily && excludedFamilies.has(model.separationFamily)) {
+    return `separation: ${model.separationFamily} is an implementer's family`
+  }
+  if (role === 'computer_use' && model.vision === false) return 'computer_use needs vision'
+  return undefined
+}
+
+// ---------------------------------------------------------------------------
+// Agent types
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_AGENT_TYPE_KEY = 'default'
+
+/** The fields of an agent definition (loadAgentsDir.ts) the dispatcher reads. */
+export type AgentTypeOption = {
+  agentType: string
+  whenToUse?: string
+  source?: string
+  tools?: readonly string[]
+  disallowedTools?: readonly string[]
+  model?: string
+}
+
+const EDIT_TOOLS = ['Edit', 'Write', 'NotebookEdit', 'MultiEdit']
+const BROWSER_TOOL = /playwright|chrome|browser|puppeteer|computer/i
+
+function inheritsAllTools(def: AgentTypeOption): boolean {
+  return def.tools === undefined || def.tools.includes('*')
+}
+
+export function agentTypeCanEdit(def: AgentTypeOption): boolean {
+  return EDIT_TOOLS.some(tool => {
+    const listed = inheritsAllTools(def) || def.tools!.includes(tool)
+    return listed && !(def.disallowedTools ?? []).includes(tool)
+  })
+}
+
+export function agentTypeCanBrowse(def: AgentTypeOption): boolean {
+  if (inheritsAllTools(def)) {
+    return !(def.disallowedTools ?? []).some(tool => BROWSER_TOOL.test(tool) && /^mcp__\w+$|\*$/.test(tool))
+  }
+  return def.tools!.some(tool => BROWSER_TOOL.test(tool))
+}
+
+/**
+ * The agent types JEV may choose: loaded definitions (built-ins only on the
+ * subagent path — teammates cannot be built-ins) plus `default`.
+ */
+export function agentTypeOptionsFor(
+  defs: readonly AgentTypeOption[] | undefined,
+  path: 'teammate' | 'subagent',
+): AgentTypeOption[] {
+  const out: AgentTypeOption[] = []
+  for (const def of defs ?? []) {
+    if (!def.agentType || def.agentType === DEFAULT_AGENT_TYPE_KEY) continue
+    if (path === 'teammate' && def.source === 'built-in') continue
+    // `default` already stands for general-purpose on the subagent path.
+    if (path === 'subagent' && def.agentType === 'general-purpose') continue
+    if (out.some(o => o.agentType === def.agentType)) continue
+    out.push(def)
+  }
+  return out
+}
+
+export function buildAgentTypeCriteria(
+  options: readonly AgentTypeOption[],
+  path: 'teammate' | 'subagent',
+): Record<string, string> {
+  const criteria: Record<string, string> = {
+    [DEFAULT_AGENT_TYPE_KEY]:
+      path === 'teammate'
+        ? 'a general teammate with the full tool set; use when no specialised type clearly fits'
+        : 'the general-purpose agent with the full tool set; use when no specialised type clearly fits',
+  }
+  for (const def of options) {
+    const caps = [
+      agentTypeCanEdit(def) ? 'can edit files' : 'read-only',
+      ...(agentTypeCanBrowse(def) ? ['can drive a browser'] : []),
+    ].join(', ')
+    const when = (def.whenToUse ?? '').replace(/\s+/g, ' ').trim().slice(0, 240)
+    criteria[def.agentType] = `${when || def.agentType} (${caps})`
+  }
+  return criteria
+}
+
+function agentTypeFits(def: AgentTypeOption, role: TeammateRole): string | undefined {
+  if (role === 'implement' && !agentTypeCanEdit(def)) return 'cannot edit files'
+  if (role === 'computer_use' && !agentTypeCanBrowse(def)) return 'cannot use a browser'
+  return undefined
+}
+
+// ---------------------------------------------------------------------------
+// Stage 1: JEV (every dispatch in auto/suggest mode)
 // ---------------------------------------------------------------------------
 
 const ROLE_CRITERIA: Record<TeammateRole, string> = {
@@ -507,40 +904,51 @@ const ROLE_CRITERIA: Record<TeammateRole, string> = {
 
 const COMPLEXITY_LEVELS: DispatchComplexity[] = ['trivial', 'moderate', 'hard']
 
-type RoleClassification = {
-  role: TeammateRole
-  source: 'jev' | 'heuristic'
-  reason: string
-  complexity?: DispatchComplexity
-  needsLongContext?: boolean
-  probabilities?: Record<string, number>
-  costUsd?: number
-  latencyMs?: number
-}
+const SEPARATED_ROLES: ReadonlySet<TeammateRole> = new Set(['review', 'verify'])
 
-async function classifyRole(
-  input: TeammateRouteInput,
+function buildInstruction(
   config: NormalizedTeammateDispatch,
-  deps: TeammateDispatchDeps,
-): Promise<RoleClassification> {
-  const heuristic = classifyRoleHeuristic(input)
-  if (heuristic.confident && heuristic.role) {
-    return {
-      role: heuristic.role,
-      source: 'heuristic',
-      reason: `heuristic ${heuristic.matched ?? heuristic.role}`,
-      complexity: heuristic.complexity,
+  opts: { askModel: boolean; askType: boolean; excluded: readonly TeammateRouteExclusion[] },
+): string {
+  const parts = [
+    'Route a task a lead is delegating to a coding-agent teammate.',
+    'role: what the teammate will mainly do. complexity: how hard the task is. needs_long_context: whether it must hold a large amount of code or text in context at once.',
+  ]
+  if (opts.askModel) {
+    const byTier = new Map<DispatchTier, TeammateRole[]>()
+    for (const role of TEAMMATE_ROLES) {
+      const tier = config.roleTiers[role]
+      byTier.set(tier, [...(byTier.get(tier) ?? []), role])
+    }
+    const tierText = DISPATCH_TIERS.filter(t => byTier.has(t))
+      .map(t => `${byTier.get(t)!.join('/')} → ${t} tier (prefer ${config.tierFamilies[t].join(', ') || 'any'})`)
+      .join('; ')
+    parts.push(
+      `model: the model to run the teammate on. Match the role's tier: ${tierText}. Deep means the strongest reasoning; fast means cheap and quick. Prefer a cheaper model for trivial tasks and a larger context when the task needs long context. computer_use requires a vision model.`,
+    )
+    if (opts.excluded.length > 0) {
+      parts.push(
+        `A review or verify teammate must not use an implementer's model family: ${describeExclusions(opts.excluded)}.`,
+      )
     }
   }
-  const fallback = (why: string, extra?: Partial<RoleClassification>): RoleClassification => ({
-    role: heuristic.role ?? 'implement',
-    source: 'heuristic',
-    reason: heuristic.role
-      ? `heuristic best guess ${heuristic.matched ?? heuristic.role} (${why})`
-      : `default implement (${why})`,
-    complexity: heuristic.complexity,
-    ...extra,
-  })
+  if (opts.askType) {
+    parts.push(
+      'agent_type: the agent definition that best fits the task; default when none clearly fits. An implementing teammate needs a type that can edit files; a computer_use teammate needs one that can drive a browser.',
+    )
+  }
+  return parts.join(' ')
+}
+
+type JevCall =
+  | { ok: true; answers: Record<string, JevAnswer>; costUsd?: number; latencyMs: number }
+  | { ok: false; why: string; latencyMs?: number }
+
+async function callJev(
+  request: JevRequest,
+  config: NormalizedTeammateDispatch,
+  deps: TeammateDispatchDeps,
+): Promise<JevCall> {
   let configured = false
   try {
     configured = config.jev.enabled && deps.isJevConfigured()
@@ -548,30 +956,7 @@ async function classifyRole(
     configured = false
   }
   if (!configured) {
-    return fallback(config.jev.enabled ? 'jev not configured' : 'jev disabled')
-  }
-
-  const request: JevRequest = {
-    instruction:
-      'Classify the task a lead is delegating to a coding-agent teammate. role: what the teammate will mainly do. complexity: how hard the task is. needs_long_context: whether it must hold a large amount of code or text in context at once.',
-    state: {
-      description: input.description ?? '',
-      name: input.name ?? '',
-      subagent_type: input.subagent_type ?? '',
-      prompt: (input.prompt ?? '').slice(0, 4000),
-    },
-    questions: {
-      role: { type: 'choice', criteria: { ...ROLE_CRITERIA } },
-      complexity: {
-        type: 'score',
-        criteria: [
-          'trivial: a lookup or one-line change',
-          'moderate: an ordinary focused task',
-          'hard: subtle, multi-file or deep reasoning required',
-        ],
-      },
-      needs_long_context: { type: 'boolean' },
-    },
+    return { ok: false, why: config.jev.enabled ? 'jev not configured' : 'jev disabled' }
   }
   const timeoutMs = config.jev.timeoutMs
   let result: JevResult
@@ -592,54 +977,59 @@ async function classifyRole(
     ])
     if (timer) clearTimeout(timer)
   } catch (error) {
-    return fallback(`jev error: ${error instanceof Error ? error.message : String(error)}`)
+    return { ok: false, why: `jev error: ${error instanceof Error ? error.message : String(error)}` }
   }
-  if (!result.ok) {
-    return fallback(`jev ${result.reason}`, { latencyMs: result.latencyMs })
+  if (!result.ok) return { ok: false, why: `jev ${result.reason}`, latencyMs: result.latencyMs }
+  return { ok: true, answers: result.answers, costUsd: result.costUsd, latencyMs: result.latencyMs }
+}
+
+type RulePick = { key: string; p?: number; corrected?: string }
+
+/**
+ * Rule A on the answer; when the pick breaks a hard rule or fails Rule A,
+ * the best remaining option by probability — renormalized over the options
+ * that pass the rules — if THAT passes Rule A. Otherwise null.
+ */
+function pickWithRules(
+  answer: JevAnswer | undefined,
+  violation: (key: string) => string | undefined,
+  deps: TeammateDispatchDeps,
+  rule: { minP?: number; minMargin?: number },
+): RulePick | null {
+  if (!answer || answer.type !== 'choice') return null
+  const accepted = deps.acceptChoice(answer, rule)
+  if (accepted && !violation(accepted)) {
+    return { key: accepted, p: answer.probabilities[accepted] }
   }
-  const roleAnswer = result.answers.role
-  const accepted = deps.acceptChoice(roleAnswer, {
-    minP: config.jev.minP,
-    minMargin: config.jev.minMargin,
-  })
-  const probabilities =
-    roleAnswer?.type === 'choice' ? roleAnswer.probabilities : undefined
-  const complexityAnswer = result.answers.complexity
-  const complexity =
-    complexityAnswer?.type === 'score'
-      ? COMPLEXITY_LEVELS[
-          Math.max(0, Math.min(COMPLEXITY_LEVELS.length - 1, Math.round(complexityAnswer.score)))
-        ]
-      : undefined
-  const longAnswer = result.answers.needs_long_context
-  const needsLongContext =
-    longAnswer?.type === 'boolean' ? longAnswer.probability >= 0.5 : undefined
-  const meta = {
-    probabilities,
-    costUsd: result.costUsd,
-    latencyMs: result.latencyMs,
-    needsLongContext,
-  }
-  if (accepted && isRole(accepted)) {
-    const p = probabilities?.[accepted]
-    return {
-      role: accepted,
-      source: 'jev',
-      reason: `jev${p !== undefined ? ` p=${p.toFixed(2)}` : ''}`,
-      complexity: complexity ?? heuristic.complexity,
-      ...meta,
-    }
-  }
-  const best = roleAnswer?.type === 'choice' ? roleAnswer.choice : undefined
-  const bestP = best ? probabilities?.[best] : undefined
-  return fallback(
-    `jev not confident${best ? `: ${best}${bestP !== undefined ? ` p=${bestP.toFixed(2)}` : ''}` : ''}`,
-    { ...meta, complexity: complexity ?? heuristic.complexity },
+  const why = accepted
+    ? `${accepted} ${violation(accepted)}`
+    : `${answer.choice} p=${(answer.probabilities[answer.choice] ?? 0).toFixed(2)} failed rule A`
+  const valid = Object.entries(answer.probabilities).filter(
+    ([key, p]) => typeof p === 'number' && p > 0 && !violation(key),
   )
+  const total = valid.reduce((sum, [, p]) => sum + p, 0)
+  if (valid.length === 0 || total <= 0) return null
+  const renormalized = Object.fromEntries(valid.map(([key, p]) => [key, p / total]))
+  const best = valid.reduce((a, b) => (b[1] > a[1] ? b : a))[0]
+  const again = deps.acceptChoice({ type: 'choice', choice: best, probabilities: renormalized }, rule)
+  return again ? { key: again, p: answer.probabilities[again], corrected: why } : null
+}
+
+function top3(probabilities: Record<string, number> | undefined): string {
+  if (!probabilities) return '-'
+  return Object.entries(probabilities)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([k, p]) => `${k}:${p.toFixed(2)}`)
+    .join(',')
+}
+
+function choiceProbabilities(answer: JevAnswer | undefined): Record<string, number> | undefined {
+  return answer?.type === 'choice' ? answer.probabilities : undefined
 }
 
 // ---------------------------------------------------------------------------
-// Stage 2: policy + candidates
+// Stage 2: tier-table fallback + helpers
 // ---------------------------------------------------------------------------
 
 /** The family a model id belongs to, or undefined for off-matrix models. */
@@ -688,24 +1078,13 @@ function allowedByAllowlist(
     // under any allowlist other than the wildcard.
     return wildcard
   }
-  if (allowed === null) return true
-  const id = normalizeTeammateModelId(entry.id)
-  return allowed.some(
-    a => a.route === entry.route && normalizeTeammateModelId(a.id) === id,
-  )
+  return allowedByTeammateAllowlist(entry.route, entry.id, allowed, wildcard)
 }
 
 function resolveCandidate(
   family: DispatchFamily,
   tier: DispatchTier,
-  ctx: {
-    allowed: TeammateMatrixEntry[] | null
-    wildcard: boolean
-    leaderRoute: string
-    anthropicAuth: boolean
-    profiles: readonly ProviderProfile[]
-    allowProfileBinding: boolean
-  },
+  ctx: RouteContext,
 ): Candidate | undefined {
   const def = DISPATCH_FAMILIES[family]
   const tierIds = def.tierIds?.[tier]
@@ -737,9 +1116,9 @@ function resolveCandidate(
 }
 
 /**
- * Families a review/verify teammate must avoid: every implementer's family,
- * and — for members with no recorded role (teams from before dispatch) —
- * every non-review member's family.
+ * Families a review/verify teammate must avoid: every implementer's
+ * separation family, and — for members with no recorded role (teams from
+ * before dispatch) — every non-review member's family.
  */
 export function collectExcludedFamilies(
   members: readonly TeamMemberLike[],
@@ -750,9 +1129,12 @@ export function collectExcludedFamilies(
     const role = member.role
     if (role && role !== 'implement') continue
     if (role === undefined && member.name && /review/i.test(member.name)) continue
-    const family =
-      (member.family && isDispatchFamily(member.family) ? member.family : undefined) ??
-      familyOfModel(member.model ?? leaderModel)
+    const fromModel = member.model ? separationFamilyOf(member.model) : undefined
+    const fromRecord =
+      member.family && isDispatchFamily(member.family)
+        ? separationFamilyOf(DISPATCH_FAMILIES[member.family].entries[0]?.id) ?? member.family
+        : undefined
+    const family = fromModel ?? fromRecord ?? separationFamilyOf(leaderModel)
     if (family && !out.some(e => e.family === family && e.by === member.name)) {
       out.push({ family, by: member.name })
     }
@@ -787,11 +1169,24 @@ export function hasNamedAgentRouting(
   return [name, agentType].some(v => !!v && keys.has(norm(v)))
 }
 
+function suggestFamilies(
+  tier: DispatchTier,
+  excluded: ReadonlySet<string>,
+  config: NormalizedTeammateDispatch,
+): DispatchFamily[] {
+  const out: DispatchFamily[] = []
+  for (const t of tierFallbackOrder(tier)) {
+    for (const family of config.tierFamilies[t]) {
+      const sep = separationFamilyOf(DISPATCH_FAMILIES[family].entries[0]?.id) ?? family
+      if (!excluded.has(family) && !excluded.has(sep) && !out.includes(family)) out.push(family)
+    }
+  }
+  return out
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
-
-const SEPARATED_ROLES: ReadonlySet<TeammateRole> = new Set(['review', 'verify'])
 
 export async function chooseTeammateRoute(
   input: TeammateRouteInput,
@@ -811,11 +1206,12 @@ export async function chooseTeammateRoute(
       reason: 'teammateDispatch.mode is off',
     }
   }
+  let decision: TeammateRouteDecision
   try {
-    return await chooseTeammateRouteInner(input, config, getDeps())
+    decision = await chooseTeammateRouteInner(input, config, getDeps())
   } catch (error) {
     logForDebugging(`[teammateDispatch] failed: ${error instanceof Error ? error.message : String(error)}`)
-    return {
+    decision = {
       role: 'implement',
       tier: 'standard',
       source: 'heuristic',
@@ -824,6 +1220,22 @@ export async function chooseTeammateRoute(
       warning: `dispatcher error: ${error instanceof Error ? error.message : String(error)}`,
     }
   }
+  logDecision(input, decision)
+  return decision
+}
+
+/** One debug line per decision (D): model, role, type, source, top-3s, cost, latency, exclusions. */
+function logDecision(input: TeammateRouteInput, d: TeammateRouteDecision): void {
+  const excluded = [
+    ...(d.excluded ?? []).map(e => `${e.family}: separation (used by ${e.by})`),
+    ...(d.excludedModels ?? []).map(e => `${e.model}: ${e.reason}`),
+  ]
+  logForDebugging(
+    `[teammateDispatch] ${input.name ?? input.subagent_type ?? 'agent'}: model=${d.model ?? 'default'} role=${d.role} type=${d.agentType ?? '-'} source=${d.source} mode=${d.mode}` +
+      ` top3.model=${top3(d.modelProbabilities)} top3.role=${top3(d.probabilities)} top3.type=${top3(d.agentTypeProbabilities)}` +
+      ` cost=${d.costUsd !== undefined ? `$${d.costUsd.toFixed(5)}` : '-'} latency=${d.latencyMs !== undefined ? `${d.latencyMs}ms` : '-'}` +
+      ` excluded=[${excluded.join('; ')}]${d.warning ? ` warning=${d.warning}` : ''}`,
+  )
 }
 
 async function chooseTeammateRouteInner(
@@ -831,23 +1243,12 @@ async function chooseTeammateRouteInner(
   config: NormalizedTeammateDispatch,
   deps: TeammateDispatchDeps,
 ): Promise<TeammateRouteDecision> {
-  const classified = await classifyRole(input, config, deps)
-  const { role } = classified
-  const baseTier = config.roleTiers[role]
-  let tier = baseTier
-  if (role === 'implement' && classified.complexity === 'hard' && tier !== 'deep') {
-    tier = DISPATCH_TIERS[DISPATCH_TIERS.indexOf(tier) - 1] ?? tier
-  }
-  if (
-    role === 'research' &&
-    classified.complexity === 'trivial' &&
-    classified.needsLongContext !== true
-  ) {
-    tier = 'fast'
-  }
+  const heuristic = classifyRoleHeuristic(input)
+  const prior = input.prior
 
+  // Implementer families in the team: the separation rule's input.
   let excluded: TeammateRouteExclusion[] = []
-  if (SEPARATED_ROLES.has(role) && input.teamName) {
+  if (input.teamName) {
     try {
       excluded = collectExcludedFamilies(
         deps.readTeamMembers(input.teamName).filter(m => m.name !== input.name),
@@ -859,66 +1260,240 @@ async function chooseTeammateRouteInner(
   }
   const excludedFamilies = new Set(excluded.map(e => e.family))
 
+  // What to ask. An explicit model / subagent_type is never asked about.
+  const modelIsExplicit = input.explicitModel !== undefined || input.modelIsExplicit === true
+  const path = input.spawnPath ?? 'teammate'
+  const askType = !prior && !input.subagent_type && input.agentTypes !== undefined
+  const typeOptions = askType ? agentTypeOptionsFor(input.agentTypes, path) : []
+  const ctx = buildRouteContext(input, deps)
+  const listing = modelIsExplicit || prior ? { candidates: [], excluded: [] } : listCandidates(ctx, deps)
+
+  // Hard rules before asking, by the best role guess we have.
+  const preRole = heuristic.role
+  const excludedModels: ModelExclusion[] = [...listing.excluded]
+  const offered: SpawnableModel[] = []
+  for (const candidate of listing.candidates) {
+    const violation = hardRuleViolation(candidate, preRole, excludedFamilies)
+    if (violation) excludedModels.push({ model: candidate.id, reason: violation })
+    else offered.push(candidate)
+  }
+  const askModel = offered.length > 0
+
+  // Always ask JEV (auto and suggest); the heuristic is only the fallback.
+  let jev: JevCall = { ok: false, why: 'reused prior classification' }
+  let request: JevRequest | undefined
+  if (!prior) {
+    const questions: JevRequest['questions'] = {
+      role: { type: 'choice', criteria: { ...ROLE_CRITERIA } },
+      complexity: {
+        type: 'score',
+        criteria: [
+          'trivial: a lookup or one-line change',
+          'moderate: an ordinary focused task',
+          'hard: subtle, multi-file or deep reasoning required',
+        ],
+      },
+      needs_long_context: { type: 'boolean' },
+    }
+    if (askModel) {
+      questions.model = {
+        type: 'choice',
+        criteria: Object.fromEntries(offered.map(m => [m.id, describeSpawnableModel(m)])),
+      }
+    }
+    if (askType) {
+      questions.agent_type = { type: 'choice', criteria: buildAgentTypeCriteria(typeOptions, path) }
+    }
+    request = {
+      instruction: buildInstruction(config, { askModel, askType, excluded }),
+      state: {
+        description: input.description ?? '',
+        name: input.name ?? '',
+        subagent_type: input.subagent_type ?? '',
+        prompt: (input.prompt ?? '').slice(0, 4000),
+      },
+      questions,
+    }
+    jev = await callJev(request, config, deps)
+  }
+  const answers = jev.ok ? jev.answers : {}
+  const rule = { minP: config.jev.minP, minMargin: config.jev.minMargin }
+
+  // Role.
+  let role: TeammateRole
+  let roleSource: 'jev' | 'heuristic'
+  let roleReason: string
+  const roleAnswer = answers.role
+  const roleProbabilities = prior?.probabilities ?? choiceProbabilities(roleAnswer)
+  const acceptedRole = jev.ok ? deps.acceptChoice(roleAnswer, rule) : null
+  if (prior) {
+    role = prior.role
+    roleSource = prior.roleSource ?? (prior.source === 'jev' ? 'jev' : 'heuristic')
+    roleReason = prior.roleReason ?? `${roleSource} ${role}`
+  } else if (acceptedRole && isRole(acceptedRole)) {
+    role = acceptedRole
+    roleSource = 'jev'
+    const p = roleProbabilities?.[acceptedRole]
+    roleReason = `jev${p !== undefined ? ` p=${p.toFixed(2)}` : ''}`
+  } else {
+    const why = !jev.ok
+      ? jev.why
+      : `jev not confident${roleAnswer?.type === 'choice' ? `: ${roleAnswer.choice}${roleProbabilities?.[roleAnswer.choice] !== undefined ? ` p=${roleProbabilities[roleAnswer.choice]!.toFixed(2)}` : ''}` : ''}`
+    role = heuristic.role ?? 'implement'
+    roleSource = 'heuristic'
+    roleReason = heuristic.role
+      ? heuristic.confident
+        ? `heuristic ${heuristic.matched ?? heuristic.role} (${why})`
+        : `heuristic best guess ${heuristic.matched ?? heuristic.role} (${why})`
+      : `default implement (${why})`
+  }
+  const complexityAnswer = answers.complexity
+  const complexity =
+    complexityAnswer?.type === 'score'
+      ? COMPLEXITY_LEVELS[Math.max(0, Math.min(COMPLEXITY_LEVELS.length - 1, Math.round(complexityAnswer.score)))]
+      : prior?.complexity ?? heuristic.complexity
+  const longAnswer = answers.needs_long_context
+  const needsLongContext = longAnswer?.type === 'boolean' ? longAnswer.probability >= 0.5 : undefined
+
+  let tier = config.roleTiers[role]
+  if (role === 'implement' && complexity === 'hard' && tier !== 'deep') {
+    tier = DISPATCH_TIERS[DISPATCH_TIERS.indexOf(tier) - 1] ?? tier
+  }
+  if (role === 'research' && complexity === 'trivial' && needsLongContext !== true) tier = 'fast'
+
+  // Separation only binds review/verify teammates.
+  const bindingExclusions = SEPARATED_ROLES.has(role) ? excluded : []
+  const exclusionNote = bindingExclusions.length > 0 ? `; excluded ${describeExclusions(bindingExclusions)}` : ''
+
+  // Agent type (C).
+  let agentType: string | undefined = input.subagent_type
+  let agentTypeP: number | undefined
+  let agentTypeNote = ''
+  let chosenDef: AgentTypeOption | undefined
+  const typeAnswer = answers.agent_type
+  if (askType) {
+    const byType = new Map(typeOptions.map(def => [def.agentType, def]))
+    const typeViolation = (key: string): string | undefined => {
+      if (key === DEFAULT_AGENT_TYPE_KEY) return undefined
+      const def = byType.get(key)
+      if (!def) return 'unknown type'
+      const fit = agentTypeFits(def, role)
+      if (fit) return fit
+      if (def.model !== undefined && modelIsExplicit === false) {
+        const model = def.model === 'inherit' ? input.leaderModel : def.model
+        const violation = hardRuleViolation(
+          { separationFamily: separationFamilyOf(model), vision: model ? deps.supportsVision(model, familyOfModel(model)) : undefined },
+          role,
+          excludedFamilies,
+        )
+        if (violation) return `model ${def.model}: ${violation}`
+      }
+      return undefined
+    }
+    const picked = jev.ok ? pickWithRules(typeAnswer, typeViolation, deps, rule) : null
+    if (picked) {
+      agentType = picked.key
+      agentTypeP = picked.p
+      chosenDef = byType.get(picked.key)
+      if (picked.corrected) agentTypeNote = `; type corrected from ${picked.corrected}`
+    } else {
+      agentType = DEFAULT_AGENT_TYPE_KEY
+      agentTypeP = choiceProbabilities(typeAnswer)?.[DEFAULT_AGENT_TYPE_KEY]
+      agentTypeNote = jev.ok ? '; type default (no confident fitting pick)' : ''
+    }
+  }
+  const agentTypeProbabilities = choiceProbabilities(typeAnswer)
+
   const base = {
     role,
     tier,
     mode: config.mode,
-    complexity: classified.complexity,
-    probabilities: classified.probabilities,
-    costUsd: classified.costUsd,
-    latencyMs: classified.latencyMs,
-    ...(excluded.length > 0 ? { excluded } : {}),
+    roleSource,
+    roleReason,
+    complexity,
+    probabilities: roleProbabilities,
+    ...(jev.ok ? { costUsd: jev.costUsd, latencyMs: jev.latencyMs } : jev.latencyMs !== undefined ? { latencyMs: jev.latencyMs } : {}),
+    ...(prior ? { costUsd: prior.costUsd, latencyMs: prior.latencyMs } : {}),
+    ...(bindingExclusions.length > 0 ? { excluded: bindingExclusions } : {}),
+    ...(excludedModels.length > 0 ? { excludedModels } : {}),
+    ...(agentType !== undefined ? { agentType } : {}),
+    ...(agentTypeP !== undefined ? { agentTypeP } : {}),
+    ...(agentTypeProbabilities ? { agentTypeProbabilities } : {}),
+    ...(choiceProbabilities(answers.model) ? { modelProbabilities: choiceProbabilities(answers.model) } : {}),
   }
-  const exclusionNote = excluded.length > 0 ? `; excluded ${describeExclusions(excluded)}` : ''
 
-  // Explicit model: respect it, enforcing only the separation rule.
-  if (input.explicitModel !== undefined) {
-    const family = familyOfModel(input.explicitModel)
-    if (family && excludedFamilies.has(family)) {
-      const implementers = excluded.filter(e => e.family === family).map(e => `'${e.by}'`)
+  // Explicit model — the caller's, or the chosen definition's frontmatter:
+  // respected, enforcing only the separation rule.
+  const frontmatterModel =
+    !modelIsExplicit && chosenDef?.model !== undefined
+      ? chosenDef.model === 'inherit'
+        ? input.leaderModel
+        : chosenDef.model
+      : undefined
+  if (input.explicitModel !== undefined || frontmatterModel !== undefined) {
+    const explicit = (input.explicitModel ?? frontmatterModel)!
+    const family = familyOfModel(explicit)
+    const sep = separationFamilyOf(explicit)
+    if (SEPARATED_ROLES.has(role) && sep && excludedFamilies.has(sep)) {
+      const implementers = excluded.filter(e => e.family === sep).map(e => `'${e.by}'`)
       const suggestions = suggestFamilies(tier, excludedFamilies, config)
       return {
         ...base,
-        family,
-        model: input.explicitModel,
+        ...(family ? { family } : {}),
+        model: explicit,
         source: 'explicit',
-        reason: `${classified.reason}; explicit ${input.explicitModel}`,
-        refusal: `Refusing to spawn ${role} teammate${input.name ? ` '${input.name}'` : ''} on '${input.explicitModel}' (${family}): ${implementers.join(', ')} implemented with ${family} in team '${input.teamName}'. A ${role} teammate must use a different model family than the implementer. Use ${suggestions.length > 0 ? `one of: ${suggestions.join(', ')}` : 'a different model family'}, or omit model to let the dispatcher choose.`,
+        reason: `${roleReason}; explicit ${explicit}`,
+        refusal: `Refusing to spawn ${role} teammate${input.name ? ` '${input.name}'` : ''} on '${explicit}' (${sep}): ${implementers.join(', ')} implemented with ${sep} in team '${input.teamName}'. A ${role} teammate must use a different model family than the implementer. Use ${suggestions.length > 0 ? `one of: ${suggestions.join(', ')}` : 'a different model family'}, or omit model to let the dispatcher choose.`,
       }
     }
     return {
       ...base,
       ...(family ? { family } : {}),
-      model: input.explicitModel,
+      model: explicit,
       source: 'explicit',
-      reason: `${classified.reason}; explicit model respected${exclusionNote}`,
+      reason: `${roleReason}; ${input.explicitModel !== undefined ? 'explicit model respected' : `model from ${agentType} definition`}${agentTypeNote}${exclusionNote}`,
     }
   }
+  if (input.modelIsExplicit) {
+    // The caller resolves the model; this call only chose role and type.
+    return { ...base, source: roleSource, reason: `${roleReason}${agentTypeNote}` }
+  }
 
-  const wildcard = (input.settings?.teammateModelAllowlist ?? []).some(
-    item => item.trim() === TEAMMATE_MODEL_ALLOWLIST_WILDCARD,
-  )
-  const ctx = {
-    allowed: getAllowedTeammateEntries(input.settings?.teammateModelAllowlist),
-    wildcard,
-    leaderRoute: deps.leaderRoute(),
-    anthropicAuth: false,
-    profiles: [] as readonly ProviderProfile[],
-    allowProfileBinding: input.allowProfileBinding !== false,
+  // Model (B): JEV's pick, corrected by the hard rules.
+  const byId = new Map(listing.candidates.map(m => [m.id, m]))
+  const modelViolation = (key: string): string | undefined => {
+    const candidate = byId.get(key)
+    if (!candidate) return 'not a spawnable model'
+    return hardRuleViolation(candidate, role, excludedFamilies)
   }
-  ctx.anthropicAuth = ctx.leaderRoute === 'anthropic' && deps.hasAnthropicAuth()
-  try {
-    ctx.profiles = deps.providerProfiles()
-  } catch {
-    ctx.profiles = []
+  let jevModelNote = ''
+  if (askModel && jev.ok) {
+    const picked = pickWithRules(answers.model, modelViolation, deps, rule)
+    if (picked) {
+      const candidate = byId.get(picked.key)!
+      return {
+        ...base,
+        ...(candidate.family ? { family: candidate.family } : {}),
+        model: candidate.id,
+        ...(candidate.providerProfile ? { providerProfile: candidate.providerProfile } : {}),
+        source: 'jev',
+        reason: `jev p=${(picked.p ?? 0).toFixed(2)}${picked.corrected ? `; corrected from ${picked.corrected}` : ''}; role ${roleReason}${agentTypeNote}${exclusionNote}`,
+      }
+    }
+    const modelAnswer = answers.model
+    jevModelNote = modelAnswer?.type === 'choice'
+      ? `; jev model ${modelAnswer.choice} p=${(modelAnswer.probabilities[modelAnswer.choice] ?? 0).toFixed(2)} rejected`
+      : '; jev gave no model'
   }
+
+  // Fallback: the tier table.
   const needsVision = role === 'computer_use'
-
   for (const candidateTier of tierFallbackOrder(tier)) {
     for (const family of config.tierFamilies[candidateTier]) {
-      if (excludedFamilies.has(family)) continue
       const candidate = resolveCandidate(family, candidateTier, ctx)
       if (!candidate) continue
+      const sep = separationFamilyOf(candidate.model) ?? family
+      if (bindingExclusions.some(e => e.family === family || e.family === sep)) continue
       if (needsVision && !deps.supportsVision(candidate.model, family)) continue
       if (!deps.isModelAllowed(candidate.model)) continue
       const tierNote = candidateTier === tier ? '' : `; ${tier} tier unavailable, used ${candidateTier}`
@@ -928,39 +1503,30 @@ async function chooseTeammateRouteInner(
         family,
         model: candidate.model,
         ...(candidate.providerProfile ? { providerProfile: candidate.providerProfile } : {}),
-        source: classified.source,
-        reason: `${classified.reason}${tierNote}${exclusionNote}`,
+        source: roleSource,
+        reason: `${roleReason}${jevModelNote}${tierNote}${agentTypeNote}${exclusionNote}`,
       }
     }
   }
-  const warning = `no configured${needsVision ? ' vision-capable' : ''} model is allowed for ${role}${excluded.length > 0 ? ` after excluding ${describeExclusions(excluded)}` : ''}; spawning on the default model`
+  const warning = `no configured${needsVision ? ' vision-capable' : ''} model is allowed for ${role}${bindingExclusions.length > 0 ? ` after excluding ${describeExclusions(bindingExclusions)}` : ''}; spawning on the default model`
   return {
     ...base,
-    source: classified.source,
-    reason: `${classified.reason}; WARNING: ${warning}`,
+    source: roleSource,
+    reason: `${roleReason}${jevModelNote}${agentTypeNote}; WARNING: ${warning}`,
     warning,
   }
 }
 
-function suggestFamilies(
-  tier: DispatchTier,
-  excluded: ReadonlySet<DispatchFamily>,
-  config: NormalizedTeammateDispatch,
-): DispatchFamily[] {
-  const out: DispatchFamily[] = []
-  for (const t of tierFallbackOrder(tier)) {
-    for (const family of config.tierFamilies[t]) {
-      if (!excluded.has(family) && !out.includes(family)) out.push(family)
-    }
-  }
-  return out
-}
-
-/** One line for the Agent tool result, e.g. "dispatch: review → fable-5.1 (jev p=0.86; …)". */
+/**
+ * One line for the Agent tool result, e.g.
+ * "dispatch: review → fable-5.1 as reviewer (jev p=0.86 / type p=0.81)".
+ */
 export function formatDispatchSummary(decision: TeammateRouteDecision): string {
   const target = decision.family ?? decision.model ?? 'default model'
+  const as = decision.agentType ? ` as ${decision.agentType}` : ''
+  const typeP = decision.agentTypeP !== undefined ? ` / type p=${decision.agentTypeP.toFixed(2)}` : ''
   const suffix = decision.mode === 'suggest' ? ' [suggest only — not applied]' : ''
-  return `dispatch: ${decision.role} → ${target} (${decision.reason})${suffix}`
+  return `dispatch: ${decision.role} → ${target}${as} (${decision.reason}${typeP})${suffix}`
 }
 
 export function toDispatchRecord(
@@ -971,6 +1537,8 @@ export function toDispatchRecord(
     role: decision.role,
     ...(applied.family ? { family: applied.family } : {}),
     ...(applied.model ? { model: applied.model } : {}),
+    ...(decision.agentType ? { agentType: decision.agentType } : {}),
+    ...(decision.agentTypeP !== undefined ? { agentTypeP: decision.agentTypeP } : {}),
     source: decision.source,
     mode: decision.mode,
     reason: decision.reason,

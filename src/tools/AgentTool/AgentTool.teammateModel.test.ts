@@ -784,7 +784,7 @@ test('dispatch: a reviewer after a sonnet-5 implementer never gets sonnet-5', as
   expect(config.model).toBe('claude-opus-5-5')
   expect(config.dispatch?.role).toBe('review')
   expect(resultText(AgentTool, result.data)).toContain(
-    'dispatch: review → opus-5.5 (heuristic',
+    'dispatch: review → opus-5.5 as default (heuristic',
   )
   expect(resultText(AgentTool, result.data)).toContain('excluded sonnet-5 used by dev')
 })

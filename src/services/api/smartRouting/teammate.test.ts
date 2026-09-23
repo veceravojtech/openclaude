@@ -6,7 +6,10 @@ import {
   _resetTeammateDispatchWarningsForTesting,
   _setTeammateDispatchDepsForTesting,
   chooseTeammateRoute,
+  agentTypeOptionsFor,
   classifyRoleHeuristic,
+  describeSpawnableModel,
+  listSpawnableModels,
   collectExcludedFamilies,
   DEFAULT_TIER_FAMILIES,
   familyOfModel,
@@ -56,6 +59,31 @@ function jevOk(
     cached: false,
     costUsd: 0.0004,
   }
+}
+
+function withModel(
+  result: JevResult,
+  choice: string,
+  probabilities: Record<string, number>,
+  type?: { choice: string; probabilities: Record<string, number> },
+): JevResult {
+  if (!result.ok) return result
+  return {
+    ...result,
+    answers: {
+      ...result.answers,
+      model: { type: 'choice', choice, probabilities },
+      ...(type ? { agent_type: { type: 'choice' as const, ...type } } : {}),
+    },
+  }
+}
+
+const codexProfile: ProviderProfile = {
+  id: 'prof_codex',
+  name: 'Codex',
+  provider: 'openai',
+  baseUrl: 'https://chatgpt.com/backend-api/codex',
+  model: 'codexplan',
 }
 
 function setDeps(overrides: Partial<TeammateDispatchDeps> = {}): void {
@@ -137,6 +165,7 @@ describe('JEV classification', () => {
     expect(jevCalls).toHaveLength(1)
     expect(Object.keys(jevCalls[0]!.req.questions).sort()).toEqual([
       'complexity',
+      'model',
       'needs_long_context',
       'role',
     ])
@@ -145,7 +174,7 @@ describe('JEV classification', () => {
     expect(decision.family).toBe('fable-5.1')
     expect(decision.costUsd).toBe(0.0004)
     expect(decision.probabilities?.review).toBe(0.86)
-    expect(formatDispatchSummary(decision)).toBe('dispatch: review → fable-5.1 (jev p=0.86)')
+    expect(formatDispatchSummary(decision)).toBe('dispatch: review → fable-5.1 (jev p=0.86; jev gave no model)')
   })
 
   test('an unconfident JEV answer falls back to the heuristic', async () => {
@@ -163,16 +192,28 @@ describe('JEV classification', () => {
     expect(decision.reason).toContain('jev not confident: design p=0.50')
   })
 
-  test('a confident heuristic skips JEV', async () => {
-    setDeps({ isJevConfigured: () => true })
+  test('JEV is called even when the heuristic is confident', async () => {
+    setDeps({
+      isJevConfigured: () => true,
+      evaluateJev: async (req, opts) => {
+        jevCalls.push({ req, opts })
+        return withModel(jevOk('review', { review: 0.9, verify: 0.05 }), 'claude-opus-5-5', {
+          'claude-opus-5-5': 0.88,
+          'claude-fable-5-1': 0.08,
+        })
+      },
+    })
+    expect(classifyRoleHeuristic({ description: 'Review the auth diff', prompt: 'Critique it.' }).confident).toBe(true)
     const decision = await chooseTeammateRoute({
       description: 'Review the auth diff',
       prompt: 'Critique it.',
       settings: settings(),
     })
-    expect(jevCalls).toHaveLength(0)
+    expect(jevCalls).toHaveLength(1)
     expect(decision.role).toBe('review')
-    expect(decision.source).toBe('heuristic')
+    expect(decision.source).toBe('jev')
+    expect(decision.model).toBe('claude-opus-5-5')
+    expect(formatDispatchSummary(decision)).toStartWith('dispatch: review → opus-5.5 (jev p=0.88')
   })
 
   test('JEV failure is non-blocking', async () => {
@@ -460,5 +501,211 @@ describe('modes and helpers', () => {
     const s = settings({ agentRouting: { default: 'x', 'code_reviewer': 'y' } })
     expect(hasNamedAgentRouting('rev', undefined, s)).toBe(false)
     expect(hasNamedAgentRouting('code-reviewer', undefined, s)).toBe(true)
+  })
+})
+
+describe('JEV model and agent-type choice', () => {
+  const jevWith = (result: JevResult) =>
+    setDeps({
+      isJevConfigured: () => true,
+      evaluateJev: async (req, opts) => {
+        jevCalls.push({ req, opts })
+        return result
+      },
+    })
+
+  test('the "*" candidate list includes gpt-5.6-luna and claude-sonnet-4-6', async () => {
+    setDeps({ providerProfiles: () => [codexProfile, zaiProfile, deepseekProfile] })
+    const { candidates } = listSpawnableModels({ settings: settings({ teammateModelAllowlist: ['*'] }) })
+    const ids = candidates.map(c => c.id)
+    expect(ids).toContain('gpt-5.6-luna')
+    expect(ids).toContain('claude-sonnet-4-6')
+    expect(ids).toContain('glm-5.3')
+    expect(ids).toContain('deepseek-v4-pro')
+    expect(candidates.find(c => c.id === 'gpt-5.6-luna')?.providerProfile).toBe('prof_codex')
+    expect(candidates.find(c => c.id === 'claude-sonnet-4-6')?.providerProfile).toBeUndefined()
+    // Descriptions come from catalog data.
+    const luna = describeSpawnableModel(candidates.find(c => c.id === 'gpt-5.6-luna')!)
+    expect(luna).toContain('provider Codex')
+    expect(luna).toContain('context')
+    expect(luna).toContain('price low')
+    expect(luna).toMatch(/vision/)
+    // The unset allowlist keeps only matrix models: no gpt-5.6, no sonnet-4-6.
+    const strict = listSpawnableModels({ settings: settings() }).candidates.map(c => c.id)
+    expect(strict).not.toContain('gpt-5.6-luna')
+    expect(strict).not.toContain('claude-sonnet-4-6')
+    expect(strict).toContain('claude-sonnet-5')
+  })
+
+  test('the model question offers every allowed candidate', async () => {
+    setDeps({ providerProfiles: () => [codexProfile], isJevConfigured: () => true, evaluateJev: async (req, opts) => { jevCalls.push({ req, opts }); return { ok: false, reason: 'timeout', latencyMs: 1 } } })
+    await chooseTeammateRoute({ description: 'Handle payments', settings: settings({ teammateModelAllowlist: ['*'] }) })
+    const model = jevCalls[0]!.req.questions.model
+    expect(model?.type).toBe('choice')
+    const keys = model?.type === 'choice' ? Object.keys(model.criteria) : []
+    expect(keys).toContain('gpt-5.6-luna')
+    expect(keys).toContain('claude-sonnet-4-6')
+    expect(jevCalls[0]!.req.instruction).toContain('deep tier (prefer fable-5.1, opus-5.5, gpt-6)')
+  })
+
+  test('a pick that breaks a hard rule is corrected', async () => {
+    // The implementer ran Sonnet 5; claude-sonnet-4-6 is the same family.
+    members = [{ name: 'dev', role: 'implement', model: 'claude-sonnet-5' }]
+    jevWith(
+      withModel(jevOk('review', { review: 0.95, verify: 0.05 }), 'claude-sonnet-4-6', {
+        'claude-sonnet-4-6': 0.8,
+        'claude-opus-5-5': 0.17,
+        'claude-haiku-4-5-20251001': 0.03,
+      }),
+    )
+    const decision = await chooseTeammateRoute({
+      description: 'Handle payments',
+      name: 'checker',
+      teamName: 't',
+      settings: settings({ teammateModelAllowlist: ['*'] }),
+    })
+    expect(decision.role).toBe('review')
+    expect(decision.model).toBe('claude-opus-5-5')
+    expect(decision.reason).toContain('corrected from claude-sonnet-4-6')
+    // Pre-filtered too: an ambiguous role still offered it, but a heuristic
+    // review would not have.
+    const reviewCall = jevCalls[0]!.req.questions.model
+    expect(reviewCall?.type === 'choice' && 'claude-sonnet-4-6' in reviewCall.criteria).toBe(true)
+  })
+
+  test('a heuristic review never offers the implementer family', async () => {
+    members = [{ name: 'dev', role: 'implement', model: 'claude-sonnet-5' }]
+    jevWith({ ok: false, reason: 'timeout', latencyMs: 1 })
+    const decision = await chooseTeammateRoute({
+      description: 'Review the diff',
+      name: 'rev',
+      teamName: 't',
+      settings: settings({ teammateModelAllowlist: ['*'] }),
+    })
+    const model = jevCalls[0]!.req.questions.model
+    const keys = model?.type === 'choice' ? Object.keys(model.criteria) : []
+    expect(keys).not.toContain('claude-sonnet-4-6')
+    expect(keys).not.toContain('claude-sonnet-5')
+    expect(decision.excludedModels?.some(e => e.model === 'claude-sonnet-4-6' && e.reason.startsWith('separation'))).toBe(true)
+  })
+
+  test('a computer_use pick without vision is corrected', async () => {
+    setDeps({
+      leaderRoute: () => 'zai',
+      hasAnthropicAuth: () => false,
+      isJevConfigured: () => true,
+      evaluateJev: async () =>
+        withModel(jevOk('computer_use', { computer_use: 0.9, research: 0.1 }), 'glm-5.3', { 'glm-5.3': 0.9, 'glm-5.3-flash': 0.1 }),
+      supportsVision: model => model === 'glm-5.3-flash',
+      routeCatalog: () => [{ id: 'glm-5.3' }, { id: 'glm-5.3-flash' }],
+    })
+    const decision = await chooseTeammateRoute({ description: 'Handle it', settings: settings() })
+    expect(decision.role).toBe('computer_use')
+    expect(decision.model).toBe('glm-5.3-flash')
+  })
+
+  test('an unconfident model pick falls back to the tier table', async () => {
+    jevWith(withModel(jevOk('review', { review: 0.9, verify: 0.1 }), 'claude-opus-5-5', { 'claude-opus-5-5': 0.5, 'claude-fable-5-1': 0.45 }))
+    const decision = await chooseTeammateRoute({ description: 'Handle it', settings: settings() })
+    expect(decision.source).toBe('jev')
+    expect(decision.model).toBe('claude-fable-5-1')
+    expect(decision.reason).toContain('jev model claude-opus-5-5 p=0.50 rejected')
+  })
+
+  test('a JEV failure falls back to the heuristic', async () => {
+    setDeps({ isJevConfigured: () => true, evaluateJev: async () => ({ ok: false, reason: 'http_error', latencyMs: 5 }) })
+    const decision = await chooseTeammateRoute({
+      description: 'Review the diff',
+      agentTypes: [{ agentType: 'reviewer', source: 'userSettings', whenToUse: 'Reviews code' }],
+      settings: settings(),
+    })
+    expect(decision.role).toBe('review')
+    expect(decision.source).toBe('heuristic')
+    expect(decision.model).toBe('claude-fable-5-1')
+    expect(decision.agentType).toBe('default')
+    expect(decision.reason).toContain('jev http_error')
+  })
+
+  const defs = [
+    { agentType: 'reviewer', source: 'userSettings', whenToUse: 'Reviews diffs', tools: ['Read', 'Grep'] },
+    { agentType: 'coder', source: 'projectSettings', whenToUse: 'Writes code' },
+    { agentType: 'Explore', source: 'built-in', whenToUse: 'Explores the codebase', tools: ['Read', 'Grep', 'Glob'] },
+    { agentType: 'general-purpose', source: 'built-in', whenToUse: 'General' },
+  ]
+
+  test('agent_type criteria come from the loaded definitions plus default', async () => {
+    jevWith({ ok: false, reason: 'timeout', latencyMs: 1 })
+    await chooseTeammateRoute({ description: 'Handle it', agentTypes: defs, settings: settings() })
+    const q = jevCalls[0]!.req.questions.agent_type
+    expect(q?.type).toBe('choice')
+    const criteria = q?.type === 'choice' ? q.criteria : {}
+    expect(Object.keys(criteria).sort()).toEqual(['coder', 'default', 'reviewer'])
+    expect(criteria.reviewer).toContain('Reviews diffs')
+    expect(criteria.reviewer).toContain('read-only')
+    expect(criteria.coder).toContain('can edit files')
+  })
+
+  test('built-ins are excluded on the teammate path and allowed on the subagent path', () => {
+    expect(agentTypeOptionsFor(defs, 'teammate').map(d => d.agentType)).toEqual(['reviewer', 'coder'])
+    // general-purpose is what `default` means on the subagent path.
+    expect(agentTypeOptionsFor(defs, 'subagent').map(d => d.agentType)).toEqual(['reviewer', 'coder', 'Explore'])
+  })
+
+  test('an explicit subagent_type is not asked about', async () => {
+    jevWith({ ok: false, reason: 'timeout', latencyMs: 1 })
+    const decision = await chooseTeammateRoute({ description: 'Handle it', subagent_type: 'coder', agentTypes: defs, settings: settings() })
+    expect(jevCalls[0]!.req.questions.agent_type).toBeUndefined()
+    expect(decision.agentType).toBe('coder')
+  })
+
+  test('an explicit model is not asked about', async () => {
+    jevWith({ ok: false, reason: 'timeout', latencyMs: 1 })
+    await chooseTeammateRoute({ description: 'Handle it', explicitModel: 'claude-opus-5-5', settings: settings() })
+    expect(jevCalls[0]!.req.questions.model).toBeUndefined()
+  })
+
+  test('an edit-incapable type for implement falls back', async () => {
+    jevWith(
+      withModel(jevOk('implement', { implement: 0.95, review: 0.05 }), 'claude-sonnet-5', { 'claude-sonnet-5': 0.9, 'claude-opus-5-5': 0.1 }, {
+        choice: 'reviewer',
+        probabilities: { reviewer: 0.8, coder: 0.15, default: 0.05 },
+      }),
+    )
+    const decision = await chooseTeammateRoute({ description: 'Handle it', agentTypes: defs, settings: settings() })
+    expect(decision.role).toBe('implement')
+    expect(decision.agentType).toBe('coder')
+    expect(decision.agentTypeP).toBe(0.15)
+    expect(decision.reason).toContain('type corrected from reviewer cannot edit files')
+    expect(formatDispatchSummary(decision)).toBe(
+      `dispatch: implement → sonnet-5 as coder (${decision.reason} / type p=0.15)`,
+    )
+    // With no capable confident alternative: default.
+    jevWith(
+      withModel(jevOk('implement', { implement: 0.95, review: 0.05 }), 'claude-sonnet-5', { 'claude-sonnet-5': 0.9, 'claude-opus-5-5': 0.1 }, {
+        choice: 'reviewer',
+        probabilities: { reviewer: 0.5, coder: 0.26, default: 0.24 },
+      }),
+    )
+    const fallback = await chooseTeammateRoute({ description: 'Handle it', agentTypes: defs, settings: settings() })
+    expect(fallback.agentType).toBe('default')
+  })
+
+  test("a chosen type's model frontmatter is used, and separation still applies", async () => {
+    members = [{ name: 'dev', role: 'implement', model: 'claude-opus-5-5' }]
+    const typed = [
+      { agentType: 'opus-reviewer', source: 'userSettings', whenToUse: 'Reviews with Opus', model: 'claude-opus-5-5' },
+      { agentType: 'fable-reviewer', source: 'userSettings', whenToUse: 'Reviews with Fable', model: 'claude-fable-5-1' },
+    ]
+    jevWith(
+      withModel(jevOk('review', { review: 0.95, verify: 0.05 }), 'claude-fable-5-1', { 'claude-fable-5-1': 0.9, 'gpt-6-astra': 0.1 }, {
+        choice: 'opus-reviewer',
+        probabilities: { 'opus-reviewer': 0.8, 'fable-reviewer': 0.18, default: 0.02 },
+      }),
+    )
+    const decision = await chooseTeammateRoute({ description: 'Handle it', name: 'rev', teamName: 't', agentTypes: typed, settings: settings() })
+    expect(decision.agentType).toBe('fable-reviewer')
+    expect(decision.model).toBe('claude-fable-5-1')
+    expect(decision.source).toBe('explicit')
+    expect(decision.refusal).toBeUndefined()
   })
 })

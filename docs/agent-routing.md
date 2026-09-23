@@ -230,13 +230,40 @@ dispatcher picks one from the teammate's **role**:
 | standard | `sonnet-5`, `deepseek-v4-pro`, `glm-5.3`, `gpt-5.6` (sol) |
 | fast | `deepseek-v4.1-flash`, `glm-5.3` (flash), `gpt-5.6` (luna) |
 
-The role comes from a keyword heuristic first. When it is not confident and
-JEV is configured (`AI_GATEWAY_API_KEY`), one JEV call classifies the role,
-complexity and long-context need. A failed or unconfident JEV answer falls back
-to the heuristic, then to `implement`; a spawn never waits longer than the JEV
-timeout.
+When JEV is configured (`AI_GATEWAY_API_KEY`), every dispatch makes one JEV
+call. It asks for the role, the complexity and whether the task needs long
+context. It also asks two choice questions:
 
-The first family in the tier that is actually usable wins: it must be admitted
+- `model`: every model this machine can spawn. That covers each catalog id on
+  each configured route: the Claude ids when Anthropic is logged in, plus every
+  saved profile's models, such as Z.AI, DeepSeek and Codex. The list is
+  filtered by `teammateModelAllowlist` (`["*"]` keeps all of them) and by the
+  organization's `availableModels`. Each option is described from catalog data:
+  provider, context, price tier, vision and reasoning. The tier table below is
+  sent as the preference.
+- `agent_type`: the loaded agent definitions plus `default`. Built-in types are
+  offered to subagents but never to teammates.
+
+A model or agent type you pass explicitly is never asked about. A chosen
+type's `model` frontmatter counts as explicit.
+
+Hard rules are applied before the question and again to the answer. A review
+or verify teammate never uses an implementer's model family, and every Claude
+Sonnet version counts as one family. A `computer_use` teammate needs a vision
+model. An implementer's agent type must be able to edit files, and a
+`computer_use` teammate's type must be able to use a browser.
+
+If a pick breaks a rule or fails the confidence rule (p ≥ 0.75 with a 0.15
+margin), the best remaining option by probability is used, provided it passes
+the same rule once the remaining options are renormalized. If none does, the
+model falls back to the tier table and the type to `default`. When JEV is not
+configured or fails, the role comes from a keyword heuristic and the model from
+the tier table. A spawn never waits longer than the JEV timeout. Every decision
+writes one debug-log line (`[teammateDispatch]`) with the model, role, type,
+source, top-3 probabilities, cost, latency and every excluded model with its
+reason.
+
+When the tier table decides, the first family in the tier that is actually usable wins: it must be admitted
 by `teammateModelAllowlist`, served on this machine (the leader's own route —
 the Anthropic route needs Anthropic login or API key — or a saved provider
 profile, which is bound to the teammate like `provider_profile`) and, for

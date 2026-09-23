@@ -501,7 +501,10 @@ export const AgentTool = buildTool({
     // Spawn is triggered when team_name is set (from param or context) and name is provided
     if (teamName && name) {
       // Set agent definition color for grouped UI display before spawning
-      const agentDef = subagent_type ? toolUseContext.options.agentDefinitions.activeAgents.find(a => a.agentType === subagent_type) : undefined;
+      let agentDef = subagent_type ? toolUseContext.options.agentDefinitions.activeAgents.find(a => a.agentType === subagent_type) : undefined;
+      // The agent type the teammate runs as: the caller's, else (auto
+      // dispatch) the one JEV chose from the loaded definitions.
+      let teammateSubagentType = subagent_type;
 
       if (subagent_type) {
         if (agentDef) {
@@ -513,9 +516,6 @@ export const AgentTool = buildTool({
         }
       }
 
-      if (agentDef?.color) {
-        setAgentColor(subagent_type!, agentDef.color);
-      }
       const settings = getInitialSettings();
       // Teammate dispatch: with no model from the call, the agent definition,
       // a provider_profile or a named agentRouting entry, pick one by role.
@@ -540,12 +540,33 @@ export const AgentTool = buildTool({
       let dispatchDecision: TeammateRouteDecision | undefined;
       let dispatchedModel: string | undefined;
       let dispatchedProfile: string | undefined;
-      if (dispatchMode !== 'off' && !teammateModelIsExplicit) {
-        dispatchDecision = await chooseTeammateRoute(dispatchInput);
-        if (dispatchMode === 'auto' && dispatchDecision.model) {
-          dispatchedModel = dispatchDecision.model;
-          dispatchedProfile = dispatchDecision.providerProfile;
+      // Ask whenever something is left to choose: the model (none explicit)
+      // or the agent type (no subagent_type). Built-ins are never offered to
+      // teammates.
+      if (dispatchMode !== 'off' && (!teammateModelIsExplicit || subagent_type === undefined)) {
+        dispatchDecision = await chooseTeammateRoute({
+          ...dispatchInput,
+          spawnPath: 'teammate',
+          ...(subagent_type === undefined ? { agentTypes: toolUseContext.options.agentDefinitions.activeAgents } : {}),
+          ...(teammateModelIsExplicit ? { modelIsExplicit: true } : {})
+        });
+        if (dispatchMode === 'auto') {
+          if (!teammateModelIsExplicit && dispatchDecision.model) {
+            dispatchedModel = dispatchDecision.model;
+            dispatchedProfile = dispatchDecision.providerProfile;
+          }
+          const pickedType = dispatchDecision.agentType;
+          if (subagent_type === undefined && pickedType && pickedType !== 'default') {
+            const pickedDef = toolUseContext.options.agentDefinitions.activeAgents.find(a => a.agentType === pickedType && a.source !== 'built-in');
+            if (pickedDef) {
+              agentDef = pickedDef;
+              teammateSubagentType = pickedType;
+            }
+          }
         }
+      }
+      if (agentDef?.color && teammateSubagentType) {
+        setAgentColor(teammateSubagentType, agentDef.color);
       }
       // The model argument every resolver below sees: the caller's, else the
       // dispatcher's. A dispatched profile binding bypasses them (like an
@@ -568,7 +589,7 @@ export const AgentTool = buildTool({
         ? resolveOutOfProcessTeammateProvider({
             cliModel: teammateModelArg,
             agentName: name,
-            agentType: subagent_type,
+            agentType: teammateSubagentType,
             agentDefinitionModel: agentDef?.model,
             settings
           })
@@ -585,7 +606,7 @@ export const AgentTool = buildTool({
           ? resolveOutOfProcessTeammateModelOnly({
               cliModel: teammateModelArg,
               agentName: name,
-              agentType: subagent_type,
+              agentType: teammateSubagentType,
               agentDefinitionModel: agentDef?.model,
               parentModel: toolUseContext.options.mainLoopModel,
               permissionMode,
@@ -609,7 +630,7 @@ export const AgentTool = buildTool({
         ? resolveOutOfProcessTeammateProviderProfile({
             cliModel: teammateModelArg,
             agentName: name,
-            agentType: subagent_type,
+            agentType: teammateSubagentType,
             agentDefinitionModel: agentDef?.model,
             settings
           })
@@ -658,10 +679,18 @@ export const AgentTool = buildTool({
         resolvedTeammateModel ??
         toolUseContext.options.mainLoopModel;
       if (dispatchMode !== 'off' && teammateModelIsExplicit) {
-        dispatchDecision = await chooseTeammateRoute({
+        // Separation check on the explicit model, reusing the role (and the
+        // type pick) from the first call rather than asking JEV again.
+        const firstDecision = dispatchDecision;
+        const recheck = await chooseTeammateRoute({
           ...dispatchInput,
-          explicitModel: effectiveTeammateModel
+          subagent_type: teammateSubagentType,
+          explicitModel: effectiveTeammateModel,
+          ...(firstDecision ? { prior: firstDecision } : {})
         });
+        dispatchDecision = firstDecision?.agentTypeProbabilities
+          ? { ...recheck, agentType: firstDecision.agentType, agentTypeP: firstDecision.agentTypeP, agentTypeProbabilities: firstDecision.agentTypeProbabilities }
+          : recheck;
         if (dispatchDecision.refusal) {
           if (dispatchMode === 'auto') {
             throw new Error(dispatchDecision.refusal);
@@ -690,7 +719,7 @@ export const AgentTool = buildTool({
           ? undefined
           : routedTeammateProvider?.model ?? routedTeammateModelOnly ?? resolvedTeammateModel,
         modelWasToolSpecified: teammateModelArg !== undefined,
-        agent_type: subagent_type,
+        agent_type: teammateSubagentType,
         providerEnv: providerProfileEnv,
         providerProfileRef: effectiveProviderProfileRef,
         invokingRequestId: assistantMessage?.requestId,
@@ -767,7 +796,41 @@ export const AgentTool = buildTool({
     // - subagent_type set: use it (explicit wins)
     // - subagent_type omitted, gate on: fork path (undefined)
     // - subagent_type omitted, gate off: default general-purpose
-    const effectiveType = subagent_type ?? (isForkSubagentEnabled() ? undefined : GENERAL_PURPOSE_AGENT.agentType);
+    //
+    // Subagent dispatch with no subagent_type (and not the fork path): JEV
+    // picks the agent type — built-ins allowed here — together with role and
+    // model. `default` keeps general-purpose.
+    let earlySubagentDecision: TeammateRouteDecision | undefined;
+    let dispatchedSubagentType: string | undefined;
+    if (subagent_type === undefined && !isForkSubagentEnabled()) {
+      const earlySettings = getInitialSettings();
+      const earlyMode = readTeammateDispatchSettings(earlySettings).mode;
+      if (earlyMode !== 'off') {
+        const {
+          activeAgents,
+          allowedAgentTypes
+        } = toolUseContext.options.agentDefinitions;
+        const offeredAgents = filterDeniedAgents(allowedAgentTypes ? activeAgents.filter(a => allowedAgentTypes.includes(a.agentType)) : activeAgents, appState.toolPermissionContext, AGENT_TOOL_NAME);
+        const earlyModelIsExplicit = model !== undefined || !!process.env.CLAUDE_CODE_SUBAGENT_MODEL || hasNamedAgentRouting(name, undefined, earlySettings);
+        earlySubagentDecision = await chooseTeammateRoute({
+          description,
+          prompt,
+          name,
+          teamName,
+          settings: earlySettings,
+          leaderModel: toolUseContext.options.mainLoopModel,
+          allowProfileBinding: false,
+          spawnPath: 'subagent',
+          agentTypes: offeredAgents,
+          ...(earlyModelIsExplicit ? { modelIsExplicit: true } : {})
+        });
+        const pickedType = earlySubagentDecision.agentType;
+        if (earlyMode === 'auto' && pickedType && pickedType !== 'default' && offeredAgents.some(a => a.agentType === pickedType)) {
+          dispatchedSubagentType = pickedType;
+        }
+      }
+    }
+    const effectiveType = subagent_type ?? dispatchedSubagentType ?? (isForkSubagentEnabled() ? undefined : GENERAL_PURPOSE_AGENT.agentType);
     const isForkPath = effectiveType === undefined;
     let selectedAgent: AgentDefinition;
     if (isForkPath) {
@@ -907,30 +970,43 @@ export const AgentTool = buildTool({
       const dispatchSettings = getInitialSettings();
       const subagentDispatchMode = readTeammateDispatchSettings(dispatchSettings).mode;
       if (subagentDispatchMode !== 'off') {
+        // A type JEV chose brings its model frontmatter as the decision's
+        // model (separation already enforced), so it is not "explicit" here.
+        const typeWasDispatched = earlySubagentDecision !== undefined && dispatchedSubagentType === selectedAgent.agentType;
         const subagentModelIsExplicit =
           model !== undefined ||
-          selectedAgent.model !== undefined ||
+          (selectedAgent.model !== undefined && !typeWasDispatched) ||
           !!process.env.CLAUDE_CODE_SUBAGENT_MODEL ||
           hasNamedAgentRouting(name, selectedAgent.agentType, dispatchSettings);
         const explicitSubagentModel = model ?? selectedAgent.model;
-        const subagentDecision = await chooseTeammateRoute({
-          description,
-          prompt,
-          name,
-          subagent_type: selectedAgent.agentType,
-          teamName,
-          settings: dispatchSettings,
-          leaderModel: toolUseContext.options.mainLoopModel,
-          allowProfileBinding: false,
-          ...(subagentModelIsExplicit
-            ? {
-                explicitModel:
-                  explicitSubagentModel === undefined || explicitSubagentModel === 'inherit'
-                    ? toolUseContext.options.mainLoopModel
-                    : explicitSubagentModel
-              }
-            : {})
-        });
+        let subagentDecision: TeammateRouteDecision;
+        if (earlySubagentDecision && !subagentModelIsExplicit) {
+          subagentDecision = earlySubagentDecision;
+        } else {
+          const recheck = await chooseTeammateRoute({
+            description,
+            prompt,
+            name,
+            subagent_type: selectedAgent.agentType,
+            teamName,
+            settings: dispatchSettings,
+            leaderModel: toolUseContext.options.mainLoopModel,
+            allowProfileBinding: false,
+            spawnPath: 'subagent',
+            ...(earlySubagentDecision ? { prior: earlySubagentDecision } : {}),
+            ...(subagentModelIsExplicit
+              ? {
+                  explicitModel:
+                    explicitSubagentModel === undefined || explicitSubagentModel === 'inherit'
+                      ? toolUseContext.options.mainLoopModel
+                      : explicitSubagentModel
+                }
+              : {})
+          });
+          subagentDecision = earlySubagentDecision?.agentTypeProbabilities
+            ? { ...recheck, agentType: earlySubagentDecision.agentType, agentTypeP: earlySubagentDecision.agentTypeP, agentTypeProbabilities: earlySubagentDecision.agentTypeProbabilities }
+            : recheck;
+        }
         if (subagentDecision.refusal && subagentDispatchMode === 'auto') {
           throw new Error(subagentDecision.refusal);
         }
