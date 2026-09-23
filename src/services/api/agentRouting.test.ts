@@ -264,7 +264,7 @@ describe('resolveAgentProvider', () => {
     )
   })
 
-  test('a tool-requested model matching a half-configured entry still warns and skips', () => {
+  test('a non-strict lookup of a half-configured entry still warns and skips', () => {
     const settings = {
       agentModels: { zai: { base_url: 'https://api.z.ai/api/coding/paas/v4' } },
     } as unknown as SettingsJson
@@ -360,6 +360,32 @@ describe('resolveAgentProvider', () => {
         resolveOutOfProcessTeammateProvider({ cliModel: 'claude-opus-5-5', settings }),
       ).toBeNull()
       expect(errorSpy).not.toHaveBeenCalled()
+    })
+
+    test('reached only through agentDefinitionModel, a half-configured entry still warns and skips', () => {
+      const settings = halfSettings({ api_key: 'sk-only' })
+      const warning =
+        '[agentRouting] Warning: agentModels entry "half" has only one of base_url/api_key; both are required for cross-provider routing. Skipping this route.'
+      expect(
+        resolveAgentRunModelRouting({
+          resolvedAgentModel: 'claude-opus-5-5',
+          parentModel: 'claude-opus-5-5',
+          agentDefinitionModel: 'half',
+          settings,
+        }),
+      ).toEqual({ mainLoopModel: 'claude-opus-5-5' })
+      expect(
+        resolveOutOfProcessTeammateProvider({ agentDefinitionModel: 'half', settings }),
+      ).toBeNull()
+      expect(
+        resolveOutOfProcessTeammateModelOnly({
+          agentDefinitionModel: 'half',
+          parentModel: 'claude-opus-5-5',
+          settings,
+        }),
+      ).toBeUndefined()
+      expect(errorSpy).toHaveBeenCalledTimes(3)
+      expect(errorSpy).toHaveBeenCalledWith(warning)
     })
   })
 
