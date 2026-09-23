@@ -48,7 +48,7 @@ import { setMemberActive } from '../utils/swarm/teamHelpers.js';
 import { reportTeammateTurnFailure } from '../utils/swarm/teammateInit.js';
 import { isSwarmWorker, generateSandboxRequestId, sendSandboxPermissionRequestViaMailbox, sendSandboxPermissionResponseViaMailbox } from '../utils/swarm/permissionSync.js';
 import { registerSandboxPermissionCallback } from '../hooks/useSwarmPermissionPoller.js';
-import { getTeamName, getAgentName } from '../utils/teammate.js';
+import { getTeamName, getAgentName, isTeammate } from '../utils/teammate.js';
 import { WorkerPendingPermission } from '../components/permissions/WorkerPendingPermission.js';
 import { injectUserMessageToTeammate, getAllInProcessTeammateTasks } from '../tasks/InProcessTeammateTask/InProcessTeammateTask.js';
 import { isLocalAgentTask, queuePendingMessage, appendMessageToLocalAgent, type LocalAgentTaskState } from '../tasks/LocalAgentTask/LocalAgentTask.js';
@@ -1054,7 +1054,15 @@ export function REPL({
   // batched) and isQueryRunning (ref, sync) could desync. See QueryGuard.ts.
   const queryGuardRef = React.useRef<QueryGuard | null>(null);
   if (queryGuardRef.current === null) {
-    queryGuardRef.current = new QueryGuard(getQueryGuardOptionsFromEnv());
+    // Teammates (out-of-process pane/tmux teammates run this same REPL) must
+    // run until they finish, error, or are explicitly stopped — never get
+    // force-ended by the hard-max query timeout partway through a long turn.
+    // getQueryGuardOptionsFromEnv's isTeammate parameter disables that
+    // watchdog by default for them, unless the user explicitly configured
+    // OPENCLAUDE_QUERY_HARD_MAX_MS.
+    queryGuardRef.current = new QueryGuard(
+      getQueryGuardOptionsFromEnv(process.env, undefined, isTeammate()),
+    );
   }
   const queryGuard = queryGuardRef.current;
 

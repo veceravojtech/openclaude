@@ -37,7 +37,9 @@ describe('REPL query lifecycle timeout logging', () => {
     expect(source).toContain(
       "import { getQueryGuardOptionsFromEnv } from '../utils/queryGuardConfig.js'",
     )
-    expect(source).toContain('new QueryGuard(getQueryGuardOptionsFromEnv())')
+    expect(source).toContain(
+      'getQueryGuardOptionsFromEnv(process.env, undefined, isTeammate())',
+    )
   })
 
   test('clears interruption-correction state before resuming another session', () => {

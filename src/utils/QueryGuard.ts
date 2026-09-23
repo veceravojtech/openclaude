@@ -19,7 +19,11 @@
  *
  * Timeout:
  *   The guard uses an idle timeout for stuck work, bounded leases for active
- *   local/API work, and a hard maximum query lifetime that always wins.
+ *   local/API work, and a hard maximum query lifetime that always wins when
+ *   enabled. Passing `hardMaxQueryMs: null` disables the hard maximum
+ *   entirely (no deadline is ever scheduled for it) — used for teammate
+ *   processes, which must run until they finish, error, or are explicitly
+ *   stopped, never force-ended by a wall-clock cap regardless of activity.
  *
  * Usage with React:
  *   const queryGuard = useRef(new QueryGuard()).current
@@ -83,8 +87,22 @@ export type QueryGuardLease = {
 type QueryTimeoutHandler = (timeout: QueryGuardTimeoutInfo) => void
 
 type QueryGuardOptions = {
-  idleTimeoutMs?: number
-  hardMaxQueryMs?: number
+  /**
+   * Idle watchdog timeout, in ms. `undefined` uses
+   * DEFAULT_QUERY_IDLE_TIMEOUT_MS; `null` explicitly DISABLES the idle
+   * watchdog (no deadline is ever scheduled for it) — used for teammate
+   * processes alongside `hardMaxQueryMs: null` so a teammate merely waiting
+   * on an unleased long-running operation is never force-ended either.
+   */
+  idleTimeoutMs?: number | null
+  /**
+   * Hard maximum query lifetime, in ms. `undefined` uses
+   * DEFAULT_QUERY_HARD_MAX_MS; `null` explicitly DISABLES the hard-max
+   * watchdog (no deadline is ever scheduled for it) — used for teammate
+   * processes, which must run until they finish, error, or are explicitly
+   * stopped, never force-ended by a wall-clock cap regardless of activity.
+   */
+  hardMaxQueryMs?: number | null
   toolLeaseGraceMs?: number
 }
 
@@ -138,19 +156,21 @@ export class QueryGuard {
   private _lastContext: QueryLifecycleContext | null = null
   private _getActiveOperations: (() => QueryActiveOperationSnapshot) | null =
     null
-  private readonly _idleTimeoutMs: number
-  private readonly _hardMaxQueryMs: number
+  /** null = idle watchdog disabled (teammate processes). */
+  private readonly _idleTimeoutMs: number | null
+  /** null = hard-max watchdog disabled (teammate processes). */
+  private readonly _hardMaxQueryMs: number | null
   private readonly _toolLeaseGraceMs: number
 
   constructor(options: QueryGuardOptions = {}) {
-    this._idleTimeoutMs = positiveOrDefault(
-      options.idleTimeoutMs,
-      DEFAULT_QUERY_IDLE_TIMEOUT_MS,
-    )
-    this._hardMaxQueryMs = positiveOrDefault(
-      options.hardMaxQueryMs,
-      DEFAULT_QUERY_HARD_MAX_MS,
-    )
+    this._idleTimeoutMs =
+      options.idleTimeoutMs === null
+        ? null
+        : positiveOrDefault(options.idleTimeoutMs, DEFAULT_QUERY_IDLE_TIMEOUT_MS)
+    this._hardMaxQueryMs =
+      options.hardMaxQueryMs === null
+        ? null
+        : positiveOrDefault(options.hardMaxQueryMs, DEFAULT_QUERY_HARD_MAX_MS)
     this._toolLeaseGraceMs = Math.max(
       0,
       positiveOrDefault(options.toolLeaseGraceMs, DEFAULT_TOOL_LEASE_GRACE_MS),
@@ -341,7 +361,7 @@ export class QueryGuard {
       Number.isFinite(input.hardCapMs) &&
       input.hardCapMs > 0
         ? input.hardCapMs
-        : this._hardMaxQueryMs
+        : (this._hardMaxQueryMs ?? Number.POSITIVE_INFINITY)
     const queryHardDeadlineAt = this._getHardMaxDeadlineAt(now)
     const queryRemainingMs = Math.max(0, queryHardDeadlineAt - now)
     const effectiveHardCapMs = Math.min(leaseHardCapMs, queryRemainingMs)
@@ -643,7 +663,9 @@ export class QueryGuard {
       : 0
   }
 
+  /** Infinity when the hard-max watchdog is disabled (`_hardMaxQueryMs === null`). */
   private _getHardMaxDeadlineAt(now: number): number {
+    if (this._hardMaxQueryMs === null) return Number.POSITIVE_INFINITY
     return (
       this._queryStartedAt +
       this._hardMaxQueryMs +
@@ -654,7 +676,11 @@ export class QueryGuard {
 
   private _getTimeoutReason(now: number): QueryGuardTimeoutReason | null {
     const isSuspended = this._suspendCount > 0
-    if (!isSuspended && now >= this._getHardMaxDeadlineAt(now)) {
+    if (
+      this._hardMaxQueryMs !== null &&
+      !isSuspended &&
+      now >= this._getHardMaxDeadlineAt(now)
+    ) {
       return 'hard_max'
     }
 
@@ -669,6 +695,7 @@ export class QueryGuard {
     if (
       !isSuspended &&
       !hasValidLease &&
+      this._idleTimeoutMs !== null &&
       now >= this._lastActivityAt + this._idleTimeoutMs
     ) {
       return 'idle'
@@ -681,13 +708,14 @@ export class QueryGuard {
     reason: QueryGuardTimeoutReason,
     now: number,
   ): number {
-    if (reason === 'hard_max') return this._hardMaxQueryMs
-    if (reason === 'idle') return this._idleTimeoutMs
+    if (reason === 'hard_max') return this._hardMaxQueryMs ?? DEFAULT_QUERY_HARD_MAX_MS
+    if (reason === 'idle') return this._idleTimeoutMs ?? DEFAULT_QUERY_IDLE_TIMEOUT_MS
 
     const expiredLease = [...this._activeLeases.values()].find(
       lease => lease.deadlineAt <= now,
     )
-    if (!expiredLease) return this._idleTimeoutMs
+    if (!expiredLease)
+      return this._idleTimeoutMs ?? DEFAULT_QUERY_IDLE_TIMEOUT_MS
     return Math.max(0, expiredLease.deadlineAt - expiredLease.startedAt)
   }
 
@@ -695,14 +723,29 @@ export class QueryGuard {
     if (this._status !== 'running') return null
 
     const isSuspended = this._suspendCount > 0
-    const deadlines = isSuspended ? [] : [this._getHardMaxDeadlineAt(now)]
-    const leaseDeadlines = [...this._activeLeases.values()]
+    // Only ever push finite deadlines: a disabled watchdog (null) must never
+    // schedule a timer, not even one with an Infinity/NaN delay.
+    const deadlines: number[] =
+      !isSuspended && this._hardMaxQueryMs !== null
+        ? [this._getHardMaxDeadlineAt(now)]
+        : []
+    const activeLeases = [...this._activeLeases.values()].filter(
+      lease => lease.deadlineAt > now,
+    )
+    // A lease can carry an Infinity deadline (no explicit timeoutMs/hardCapMs
+    // while the hard-max watchdog is disabled for teammates) — never schedule
+    // a timer for that. It still counts as "active" below: mirrors
+    // _getTimeoutReason's hasValidLease gate, which suppresses the idle
+    // timeout for ANY active lease regardless of its deadline.
+    const finiteLeaseDeadlines = activeLeases
       .map(lease => lease.deadlineAt)
-      .filter(deadline => deadline > now)
+      .filter(deadline => Number.isFinite(deadline))
 
-    if (leaseDeadlines.length > 0) {
-      deadlines.push(Math.min(...leaseDeadlines))
-    } else if (!isSuspended) {
+    if (activeLeases.length > 0) {
+      if (finiteLeaseDeadlines.length > 0) {
+        deadlines.push(Math.min(...finiteLeaseDeadlines))
+      }
+    } else if (!isSuspended && this._idleTimeoutMs !== null) {
       deadlines.push(this._lastActivityAt + this._idleTimeoutMs)
     }
 

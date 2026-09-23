@@ -76,4 +76,56 @@ describe('query guard config', () => {
       expect(warn.mock.calls[0]?.[1]).toEqual({ level: 'warn' })
     }
   })
+
+  describe('teammate processes', () => {
+    test('disables both the hard max and the idle timeout when no env override is set', () => {
+      const warn = vi.fn()
+
+      expect(getQueryGuardOptionsFromEnv({}, warn, true)).toEqual({
+        hardMaxQueryMs: null,
+        idleTimeoutMs: null,
+      })
+      expect(
+        getQueryGuardOptionsFromEnv(
+          { OPENCLAUDE_QUERY_HARD_MAX_MS: '   ' },
+          warn,
+          true,
+        ),
+      ).toEqual({ hardMaxQueryMs: null, idleTimeoutMs: null })
+      expect(warn).not.toHaveBeenCalled()
+    })
+
+    test('still honors an explicit, valid hard-max env override, but keeps the idle timeout disabled', () => {
+      const warn = vi.fn()
+
+      expect(
+        getQueryGuardOptionsFromEnv(
+          { OPENCLAUDE_QUERY_HARD_MAX_MS: '3600000' },
+          warn,
+          true,
+        ),
+      ).toEqual({ hardMaxQueryMs: 3_600_000, idleTimeoutMs: null })
+      expect(warn).not.toHaveBeenCalled()
+    })
+
+    test('falls back to fully disabled on an invalid env override', () => {
+      const warn = vi.fn()
+
+      expect(
+        getQueryGuardOptionsFromEnv(
+          { OPENCLAUDE_QUERY_HARD_MAX_MS: '0' },
+          warn,
+          true,
+        ),
+      ).toEqual({ hardMaxQueryMs: null, idleTimeoutMs: null })
+      expect(warn).toHaveBeenCalledTimes(1)
+    })
+
+    test('does not disable either watchdog for the non-teammate main session', () => {
+      const warn = vi.fn()
+
+      expect(getQueryGuardOptionsFromEnv({}, warn, false)).toEqual({})
+      expect(getQueryGuardOptionsFromEnv({}, warn)).toEqual({})
+    })
+  })
 })

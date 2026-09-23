@@ -439,6 +439,87 @@ describe('QueryGuard', () => {
     )
   })
 
+  test('hardMaxQueryMs: null disables the hard-max watchdog entirely (teammates)', () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const guard = new QueryGuard({
+      idleTimeoutMs: 100,
+      hardMaxQueryMs: null,
+      toolLeaseGraceMs: 0,
+    })
+    const onTimeout = vi.fn()
+    guard.setTimeoutHandler(onTimeout)
+    const gen = guard.tryStart()!
+    guard.acquireLease(
+      {
+        owner: 'api',
+        id: 'stream',
+        // No explicit hardCapMs: falls back to the (disabled) query hard max,
+        // which must not silently reintroduce a cap.
+        timeoutMs: DEFAULT_QUERY_HARD_MAX_MS * 3,
+      },
+      gen,
+    )
+
+    // Sail well past the default hard max — an enabled watchdog would have
+    // force-ended the query long before this.
+    vi.advanceTimersByTime(DEFAULT_QUERY_HARD_MAX_MS * 2)
+
+    expect(guard.isActive).toBe(true)
+    expect(onTimeout).not.toHaveBeenCalled()
+
+    guard.end(gen)
+  })
+
+  test('idleTimeoutMs: null disables the idle watchdog entirely (teammates)', () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const guard = new QueryGuard({
+      idleTimeoutMs: null,
+      hardMaxQueryMs: null,
+      toolLeaseGraceMs: 0,
+    })
+    const onTimeout = vi.fn()
+    guard.setTimeoutHandler(onTimeout)
+    const gen = guard.tryStart()!
+
+    // No leases, no activity, both watchdogs disabled — an enabled idle
+    // watchdog would have force-ended this after 5 minutes.
+    vi.advanceTimersByTime(DEFAULT_QUERY_HARD_MAX_MS * 3)
+
+    expect(guard.isActive).toBe(true)
+    expect(onTimeout).not.toHaveBeenCalled()
+
+    guard.end(gen)
+  })
+
+  test('both watchdogs disabled never schedules a timer, even with an unbounded active lease', () => {
+    vi.useFakeTimers()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout')
+    const guard = new QueryGuard({
+      idleTimeoutMs: null,
+      hardMaxQueryMs: null,
+      toolLeaseGraceMs: 0,
+    })
+    const gen = guard.tryStart()!
+    setTimeoutSpy.mockClear()
+
+    // No explicit timeoutMs/hardCapMs: with the hard max disabled, this
+    // lease's own deadline resolves to Infinity. Acquiring it must not
+    // schedule a setTimeout with an Infinity (or NaN) delay.
+    guard.acquireLease({ owner: 'subagent', id: 'unbounded' }, gen)
+
+    for (const call of setTimeoutSpy.mock.calls) {
+      const delay = call[1]
+      if (delay !== undefined) {
+        expect(Number.isFinite(delay)).toBe(true)
+      }
+    }
+
+    guard.end(gen)
+  })
+
   test('lease hard cap is relative to acquisition and capped by query remaining budget', () => {
     vi.useFakeTimers()
     vi.spyOn(console, 'error').mockImplementation(() => {})
