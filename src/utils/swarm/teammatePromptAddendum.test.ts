@@ -19,6 +19,37 @@ test.each(RULE_PHRASES)('teammate addendum carries %s', (_label, phrase) => {
   expect(TEAMMATE_SYSTEM_PROMPT_ADDENDUM).toContain(phrase)
 })
 
+/**
+ * Rule 5 names the mechanism, and names only the mechanism THIS reader has.
+ * An in-process teammate - and a sub-lead is one - is filtered to
+ * IN_PROCESS_TEAMMATE_ALLOWED_TOOLS (src/constants/tools.ts:79-103):
+ * SendMessage and ListAgents are in that set, TaskStop is not. So the
+ * addendum has to point a sub-lead at `shutdown_request` for the agents it
+ * leads, and at its own lead when that does not work.
+ */
+test('teammate addendum names a shutdown mechanism this reader actually has', () => {
+  expect(TEAMMATE_SYSTEM_PROMPT_ADDENDUM).toContain(
+    'shut the owner down with `SendMessage`',
+  )
+  expect(TEAMMATE_SYSTEM_PROMPT_ADDENDUM).toContain(
+    '`message: {"type": "shutdown_request"}` to an agent you lead',
+  )
+  // The fallback is a person, not a tool: escalate to your own lead.
+  expect(TEAMMATE_SYSTEM_PROMPT_ADDENDUM).toContain(
+    'If it will not stop, tell your own lead',
+  )
+})
+
+test('teammate addendum never points a teammate at TaskStop', () => {
+  // TaskStop is absent from IN_PROCESS_TEAMMATE_ALLOWED_TOOLS
+  // (src/constants/tools.ts:79-103) and blocked for every async agent
+  // (ALL_AGENT_DISALLOWED_TOOLS, src/constants/tools.ts:40-48; the
+  // blocked-list note at :110 gives the reason - it "Requires access to main
+  // thread task state"). This guard is what stops a future rewrite from
+  // handing a sub-lead a tool it cannot call.
+  expect(TEAMMATE_SYSTEM_PROMPT_ADDENDUM).not.toContain('TaskStop')
+})
+
 test('teammate addendum binds nested delegation', () => {
   expect(TEAMMATE_SYSTEM_PROMPT_ADDENDUM).toContain('These rules bind whoever delegates.')
   expect(TEAMMATE_SYSTEM_PROMPT_ADDENDUM).toContain(

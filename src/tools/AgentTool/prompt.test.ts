@@ -476,7 +476,7 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
       expect(schema.description).not.toContain(clause)
     }
     // Same class, same gate: SendMessageTool.isEnabled() IS
-    // isAgentSwarmsEnabled() (SendMessageTool.ts:583-585), so with Agent Teams
+    // isAgentSwarmsEnabled() (SendMessageTool.ts:836-838), so with Agent Teams
     // off that tool is not registered and the description may not name it.
     expect(schema.description).not.toContain('SendMessage')
     // Only the SendMessage half of that bullet is gated; its advice survives.
@@ -619,6 +619,19 @@ describe('AgentTool prompt: one objective, one agent', () => {
   ]
 
   /**
+   * Rule 5 used to say "shut the owner down" without naming HOW. The lead
+   * render may name both mechanisms this reader actually has: SendMessage AND
+   * TaskStop are in COORDINATOR_MODE_ALLOWED_TOOLS
+   * (src/constants/tools.ts:122-128). Pinned apart from rule 5's own phrase
+   * above so a rewrite that keeps the confirmation clause but drops the
+   * mechanism still fails something.
+   */
+  const SHUTDOWN_MECHANISM_PHRASES = [
+    'SendMessage with `message: {"type": "shutdown_request"}`',
+    'or TaskStop when it does not stop on its own',
+  ]
+
+  /**
    * Rendered to the lead and to a teammate from the SAME cached description
    * (see the design note above TEAMMATE_SPAWN_RULES), so the sub-team case is
    * stated in the shared text instead of branched on the reader.
@@ -652,6 +665,9 @@ describe('AgentTool prompt: one objective, one agent', () => {
       for (const [, phrase] of OBJECTIVE_RULE_PHRASES) {
         expect(prompt).toContain(phrase)
       }
+      for (const phrase of SHUTDOWN_MECHANISM_PHRASES) {
+        expect(prompt).toContain(phrase)
+      }
       expect(prompt).toContain(NESTED_DELEGATION_CLAUSE)
       expect(prompt).toContain(
         "you cannot approve your own overlap, and a lead cannot grant one on the user's behalf",
@@ -673,11 +689,17 @@ describe('AgentTool prompt: one objective, one agent', () => {
     for (const [, phrase] of OBJECTIVE_RULE_PHRASES) {
       expect(prompt).not.toContain(phrase)
     }
+    for (const phrase of SHUTDOWN_MECHANISM_PHRASES) {
+      expect(prompt).not.toContain(phrase)
+    }
     expect(prompt).not.toContain(NESTED_DELEGATION_CLAUSE)
     // The gate takes the rules because they name SendMessage and ListAgents,
     // both unregistered with Agent Teams off — not because the surrounding
     // description went away.
     expect(prompt).not.toContain('ListAgents')
+    // Rule 5's escalation names TaskStop, and it lives inside the same gated
+    // block, so the tool name goes with it.
+    expect(prompt).not.toContain('TaskStop')
     expect(prompt).toContain('isolation: "worktree"')
   })
 
@@ -692,6 +714,9 @@ describe('AgentTool prompt: one objective, one agent', () => {
     expect(prompt).toContain('## When to fork')
 
     for (const [, phrase] of OBJECTIVE_RULE_PHRASES) {
+      expect(prompt).toContain(phrase)
+    }
+    for (const phrase of SHUTDOWN_MECHANISM_PHRASES) {
       expect(prompt).toContain(phrase)
     }
     expect(prompt).toContain(NESTED_DELEGATION_CLAUSE)

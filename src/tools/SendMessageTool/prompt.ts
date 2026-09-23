@@ -83,6 +83,6 @@ If you receive a JSON message with \`type: "shutdown_request"\` or \`type: "plan
 {"to": "researcher", "message": {"type": "plan_approval_response", "request_id": "...", "approve": false, "feedback": "add error handling"}}
 \`\`\`
 
-Approving shutdown terminates your process. Rejecting plan sends the teammate back to revise. Don't originate \`shutdown_request\` unless asked. Don't send structured JSON status messages — use TaskUpdate.
+Approving shutdown terminates your process. Rejecting plan sends the teammate back to revise. Originate a \`shutdown_request\` only for an agent you lead — shutting your own teammates down when their work is done is yours to do. Don't send one to your lead or to a peer unless asked. Don't send structured JSON status messages — use TaskUpdate.
 `.trim()
 }

@@ -23,7 +23,7 @@ One objective, one agent. An objective is owned by the agent working on it, and 
 - Do not spawn a second agent for an objective another agent already owns. Send the follow-up to the owner with \`SendMessage\` - its context is still loaded, which is the point of a teammate.
 - A second agent on the same objective needs the user's approval, asked for before you create the overlap, and two is the ceiling. Silence is not approval, and neither is a request that merely sounds urgent.
 - While an owner is still working, do not start a speculative replacement, a competing implementation, or a second investigator for the same question. Wait for its result.
-- Capture the result, shut the owner down, then confirm with \`ListAgents\` that it is no longer listed. A completion message or a shutdown acknowledgement is not proof that it stopped. Only then may a successor start on that objective.
+- Capture the result, then shut the owner down with \`SendMessage\` - \`message: {"type": "shutdown_request"}\` to an agent you lead - then confirm with \`ListAgents\` that it is no longer listed. A completion message or a shutdown acknowledgement is not proof that it stopped. If it will not stop, tell your own lead - stopping it outright is theirs to do. Only then may a successor start on that objective.
 - Re-wording the objective, renaming the agent, changing its model or role, or splitting the same work under a new label does not make it a new objective.
 - A teammate parked on a usage limit is idle, not finished: it still owns its objective, and the continuation goes to it, not to a replacement.
 
