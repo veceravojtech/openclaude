@@ -3,6 +3,7 @@ import {
   _resetJevCacheForTesting,
   acceptChoice,
   evaluateJev,
+  formatJevLogLine,
   isJevConfigured,
   JEV_ENDPOINT,
   type JevAnswer,
@@ -431,5 +432,163 @@ describe('acceptChoice (Rule A)', () => {
     expect(acceptChoice(choice({ a: 0.7, b: 0.3 }, 'a'), { minP: 0.6, minMargin: 0.3 })).toBe('a')
     expect(acceptChoice({ type: 'boolean', probability: 0.99 })).toBeNull()
     expect(acceptChoice(undefined)).toBeNull()
+  })
+})
+
+describe('large criteria sets (dispatcher model choice)', () => {
+  const MODEL_IDS = [
+    'gpt-5.6-luna',
+    'gpt-5.6-luna-mini',
+    'gpt-5.5',
+    'gpt-5.5[1m]',
+    'claude-sonnet-4-6',
+    'claude-sonnet-4-6[1m]',
+    'claude-opus-4-7',
+    'claude-haiku-4-5',
+    'gemini-3.1-pro',
+    'gemini-3.1-flash',
+    'deepseek-v4.1',
+    'deepseek-v4.1-reasoner',
+    'qwen3.5-coder-480b',
+    'kimi-k2.5',
+    'glm-5.1',
+    'grok-5-fast',
+    'mistral-large-3',
+    'llama-4.1-405b',
+    'ollama/qwen3:32b',
+    'openrouter/anthropic/claude-sonnet-4.6',
+  ]
+  const criteria = Object.fromEntries(MODEL_IDS.map(id => [id, `Model ${id}`]))
+  const MODEL_REQUEST: JevRequest = {
+    instruction: 'Pick the best model for this task.',
+    state: 'Refactor the auth module.',
+    questions: { model: { type: 'choice', criteria } },
+  }
+
+  function spread(winner: string, pWinner: number): Record<string, number> {
+    const rest = (1 - pWinner) / (MODEL_IDS.length - 1)
+    return Object.fromEntries(MODEL_IDS.map(id => [id, id === winner ? pWinner : rest]))
+  }
+
+  test('20 criteria with dotted/dashed/bracketed ids validate and pass Rule A', async () => {
+    expect(MODEL_IDS).toHaveLength(20)
+    const winner = 'claude-sonnet-4-6[1m]'
+    const { fetchImpl, calls } = mockFetch(() =>
+      jsonResponse({
+        answers: { model: { type: 'choice', choice: winner, probabilities: spread(winner, 0.81) } },
+      }),
+    )
+    const result = await evaluateJev(MODEL_REQUEST, { apiKey: KEY, fetchImpl })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const answer = result.answers.model!
+    expect(answer.type).toBe('choice')
+    if (answer.type !== 'choice') return
+    expect(Object.keys(answer.probabilities).sort()).toEqual([...MODEL_IDS].sort())
+    expect(acceptChoice(answer)).toBe(winner)
+    const sent = JSON.parse(String(calls[0]!.init.body))
+    expect(Object.keys(sent.questions.model.criteria)).toEqual(MODEL_IDS)
+  })
+
+  test('20 criteria: close runner-up fails Rule A', () => {
+    // p=0.78 passes the probability bar, but the bracketed runner-up at 0.7
+    // leaves a margin of 0.08 < 0.15; the other 18 share the remaining 0.02
+    const probs = spread('gpt-5.6-luna', 0.78)
+    for (const id of MODEL_IDS) probs[id] = 0.02 / 18
+    probs['gpt-5.6-luna'] = 0.78
+    probs['gpt-5.5[1m]'] = 0.7 // margin 0.08
+    const answer: JevAnswer = { type: 'choice', choice: 'gpt-5.6-luna', probabilities: probs }
+    expect(acceptChoice(answer)).toBeNull()
+    expect(acceptChoice({ type: 'choice', choice: 'gpt-5.6-luna', probabilities: spread('gpt-5.6-luna', 0.76) })).toBe('gpt-5.6-luna')
+  })
+
+  test('20 criteria: one missing key is invalid_response', async () => {
+    const probs = spread('glm-5.1', 0.9)
+    delete probs['ollama/qwen3:32b']
+    const { fetchImpl } = mockFetch(() =>
+      jsonResponse({ answers: { model: { type: 'choice', choice: 'glm-5.1', probabilities: probs } } }),
+    )
+    const result = await evaluateJev(MODEL_REQUEST, { apiKey: KEY, fetchImpl })
+    expect(result).toMatchObject({ ok: false, reason: 'invalid_response' })
+  })
+
+  test('prototype-named keys are handled as plain own keys', async () => {
+    // JSON.parse gives an own `__proto__` key (an object literal would set the prototype).
+    const own = JSON.parse('{"__proto__":"x","a.b-c[1]":"y"}') as Record<string, string>
+    const req: JevRequest = { state: 's', questions: { q: { type: 'choice', criteria: own } } }
+    const { fetchImpl } = mockFetch(() =>
+      new Response('{"answers":{"q":{"type":"choice","choice":"__proto__","probabilities":{"__proto__":0.9,"a.b-c[1]":0.1}}}}'),
+    )
+    const result = await evaluateJev(req, { apiKey: KEY, fetchImpl })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const answer = result.answers.q!
+    if (answer.type !== 'choice') throw new Error('expected choice')
+    expect(Object.keys(answer.probabilities).sort()).toEqual(['__proto__', 'a.b-c[1]'])
+    expect(acceptChoice(answer)).toBe('__proto__')
+  })
+
+  test('a choice naming an inherited property is rejected', async () => {
+    const { fetchImpl } = mockFetch(() =>
+      jsonResponse({
+        answers: {
+          model: { type: 'choice', choice: 'constructor', probabilities: spread('glm-5.1', 0.9) },
+        },
+      }),
+    )
+    const result = await evaluateJev(MODEL_REQUEST, { apiKey: KEY, fetchImpl })
+    expect(result).toMatchObject({ ok: false, reason: 'invalid_response' })
+    expect(
+      acceptChoice({ type: 'choice', choice: 'constructor', probabilities: { a: 1 } }),
+    ).toBeNull()
+  })
+})
+
+describe('formatJevLogLine', () => {
+  test('success line has question names, latency, cost, tokens and top probabilities', async () => {
+    const { fetchImpl } = mockFetch(() => jsonResponse(VALID_BODY))
+    const result = await evaluateJev(REQUEST, { apiKey: KEY, fetchImpl })
+    const line = formatJevLogLine(REQUEST, result)
+    expect(line).toContain('questions=department,urgent,impact')
+    expect(line).toMatch(/latencyMs=\d+/)
+    expect(line).toContain('costUsd=0.00042')
+    expect(line).toContain('tokens=1100/150')
+    expect(line).toContain('department=technical[technical:0.9,billing:0.06,other:0.04]')
+    expect(line).toContain('urgent=p0.93')
+    expect(line).toContain('impact=score1.8')
+    expect(line).not.toContain(KEY)
+    expect(line).not.toContain('Bearer')
+    expect(line).not.toContain('booking integration') // state is never logged
+    expect(line).not.toContain('Route this') // instruction is never logged
+  })
+
+  test('failure line has the reason and status but never the key', async () => {
+    const { fetchImpl } = mockFetch(() => jsonResponse({ error: `bad ${KEY}` }, 403))
+    const result = await evaluateJev(REQUEST, { apiKey: KEY, fetchImpl })
+    const line = formatJevLogLine(REQUEST, result)
+    expect(line).toContain('fail reason=http_error')
+    expect(line).toContain('status=403')
+    expect(line).not.toContain(KEY)
+  })
+
+  test('no_key and top-N truncation', () => {
+    expect(
+      formatJevLogLine(REQUEST, { ok: false, reason: 'no_key', latencyMs: 0 }),
+    ).toContain('fail reason=no_key')
+    const probabilities = Object.fromEntries(
+      Array.from({ length: 20 }, (_, i) => [`m-${i}.x`, i === 7 ? 0.62 : 0.02]),
+    )
+    const line = formatJevLogLine(
+      { state: 's', questions: { model: { type: 'choice', criteria: {} } } },
+      {
+        ok: true,
+        cached: true,
+        latencyMs: 1,
+        answers: { model: { type: 'choice', choice: 'm-7.x', probabilities } },
+      },
+    )
+    expect(line).toContain('cached=true')
+    expect(line.match(/m-\d+\.x:/g)).toHaveLength(3)
+    expect(line).toContain('model=m-7.x[m-7.x:0.62,')
   })
 })

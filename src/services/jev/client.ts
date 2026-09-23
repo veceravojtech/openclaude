@@ -20,6 +20,7 @@
  * (redacted) prompts.
  */
 import { createHash } from 'crypto'
+import { logForDebugging } from '../../utils/debug.js'
 import { redactLikelySecrets } from '../../utils/redaction.js'
 
 export type JevQuestion =
@@ -197,19 +198,27 @@ function validateAnswer(
       ) {
         return `answer ${name}: probability keys do not match criteria`
       }
-      const probs: Record<string, number> = {}
+      // Criteria keys are arbitrary ids (model names with dots, dashes,
+      // brackets, even `__proto__`), so use own-property checks and build the
+      // record with Object.fromEntries (a plain `probs[k] = p` would drop a
+      // `__proto__` key, and `k in probs` would accept `constructor`).
+      const entries: Array<[string, number]> = []
       let sum = 0
+      let max = -Infinity
       for (const k of actual) {
         const p = probabilities[k]
         if (!isProbability(p)) return `answer ${name}: invalid probability`
-        probs[k] = p
+        entries.push([k, p])
         sum += p
+        if (p > max) max = p
       }
       if (Math.abs(sum - 1) > PROBABILITY_SUM_TOLERANCE) {
         return `answer ${name}: probabilities do not sum to 1`
       }
-      if (!(choice in probs)) return `answer ${name}: choice not in criteria`
-      const max = Math.max(...Object.values(probs))
+      if (!Object.hasOwn(question.criteria, choice)) {
+        return `answer ${name}: choice not in criteria`
+      }
+      const probs: Record<string, number> = Object.fromEntries(entries)
       if (probs[choice]! < max) return `answer ${name}: choice is not argmax`
       return { type: 'choice', choice, probabilities: probs }
     }
@@ -278,9 +287,78 @@ function parseResponse(
 // Public API
 // ---------------------------------------------------------------------------
 
+const LOG_TOP_N = 3
+
+function formatNumber(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(3).replace(/0+$/, '')
+}
+
+/**
+ * One debug-log line per call. Contains only question names, latency, cost,
+ * token usage, top choice probabilities and failure reasons: never the state,
+ * the instruction, the API key or any request header.
+ */
+export function formatJevLogLine(req: JevRequest, result: JevResult): string {
+  let names = '?'
+  try {
+    names = Object.keys(req.questions).join(',')
+  } catch {
+    // malformed request: keep '?'
+  }
+  const parts = [`[jev] questions=${names}`, `latencyMs=${result.latencyMs}`]
+  if (!result.ok) {
+    parts.push(`fail reason=${result.reason}`)
+    if (result.status !== undefined) parts.push(`status=${result.status}`)
+    if (result.detail) parts.push(`detail=${JSON.stringify(result.detail)}`)
+    return parts.join(' ')
+  }
+  parts.push(`ok cached=${result.cached}`)
+  if (result.costUsd !== undefined) parts.push(`costUsd=${result.costUsd}`)
+  if (result.usage) {
+    parts.push(
+      `tokens=${result.usage.inputTokens ?? '?'}/${result.usage.outputTokens ?? '?'}`,
+    )
+  }
+  if (result.generationId) parts.push(`generationId=${result.generationId}`)
+  for (const [name, answer] of Object.entries(result.answers)) {
+    if (answer.type === 'choice') {
+      const top = Object.entries(answer.probabilities)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, LOG_TOP_N)
+        .map(([k, p]) => `${k}:${formatNumber(p)}`)
+        .join(',')
+      parts.push(`${name}=${answer.choice}[${top}]`)
+    } else if (answer.type === 'boolean') {
+      parts.push(`${name}=p${formatNumber(answer.probability)}`)
+    } else {
+      parts.push(`${name}=score${formatNumber(answer.score)}`)
+    }
+  }
+  return parts.join(' ')
+}
+
 export async function evaluateJev(
   req: JevRequest,
   opts: JevOptions = {},
+): Promise<JevResult> {
+  const result = await runEvaluation(req, opts)
+  try {
+    // Defence in depth: the line never contains the key by construction,
+    // but scrub it anyway before it reaches the debug log.
+    const key = resolveKey(opts)
+    logForDebugging(
+      key ? formatJevLogLine(req, result).split(key).join('[REDACTED]') : formatJevLogLine(req, result),
+      { level: result.ok ? 'debug' : 'warn' },
+    )
+  } catch {
+    // logging must never break the caller
+  }
+  return result
+}
+
+async function runEvaluation(
+  req: JevRequest,
+  opts: JevOptions,
 ): Promise<JevResult> {
   const started = Date.now()
   const elapsed = () => Date.now() - started
@@ -421,6 +499,7 @@ export function acceptChoice(
   if (!answer || answer.type !== 'choice') return null
   const minP = rule.minP ?? RULE_A_MIN_P
   const minMargin = rule.minMargin ?? RULE_A_MIN_MARGIN
+  if (!Object.hasOwn(answer.probabilities, answer.choice)) return null
   const p = answer.probabilities[answer.choice]
   if (!isProbability(p)) return null
   let bestOther = 0
