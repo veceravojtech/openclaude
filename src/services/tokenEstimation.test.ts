@@ -78,3 +78,95 @@ test('countMessagesTokensWithClient uses countTokens when the client supports it
   })
   expect(result).toBe(42)
 })
+
+const FABLE_MODEL = 'claude-fable-5-1'
+const NON_FABLE_MODEL = 'claude-sonnet-4-5'
+const THINKING_MESSAGES: Anthropic.Beta.Messages.BetaMessageParam[] = [
+  { role: 'user', content: 'hi' },
+  {
+    role: 'assistant',
+    content: [
+      { type: 'thinking', thinking: 'hmm', signature: 'sig' },
+      { type: 'text', text: 'hello' },
+    ],
+  },
+]
+const ENABLED_THINKING = { type: 'enabled', budget_tokens: 1024 }
+
+async function captureCountTokensParams(model: string) {
+  const countTokens = mock(async (_params: unknown) => ({ input_tokens: 7 }))
+  await __test.countMessagesTokensWithClient({
+    messagesClient: {
+      countTokens:
+        countTokens as unknown as Anthropic['beta']['messages']['countTokens'],
+    },
+    model,
+    messages: THINKING_MESSAGES,
+    tools: [],
+    filteredBetas: [],
+    containsThinking: true,
+  })
+  return countTokens.mock.calls[0]?.[0] as Record<string, unknown>
+}
+
+test('countTokens request for Fable uses adaptive thinking, not a budget', async () => {
+  const params = await captureCountTokensParams(FABLE_MODEL)
+  expect(params.thinking).toEqual({ type: 'adaptive' })
+})
+
+test('countTokens request for non-Fable keeps enabled budgeted thinking', async () => {
+  const params = await captureCountTokensParams(NON_FABLE_MODEL)
+  expect(params.thinking).toEqual(ENABLED_THINKING)
+})
+
+test('Haiku-fallback create params for Fable use adaptive thinking', () => {
+  const params = __test.buildHaikuFallbackCreateParams({
+    model: FABLE_MODEL,
+    messages: THINKING_MESSAGES,
+    tools: [],
+    filteredBetas: [],
+    containsThinking: true,
+    extraParams: { temperature: 0 },
+  }) as unknown as Record<string, unknown>
+  expect(params.thinking).toEqual({ type: 'adaptive' })
+  expect(params.temperature).toBeUndefined()
+})
+
+test('Haiku-fallback create params for non-Fable are unchanged', () => {
+  const params = __test.buildHaikuFallbackCreateParams({
+    model: NON_FABLE_MODEL,
+    messages: THINKING_MESSAGES,
+    tools: [],
+    filteredBetas: [],
+    containsThinking: true,
+    extraParams: { temperature: 0 },
+  }) as unknown as Record<string, unknown>
+  expect(params.thinking).toEqual(ENABLED_THINKING)
+  expect(params.temperature).toBe(0)
+  expect(params.max_tokens).toBe(2048)
+})
+
+test('Bedrock CountTokens body for Fable uses adaptive thinking and omits model', () => {
+  const body = __test.buildBedrockCountTokensBody({
+    model: 'us.anthropic.claude-fable-5-1',
+    messages: THINKING_MESSAGES,
+    tools: [],
+    betas: [],
+    containsThinking: true,
+  })
+  expect(body.thinking).toEqual({ type: 'adaptive' })
+  expect('model' in body).toBe(false)
+})
+
+test('Bedrock CountTokens body for non-Fable keeps enabled budgeted thinking', () => {
+  const body = __test.buildBedrockCountTokensBody({
+    model: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
+    messages: THINKING_MESSAGES,
+    tools: [],
+    betas: [],
+    containsThinking: true,
+  })
+  expect(body.thinking).toEqual(ENABLED_THINKING)
+  expect(body.anthropic_version).toBe('bedrock-2023-05-31')
+  expect('model' in body).toBe(false)
+})

@@ -26,6 +26,7 @@ import { jsonStringify } from '../utils/slowOperations.js'
 import { isToolReferenceBlock } from '../utils/toolSearch.js'
 import { getAPIMetadata, getExtraBodyParams } from './api/claude.js'
 import { getAnthropicClient } from './api/client.js'
+import { applyModelRequestConstraints } from './api/modelRequestConstraints.js'
 import { withTokenCountVCR } from './vcr.js'
 
 // Minimal values for token counting with thinking enabled
@@ -217,22 +218,30 @@ async function countMessagesTokensWithClient({
     return roughTokenCountEstimationForCountTokensFallback(messages, tools)
   }
 
-  const response = await messagesClient.countTokens({
-    model: normalizeModelStringForAPI(model),
-    messages:
-      // When we pass tools and no messages, we need to pass a dummy message
-      // to get an accurate tool token count.
-      messages.length > 0 ? messages : [{ role: 'user', content: 'foo' }],
-    tools,
-    ...(filteredBetas.length > 0 && { betas: filteredBetas }),
-    // Enable thinking if messages contain thinking blocks
-    ...(containsThinking && {
-      thinking: {
-        type: 'enabled',
-        budget_tokens: TOKEN_COUNT_THINKING_BUDGET,
+  const normalizedModel = normalizeModelStringForAPI(model)
+  // Per-model constraints (e.g. Fable's always-adaptive thinking) must apply
+  // here too, since this call bypasses queryModel/sideQuery.
+  const response = await messagesClient.countTokens(
+    applyModelRequestConstraints(
+      {
+        model: normalizedModel,
+        messages:
+          // When we pass tools and no messages, we need to pass a dummy message
+          // to get an accurate tool token count.
+          messages.length > 0 ? messages : [{ role: 'user', content: 'foo' }],
+        tools,
+        ...(filteredBetas.length > 0 && { betas: filteredBetas }),
+        // Enable thinking if messages contain thinking blocks
+        ...(containsThinking && {
+          thinking: {
+            type: 'enabled',
+            budget_tokens: TOKEN_COUNT_THINKING_BUDGET,
+          },
+        }),
       },
-    }),
-  })
+      normalizedModel,
+    ),
+  )
 
   if (typeof response.input_tokens !== 'number') {
     // Vertex client throws
@@ -269,7 +278,11 @@ function roughTokenCountEstimationForCountTokensFallback(
 }
 
 // Test-only surface for fallback dispatch without process-wide module mocks.
-export const __test = { countMessagesTokensWithClient }
+export const __test = {
+  countMessagesTokensWithClient,
+  buildHaikuFallbackCreateParams,
+  buildBedrockCountTokensBody,
+}
 
 export function roughTokenCountEstimation(
   content: string,
@@ -456,6 +469,87 @@ export function estimateWithBounds(
 }
 
 /**
+ * Builds the messages.create params for countTokensViaHaikuFallback. Per-model
+ * constraints (e.g. Fable's always-adaptive thinking) are applied here because
+ * this call bypasses queryModel/sideQuery.
+ */
+function buildHaikuFallbackCreateParams({
+  model,
+  messages,
+  tools,
+  filteredBetas,
+  containsThinking,
+  extraParams = {},
+}: {
+  model: string
+  messages: MessageParam[]
+  tools: Anthropic.Beta.Messages.BetaToolUnion[]
+  filteredBetas: string[]
+  containsThinking: boolean
+  extraParams?: Record<string, unknown>
+}): Anthropic.Beta.Messages.MessageCreateParamsNonStreaming {
+  const normalizedModel = normalizeModelStringForAPI(model)
+  return applyModelRequestConstraints(
+    {
+      model: normalizedModel,
+      max_tokens: containsThinking ? TOKEN_COUNT_MAX_TOKENS : 1,
+      messages,
+      tools: tools.length > 0 ? tools : undefined,
+      ...(filteredBetas.length > 0 && { betas: filteredBetas }),
+      ...extraParams,
+      // Enable thinking if messages contain thinking blocks
+      ...(containsThinking && {
+        thinking: {
+          type: 'enabled' as const,
+          budget_tokens: TOKEN_COUNT_THINKING_BUDGET,
+        },
+      }),
+    },
+    normalizedModel,
+  )
+}
+
+/**
+ * Builds the Bedrock CountTokens invokeModel body. The model id is not part of
+ * the body, so constraints are applied against it separately.
+ */
+function buildBedrockCountTokensBody({
+  model,
+  messages,
+  tools,
+  betas,
+  containsThinking,
+}: {
+  model: string
+  messages: Anthropic.Beta.Messages.BetaMessageParam[]
+  tools: Anthropic.Beta.Messages.BetaToolUnion[]
+  betas: string[]
+  containsThinking: boolean
+}): Record<string, unknown> {
+  const { model: _model, ...body } = applyModelRequestConstraints(
+    {
+      model,
+      anthropic_version: 'bedrock-2023-05-31',
+      // When we pass tools and no messages, we need to pass a dummy message
+      // to get an accurate tool token count.
+      messages:
+        messages.length > 0 ? messages : [{ role: 'user', content: 'foo' }],
+      max_tokens: containsThinking ? TOKEN_COUNT_MAX_TOKENS : 1,
+      ...(tools.length > 0 && { tools }),
+      ...(betas.length > 0 && { anthropic_beta: betas }),
+      ...(containsThinking && {
+        thinking: {
+          type: 'enabled',
+          budget_tokens: TOKEN_COUNT_THINKING_BUDGET,
+        },
+      }),
+    },
+    model,
+  )
+  return body
+}
+
+/**
  * Estimates token count for a Message object by extracting and analyzing its text content.
  * This provides a more reliable estimate than getTokenUsage for messages that may have been compacted.
  * Uses Haiku for token counting (Haiku 4.5 supports thinking blocks), except:
@@ -513,22 +607,19 @@ export async function countTokensViaHaikuFallback(
       : betas
 
   // biome-ignore lint/plugin: token counting needs specialized parameters (thinking, betas) that sideQuery doesn't support
-  const response = await anthropic.beta.messages.create({
-    model: normalizeModelStringForAPI(model),
-    max_tokens: containsThinking ? TOKEN_COUNT_MAX_TOKENS : 1,
-    messages: messagesToSend,
-    tools: tools.length > 0 ? tools : undefined,
-    ...(filteredBetas.length > 0 && { betas: filteredBetas }),
-    metadata: getAPIMetadata(),
-    ...getExtraBodyParams(),
-    // Enable thinking if messages contain thinking blocks
-    ...(containsThinking && {
-      thinking: {
-        type: 'enabled',
-        budget_tokens: TOKEN_COUNT_THINKING_BUDGET,
+  const response = await anthropic.beta.messages.create(
+    buildHaikuFallbackCreateParams({
+      model,
+      messages: messagesToSend,
+      tools,
+      filteredBetas,
+      containsThinking,
+      extraParams: {
+        metadata: getAPIMetadata(),
+        ...getExtraBodyParams(),
       },
     }),
-  })
+  )
 
   const usage = response.usage
   const inputTokens = usage.input_tokens
@@ -678,22 +769,13 @@ async function countTokensWithBedrock({
       return null
     }
 
-    const requestBody = {
-      anthropic_version: 'bedrock-2023-05-31',
-      // When we pass tools and no messages, we need to pass a dummy message
-      // to get an accurate tool token count.
-      messages:
-        messages.length > 0 ? messages : [{ role: 'user', content: 'foo' }],
-      max_tokens: containsThinking ? TOKEN_COUNT_MAX_TOKENS : 1,
-      ...(tools.length > 0 && { tools }),
-      ...(betas.length > 0 && { anthropic_beta: betas }),
-      ...(containsThinking && {
-        thinking: {
-          type: 'enabled',
-          budget_tokens: TOKEN_COUNT_THINKING_BUDGET,
-        },
-      }),
-    }
+    const requestBody = buildBedrockCountTokensBody({
+      model,
+      messages,
+      tools,
+      betas,
+      containsThinking,
+    })
 
     const { CountTokensCommand } = await importOptionalRuntimeModule<
       typeof import('@aws-sdk/client-bedrock-runtime')
