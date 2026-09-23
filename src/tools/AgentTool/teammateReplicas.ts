@@ -2,8 +2,10 @@
  * Caps for the Agent tool's `replicas` parameter and for the size of the
  * in-process teammate pool.
  *
- * - `replicas` per call is capped by MAX_TEAMMATE_REPLICAS
- *   (env CLAUDE_CODE_MAX_TEAMMATE_REPLICAS, default 8).
+ * - `replicas` per call is capped by MAX_TEAMMATE_REPLICAS_CEILING, a HARD
+ *   ceiling of 4 that is also the default. env CLAUDE_CODE_MAX_TEAMMATE_REPLICAS
+ *   may only LOWER the cap (1..4); a larger value is clamped back to the
+ *   ceiling, so no env can hand out more than 4 replicas per call.
  * - Live in-process teammates (`in_process_teammate` tasks still `running`,
  *   idle or busy) are capped twice: PER TEAM by MAX_LIVE_TEAMMATES
  *   (env CLAUDE_CODE_MAX_TEAMMATES, default 16), counting only teammates in
@@ -23,7 +25,12 @@ import type { AppState } from '../../state/AppStateStore.js'
 export const MAX_TEAMMATE_REPLICAS_ENV = 'CLAUDE_CODE_MAX_TEAMMATE_REPLICAS'
 export const MAX_LIVE_TEAMMATES_ENV = 'CLAUDE_CODE_MAX_TEAMMATES'
 export const MAX_TEAM_TOTAL_ENV = 'CLAUDE_CODE_MAX_TEAM_TOTAL'
-export const DEFAULT_MAX_TEAMMATE_REPLICAS = 8
+/**
+ * Hard ceiling on `replicas` per call. Not merely a default: the env var is
+ * clamped to it, so it is the largest cap any session can reach.
+ */
+export const MAX_TEAMMATE_REPLICAS_CEILING = 4
+export const DEFAULT_MAX_TEAMMATE_REPLICAS = MAX_TEAMMATE_REPLICAS_CEILING
 export const DEFAULT_MAX_LIVE_TEAMMATES = 16
 export const DEFAULT_MAX_TEAM_TOTAL = 24
 
@@ -42,10 +49,18 @@ export function parsePositiveIntEnv(
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : defaultValue
 }
 
+/**
+ * The per-call replica cap, clamped to MAX_TEAMMATE_REPLICAS_CEILING: the env
+ * var lowers the cap and can never raise it. Unset or unparseable env values
+ * fall back to the default, which is the ceiling itself.
+ */
 export function getMaxTeammateReplicas(): number {
-  return parsePositiveIntEnv(
-    process.env[MAX_TEAMMATE_REPLICAS_ENV],
-    DEFAULT_MAX_TEAMMATE_REPLICAS,
+  return Math.min(
+    parsePositiveIntEnv(
+      process.env[MAX_TEAMMATE_REPLICAS_ENV],
+      DEFAULT_MAX_TEAMMATE_REPLICAS,
+    ),
+    MAX_TEAMMATE_REPLICAS_CEILING,
   )
 }
 
@@ -136,7 +151,7 @@ export function getTeammateSpawnCapError(
   }
   const maxReplicas = getMaxTeammateReplicas()
   if (replicas !== undefined && replicas > maxReplicas) {
-    return `replicas (${replicas}) exceeds the per-call cap of ${maxReplicas} (set ${MAX_TEAMMATE_REPLICAS_ENV} to change it).`
+    return `replicas (${replicas}) exceeds the per-call cap of ${maxReplicas} (${MAX_TEAMMATE_REPLICAS_ENV} can lower this cap but never raise it above ${MAX_TEAMMATE_REPLICAS_CEILING}). Spawn fewer replicas, or spawn again once these have finished.`
   }
   if (!isTeammateSpawn) {
     // A plain subagent (or a named background subagent) is not a teammate;

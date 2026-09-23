@@ -18,6 +18,7 @@ import {
   getTeammateSpawnCapError,
   MAX_LIVE_TEAMMATES_ENV,
   MAX_TEAM_TOTAL_ENV,
+  MAX_TEAMMATE_REPLICAS_CEILING,
   MAX_TEAMMATE_REPLICAS_ENV,
   parsePositiveIntEnv,
   REPLICAS_REQUIRE_NAME_ERROR,
@@ -149,17 +150,59 @@ test('parsePositiveIntEnv accepts positive integers and falls back otherwise', (
   expect(parsePositiveIntEnv('99999999999999999999', 8)).toBe(8)
 })
 
-test('caps default to 8 replicas per call and 16 live teammates', () => {
-  expect(DEFAULT_MAX_TEAMMATE_REPLICAS).toBe(8)
+test('with the env unset the replica cap defaults to the ceiling of 4, live teammates to 16', () => {
+  expect(MAX_TEAMMATE_REPLICAS_CEILING).toBe(4)
+  expect(DEFAULT_MAX_TEAMMATE_REPLICAS).toBe(4)
   expect(DEFAULT_MAX_LIVE_TEAMMATES).toBe(16)
-  expect(getMaxTeammateReplicas()).toBe(8)
+  expect(process.env[MAX_TEAMMATE_REPLICAS_ENV]).toBeUndefined()
+  expect(getMaxTeammateReplicas()).toBe(4)
   expect(getMaxLiveTeammates()).toBe(16)
+})
+
+test('CLAUDE_CODE_MAX_TEAMMATE_REPLICAS=9 cannot raise the replica cap above the ceiling of 4', () => {
+  process.env[MAX_TEAMMATE_REPLICAS_ENV] = '9'
+  expect(getMaxTeammateReplicas()).toBe(4)
+  // The env is clamped, not honoured: a 5-replica call is still refused and
+  // the refusal still names 4.
+  const refused = getTeammateSpawnCapError({
+    replicas: 5,
+    name: 'worker',
+    isTeammateSpawn: true,
+    tasks: {},
+  })
+  expect(refused).toContain('cap of 4')
+  expect(refused).toContain('never raise it above 4')
+  // parsePositiveIntEnv itself stays generic — only the replica getter clamps,
+  // so the live-teammate caps that share it are untouched.
+  expect(parsePositiveIntEnv('9', DEFAULT_MAX_TEAMMATE_REPLICAS)).toBe(9)
+})
+
+test('CLAUDE_CODE_MAX_TEAMMATE_REPLICAS=1 lowers the replica cap to 1', () => {
+  process.env[MAX_TEAMMATE_REPLICAS_ENV] = '1'
+  expect(getMaxTeammateReplicas()).toBe(1)
+  expect(
+    getTeammateSpawnCapError({
+      replicas: 2,
+      name: 'worker',
+      isTeammateSpawn: true,
+      tasks: {},
+    }),
+  ).toContain('cap of 1')
+  expect(
+    getTeammateSpawnCapError({
+      replicas: 1,
+      name: 'worker',
+      isTeammateSpawn: true,
+      tasks: {},
+    }),
+  ).toBeUndefined()
 })
 
 test('CLAUDE_CODE_MAX_TEAMMATE_REPLICAS and CLAUDE_CODE_MAX_TEAMMATES override the caps', () => {
   expect(MAX_TEAMMATE_REPLICAS_ENV).toBe('CLAUDE_CODE_MAX_TEAMMATE_REPLICAS')
   expect(MAX_LIVE_TEAMMATES_ENV).toBe('CLAUDE_CODE_MAX_TEAMMATES')
 
+  // 3 is below the ceiling, so it is a legal lowering and is honoured.
   process.env[MAX_TEAMMATE_REPLICAS_ENV] = '3'
   process.env[MAX_LIVE_TEAMMATES_ENV] = '5'
   expect(getMaxTeammateReplicas()).toBe(3)
@@ -167,7 +210,7 @@ test('CLAUDE_CODE_MAX_TEAMMATE_REPLICAS and CLAUDE_CODE_MAX_TEAMMATES override t
 
   process.env[MAX_TEAMMATE_REPLICAS_ENV] = 'nope'
   process.env[MAX_LIVE_TEAMMATES_ENV] = '0'
-  expect(getMaxTeammateReplicas()).toBe(8)
+  expect(getMaxTeammateReplicas()).toBe(4)
   expect(getMaxLiveTeammates()).toBe(16)
 })
 
@@ -203,12 +246,12 @@ test('replicas over the per-call cap is rejected with the cap named', () => {
     tasks: {},
   })
   expect(error).toContain('replicas (9)')
-  expect(error).toContain('cap of 8')
+  expect(error).toContain('cap of 4')
   expect(error).toContain(MAX_TEAMMATE_REPLICAS_ENV)
 
   expect(
     getTeammateSpawnCapError({
-      replicas: 8,
+      replicas: 4,
       name: 'worker',
       isTeammateSpawn: true,
       tasks: {},

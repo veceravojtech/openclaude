@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { rmSync } from 'node:fs'
+import { mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { ToolUseContext } from '../../Tool.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import { fullInputSchema } from './AgentTool.js'
-import { REPLICAS_REQUIRE_NAME_ERROR } from './teammateReplicas.js'
+import {
+  MAX_TEAMMATE_REPLICAS_CEILING,
+  REPLICAS_REQUIRE_NAME_ERROR,
+} from './teammateReplicas.js'
 
 type SettingsModule = typeof import('../../utils/settings/settings.js')
 type SpawnMultiAgentModule = typeof import('../shared/spawnMultiAgent.js')
@@ -20,8 +27,10 @@ const ENV_KEYS = [
   'USER_TYPE',
   'CLAUDE_CODE_MAX_TEAMMATE_REPLICAS',
   'CLAUDE_CODE_MAX_TEAMMATES',
+  'OPENCLAUDE_CONFIG_DIR',
 ] as const
 const savedEnv: Partial<Record<(typeof ENV_KEYS)[number], string>> = {}
+let configDir: string | undefined
 
 beforeEach(async () => {
   await acquireSharedMutationLock('tools/AgentTool/AgentTool.replicas.test.ts')
@@ -30,6 +39,11 @@ beforeEach(async () => {
     delete process.env[key]
   }
   process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = '1'
+  // Config isolation goes through OPENCLAUDE_CONFIG_DIR, never HOME: the tool
+  // is really constructed and called below, so nothing may reach the
+  // developer's own config.
+  configDir = await mkdtemp(join(tmpdir(), 'openclaude-replicas-'))
+  process.env.OPENCLAUDE_CONFIG_DIR = configDir
 })
 
 afterEach(() => {
@@ -48,6 +62,10 @@ afterEach(() => {
       const value = savedEnv[key]
       if (value === undefined) delete process.env[key]
       else process.env[key] = value
+    }
+    if (configDir) {
+      rmSync(configDir, { recursive: true, force: true })
+      configDir = undefined
     }
   } finally {
     releaseSharedMutationLock()
@@ -184,10 +202,63 @@ test('validateInput rejects replicas without a name and over the per-call cap', 
     { description: 'pool', name: 'w', replicas: 9 } as never,
   )
   expect(over.result).toBe(false)
-  expect((over as { message: string }).message).toContain('per-call cap of 8')
+  expect((over as { message: string }).message).toContain('per-call cap of 4')
   await expect(
-    AgentTool.validateInput!({ description: 'pool', name: 'w', replicas: 8 } as never),
+    AgentTool.validateInput!({ description: 'pool', name: 'w', replicas: 4 } as never),
   ).resolves.toEqual({ result: true })
+})
+
+test('replicas=5 is refused before any spawn side effect, naming the cap of 4', async () => {
+  const { AgentTool, spawnTeammate, generateUniqueTeammateName } =
+    await importAgentToolWithSpawnMock()
+
+  // validateInput refuses it without a team ever being resolved…
+  const rejected = await AgentTool.validateInput!(
+    { description: 'pool', name: 'w', team_name: 'review-team', replicas: 5 } as never,
+  )
+  expect(rejected.result).toBe(false)
+  expect((rejected as { message: string }).message).toContain('replicas (5)')
+  expect((rejected as { message: string }).message).toContain('per-call cap of 4')
+
+  // …and call() refuses it too, for direct call() paths (SDK, tests) that
+  // never run validateInput. The throw happens before the spawn loop, so no
+  // teammate is created and no name is reserved on the roster.
+  await expect(
+    AgentTool.call(
+      { description: 'pool', name: 'w', team_name: 'review-team', replicas: 5 } as never,
+      makeToolUseContext(),
+      allow(),
+      { requestId: 'req-rep-cap' } as never,
+    ),
+  ).rejects.toThrow('per-call cap of 4')
+  expect(spawnTeammate).not.toHaveBeenCalled()
+  expect(generateUniqueTeammateName).not.toHaveBeenCalled()
+
+  // The ceiling is hard: the env cannot buy the 5th replica back.
+  process.env.CLAUDE_CODE_MAX_TEAMMATE_REPLICAS = '9'
+  await expect(
+    AgentTool.call(
+      { description: 'pool', name: 'w', team_name: 'review-team', replicas: 5 } as never,
+      makeToolUseContext(),
+      allow(),
+      { requestId: 'req-rep-cap-env' } as never,
+    ),
+  ).rejects.toThrow(`never raise it above ${MAX_TEAMMATE_REPLICAS_CEILING}`)
+  expect(spawnTeammate).not.toHaveBeenCalled()
+})
+
+test('replicas=4 sits exactly on the ceiling and spawns four teammates', async () => {
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+  await AgentTool.call(
+    { description: 'pool', name: 'w', team_name: 'review-team', replicas: 4 } as never,
+    makeToolUseContext(),
+    allow(),
+    { requestId: 'req-rep-ceiling' } as never,
+  )
+  expect(spawnTeammate).toHaveBeenCalledTimes(4)
+  expect(
+    spawnTeammate.mock.calls.map(c => (c[0] as SpawnTeammateConfig).name),
+  ).toEqual(['w-1', 'w-2', 'w-3', 'w-4'])
 })
 
 test('replicas=3 without a prompt spawns three idle teammates named name-1..3', async () => {

@@ -61,7 +61,7 @@ import { BackgroundHint } from '../BashTool/UI.js';
 import { FILE_READ_TOOL_NAME } from '../FileReadTool/prompt.js';
 import { spawnTeammate, generateUniqueTeammateName } from '../shared/spawnMultiAgent.js';
 import { PROVIDER_PROFILE_IN_PROCESS_ERROR, resolveProviderProfileEnv } from './providerProfileBinding.js';
-import { getTeammateSpawnCapError } from './teammateReplicas.js';
+import { getTeammateSpawnCapError, MAX_TEAMMATE_REPLICAS_CEILING } from './teammateReplicas.js';
 import { setAgentColor } from './agentColorManager.js';
 import { agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extractPartialResult, finalizeAgentTool, getLastToolUseName, runAsyncAgentLifecycle } from './agentToolUtils.js';
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
@@ -112,7 +112,7 @@ export const fullInputSchema = lazySchema(() => {
     name: z.string().optional().describe('Name for the spawned agent. Makes it addressable via SendMessage({to: name}) while running.'),
     team_name: z.string().optional().describe('Team name for spawning. Uses current team context if omitted.'),
     mode: permissionModeSchema().optional().describe('Permission mode for spawned teammate (e.g., "plan" to require plan approval).'),
-    replicas: z.number().int().min(1).optional().describe('Number of teammates to spawn from this call (default 1). Requires `name`; they are named <name>-1 ... <name>-N and all share the same prompt (or all start idle when prompt is omitted). Capped per call and by the live teammate pool size.'),
+    replicas: z.number().int().min(1).optional().describe(`Number of teammates to spawn from this call (default 1). Requires \`name\`; they are named <name>-1 ... <name>-N and all share the same prompt (or all start idle when prompt is omitted). At most ${MAX_TEAMMATE_REPLICAS_CEILING} per call (CLAUDE_CODE_MAX_TEAMMATE_REPLICAS can lower that cap, never raise it), and also capped by the live teammate pool size.`),
     provider_profile: z.string().trim().min(1, 'provider_profile cannot be empty').optional().describe('Bind the teammate to a provider PROFILE (its id or name, e.g. a saved Codex/OAuth profile), NOT a model id. Saved provider profiles of any supported provider are resolved inside the child without placing credentials in the launch command. Not valid for idle or in-process teammates.')
   });
   return baseInputSchema().merge(multiAgentInputSchema).extend({
