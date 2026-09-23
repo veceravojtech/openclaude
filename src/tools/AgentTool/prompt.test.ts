@@ -593,3 +593,107 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     expect(slim).not.toContain('Usage notes:')
   })
 })
+
+// The one-objective-one-agent policy is prompt text and nothing else.
+// TEAMMATE-WORKFLOW-ROADMAP.md ("Rejected designs") records both enforcement
+// designs being rejected — no topic records, no spawn-time listing, no
+// across-call cap, no programmatic termination check — so the rendered string
+// IS the mechanism and these assertions are the only thing holding it in
+// place. They pin one distinct phrase per rule rather than matching the block
+// as a blob: a blob match survives any rewrite that keeps the first and last
+// sentence, which is exactly the drift the roadmap is trying to prevent.
+describe('AgentTool prompt: one objective, one agent', () => {
+  /**
+   * Roadmap rule number -> the phrase that carries it. Distinct per rule: no
+   * phrase here is a substring of another, so a rule dropped in a rewrite
+   * fails its own assertion and not someone else's.
+   */
+  const OBJECTIVE_RULE_PHRASES: Array<[number, string]> = [
+    [1, 'starting, running, idle, parked and shutting-down agents all hold that ownership'],
+    [2, "needs the user's approval, asked for before you create the overlap, and two is the ceiling"],
+    [3, 'Send the follow-up to the owner with SendMessage'],
+    [4, 'do not start a speculative replacement, a competing implementation, or a second investigator'],
+    [5, 'confirm with ListAgents that it is no longer listed'],
+    [6, 'splitting the same work under a new label does not make it a new objective'],
+    [7, 'parked on a usage limit is idle, not finished'],
+  ]
+
+  /**
+   * Rendered to the lead and to a teammate from the SAME cached description
+   * (see the design note above TEAMMATE_SPAWN_RULES), so the sub-team case is
+   * stated in the shared text instead of branched on the reader.
+   */
+  const NESTED_DELEGATION_CLAUSE =
+    'delegating one level down does not reset the count'
+
+  // Same reasoning as `pins the teammate parameter list the loops below assert
+  // over`: every assertion below is a loop over this list, and a loop over a
+  // trimmed list still passes. Drop rule 5 from the array and nothing else in
+  // this file notices. So the array needs a pin of its own.
+  test('pins all seven rules the loops below assert over', () => {
+    expect(OBJECTIVE_RULE_PHRASES.map(([rule]) => rule)).toEqual([
+      1, 2, 3, 4, 5, 6, 7,
+    ])
+  })
+
+  test('carries all seven rules and the nested-delegation clause in both renders when Agent Teams is ON', async () => {
+    process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
+    forceAgentTeamsOn()
+
+    const full = await getPrompt(agents)
+    // The rules live in the SHARED core, so the slim coordinator render has
+    // to carry them too — a coordinator makes the same spawn decision.
+    const slim = await getPrompt(agents, true)
+
+    for (const prompt of [full, slim]) {
+      expect(prompt).toContain(
+        '**One objective, one agent.** An objective is owned by the agent working on it',
+      )
+      for (const [, phrase] of OBJECTIVE_RULE_PHRASES) {
+        expect(prompt).toContain(phrase)
+      }
+      expect(prompt).toContain(NESTED_DELEGATION_CLAUSE)
+      expect(prompt).toContain(
+        "you cannot approve your own overlap, and a lead cannot grant one on the user's behalf",
+      )
+    }
+    expect(slim).not.toContain('Usage notes:')
+  })
+
+  test('drops all seven rules when Agent Teams is OFF', async () => {
+    process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
+    process.env.CLAUDE_CODE_DISABLE_AGENT_TEAMS = '1'
+    // The opt-out wins on its own (agentSwarmsEnabled.ts:21-24), but an
+    // ambient ant build must not be able to turn this render back on.
+    delete process.env.USER_TYPE
+
+    const prompt = await getPrompt(agents)
+
+    expect(prompt).not.toContain('**One objective, one agent.**')
+    for (const [, phrase] of OBJECTIVE_RULE_PHRASES) {
+      expect(prompt).not.toContain(phrase)
+    }
+    expect(prompt).not.toContain(NESTED_DELEGATION_CLAUSE)
+    // The gate takes the rules because they name SendMessage and ListAgents,
+    // both unregistered with Agent Teams off — not because the surrounding
+    // description went away.
+    expect(prompt).not.toContain('ListAgents')
+    expect(prompt).toContain('isolation: "worktree"')
+  })
+
+  test('the FORK render keeps the rules when Agent Teams is ON', async () => {
+    process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
+    forceAgentTeamsOn()
+
+    const prompt = await withForkRender(() => getPrompt(agents))
+
+    // Prove the fork branch actually rendered, or the rest passes vacuously
+    // on the default render.
+    expect(prompt).toContain('## When to fork')
+
+    for (const [, phrase] of OBJECTIVE_RULE_PHRASES) {
+      expect(prompt).toContain(phrase)
+    }
+    expect(prompt).toContain(NESTED_DELEGATION_CLAUSE)
+  })
+})

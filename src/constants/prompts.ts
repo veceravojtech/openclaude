@@ -320,7 +320,7 @@ function getAgentToolSection(): string {
   // Same gate as the Agent tool's own teammate text: without Agent Teams,
   // TeamCreate and the `name`/`team_name` parameters do not exist.
   if (!isAgentSwarmsEnabled()) return base
-  return `${base} When you delegate, strongly prefer a team: create it once with ${TEAM_CREATE_TOOL_NAME}, then spawn named teammates (${AGENT_TOOL_NAME} with \`name\` and \`team_name\`) — they persist, can be re-tasked with ${SEND_MESSAGE_TOOL_NAME}, and report back. Unnamed subagents and forks are the fallback; built-in types such as ${EXPLORE_AGENT.agentType}, Plan, code-reviewer and verification cannot be teammates, so spawn those without \`name\`.`
+  return `${base} When you delegate, strongly prefer a team: create it once with ${TEAM_CREATE_TOOL_NAME}, then spawn named teammates (${AGENT_TOOL_NAME} with \`name\` and \`team_name\`) — they persist, can be re-tasked with ${SEND_MESSAGE_TOOL_NAME}, and report back. Unnamed subagents and forks are the fallback; built-in types such as ${EXPLORE_AGENT.agentType}, Plan, code-reviewer and verification cannot be teammates, so spawn those without \`name\`. One objective, one agent: re-task the live owner with ${SEND_MESSAGE_TOOL_NAME} instead of spawning a second agent for work someone already owns, and ask the user before putting a second agent on the same objective.`
 }
 
 /**

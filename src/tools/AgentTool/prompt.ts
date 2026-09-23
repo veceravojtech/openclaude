@@ -6,6 +6,7 @@ import { isEnvDefinedFalsy, isEnvTruthy } from '../../utils/envUtils.js'
 import { FILE_READ_TOOL_NAME } from '../FileReadTool/prompt.js'
 import { FILE_WRITE_TOOL_NAME } from '../FileWriteTool/prompt.js'
 import { GLOB_TOOL_NAME } from '../GlobTool/prompt.js'
+import { LIST_AGENTS_TOOL_NAME } from '../ListAgentsTool/constants.js'
 import { SEND_MESSAGE_TOOL_NAME } from '../SendMessageTool/constants.js'
 import { TEAM_CREATE_TOOL_NAME } from '../TeamCreateTool/constants.js'
 import { AGENT_TOOL_NAME } from './constants.js'
@@ -159,6 +160,39 @@ const TEAMMATE_BACKGROUND_RULE = `
 const TEAMMATE_DEFAULT_RECOMMENDATION = `
 
 **Default to teammates.** Create a team once with ${TEAM_CREATE_TOOL_NAME}, then spawn every agent with \`name\` (and \`team_name\`) so it joins that team as a teammate. Teammates persist after they report, can be re-tasked with ${SEND_MESSAGE_TOOL_NAME} with their context still loaded, and report back to you — an unnamed subagent or a fork can do none of that. Omitting \`name\` still works; treat it as the fallback, for a built-in type that cannot be a teammate (\`Explore\`, \`Plan\`, \`code-reviewer\`, \`verification\`) or a truly throwaway lookup.`
+
+/**
+ * Who owns an objective, and what has to be true before a second agent may
+ * touch it. Rendered in the SHARED core alongside
+ * TEAMMATE_DEFAULT_RECOMMENDATION, so the slim coordinator description carries
+ * it too — the coordinator makes the same spawn decision these rules govern.
+ *
+ * Reader-attributed, not branched, for the reason TEAMMATE_SPAWN_RULES gives
+ * above: the description is memoised process-wide and a teammate reads
+ * whatever its lead's render cached, so the nested-delegation clause is stated
+ * to both readers rather than gated on being one of them.
+ *
+ * Gated on `isAgentSwarmsEnabled()` like its neighbours: it names
+ * SendMessage and ListAgents, whose own isEnabled() is that same flag
+ * (`SendMessageTool.ts:836-838`, `ListAgentsTool.ts:114-115`), so with Agent
+ * Teams off it would point at tools the model does not have.
+ *
+ * Text is the whole mechanism here, deliberately: no code checks ownership.
+ * `TEAMMATE-WORKFLOW-ROADMAP.md` ("Rejected designs") records both the
+ * topic-record design and the lighter spawn-guard design being rejected, the
+ * second because the lead must follow its written rules rather than have a
+ * program built around them.
+ */
+const TEAMMATE_OBJECTIVE_RULES = `
+
+**One objective, one agent.** An objective is owned by the agent working on it, and starting, running, idle, parked and shutting-down agents all hold that ownership.
+- Do not spawn a second agent for an objective another agent already owns. Send the follow-up to the owner with ${SEND_MESSAGE_TOOL_NAME} — its context is still loaded, which is the point of a teammate.
+- A second agent on the same objective needs the user's approval, asked for before you create the overlap, and two is the ceiling. Silence is not approval, and neither is a request that merely sounds urgent.
+- While an owner is still working, do not start a speculative replacement, a competing implementation, or a second investigator for the same question. Wait for its result.
+- Capture the result, shut the owner down, then confirm with ${LIST_AGENTS_TOOL_NAME} that it is no longer listed. A completion message or a shutdown acknowledgement is not proof that it stopped. Only then may a successor start on that objective.
+- Re-wording the objective, renaming the agent, changing its model or role, or splitting the same work under a new label does not make it a new objective.
+- A teammate parked on a usage limit is idle, not finished: it still owns its objective, and the continuation goes to it, not to a replacement.
+- These rules bind whoever delegates. If you lead a sub-team they apply unchanged to the objectives you hand out; delegating one level down does not reset the count. Splitting an objective you were given and putting two agents on the same split is still the two-agent case and still needs the user's approval — you cannot approve your own overlap, and a lead cannot grant one on the user's behalf.`
 
 export async function getPrompt(
   agentDefinitions: AgentDefinition[],
@@ -320,7 +354,7 @@ ${
   forkEnabled
     ? `When using the ${AGENT_TOOL_NAME} tool, specify a subagent_type to use a specialized agent, or omit it to fork yourself — a fork inherits your full conversation context.`
     : `When using the ${AGENT_TOOL_NAME} tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used.`
-}${teammateSpawnAvailable ? TEAMMATE_DEFAULT_RECOMMENDATION : ''}`
+}${teammateSpawnAvailable ? `${TEAMMATE_DEFAULT_RECOMMENDATION}${TEAMMATE_OBJECTIVE_RULES}` : ''}`
 
   // Coordinator mode gets the slim prompt -- the coordinator system prompt
   // already covers usage notes, examples, and when-not-to-use guidance.
