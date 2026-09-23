@@ -123,17 +123,85 @@ describe('resolveAgentProvider', () => {
     expect(resolveAgentProvider(undefined, 'Explore', settings)).toBeNull()
   })
 
-  test('returns null when agentModels is missing', () => {
+  test('throws when a matched routing key has no agentModels at all', () => {
     const settings = { agentRouting: baseSettings.agentRouting } as unknown as SettingsJson
-    expect(resolveAgentProvider(undefined, 'Explore', settings)).toBeNull()
+    expect(() => resolveAgentProvider(undefined, 'Explore', settings)).toThrow(
+      'agentRouting key "Explore" points to agentModels entry "deepseek-chat", which does not exist. Add it to agentModels or remove the routing entry.',
+    )
   })
 
-  test('returns null when routing references non-existent model', () => {
+  test('throws when a routing key references a missing agentModels entry', () => {
     const settings = {
       agentModels: {},
       agentRouting: { Explore: 'non-existent-model' },
     } as unknown as SettingsJson
+    expect(() => resolveAgentProvider(undefined, 'Explore', settings)).toThrow(
+      'agentRouting key "Explore" points to agentModels entry "non-existent-model", which does not exist.',
+    )
+  })
+
+  test('names the original (un-normalized) routing key in the error', () => {
+    const settings = {
+      agentModels: {},
+      agentRouting: { 'explore_agent': 'gone' },
+    } as unknown as SettingsJson
+    expect(() => resolveAgentProvider(undefined, 'explore-agent', settings)).toThrow(
+      'agentRouting key "explore_agent" points to agentModels entry "gone"',
+    )
+  })
+
+  test('no matching routing key still returns null without agentModels', () => {
+    const settings = { agentRouting: { Plan: 'x' } } as unknown as SettingsJson
     expect(resolveAgentProvider(undefined, 'Explore', settings)).toBeNull()
+  })
+
+  test('unchanged: no agentRouting at all resolves nothing and never throws', () => {
+    for (const settings of [
+      {},
+      { agentModels: baseSettings.agentModels },
+      { agentModels: { broken: { base_url: 'https://x.example/v1' } } },
+    ] as unknown as SettingsJson[]) {
+      expect(resolveAgentProvider('Explore', 'Explore', settings)).toBeNull()
+      expect(
+        resolveAgentRunModelRouting({
+          resolvedAgentModel: 'parent-model',
+          parentModel: 'parent-model',
+          agentName: 'Explore',
+          subagentType: 'Explore',
+          settings,
+        }),
+      ).toEqual({ mainLoopModel: 'parent-model' })
+    }
+  })
+
+  test('unchanged: a valid config resolves exactly as before', () => {
+    expect(resolveAgentProvider(undefined, 'Explore', baseSettings)).toEqual(
+      resolveAgentModelProvider('deepseek-chat', baseSettings),
+    )
+    expect(
+      resolveAgentRunModelRouting({
+        resolvedAgentModel: 'parent-model',
+        parentModel: 'parent-model',
+        subagentType: 'Explore',
+        settings: baseSettings,
+      }).mainLoopModel,
+    ).toBe('deepseek-chat')
+  })
+
+  test('in-process subagents fail loudly on a broken routing key too', () => {
+    expect(() =>
+      resolveAgentRunModelRouting({
+        resolvedAgentModel: 'parent-model',
+        parentModel: 'parent-model',
+        subagentType: 'Explore',
+        settings: {
+          agentModels: {},
+          agentRouting: { Explore: 'gone' },
+        } as unknown as SettingsJson,
+      }),
+    ).toThrow(
+      'agentRouting key "Explore" points to agentModels entry "gone", which does not exist. Add it to agentModels or remove the routing entry.',
+    )
   })
 
   test('subagentType only (no name)', () => {
@@ -179,7 +247,28 @@ describe('resolveAgentProvider', () => {
       agentRouting: { default: 'zai' },
     } as unknown as SettingsJson
 
-    expect(resolveAgentProvider(undefined, undefined, settings)).toBeNull()
+    expect(() => resolveAgentProvider(undefined, undefined, settings)).toThrow(
+      'agentRouting key "default": agentModels entry "zai" has only one of base_url/api_key; both are required for cross-provider routing.',
+    )
+  })
+
+  test('a routed provider_profile entry that also carries credentials throws', () => {
+    const settings = {
+      agentModels: {
+        codex: { provider_profile: 'codex-oauth', api_key: 'sk-x' },
+      },
+      agentRouting: { Explore: 'codex' },
+    } as unknown as SettingsJson
+    expect(() => resolveAgentProvider(undefined, 'Explore', settings)).toThrow(
+      'agentRouting key "Explore": agentModels entry "codex" cannot combine provider_profile with base_url/api_key.',
+    )
+  })
+
+  test('a tool-requested model matching a half-configured entry still warns and skips', () => {
+    const settings = {
+      agentModels: { zai: { base_url: 'https://api.z.ai/api/coding/paas/v4' } },
+    } as unknown as SettingsJson
+    expect(resolveAgentModelProvider('zai', settings)).toBeNull()
     expect(errorSpy).toHaveBeenCalledWith(
       '[agentRouting] Warning: agentModels entry "zai" has only one of base_url/api_key; both are required for cross-provider routing. Skipping this route.',
     )
@@ -220,11 +309,9 @@ describe('model-only routes', () => {
     expect(route).toEqual({ model: 'bare' })
   })
 
-  test('partial entry (only base_url) is skipped', () => {
-    const route = resolveAgentProvider(undefined, 'Plan', modelOnlySettings)
-    expect(route).toBeNull()
-    expect(errorSpy).toHaveBeenCalledWith(
-      '[agentRouting] Warning: agentModels entry "half-entry" has only one of base_url/api_key; both are required for cross-provider routing. Skipping this route.',
+  test('partial entry (only base_url) reached through routing throws', () => {
+    expect(() => resolveAgentProvider(undefined, 'Plan', modelOnlySettings)).toThrow(
+      'agentRouting key "Plan": agentModels entry "half-entry" has only one of base_url/api_key; both are required for cross-provider routing.',
     )
   })
 
@@ -384,8 +471,8 @@ describe('resolveAgentRunModelRouting', () => {
     expect(result).toEqual({ mainLoopModel: 'default-model' })
   })
 
-  test('falls back to resolved model when routed provider has a blank API key', () => {
-    const result = resolveAgentRunModelRouting({
+  test('throws instead of falling back when the routed provider has a blank API key', () => {
+    const run = () => resolveAgentRunModelRouting({
       resolvedAgentModel: 'parent-runtime-model',
       parentModel: 'parent-model',
       subagentType: 'Explore',
@@ -401,9 +488,8 @@ describe('resolveAgentRunModelRouting', () => {
       } as unknown as SettingsJson,
     })
 
-    expect(result).toEqual({ mainLoopModel: 'parent-runtime-model' })
-    expect(errorSpy).toHaveBeenCalledWith(
-      '[agentRouting] Warning: agentModels entry "zai" has only one of base_url/api_key; both are required for cross-provider routing. Skipping this route.',
+    expect(run).toThrow(
+      'agentRouting key "Explore": agentModels entry "zai" has only one of base_url/api_key',
     )
   })
 

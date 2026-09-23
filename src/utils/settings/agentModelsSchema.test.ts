@@ -57,3 +57,19 @@ test('agentModels rejects a saved provider profile mixed with inline credentials
   })
   expect(result.success).toBe(false)
 })
+
+test('teammateModelAllowlist accepts family keys, exact ids and "*"', () => {
+  for (const teammateModelAllowlist of [
+    ['deepseek-v4-pro', 'glm-5.3-flash'],
+    ['*'],
+    [],
+  ]) {
+    expect(SettingsSchema().safeParse({ teammateModelAllowlist }).success).toBe(true)
+  }
+})
+
+test('teammateModelAllowlist rejects a non-array', () => {
+  expect(
+    SettingsSchema().safeParse({ teammateModelAllowlist: 'deepseek-v4-pro' }).success,
+  ).toBe(false)
+})

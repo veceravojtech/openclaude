@@ -65,7 +65,15 @@ import {
   applyTeammateModelFlag,
   buildInheritedEnvVars,
 } from '../../utils/swarm/spawnUtils.js'
-import { findUnroutableCodexOAuthProfile } from '../../services/api/agentRouting.js'
+import {
+  findUnroutableCodexOAuthProfile,
+  resolveOutOfProcessTeammateProvider,
+} from '../../services/api/agentRouting.js'
+import {
+  assertTeammateModelCheck,
+  normalizeTeammateModelId,
+  resolveTeammateProviderRoute,
+} from '../../utils/model/teammateModelMatrix.js'
 import { isCodexBaseUrl } from '../../services/api/providerConfig.js'
 import { getInitialSettings } from '../../utils/settings/settings.js'
 import { PROVIDER_PROFILE_IN_PROCESS_ERROR } from '../AgentTool/providerProfileBinding.js'
@@ -560,6 +568,125 @@ function assertProfileBoundModelServable(input: SpawnInput): void {
   throw new Error(
     `Model '${model.trim()}'${requested === model.trim() ? '' : ` (resolves to '${requested}')`} is an Anthropic model, and this spawn is bound to the Codex (OAuth) provider profile '${input.providerProfileRef ?? providerEnv.OPENAI_MODEL}' — a ChatGPT account cannot serve it, so the teammate would fail on its first request with "model is not supported when using Codex with a ChatGPT account". Drop the model argument to use the profile's own model, pass a model that profile serves, or drop provider_profile to run the teammate on this session's provider.`,
   )
+}
+
+/**
+ * The single choke point for the teammate model matrix: every backend
+ * (in-process, split pane, separate window) enters through handleSpawn,
+ * which calls this before any pane, task or team-file member exists — so a
+ * refusal leaves nothing behind and the Agent tool just returns the error.
+ *
+ * It checks what the teammate will ACTUALLY run: the model after 'inherit',
+ * aliases and a provider-profile binding are applied (the same values the
+ * backends launch with), on the provider route the child will end up on
+ * (bound profile > agentModels cross-provider override > leader's env).
+ *
+ * The one exemption is a teammate that simply inherits the leader's own
+ * model on the leader's own provider: no profile binding, no cross-provider
+ * override, and a resolved model equal to the leader's. The leader proves
+ * that pair works, whatever the matrix says (custom/local leaders included).
+ *
+ * Exported for testing.
+ */
+export function assertTeammateModelAllowed(
+  input: SpawnInput,
+  context: Pick<ToolUseContext, 'getAppState'>,
+): void {
+  const leaderModel = getLeaderModel(context.getAppState())
+  const settings = getInitialSettings()
+  const { providerEnv } = input
+
+  let resolvedModel: string | undefined
+  let providerRoute: string
+  let isInheritingLeader = false
+
+  if (providerEnv !== undefined) {
+    // Profile-bound: the child runs the binding's model (or an explicit one)
+    // on the bound profile's provider.
+    const profileId = providerEnv.OPENCLAUDE_TEAMMATE_PROFILE_ID
+    const profile = profileId
+      ? getProviderProfiles(getGlobalConfig()).find(p => p.id === profileId)
+      : undefined
+    resolvedModel =
+      resolveTeammateLaunchModel(input.model, leaderModel, providerEnv) ??
+      providerEnv.OPENAI_MODEL
+    providerRoute = profile
+      ? resolveTeammateProviderRoute({ model: resolvedModel, profile })
+      : resolveTeammateProviderRoute({
+          model: resolvedModel,
+          env: { ...process.env, ...providerEnv },
+        })
+  } else {
+    resolvedModel = resolveTeammateModel(input.model, leaderModel)
+    // The exact lookup the child performs at startup
+    // (resolveOutOfProcessTeammateProviderFromCliArgs in cli.tsx): its
+    // --model, then its --agent-name / --agent-type routing. Mirroring it
+    // judges the provider the child will really run on, and surfaces a
+    // broken agentRouting key (resolveAgentProvider throws) here, before
+    // any pane exists, rather than as a crash in the child.
+    const override = resolveOutOfProcessTeammateProvider({
+      cliModel: input.model,
+      agentName: input.name,
+      agentType: input.agent_type,
+      settings,
+    })
+    if (override) {
+      resolvedModel = override.model
+      providerRoute = resolveTeammateProviderRoute({
+        model: override.model,
+        overrideBaseUrl: override.baseURL,
+      })
+    } else {
+      // THE INHERIT-LEADER EXCEPTION: no profile binding, no cross-provider
+      // route, and the teammate runs exactly the leader's current model.
+      // That (provider, model) pair is the one the leader itself is running
+      // on right now, so it is proven to work — refusing it would make
+      // teammates unusable for any leader not on a matrix model (custom and
+      // local models included). An explicit `model` equal to the leader's is
+      // the same pair and is treated the same.
+      isInheritingLeader =
+        normalizeTeammateModelId(resolvedModel) ===
+        normalizeTeammateModelId(leaderModel)
+      // The leader's provider as the session actually runs it: process.env,
+      // which startup already populated from the active profile. Deliberately
+      // the same source getAPIProvider() reads — not the saved-profile list,
+      // whose profiles[0] fallback would name a provider the session is not
+      // on.
+      providerRoute = resolveTeammateProviderRoute({ model: resolvedModel })
+    }
+  }
+
+  // No model at all means the child falls back to its provider default,
+  // which only happens under a binding that carries none — nothing to check.
+  if (!resolvedModel) return
+  // Judge what reaches the wire: aliases resolve first, so 'opus' or
+  // 'codexplan' cannot slip past as unknown strings.
+  const wireModel = isInheritingLeader
+    ? resolvedModel
+    : parseUserSpecifiedModel(resolvedModel)
+  assertTeammateModelCheck({
+    resolvedModel: wireModel,
+    requestedModel: resolvedModel,
+    providerRoute,
+    isInheritingLeader,
+    allowlist: settings?.teammateModelAllowlist,
+  })
+}
+
+/**
+ * Spawn preconditions that are more specific than the model check and so
+ * must win over it: a provider_profile binding cannot run in-process. Idle
+ * spawns and an enabled in-process backend both land in-process (see
+ * handleSpawn), and handleSpawnInProcess repeats the same guard for the
+ * pane-backend fallback, which is only known after detection.
+ */
+function assertSpawnPreconditions(input: SpawnInput): void {
+  if (
+    input.providerEnv !== undefined &&
+    (input.prompt === undefined || isInProcessEnabled())
+  ) {
+    throw new Error(PROVIDER_PROFILE_IN_PROCESS_ERROR)
+  }
 }
 
 /**
@@ -1387,6 +1514,11 @@ async function handleSpawn(
   input: SpawnInput,
   context: ToolUseContext,
 ): Promise<{ data: SpawnOutput }> {
+  // One choke point for every backend: both run before any pane, task or
+  // team-file member exists, so a refusal leaves nothing behind.
+  assertSpawnPreconditions(input)
+  assertTeammateModelAllowed(input, context)
+
   // Idle spawns (no prompt) only exist in-process: pane/window teammates are
   // separate processes that block on their first mailbox message and cannot
   // be parked idle. Route them in-process regardless of teammate mode so the

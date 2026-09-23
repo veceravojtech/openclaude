@@ -81,6 +81,69 @@ When no routing match is found, the global provider remains the fallback.
 provider. Set `agentModels.<key>.model` when you want a local route key such
 as `zai-default` to call a different provider model name such as `glm-5.2`.
 
+A matched `agentRouting` key is never silently ignored. If it names an
+`agentModels` entry that does not exist, or a half-configured one (only one of
+`base_url`/`api_key`, or `provider_profile` mixed with credentials), the agent
+fails with an error naming the routing key and the entry, instead of quietly
+running on the leader's model. This applies to every agent the key reaches:
+teammates (refused before any pane is created) and in-process subagents alike.
+For example:
+
+```text
+agentRouting key "reviewer" points to agentModels entry "gone", which does not exist. Add it to agentModels or remove the routing entry.
+agentRouting key "Plan": agentModels entry "half-entry" has only one of base_url/api_key; both are required for cross-provider routing.
+```
+
+With no `agentRouting` at all, or no key matching the agent, nothing changes:
+the agent runs on the global provider as before. An Agent tool `model` that
+names a half-configured `agentModels` entry is still only warned about and
+skipped, since it is not a routing instruction.
+
+### Teammate model allowlist
+
+Teammates (agents spawned with `name`) can only run a model from the teammate
+model matrix, and only on a provider that serves it. The check uses the
+resolved model (after `inherit`, aliases, routing and `provider_profile`
+binding) and the provider the teammate will actually run on:
+
+| Family | Provider → model id |
+| --- | --- |
+| `opus-5.5` | Anthropic / Vertex / Foundry `claude-opus-5-5`; Bedrock `us.anthropic.claude-opus-5-5-v1` |
+| `fable-5.1` | Anthropic / Vertex / Foundry `claude-fable-5-1`; Bedrock `us.anthropic.claude-fable-5-1` |
+| `glm-5.3` | Z.ai `glm-5.3`, `glm-5.3-flash`; CommandCode `z-ai/glm-5.3-flash` |
+| `gpt-6` | OpenAI and Codex (OAuth) `gpt-6-astra` |
+| `deepseek-v4-pro` | DeepSeek, OpenCode, OpenCode Go, HiCap `deepseek-v4-pro`; NVIDIA NIM, Atlas Cloud `deepseek-ai/deepseek-v4-pro`; Fireworks `accounts/fireworks/models/deepseek-v4-pro`; Ollama `deepseek-v4-pro:cloud`; llmtr, CommandCode `deepseek/deepseek-v4-pro`; ClinePass `cline-pass/deepseek-v4-pro` |
+| `deepseek-v4.1-flash` | DeepSeek `deepseek-flash`; Fireworks `accounts/fireworks/models/deepseek-v4p1-flash` |
+
+Aliases are resolved first, so `opus` is judged as the model it names. The
+provider is the one the teammate will actually run on: a `provider_profile`
+binding, then an `agentModels` cross-provider route, then the leader's own
+provider. An OpenAI-compatible session counts as Codex when it uses a Codex
+base URL, or has no explicit base URL and a Codex alias model such as
+`gpt-6-astra` or `codexplan`; Codex's `codexplan` resolves to `gpt-5.6-sol`,
+which is not in the matrix, so pin `gpt-6-astra` for Codex teammates.
+
+A teammate that simply inherits the leader's own model and provider (no
+`model`, `inherit`, or the leader's exact model, with no routing and no
+profile) is always allowed, even on a custom or local model. Anything else is
+refused before a pane, task or team member is created, for example:
+
+```text
+Model 'gpt-99-fake' is not allowed for teammates on provider 'deepseek'. Allowed here: deepseek-v4-pro, deepseek-flash. Configure teammateModelAllowlist to change this.
+```
+
+Narrow or disable the check with `teammateModelAllowlist`:
+
+```json
+{
+  "teammateModelAllowlist": ["deepseek-v4-pro", "glm-5.3-flash"]
+}
+```
+
+Entries are family keys or exact model ids from the matrix. Unset allows every
+family; `["*"]` disables the check, which is the escape hatch for custom and
+local models. An unknown entry is ignored with a one-time warning.
+
 > **Note:** `/provider` changes the global/parent provider for your current
 > session. `agentModels` and `agentRouting` are specifically for configuring
 > per-agent provider overrides while keeping the parent session unchanged.

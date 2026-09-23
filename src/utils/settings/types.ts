@@ -939,6 +939,17 @@ export const SettingsSchema = lazySchema(() =>
             'Use "default" key as fallback. Model name must exist in agentModels. ' +
             'Example: { "Explore": "deepseek-chat", "general-purpose": "gpt-4o", "default": "gpt-4o" }',
         ),
+      teammateModelAllowlist: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Restrict teammate spawns to these model families or exact model ids from the teammate model matrix ' +
+            '(families: opus-5.5, fable-5.1, glm-5.3, gpt-6, deepseek-v4-pro, deepseek-v4.1-flash). ' +
+            'A teammate model must also be listed for the provider the teammate runs on. ' +
+            'Unset allows every family; ["*"] disables the check (custom/local models). ' +
+            "A teammate that inherits the leader's own model and provider is always allowed. " +
+            'Example: ["deepseek-v4-pro", "glm-5.3-flash"]',
+        ),
       smartRouting: z
         .object({
           enabled: z.boolean().optional().describe('Opt in to per-turn simple-vs-strong model routing. Off by default.'),

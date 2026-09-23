@@ -97,11 +97,24 @@ function normalize(key: string): string {
   return key.toLowerCase().replace(/[-_]/g, '')
 }
 
+/**
+ * Turn one agentModels entry into a route. A broken entry (provider_profile
+ * mixed with credentials, or only one of base_url/api_key) warns and yields
+ * null by default; with `strict` it throws instead, so a caller that reached
+ * the entry through an explicit agentRouting key never silently falls back
+ * to the leader's model.
+ */
 function toAgentRoute(
   configuredModelKey: string,
   modelConfig: AgentModelConfig | undefined,
+  options?: { strict?: boolean },
 ): AgentRoute | null {
   if (!modelConfig) return null
+  const reject = (message: string): null => {
+    if (options?.strict) throw new Error(message)
+    console.error(`[agentRouting] Warning: ${message} Skipping this route.`)
+    return null
+  }
 
   const model = modelConfig.model?.trim()
   const baseURL = modelConfig.base_url?.trim()
@@ -110,10 +123,9 @@ function toAgentRoute(
   const providerProfile = modelConfig.provider_profile?.trim()
   if (providerProfile) {
     if (baseURL || apiKey) {
-      console.error(
-        `[agentRouting] Warning: agentModels entry "${configuredModelKey}" cannot combine provider_profile with base_url/api_key. Skipping this route.`,
+      return reject(
+        `agentModels entry "${configuredModelKey}" cannot combine provider_profile with base_url/api_key.`,
       )
-      return null
     }
     return {
       providerProfile,
@@ -128,10 +140,9 @@ function toAgentRoute(
 
   // Misconfiguration: a cross-provider route needs BOTH endpoint and key.
   if (!baseURL || !apiKey) {
-    console.error(
-      `[agentRouting] Warning: agentModels entry "${configuredModelKey}" has only one of base_url/api_key; both are required for cross-provider routing. Skipping this route.`,
+    return reject(
+      `agentModels entry "${configuredModelKey}" has only one of base_url/api_key; both are required for cross-provider routing.`,
     )
-    return null
   }
 
   return { model: effectiveModel, baseURL, apiKey }
@@ -141,6 +152,10 @@ function toAgentRoute(
  * Look up agent.routing by name or subagent_type, then resolve via agent.models.
  *
  * Priority: name > subagentType > "default" > null (use global provider)
+ *
+ * A matched routing key is an explicit instruction, so it never degrades to
+ * the leader's model: a key naming a missing agentModels entry, or a
+ * half-configured one, throws with the key and the entry named.
  */
 export function resolveAgentProvider(
   name: string | undefined,
@@ -151,12 +166,12 @@ export function resolveAgentProvider(
 
   const routing = settings.agentRouting
   const models = settings.agentModels
-  if (!routing || !models) return null
+  if (!routing) return null
 
   // Build normalized lookup from routing config.
   // Warn on duplicate normalized keys (e.g. "explore-agent" and "explore_agent"
   // both normalize to "exploreagent") to prevent silent shadowing.
-  const normalizedRouting = new Map<string, string>()
+  const normalizedRouting = new Map<string, { key: string; value: string }>()
   for (const [key, value] of Object.entries(routing)) {
     const nk = normalize(key)
     if (normalizedRouting.has(nk)) {
@@ -165,25 +180,38 @@ export function resolveAgentProvider(
       )
     }
     if (!normalizedRouting.has(nk)) {
-      normalizedRouting.set(nk, value)
+      normalizedRouting.set(nk, { key, value })
     }
   }
 
   // Try name first, then subagentType, then "default"
   const candidates = [name, subagentType, 'default'].filter(Boolean) as string[]
-  let modelName: string | undefined
+  let matched: { key: string; value: string } | undefined
 
   for (const candidate of candidates) {
     const match = normalizedRouting.get(normalize(candidate))
-    if (match) {
-      modelName = match
+    if (match?.value) {
+      matched = match
       break
     }
   }
 
-  if (!modelName) return null
+  if (!matched) return null
 
-  return toAgentRoute(modelName, models[modelName])
+  const modelName = matched.value
+  const entry = models?.[modelName]
+  if (!entry) {
+    throw new Error(
+      `agentRouting key "${matched.key}" points to agentModels entry "${modelName}", which does not exist. Add it to agentModels or remove the routing entry.`,
+    )
+  }
+  try {
+    return toAgentRoute(modelName, entry, { strict: true })
+  } catch (error) {
+    throw new Error(
+      `agentRouting key "${matched.key}": ${(error as Error).message}`,
+    )
+  }
 }
 
 /**

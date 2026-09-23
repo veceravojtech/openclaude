@@ -11,6 +11,13 @@ import type { TeamFile } from '../../utils/swarm/teamHelpers.js'
 import { buildInheritedEnvVars } from '../../utils/swarm/spawnUtils.js'
 import { quote } from '../../utils/bash/shellQuote.js'
 import { PROVIDER_PROFILE_IN_PROCESS_ERROR } from '../AgentTool/providerProfileBinding.js'
+import { useHermeticEnv } from '../../test/hermeticEnv.js'
+
+// spawnTeammate now judges the teammate's provider route (teammate model
+// matrix), which for an unbound or partially bound spawn is read from the
+// inherited process env. Scrub ambient provider selection so a shell that
+// happens to carry OPENAI_*/CLAUDE_CODE_USE_* cannot change the route.
+useHermeticEnv({ scrubProviderEnv: true })
 
 type SpawnMultiAgentModule = typeof import('./spawnMultiAgent.js')
 type TeammateLayoutManagerModule = typeof import(
@@ -37,6 +44,16 @@ const CODEX_PROVIDER_ENV: Record<string, string> = {
   CODEX_CREDENTIAL_SOURCE: 'oauth',
   CHATGPT_ACCOUNT_ID: 'a'.repeat(36),
   CLAUDE_CODE_USE_OPENAI: '1',
+}
+
+/** The same Codex binding pinned to a teammate-matrix model. Spawns routed
+ * through spawnTeammate pass the teammate model matrix, and the binding's
+ * default 'codexplan' resolves to gpt-5.6-sol, which the matrix does not
+ * list for Codex. Tests whose subject is env threading or --model emission
+ * (not the model id) use this real Codex pair instead. */
+const CODEX_ASTRA_PROVIDER_ENV: Record<string, string> = {
+  ...CODEX_PROVIDER_ENV,
+  OPENAI_MODEL: 'gpt-6-astra',
 }
 
 let actualLayoutManager: TeammateLayoutManagerModule | undefined
@@ -275,11 +292,14 @@ function makeToolUseContext(): ToolUseContext {
  * (as buildInheritedEnvVars emits them) and lastIndexOf, because the test
  * runner's own env may legitimately carry OPENAI_* inherited entries
  * EARLIER in the same command — the override must come after them all. */
-function assertProviderEnvThreaded(command: string): void {
+function assertProviderEnvThreaded(
+  command: string,
+  providerEnv: Record<string, string> = CODEX_PROVIDER_ENV,
+): void {
   expect(command).toContain('env CLAUDECODE=1')
   expect(command).toContain(SENTINEL_BINARY)
   const inheritedAt = command.indexOf('CLAUDECODE=1')
-  for (const [key, value] of Object.entries(CODEX_PROVIDER_ENV)) {
+  for (const [key, value] of Object.entries(providerEnv)) {
     const fragment = `${key}=${quote([value])}`
     expect(command).toContain(fragment)
     expect(command.lastIndexOf(fragment)).toBeGreaterThan(inheritedAt)
@@ -294,12 +314,16 @@ for (const split of [true, false]) test(`identity-bound ${split ? 'pane' : 'wind
   process.env.HTTPS_PROXY = 'https://user:SENTINEL_SECRET_PROXY@proxy.test'
   try {
     await spawnMultiAgent.spawnTeammate({ name: 'bound-worker', prompt: 'do work', team_name: 'bound-team', cwd: '/tmp/bound-worker', use_splitpane: split,
-      providerEnv: { OPENCLAUDE_TEAMMATE_PROFILE_ID: 'saved-child', OPENCLAUDE_TEAMMATE_MODEL: 'child-custom' },
+      // The model is incidental (this test is about secrets). 'saved-child'
+      // is not a saved profile here, so the route is the inherited env —
+      // first-party Anthropic after the scrub — and a matrix model for it
+      // passes the teammate model check.
+      providerEnv: { OPENCLAUDE_TEAMMATE_PROFILE_ID: 'saved-child', OPENCLAUDE_TEAMMATE_MODEL: 'claude-opus-5-5' },
     }, makeToolUseContext())
     expect(capturedCommands).toHaveLength(1)
     expect(capturedCommands[0]).not.toContain('SENTINEL_SECRET')
     expect(capturedCommands[0]).toContain('OPENCLAUDE_TEAMMATE_PROFILE_ID=saved-child')
-    expect(capturedCommands[0]).toContain('--model child-custom')
+    expect(capturedCommands[0]).toContain('--model claude-opus-5-5')
   } finally {
     if (previousKey === undefined) delete process.env.OPENAI_API_KEY
     else process.env.OPENAI_API_KEY = previousKey
@@ -336,13 +360,13 @@ test('separate-window command threads providerEnv after the inherited allowlist'
       team_name: 'codex-team',
       cwd: '/tmp/codex-window',
       use_splitpane: false,
-      providerEnv: CODEX_PROVIDER_ENV,
+      providerEnv: CODEX_ASTRA_PROVIDER_ENV,
     },
     makeToolUseContext(),
   )
 
   expect(capturedCommands).toHaveLength(1)
-  assertProviderEnvThreaded(capturedCommands[0]!)
+  assertProviderEnvThreaded(capturedCommands[0]!, CODEX_ASTRA_PROVIDER_ENV)
 })
 
 test('PaneBackendExecutor command threads providerEnv after the inherited allowlist', async () => {
@@ -456,14 +480,14 @@ test('profile-bound separate-window spawn with no model emits no --model', async
       team_name: 'codex-team',
       cwd: '/tmp/codex-window',
       use_splitpane: false,
-      providerEnv: CODEX_PROVIDER_ENV,
+      providerEnv: CODEX_ASTRA_PROVIDER_ENV,
     },
     makeToolUseContext(),
   )
 
   expect(capturedCommands).toHaveLength(1)
   expect(modelFlagOf(capturedCommands[0]!)).toBeUndefined()
-  expect(result.data.model).toBe('codexplan')
+  expect(result.data.model).toBe('gpt-6-astra')
 })
 
 test("profile-bound spawn with model 'inherit' emits no --model", async () => {
@@ -680,6 +704,9 @@ test('an Anthropic model is untouched without a binding', async () => {
   expect(modelFlagOf(capturedCommands[0]!)).toBe('claude-opus-5\\[1m\\]')
 })
 
+// The binding here is the unmodified 'codexplan' default, which the teammate
+// model matrix would also refuse on Codex. The in-process error is the more
+// specific and actionable one, so handleSpawn checks it first.
 test('in-process spawn rejects providerEnv with the named error', async () => {
   const spawnMultiAgent = await importSpawnMultiAgentWithMocks({
     inProcessEnabled: true,
