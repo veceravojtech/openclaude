@@ -3767,6 +3767,14 @@ export function filterOrphanedThinkingOnlyMessages(
  * from all assistant messages. Their signatures are bound to the API key that
  * generated them; after a credential change (e.g. /login) they're invalid and
  * the API rejects them with a 400.
+ *
+ * Deliberately NOT applied on a model switch (/model, e.g. Opus <-> Fable).
+ * The API does not reject another model's thinking blocks: Claude Fable 5.1
+ * reads earlier models' blocks, and a model that cannot read a block has it
+ * dropped server-side, silently and unbilled. Stripping here would also do
+ * harm: removing a thinking block anywhere but the start of the run
+ * invalidates every later Fable 5.1 block ("The block is bound to a different
+ * conversation" 400), so switching back to Fable would fail.
  */
 export function stripSignatureBlocks(messages: Message[]): Message[] {
   let changed = false

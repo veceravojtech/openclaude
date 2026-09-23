@@ -280,6 +280,34 @@ export function getDefaultOpusModel(): ModelName {
   return getResolvedLatestOpusModel() ?? getModelStrings().opus55
 }
 
+// @[MODEL LAUNCH]: Update the pinned Fable model when a new Fable ships.
+/**
+ * The model the `fable` alias resolves to. Fable is opt-in only — it is never
+ * returned by any default resolver (main loop, `opus`, `best`) — and is pinned
+ * rather than resolved dynamically, so a new Fable launch never silently moves
+ * a session onto a model with different pricing and request constraints.
+ *
+ * Claude-native providers (first-party API/OAuth, Bedrock, Vertex, Foundry)
+ * get the provider-specific Fable id. Every other provider has no Fable, so
+ * the alias falls back to that provider's flagship (the `opus` equivalent)
+ * instead of sending a Claude id it would reject.
+ */
+export function getDefaultFableModel(): ModelName {
+  if (process.env.ANTHROPIC_DEFAULT_FABLE_MODEL) {
+    return process.env.ANTHROPIC_DEFAULT_FABLE_MODEL
+  }
+  const provider = getAPIProvider()
+  if (
+    provider === 'firstParty' ||
+    provider === 'bedrock' ||
+    provider === 'vertex' ||
+    provider === 'foundry'
+  ) {
+    return getModelStrings().fable51
+  }
+  return getDefaultOpusModel()
+}
+
 // @[MODEL LAUNCH]: Update the default Sonnet model (3P providers may lag so keep defaults unchanged).
 export function getDefaultSonnetModel(): ModelName {
   if (process.env.ANTHROPIC_DEFAULT_SONNET_MODEL) {
@@ -957,6 +985,8 @@ export function parseUserSpecifiedModel(
         return applyOneMTag(getDefaultHaikuModel())
       case 'opus':
         return applyOneMTag(getDefaultOpusModel())
+      case 'fable':
+        return applyOneMTag(getDefaultFableModel())
       case 'best':
         return applyOneMTag(getBestModel())
       default:

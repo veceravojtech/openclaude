@@ -438,6 +438,24 @@ const MaxHaiku45Option: ModelOption = {
   description: 'Haiku 4.5 · Fastest for quick answers',
 }
 
+// @[MODEL LAUNCH]: Update the Fable row when a new Fable ships.
+/**
+ * Claude Fable 5.1 — an explicit opt-in row, never the default. Uses the
+ * `fable` alias so the saved setting survives a future Fable pin bump the same
+ * way `opus` does. Fast mode is Opus-only, so this row never carries the fast
+ * pricing suffix. Subscribers see no per-token price (matching the Opus rows);
+ * PAYG users see the list price.
+ */
+export function getFable51Option(showPricing = false): ModelOption {
+  return {
+    value: 'fable',
+    label: 'Fable',
+    description: `Fable 5.1 · Deepest reasoning for long-horizon work${showPricing ? getPricingSuffix(getModelStrings().fable51) : ''}`,
+    descriptionForModel:
+      'Fable 5.1 - deepest reasoning for demanding, long-horizon agentic work',
+  }
+}
+
 function getOpusPlanOption(): ModelOption {
   return {
     value: 'opusplan',
@@ -674,6 +692,7 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
       ...(canOfferOpus46Pinned1M() ? [getOpus46Pinned1MOption(fastMode)] : []),
       ...antModelOptions,
       getMergedOpus1MOption(fastMode),
+      getFable51Option(),
       getSonnet46Option(),
       getSonnet46_1MOption(),
       getHaiku45Option(),
@@ -691,6 +710,7 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
       if (!isOpus1mMergeEnabled() && checkOpus1mAccess()) {
         premiumOptions.push(getMaxOpus46_1MOption(fastMode))
       }
+      premiumOptions.push(getFable51Option())
 
       premiumOptions.push(MaxSonnet46Option)
       if (checkSonnet1mAccess()) {
@@ -719,6 +739,7 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
         standardOptions.push(getMaxOpus46_1MOption(fastMode))
       }
     }
+    standardOptions.push(getFable51Option())
 
     standardOptions.push(MaxHaiku45Option)
     standardOptions.push(...inactiveProfileOptions)
@@ -773,6 +794,7 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
         payg1POptions.push(getOpus46_1MOption(fastMode))
       }
     }
+    payg1POptions.push(getFable51Option(true))
     payg1POptions.push(getHaiku45Option())
     payg1POptions.push(...profileModelOptions)
     payg1POptions.push(...inactiveProfileOptions)
