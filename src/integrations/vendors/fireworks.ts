@@ -328,6 +328,12 @@ export default defineVendor({
         modelDescriptorId: 'accounts/fireworks/models/deepseek-v4-pro',
       },
       {
+        id: 'accounts/fireworks/models/deepseek-v4p1-flash',
+        apiName: 'accounts/fireworks/models/deepseek-v4p1-flash',
+        label: 'DeepSeek V4.1 Flash',
+        modelDescriptorId: 'accounts/fireworks/models/deepseek-v4p1-flash',
+      },
+      {
         id: 'accounts/fireworks/models/devstral-small-2-24b-instruct-2512',
         apiName: 'accounts/fireworks/models/devstral-small-2-24b-instruct-2512',
         label: 'Devstral Small 2 24B Instruct 2512',

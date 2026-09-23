@@ -61,6 +61,7 @@ export default defineBrand({
     'accounts/fireworks/models/deepseek-v3p2',
     'accounts/fireworks/models/deepseek-v4-flash',
     'accounts/fireworks/models/deepseek-v4-pro',
+    'accounts/fireworks/models/deepseek-v4p1-flash',
     'accounts/fireworks/models/devstral-small-2-24b-instruct-2512',
     'accounts/fireworks/models/devstral-small-2505',
     'accounts/fireworks/models/dolphin-2-9-2-qwen2-72b',

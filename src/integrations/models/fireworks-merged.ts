@@ -169,6 +169,19 @@ export default [
     contextWindow: 1_048_576,
     maxOutputTokens: 32_768,
   }),
+  // Fireworks model page lists 1040k context, image input and function calling;
+  // max output is not stated, so this mirrors the other Fireworks DeepSeek V4 routes.
+  defineModel({
+    id: 'accounts/fireworks/models/deepseek-v4p1-flash',
+    defaultModel: 'accounts/fireworks/models/deepseek-v4p1-flash',
+    label: 'DeepSeek V4.1 Flash',
+    brandId: 'fireworks',
+    vendorId: 'fireworks',
+    classification: ['chat', 'coding'],
+    capabilities: { supportsVision: true, supportsStreaming: true, supportsFunctionCalling: true, supportsJsonMode: true, supportsReasoning: false, supportsPreciseTokenCount: false },
+    contextWindow: 1_040_000,
+    maxOutputTokens: 32_768,
+  }),
   defineModel({
     id: 'accounts/fireworks/models/deepseek-r1',
     defaultModel: 'accounts/fireworks/models/deepseek-r1',

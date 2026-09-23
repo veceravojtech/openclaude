@@ -80,8 +80,11 @@ export default [
     vendorId: 'deepseek',
     classification: ['chat', 'coding'],
     defaultModel: 'deepseek-flash',
+    // DeepSeek V4.1 Flash (changelog news260910) is natively multimodal and
+    // accepts image input. The changelog does not state context or max output
+    // limits, so these keep the V4 Flash values below until DeepSeek publishes them.
     capabilities: {
-      supportsVision: false,
+      supportsVision: true,
       supportsStreaming: true,
       supportsFunctionCalling: true,
       supportsJsonMode: true,
