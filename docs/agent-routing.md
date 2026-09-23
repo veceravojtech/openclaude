@@ -409,6 +409,84 @@ Configure it with `teammateDispatch`:
   `exhausted` below `high` warns once and is raised to `high`.
 - In `suggest` mode a refusal is reported as `WOULD REFUSE: …` instead.
 
+## Teammate replicas per call
+
+`replicas` on an Agent call spawns several teammates from one call. They are
+named `<name>-1` … `<name>-N`, share the same prompt and routing, and require
+`name` together with a team — `team_name`, or a call made from inside an
+existing team. Omitting the prompt starts them all idle.
+
+**At most 4 per call.** Four is a hard ceiling, not merely the default.
+`CLAUDE_CODE_MAX_TEAMMATE_REPLICAS` can only *lower* it: the value is read as a
+positive integer and then clamped to 4, so `=1` gives a cap of 1 while `=9`
+still gives 4. Unset or unparseable values leave the default, which is the
+ceiling itself. The env var is read on every call, not memoized. A call over
+the cap is refused before any teammate is spawned:
+
+```text
+replicas (5) exceeds the per-call cap of 4 (CLAUDE_CODE_MAX_TEAMMATE_REPLICAS can lower this cap but never raise it above 4). Spawn fewer replicas, or spawn again once these have finished.
+```
+
+The per-call cap is not the only limit — the replicas must also fit in the live
+teammate pool. Every running in-process teammate counts, idle ones included,
+since they still hold a slot. The pool is capped per team by
+`CLAUDE_CODE_MAX_TEAMMATES` (default 16, counted in the team being spawned
+into) and across every team of the session by `CLAUDE_CODE_MAX_TEAM_TOTAL`
+(default 24). Asking for 4 replicas with 14 teammates already running in that
+team is refused even though 4 is within the per-call cap:
+
+```text
+Spawning 4 teammates with 14 already running in team "review-team" would exceed the live teammate cap of 16 per team (set CLAUDE_CODE_MAX_TEAMMATES to change it; the cap across all teams is 24, set CLAUDE_CODE_MAX_TEAM_TOTAL). Shut down or wait for running teammates first.
+```
+
+Sub-teams (names containing `/`) have their own per-team pool, but every member
+of every team counts against the one total. Replicas are spawned one after the
+other because the team file is shared state; if one fails partway through, the
+replicas already spawned keep running and the result names the index that
+failed. Only a failure on the first replica fails the whole call.
+
+## One objective, one agent
+
+The Agent tool description and the teammate system prompt both carry delegation
+rules for whoever hands out work — the lead, and any teammate that leads a
+sub-team.
+
+**These rules are prompt text, not code.** Nothing checks objective ownership
+at spawn time, so a second agent on an objective another agent already owns is
+not refused the way an over-cap `replicas` call is. The rules shape what the
+model does; the caps in the section above are the enforced limits. This is
+deliberate: a lead follows its written rules rather than having a guard built
+around them.
+
+The rules say:
+
+- An objective is owned by the agent working on it, and starting, running,
+  idle, parked and shutting-down agents all hold that ownership.
+- A follow-up on an owned objective goes to the owner with `SendMessage`, not
+  to a new agent — the owner's context is still loaded, which is the point of a
+  teammate.
+- A second agent on the same objective needs the user's approval, asked for
+  before the overlap is created, and two is the ceiling. Silence is not
+  approval, and neither is a request that merely sounds urgent.
+- While an owner is still working, no speculative replacement, competing
+  implementation, or second investigator for the same question. Wait for its
+  result.
+- A successor starts only after the result is captured, the owner is shut down,
+  and `ListAgents` no longer lists it. A completion message or a shutdown
+  acknowledgement is not proof that it stopped.
+- Re-wording the objective, renaming the agent, changing its model or role, or
+  splitting the same work under a new label does not make it a new objective.
+- A teammate parked on a usage limit is idle, not finished: it still owns its
+  objective, and the continuation goes to it, not to a replacement.
+- The rules bind whoever delegates. A sub-team lead applies them unchanged to
+  the objectives it hands out one level down; it cannot approve its own overlap
+  or grant one on the user's behalf.
+
+Both renderings depend on Agent Teams: the lead-side text is omitted when Agent
+Teams is off, because it names `SendMessage` and `ListAgents`, which are not
+registered then, and the teammate-side text reaches teammates, which only exist
+with Agent Teams on.
+
 ## GitHub Copilot sub-agent optimization
 
 When `CLAUDE_CODE_USE_GITHUB=1`, OpenClaude serializes sub-agent execution to

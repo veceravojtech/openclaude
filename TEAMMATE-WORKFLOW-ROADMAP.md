@@ -1,12 +1,52 @@
 # One objective, one agent — prompt rules roadmap
 
-Created 2026-09-23. Rewritten 2026-09-24. Status: **planned; not implemented**.
+Created 2026-09-23. Rewritten 2026-09-24. Status: **implemented 2026-09-24** in
+`cef56e7b`; no enforcement code was written, by decision.
 
-This is a plan for prompt text. The delegation policy below is carried by written
-rules in the agent prompts, not by enforcement code. Two code-enforced designs
-were drafted and the user rejected both (see "Rejected designs"); the only code
-involved is a per-call cap that already shipped. Nothing here changes behaviour
-until the prompts named in "Where the rules go" are edited.
+This was a plan for prompt text, and it shipped as prompt text. The delegation
+policy below is carried by written rules in the agent prompts, not by enforcement
+code. Two code-enforced designs were drafted and the user rejected both (see
+"Rejected designs"); the only code involved is a per-call cap that already
+shipped. The prompts named in "Where the rules go" now carry rules 1-7 — see
+"What landed" for which commit delivered which part.
+
+## What landed
+
+Three commits, in order. The mapping is exact: each names only the work it
+actually delivered.
+
+- `a7c9ad5b` — **feat(agents): cap teammate replicas at 4.** The per-call ceiling
+  described in "The code that stays", and nothing else. It predates the rules and
+  carries none of them: `MAX_TEAMMATE_REPLICAS_CEILING = 4` with
+  `DEFAULT_MAX_TEAMMATE_REPLICAS` set to it
+  (`src/tools/AgentTool/teammateReplicas.ts:32-33`), plus the clamp that lets
+  `CLAUDE_CODE_MAX_TEAMMATE_REPLICAS` only lower the cap, never raise it. Touches
+  `teammateReplicas.ts`, `AgentTool.tsx` and their two test files — no prompt text.
+- `3786bedc` — **docs: add prompt-rules roadmap for one objective, one agent.**
+  This document. Documentation only: the single file in the commit is
+  `TEAMMATE-WORKFLOW-ROADMAP.md`.
+- `cef56e7b` — **feat(prompt): one objective, one agent delegation rules.** The
+  rules themselves, on both sides — U3 and U4 below, in one commit:
+  - Lead side: `TEAMMATE_OBJECTIVE_RULES`
+    (`src/tools/AgentTool/prompt.ts:186-195`), rendered in the shared core at
+    `:357`, so the slim coordinator description carries it too.
+  - Teammate and sub-lead side: the `# Delegating Work to Other Agents` section
+    (`src/utils/swarm/teammatePromptAddendum.ts:20-30`).
+  - System prompt: the headline sentence only (`src/constants/prompts.ts:323`),
+    not a second copy of the list, to limit topic duplication.
+  - Plus three test files pinning one distinct phrase per rule. The diff is
+    string literals, their doc comments, one tool-name import and tests: no new
+    gate and no control-flow change.
+
+### What deliberately did not ship
+
+No enforcement code, and none is pending. The user reduced the scope to prompt
+rules only, and the code unit drafted alongside them — an across-call live cap on
+agents and a programmatic predecessor-terminated check before a successor may
+start — was cancelled, not deferred. It is the second of the two drafts under
+"Rejected designs", and neither returns piecemeal. Nothing counts objectives,
+nothing reserves them, and nothing verifies a shutdown; the rendered prompt string
+is the whole mechanism, which is why the tests pin its wording.
 
 The rules bind whoever is delegating: the lead in a session, and equally a
 teammate or sub-lead that delegates further.
@@ -69,19 +109,25 @@ on the same objective goes to the live owner (rule 3), not to a second agent.
 
 ## Where the rules go
 
+Line numbers below are current as of `cef56e7b`. This map was drawn before the
+rules landed, so it names the neighbourhood each block sits in rather than the
+final home: on the lead side the rules went into a new constant beside these,
+`TEAMMATE_OBJECTIVE_RULES` at `src/tools/AgentTool/prompt.ts:186-195`, not inside
+`TEAMMATE_DEFAULT_RECOMMENDATION`.
+
 Lead side — the delegating agent's own instructions:
 
-- `src/tools/AgentTool/prompt.ts:134` — `TEAMMATE_SPAWN_RULES`, the per-parameter
+- `src/tools/AgentTool/prompt.ts:135` — `TEAMMATE_SPAWN_RULES`, the per-parameter
   rules block rendered into the Agent tool description.
-- `src/tools/AgentTool/prompt.ts:146` — `TEAMMATE_BACKGROUND_RULE`, an adjacent
+- `src/tools/AgentTool/prompt.ts:147` — `TEAMMATE_BACKGROUND_RULE`, an adjacent
   block under the same gating pattern.
-- `src/tools/AgentTool/prompt.ts:159` — `TEAMMATE_DEFAULT_RECOMMENDATION`, the
-  "**Default to teammates.**" block (body at `:161`). The natural home for rules 1
-  and 3: it already tells the lead that a teammate persists and can be re-tasked
-  with `SendMessage`.
-- `src/tools/AgentTool/prompt.ts:197` — `const teammateSpawnAvailable =
+- `src/tools/AgentTool/prompt.ts:160` — `TEAMMATE_DEFAULT_RECOMMENDATION`, the
+  "**Default to teammates.**" block (body at `:162`). It already tells the lead
+  that a teammate persists and can be re-tasked with `SendMessage`, which is why
+  rules 1 and 3 render directly after it.
+- `src/tools/AgentTool/prompt.ts:231` — `const teammateSpawnAvailable =
   isAgentSwarmsEnabled()`, the gate that keeps teammate text out of the tool
-  description when Agent Teams is off. New rule text sits behind this same gate;
+  description when Agent Teams is off. The rule text sits behind this same gate;
   with Agent Teams off the parameters and `SendMessage` do not exist for the model.
 - `src/constants/prompts.ts:316` — `getAgentToolSection()`, the system-prompt
   delegation text. Its Agent-Teams branch is the "When you delegate, strongly
@@ -89,9 +135,10 @@ Lead side — the delegating agent's own instructions:
 
 Teammate and sub-lead side — nested delegation:
 
-- `src/utils/swarm/teammatePromptAddendum.ts:8` —
-  `TEAMMATE_SYSTEM_PROMPT_ADDENDUM`, body `:9-17`, the "# Agent Teammate
-  Communication" section. This is the one teammate addendum.
+- `src/utils/swarm/teammatePromptAddendum.ts:9` —
+  `TEAMMATE_SYSTEM_PROMPT_ADDENDUM`, whose "# Agent Teammate Communication"
+  section is `:10-18`. This is the one teammate addendum; the delegation rules
+  were appended to it as a second section, `:20-30`.
 - `src/main.tsx:1320-1324` — injection for pane/tmux teammates. The addendum is
   appended to `appendSystemPrompt` when `isAgentSwarmsEnabled()` and the
   agentId/agentName/teamName triple is present.
@@ -132,11 +179,19 @@ the same ceiling. It counts nothing across calls and knows nothing about
 objectives. No across-call live cap is being added; rules 1 and 2 cover that, in
 prose.
 
-## Next steps
+## The three slices
 
-Three separately committable slices. None of them adds enforcement code.
+Three separately committable slices. None of them adds enforcement code. U3 and
+U4 landed together in `cef56e7b`; U5 is the remainder.
 
 ### U3 — lead-side prompt rules
+
+Status: **done** — `cef56e7b`. `TEAMMATE_OBJECTIVE_RULES` at
+`src/tools/AgentTool/prompt.ts:186-195`, rendered at `:357`; headline sentence at
+`src/constants/prompts.ts:323`. Exit criterion met and pinned by
+`src/tools/AgentTool/prompt.test.ts` and
+`src/constants/prompts.agentTeams.test.ts`, which assert both the Agent-Teams-on
+and Agent-Teams-off branches.
 
 Write rules 1-7 into the lead's own instructions, behind the existing
 `isAgentSwarmsEnabled()` gates.
@@ -149,6 +204,13 @@ prompt carry the rules; with Agent Teams off, neither mentions them.
 
 ### U4 — teammate and sub-lead prompt rules
 
+Status: **done** — `cef56e7b`, the same commit as U3. The
+`# Delegating Work to Other Agents` section at
+`src/utils/swarm/teammatePromptAddendum.ts:20-30`. `src/main.tsx` and
+`src/utils/swarm/inProcessRunner.ts` are listed below but needed no edit: both
+injection sites already read that one constant, which is exactly what this slice
+predicted. Pinned by `src/utils/swarm/teammatePromptAddendum.test.ts`.
+
 Write the nested-delegation rules into the teammate addendum and confirm both
 injection paths still carry it.
 
@@ -160,6 +222,13 @@ from that one constant.
 
 ### U5 — validation, docs, and reinstall
 
+Status: **outstanding** at the time of writing. `cef56e7b` ran the three prompt
+test files (28 tests), `typecheck` and `build` green, but the full pre-push
+contract, the user-facing docs, and the reinstall-and-read-back are still open.
+Rebase onto `main` and the push are owed as well
+([CONTRIBUTING § Keep Your Branch Current](CONTRIBUTING.md#keep-your-branch-current));
+neither has been done.
+
 Run the authoritative [pre-push validation contract](CONTRIBUTING.md#validation),
 update any user-facing docs that describe delegation, reinstall, and read the
 rules back out of a live lead prompt and a live teammate prompt.
@@ -169,9 +238,10 @@ Files: the docs the wording change touches; no source files beyond U3 and U4.
 Exit criterion: the required checks pass and the rules appear verbatim in a live
 session.
 
-This roadmap is complete when the rules are written into those prompts and
-observed live. There is no enforcement code to verify, because none is being
-built.
+The rules are now written into those prompts. What remains before this roadmap
+closes is U5: reading them back out of a live lead prompt and a live teammate
+prompt after a reinstall, plus the docs and validation that go with it. There is
+no enforcement code to verify, because none was built.
 
 ## Relationship to existing follow-up work
 
@@ -181,5 +251,8 @@ separate tracked topics. Their blockers and restoration requirements remain in
 [FOLLOW-UP.md](FOLLOW-UP.md). Do not restore those stashes as part of this work
 or merge their unrelated repairs into the prompt change.
 
-Writing this document changes no behaviour. Until the prompts in "Where the rules
-go" are edited, the rules above are a plan, not instructions any agent receives.
+Writing this document changed no behaviour; `cef56e7b` did. The prompts in "Where
+the rules go" now carry rules 1-7, so an agent running with Agent Teams enabled
+receives them as instructions rather than as a plan. With Agent Teams off it
+receives none of them: every block sits inside the pre-existing
+`isAgentSwarmsEnabled()` gates.
