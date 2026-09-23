@@ -1532,6 +1532,67 @@ function findBusySubTeamChildren(
  * runner's completion tail then marks the task completed, evicts it and emits
  * the SDK terminated event exactly as for a normal exit.
  */
+/**
+ * Removes a teammate from the active roster the same way an approved
+ * shutdown does: leaves the team file (as `killInProcessTeammate` does),
+ * evicts the teamContext entry, and unassigns its outstanding tasks. Shared
+ * by {@link finalizeIdleShutdown} and the runner's failure tail so a crashed
+ * teammate is cleaned up through the one roster-removal path instead of a
+ * parallel implementation — this is also what frees the teammate's name for
+ * reuse by a later spawn under the same `name@team`.
+ *
+ * Does not cascade a sub-team teardown: a failed teammate's sub-team stays
+ * recoverable (see `noteSubLeadFailure`), which the idle-shutdown path does
+ * not need to preserve since it cascades before calling this. Does not
+ * message the lead either — callers send their own notification, since the
+ * fallback message and reason phrasing differ between an idle shutdown and a
+ * crash.
+ *
+ * Returns the notification message `unassignTeammateTasks` produced (falling
+ * back to a generic one on failure) so callers can still report which tasks,
+ * if any, were unassigned.
+ */
+async function leaveRosterAndUnassignTasks(
+  identity: TeammateIdentity,
+  setAppState: SetAppStateFn,
+  taskListId: string,
+  unassignReason: 'shutdown' | 'failed',
+): Promise<string> {
+  try {
+    removeMemberByAgentId(identity.teamName, identity.agentId)
+  } catch (err) {
+    logForDebugging(
+      `[inProcessRunner] ${identity.agentId} failed to leave team file: ${err}`,
+    )
+  }
+  setAppState(prev => {
+    if (!prev.teamContext?.teammates) return prev
+    if (!(identity.agentId in prev.teamContext.teammates)) return prev
+    const { [identity.agentId]: _, ...remainingTeammates } =
+      prev.teamContext.teammates
+    return {
+      ...prev,
+      teamContext: { ...prev.teamContext, teammates: remainingTeammates },
+    }
+  })
+  let notificationMessage = `${identity.agentName} has shut down.`
+  try {
+    notificationMessage = (
+      await unassignTeammateTasks(
+        taskListId,
+        identity.agentId,
+        identity.agentName,
+        unassignReason,
+      )
+    ).notificationMessage
+  } catch (err) {
+    logForDebugging(
+      `[inProcessRunner] ${identity.agentId} failed to unassign tasks: ${err}`,
+    )
+  }
+  return notificationMessage
+}
+
 async function finalizeIdleShutdown(
   identity: TeammateIdentity,
   getAppState: () => AppState,
@@ -1590,39 +1651,13 @@ async function finalizeIdleShutdown(
     `[inProcessRunner] ${identity.agentId} shutting down after idle timeout (${cause})`,
   )
 
-  try {
-    removeMemberByAgentId(identity.teamName, identity.agentId)
-  } catch (err) {
-    logForDebugging(
-      `[inProcessRunner] ${identity.agentId} failed to leave team file: ${err}`,
-    )
-  }
-  setAppState(prev => {
-    if (!prev.teamContext?.teammates) return prev
-    if (!(identity.agentId in prev.teamContext.teammates)) return prev
-    const { [identity.agentId]: _, ...remainingTeammates } =
-      prev.teamContext.teammates
-    return {
-      ...prev,
-      teamContext: { ...prev.teamContext, teammates: remainingTeammates },
-    }
-  })
+  const notificationMessage = await leaveRosterAndUnassignTasks(
+    identity,
+    setAppState,
+    taskListId,
+    'shutdown',
+  )
 
-  let notificationMessage = `${identity.agentName} has shut down.`
-  try {
-    notificationMessage = (
-      await unassignTeammateTasks(
-        taskListId,
-        identity.agentId,
-        identity.agentName,
-        'shutdown',
-      )
-    ).notificationMessage
-  } catch (err) {
-    logForDebugging(
-      `[inProcessRunner] ${identity.agentId} failed to unassign tasks: ${err}`,
-    )
-  }
   await sendMessageToLeader(
     identity.agentName,
     `${notificationMessage} Reason: shut down after idle timeout (${cause}).`,
@@ -3026,6 +3061,20 @@ export async function runInProcessTeammate(
         completedStatus: 'failed',
         failureReason: errorMessage,
       },
+    )
+
+    // The lead has now been told exactly what failed and why. Leave the
+    // roster through the same path an approved shutdown uses — team file,
+    // teamContext, and outstanding tasks — so ListAgents stops listing this
+    // teammate, SendMessage to it stops answering "not running", and its
+    // name (`identity.agentName`) is free for a later spawn to reuse. No
+    // second lead notification: the idle notification above already said
+    // this teammate is gone and why.
+    await leaveRosterAndUnassignTasks(
+      identity,
+      setAppState,
+      taskListId,
+      'failed',
     )
 
     // This is the one terminal path with no sub-team cascade, and that is

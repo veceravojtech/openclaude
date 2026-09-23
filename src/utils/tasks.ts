@@ -833,14 +833,14 @@ export type UnassignTasksResult = {
  * @param teamName - The team/task list name
  * @param teammateId - The teammate's agent ID
  * @param teammateName - The teammate's display name
- * @param reason - How the teammate exited ('terminated' | 'shutdown')
+ * @param reason - How the teammate exited ('terminated' | 'shutdown' | 'failed')
  * @returns The unassigned tasks and a formatted notification message
  */
 export async function unassignTeammateTasks(
   teamName: string,
   teammateId: string,
   teammateName: string,
-  reason: 'terminated' | 'shutdown',
+  reason: 'terminated' | 'shutdown' | 'failed',
 ): Promise<UnassignTasksResult> {
   const tasks = await listTasks(teamName)
   const unresolvedAssignedTasks = tasks.filter(
@@ -862,7 +862,11 @@ export async function unassignTeammateTasks(
 
   // Build notification message
   const actionVerb =
-    reason === 'terminated' ? 'was terminated' : 'has shut down'
+    reason === 'terminated'
+      ? 'was terminated'
+      : reason === 'failed'
+        ? 'failed'
+        : 'has shut down'
   let notificationMessage = `${teammateName} ${actionVerb}.`
   if (unresolvedAssignedTasks.length > 0) {
     const taskList = unresolvedAssignedTasks

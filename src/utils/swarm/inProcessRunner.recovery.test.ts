@@ -489,6 +489,63 @@ test('a failing teammate that leads no sub-team records nothing and reports only
   expect(leadInbox[0]!.text).toContain('"idleReason":"failed"')
 })
 
+test('a failed teammate is removed from the roster after its failure notification', async () => {
+  // The lead must still get the failure notification with its reason exactly
+  // as before; the teammate must then leave the active roster the same way an
+  // approved shutdown does, so ListAgents stops listing it, SendMessage to it
+  // stops answering "not running", and its team-file seat is freed.
+  const world = createWorld()
+  writeTeam(PARENT_TEAM, [
+    { agentId: ROOT_LEAD_AGENT_ID, name: TEAM_LEAD_NAME },
+    { agentId: `${WORKER}@${PARENT_TEAM}`, name: WORKER },
+  ])
+  const harness = await importRunnerWithMocks({ failTurns: true })
+
+  const worker = await startTeammate(harness, world, WORKER, PARENT_TEAM, {
+    prompt: 'work',
+  })
+  const result = await worker.done
+  expect(result.success).toBe(false)
+
+  const leadInbox = harness.inbox(TEAM_LEAD_NAME, PARENT_TEAM)
+  expect(leadInbox).toHaveLength(1)
+  expect(leadInbox[0]!.text).toContain('"idleReason":"failed"')
+  expect(leadInbox[0]!.text).toContain(STREAM_DIED)
+
+  // Gone from the team file member list…
+  expect(readTeamFile(PARENT_TEAM)?.members.map(m => m.name)).toEqual([
+    TEAM_LEAD_NAME,
+  ])
+  // …and gone from teamContext, the other half of the active roster.
+  expect(
+    world.getState().teamContext?.teammates?.[worker.agentId],
+  ).toBeUndefined()
+})
+
+test('a teammate name is reusable after its previous holder failed', async () => {
+  const world = createWorld()
+  writeTeam(PARENT_TEAM, [
+    { agentId: ROOT_LEAD_AGENT_ID, name: TEAM_LEAD_NAME },
+    { agentId: `${WORKER}@${PARENT_TEAM}`, name: WORKER },
+  ])
+  const harness = await importRunnerWithMocks({ failTurns: true })
+
+  const worker = await startTeammate(harness, world, WORKER, PARENT_TEAM, {
+    prompt: 'work',
+  })
+  expect((await worker.done).success).toBe(false)
+
+  // A fresh spawn under the exact same name lands the exact same agentId —
+  // no numeric suffix — because the roster no longer has a live or failed
+  // seat blocking it.
+  const respawn = await spawnInProcessTeammate(
+    { name: WORKER, teamName: PARENT_TEAM, planModeRequired: false },
+    { setAppState: world.setAppState, getAppState: world.getState },
+  )
+  expect(respawn.success).toBe(true)
+  expect(respawn.agentId).toBe(worker.agentId)
+})
+
 test('a failed teammate keeps its task and its row for the grace window', async () => {
   // The failure tail used to evict the task from AppState on the spot, which is
   // how a row vanished between two keystrokes. It now writes the retain/grace
