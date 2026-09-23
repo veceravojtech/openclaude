@@ -135,6 +135,19 @@ describe('getCoordinatorSystemPrompt — supervision', () => {
     expect(prompt).toContain('a nudge, not a target')
   })
 
+  it('strongly recommends a team of named teammates over one-shot subagents', () => {
+    const prompt = getCoordinatorSystemPrompt()
+    expect(prompt).toContain('Always do this once, before your first spawn')
+    expect(prompt).toContain('Spawn a teammate: always pass `name`')
+    expect(prompt).toContain(
+      'Default to named teammates in your team. Prefer them over unnamed subagents and forks',
+    )
+    // Omitting name is still allowed, but only as a documented fallback.
+    expect(prompt).toContain('Omitting `name` still works')
+    expect(prompt).toContain('`Explore`, `Plan`, `code-reviewer`, `verification`')
+    expect(prompt).not.toContain('fine for a self-contained question')
+  })
+
   it('keeps per-teammate model routing on the table', () => {
     // AgentTool only drops the model argument under strict supervision, so the
     // soft prompt must not tell the supervisor to leave models alone.

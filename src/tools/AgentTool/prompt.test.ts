@@ -428,6 +428,10 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     // not.toContain, where a LONGER needle matches less and so pins less — the
     // opposite of the positive pin above.
     '`run_in_background` is not available to you when you are a teammate',
+    // TEAMMATE_DEFAULT_RECOMMENDATION and its fork-section echo: they name
+    // TeamCreate, `name` and `team_name`, so they share the same gate.
+    '**Default to teammates.**',
+    'A fork is the fallback, not the default',
   ]
 
   /**
@@ -556,5 +560,36 @@ describe('AgentTool prompt: one text for the lead and for the teammate', () => {
     )
     // And the teammate rules themselves are back with the parameters.
     expect(prompt).toContain('`name` spawns a TEAMMATE')
+    // Forks stay documented, but framed as the fallback to teammates; the
+    // built-in code-reviewer stays the exception to that default.
+    expect(prompt).toContain(
+      'A fork is the fallback, not the default — a named teammate in your team is still the better choice',
+    )
+    expect(prompt).toContain(
+      'this is the exception to the "always teammates" default',
+    )
+    expect(prompt).toContain('**Default to teammates.**')
+  })
+
+  test('recommends named teammates in a team, in both renders, when Agent Teams is ON', async () => {
+    process.env.CLAUDE_CODE_AGENT_LIST_IN_MESSAGES = 'false'
+    forceAgentTeamsOn()
+
+    const full = await getPrompt(agents)
+    // The slim supervisor render only carries `shared` — the default has to
+    // live there, or the supervisor never sees it.
+    const slim = await getPrompt(agents, true)
+    for (const prompt of [full, slim]) {
+      expect(prompt).toContain(
+        '**Default to teammates.** Create a team once with TeamCreate, then spawn every agent with `name` (and `team_name`)',
+      )
+      expect(prompt).toContain(
+        'can be re-tasked with SendMessage with their context still loaded, and report back to you',
+      )
+      // A recommendation, not a ban: the other paths stay open.
+      expect(prompt).toContain('Omitting `name` still works; treat it as the fallback')
+      expect(prompt).toContain('`Explore`, `Plan`, `code-reviewer`, `verification`')
+    }
+    expect(slim).not.toContain('Usage notes:')
   })
 })

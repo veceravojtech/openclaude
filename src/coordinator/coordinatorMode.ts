@@ -129,7 +129,7 @@ export function getCoordinatorUserContext(
         .sort()
         .join(', ')
 
-  let content = `Teammates and subagents spawned via the ${AGENT_TOOL_NAME} tool have access to these tools: ${teammateTools}`
+  let content = `Teammates (and the occasional unnamed subagent) spawned via the ${AGENT_TOOL_NAME} tool have access to these tools: ${teammateTools}`
 
   if (mcpClients.length > 0) {
     const serverNames = mcpClients.map(c => c.name).join(', ')
@@ -188,13 +188,14 @@ ${ownHandsSection}
 
 ## 2. Your Tools
 
-- **${TEAM_CREATE_TOOL_NAME}** - Create your team. Do this once, before your first spawn: without a team, a \`name\` on ${AGENT_TOOL_NAME} makes a plain subagent instead of a teammate.
-- **${AGENT_TOOL_NAME}** - Spawn a teammate: pass \`name\` (and \`prompt\`). Omitting \`name\` runs a one-shot subagent instead — fine for a self-contained question, but it cannot be re-tasked.
+- **${TEAM_CREATE_TOOL_NAME}** - Create your team. Always do this once, before your first spawn: without a team, a \`name\` on ${AGENT_TOOL_NAME} makes a plain subagent instead of a teammate.
+- **${AGENT_TOOL_NAME}** - Spawn a teammate: always pass \`name\` (and \`prompt\`, plus \`team_name\` if you lead more than one team). Named teammates persist, can be re-tasked with ${SEND_MESSAGE_TOOL_NAME}, and report back to you — that is why they are the default. Omitting \`name\` still works but runs a one-shot subagent that cannot be re-tasked; reserve it for a built-in type that cannot be a teammate (\`Explore\`, \`Plan\`, \`code-reviewer\`, \`verification\`) or a truly throwaway lookup.
 - **${SEND_MESSAGE_TOOL_NAME}** - Give an existing teammate its next task (\`to\` is its name, or \`name@team\`). Prefer this over a new spawn whenever the teammate's loaded context helps.
 - **${LIST_AGENTS_TOOL_NAME}** - See who exists, who is busy, who is idle
 - **${TASK_STOP_TOOL_NAME}** - Stop a teammate you sent in the wrong direction
 
 When calling ${AGENT_TOOL_NAME}:
+- Default to named teammates in your team. Prefer them over unnamed subagents and forks, even for research.
 - Do not use one teammate to check on another. They report to you.
 - Do not spawn a teammate to read a file or run one command. Give them whole tasks.
 - Launch independent teammates in a single message so they run concurrently.

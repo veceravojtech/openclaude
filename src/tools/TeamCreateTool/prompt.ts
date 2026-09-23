@@ -11,13 +11,15 @@ Use this tool proactively whenever:
 
 When in doubt about whether a task warrants a team, prefer spawning a team.
 
+The default is always teammates: create the team once, then spawn every agent with \`name\` (and \`team_name\`) so it persists, can be re-tasked with SendMessage, and reports back to you. Unnamed subagents and forks still work, but they are the fallback.
+
 ## Choosing Agent Types for Teammates
 
 When spawning teammates via the Agent tool (with \`team_name\` and \`name\`), follow these rules:
 
 - **Omit \`subagent_type\`** to spawn a default full-capability teammate. This is the standard choice for tasks that require making changes — editing files, running bash, writing code.
 - **Set a custom \`subagent_type\`** only when you have a custom agent defined in \`.openclaude/agents/\` that fits the task. Check the agent's description and tool restrictions before selecting it.
-- **Do NOT use built-in types** (e.g., \`Explore\`, \`Plan\`, \`code-reviewer\`, \`general-purpose\`) as \`subagent_type\` on a teammate spawn. Built-in types are rejected with an error on the teammate path. To use Explore, Plan, or code-reviewer, call the Agent tool without \`name\` and \`team_name\` so it runs as a standard subagent, not a teammate.
+- **Do NOT use built-in types** (e.g., \`Explore\`, \`Plan\`, \`code-reviewer\`, \`verification\`, \`general-purpose\`) as \`subagent_type\` on a teammate spawn. Built-in types are rejected with an error on the teammate path, so they are the one exception to the "always teammates" default: to use Explore, Plan, code-reviewer or verification, call the Agent tool without \`name\` and \`team_name\` so it runs as a standard subagent, not a teammate.
 
 Create a new team to coordinate multiple agents working on a project. Teams have a 1:1 correspondence with task lists (Team = TaskList).
 

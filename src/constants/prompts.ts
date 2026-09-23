@@ -49,6 +49,9 @@ import { feature } from 'bun:bundle'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from 'src/services/analytics/growthbook.js'
 import { shouldUseGlobalCacheScope } from '../utils/betas.js'
 import { isForkSubagentEnabled } from '../tools/AgentTool/forkSubagent.js'
+import { isAgentSwarmsEnabled } from '../utils/agentSwarmsEnabled.js'
+import { TEAM_CREATE_TOOL_NAME } from '../tools/TeamCreateTool/constants.js'
+import { SEND_MESSAGE_TOOL_NAME } from '../tools/SendMessageTool/constants.js'
 import {
   systemPromptSection,
   DANGEROUS_uncachedSystemPromptSection,
@@ -311,9 +314,13 @@ function getUsingYourToolsSection(enabledTools: Set<string>): string {
 }
 
 function getAgentToolSection(): string {
-  return isForkSubagentEnabled()
+  const base = isForkSubagentEnabled()
     ? `Calling ${AGENT_TOOL_NAME} without a subagent_type creates a fork, which runs in the background and keeps its tool output out of your context \u2014 so you can keep chatting with the user while it works. Reach for it when research or multi-step implementation work would otherwise fill your context with raw output you won't need again. **If you ARE the fork** \u2014 execute directly; do not re-delegate.`
     : `Use the ${AGENT_TOOL_NAME} tool with specialized agents when the task at hand matches the agent's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but they should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing - if you delegate research to a subagent, do not also perform the same searches yourself.`
+  // Same gate as the Agent tool's own teammate text: without Agent Teams,
+  // TeamCreate and the `name`/`team_name` parameters do not exist.
+  if (!isAgentSwarmsEnabled()) return base
+  return `${base} When you delegate, strongly prefer a team: create it once with ${TEAM_CREATE_TOOL_NAME}, then spawn named teammates (${AGENT_TOOL_NAME} with \`name\` and \`team_name\`) — they persist, can be re-tasked with ${SEND_MESSAGE_TOOL_NAME}, and report back. Unnamed subagents and forks are the fallback; built-in types such as ${EXPLORE_AGENT.agentType}, Plan, code-reviewer and verification cannot be teammates, so spawn those without \`name\`.`
 }
 
 /**

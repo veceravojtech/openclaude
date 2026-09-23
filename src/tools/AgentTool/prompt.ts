@@ -146,6 +146,20 @@ const TEAMMATE_SPAWN_RULES = `
 const TEAMMATE_BACKGROUND_RULE = `
 - \`run_in_background\` is not available to you when you are a teammate running inside your lead's session — omit it there; a lead, or a teammate running in its own terminal, can use it.`
 
+/**
+ * The default the model should reach for when Agent Teams is on: a team, and
+ * named teammates in it. Rendered in the SHARED core so the slim supervisor
+ * description carries it too. It only recommends — forks, unnamed subagents
+ * and the built-in types keep working, and the built-ins stay the documented
+ * exception because the teammate path rejects them (AgentTool.tsx).
+ * Gated on `isAgentSwarmsEnabled()` for the same reason as
+ * TEAMMATE_SPAWN_RULES: without Agent Teams, `name`/`team_name` and
+ * `TeamCreate` do not exist for the model.
+ */
+const TEAMMATE_DEFAULT_RECOMMENDATION = `
+
+**Default to teammates.** Create a team once with ${TEAM_CREATE_TOOL_NAME}, then spawn every agent with \`name\` (and \`team_name\`) so it joins that team as a teammate. Teammates persist after they report, can be re-tasked with ${SEND_MESSAGE_TOOL_NAME} with their context still loaded, and report back to you — an unnamed subagent or a fork can do none of that. Omitting \`name\` still works; treat it as the fallback, for a built-in type that cannot be a teammate (\`Explore\`, \`Plan\`, \`code-reviewer\`, \`verification\`) or a truly throwaway lookup.`
+
 export async function getPrompt(
   agentDefinitions: AgentDefinition[],
   isCoordinator?: boolean,
@@ -186,7 +200,9 @@ export async function getPrompt(
     ? `
 
 ## When to fork
-
+${teammateSpawnAvailable ? `
+A fork is the fallback, not the default — a named teammate in your team is still the better choice for work you may want to re-task or hear back on.
+` : ''}
 Fork yourself (omit \`subagent_type\`) when the intermediate tool output isn't worth keeping in your context. The criterion is qualitative \u2014 "will I need this output again" \u2014 not task size.
 - **Research**: fork open-ended questions. If research can be broken into independent questions, launch parallel forks in one message. A fork beats a fresh subagent for this \u2014 it inherits context and shares your cache.
 - **Implementation**: prefer to fork implementation work that requires more than a couple of edits. Do research before jumping to implementation.
@@ -248,7 +264,7 @@ assistant: Still waiting on the audit \u2014 that's one of the things it's check
 user: "Can you get a second opinion on whether this migration is safe?"
 assistant: <thinking>I'll ask the code-reviewer agent — it won't see my analysis, so it can give an independent read. The code-reviewer requires the diff inline, so I need to include the changed hunks.</thinking>
 <commentary>
-A subagent_type is specified, so the agent starts fresh. It needs full context in the prompt. The code-reviewer contract requires the caller to provide the diff or changed hunks inline — the reviewer cannot run git diff itself.${teammateSpawnAvailable ? '\nNote: do NOT add a name parameter here — code-reviewer is a built-in and will be rejected if spawned as a teammate. Omit name/team_name so it runs as a standard subagent.' : ''}
+A subagent_type is specified, so the agent starts fresh. It needs full context in the prompt. The code-reviewer contract requires the caller to provide the diff or changed hunks inline — the reviewer cannot run git diff itself.${teammateSpawnAvailable ? '\nNote: this is the exception to the "always teammates" default. Do NOT add a name parameter here — code-reviewer is a built-in and will be rejected if spawned as a teammate. Omit name/team_name so it runs as a standard subagent.' : ''}
 </commentary>
 ${AGENT_TOOL_NAME}({
   description: "Independent migration review",
@@ -304,7 +320,7 @@ ${
   forkEnabled
     ? `When using the ${AGENT_TOOL_NAME} tool, specify a subagent_type to use a specialized agent, or omit it to fork yourself — a fork inherits your full conversation context.`
     : `When using the ${AGENT_TOOL_NAME} tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used.`
-}`
+}${teammateSpawnAvailable ? TEAMMATE_DEFAULT_RECOMMENDATION : ''}`
 
   // Coordinator mode gets the slim prompt -- the coordinator system prompt
   // already covers usage notes, examples, and when-not-to-use guidance.

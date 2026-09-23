@@ -344,9 +344,9 @@ export const AgentTool = buildTool({
     const agentsWithMcpRequirementsMet = filterAgentsByMcpRequirements(agents, mcpServersWithTools);
     const filteredAgents = filterDeniedAgents(agentsWithMcpRequirementsMet, toolPermissionContext, AGENT_TOOL_NAME);
 
-    // Use inline env check instead of coordinatorModule to avoid circular
-    // dependency issues during test module loading.
-    const isCoordinator = feature('COORDINATOR_MODE') ? isEnvTruthy(process.env.CLAUDE_CODE_COORDINATOR_MODE) : false;
+    // The real supervisor gate. Supervision is ON by default (the env var is
+    // unset), so an isEnvTruthy() check here would miss every default session.
+    const isCoordinator = isCoordinatorMode();
     return await getPrompt(filteredAgents, isCoordinator, allowedAgentTypes);
   },
   name: AGENT_TOOL_NAME,
@@ -783,9 +783,8 @@ export const AgentTool = buildTool({
     const forceSyncCopilot = shouldForceSyncSubagentsInCopilotMode();
     const forcePlanModeSync = permissionMode === 'plan' || toolUseContext.getAppState().toolPermissionContext.mode === 'plan';
 
-    // Use inline env check instead of coordinatorModule to avoid circular
-    // dependency issues during test module loading.
-    const isCoordinator = feature('COORDINATOR_MODE') ? isEnvTruthy(process.env.CLAUDE_CODE_COORDINATOR_MODE) : false;
+    // Same gate as the prompt above: supervision defaults ON.
+    const isCoordinator = isCoordinatorMode();
 
     // Fork subagent experiment: force ALL spawns async for a unified
     // <task-notification> interaction model (not just fork spawns — all of them).
@@ -910,8 +909,6 @@ export const AgentTool = buildTool({
       agentType: selectedAgent.agentType,
       isAsync: shouldRunAsync
     };
-    // Use inline env check instead of coordinatorModule to avoid circular
-    // dependency issues during test module loading.
     // (isCoordinator / forceAsync / assistantForceAsync already computed
     // above; shouldRunAsync is the single source of truth for the launch
     // decision. Throws above are gone — they're at the top now.)
