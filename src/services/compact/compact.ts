@@ -27,6 +27,7 @@ import type { AgentId } from '../../types/ids.js'
 import type {
   AssistantMessage,
   AttachmentMessage,
+  CompactForceReason,
   HookResultMessage,
   Message,
   PartialCompactDirection,
@@ -338,6 +339,12 @@ export type RecompactionInfo = {
   previousCompactTurnId?: string
   autoCompactThreshold: number
   querySource?: QuerySource
+  /**
+   * Set when this compaction bypassed the token threshold. Recorded on the
+   * boundary so a transcript shows WHY it fired — `trigger` reports 'auto'
+   * for forced and threshold compactions alike.
+   */
+  forceReason?: CompactForceReason
 }
 
 /**
@@ -647,6 +654,9 @@ export async function compactConversation(
       isAutoCompact ? 'auto' : 'manual',
       preCompactTokenCount ?? 0,
       messages.at(-1)?.uuid,
+      undefined,
+      undefined,
+      recompactionInfo?.forceReason,
     )
     // Carry loaded-tool state — the summary doesn't preserve tool_reference
     // blocks, so the post-compact schema filter needs this to keep sending

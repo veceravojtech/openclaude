@@ -56,9 +56,23 @@ export type MessageOrigin =
 /** Direction for partial /compact: summarize up to or from a pivot message. */
 export type PartialCompactDirection = 'up_to' | 'from'
 
+/**
+ * Why a compaction was forced past the token-threshold check.
+ *
+ * A forced compaction still reports `trigger: 'auto'`, so this is the only
+ * thing that distinguishes "RSS got high" or "too many messages" from an
+ * ordinary context-budget compaction when reading a transcript afterwards.
+ */
+export type CompactForceReason =
+  | 'memory-pressure'
+  | 'message-count'
+  | 'context-overflow'
+
 export type CompactMetadata = {
   trigger: 'manual' | 'auto'
   preTokens: number
+  /** Set only when the compaction was forced; absent for threshold compactions. */
+  forceReason?: CompactForceReason
   userContext?: string
   messagesSummarized?: number
   preservedSegment?: {

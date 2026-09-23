@@ -3,7 +3,7 @@ import { markPostCompaction } from 'src/bootstrap/state.js'
 import { getSdkBetas } from '../../bootstrap/state.js'
 import type { QuerySource } from '../../constants/querySource.js'
 import type { ToolUseContext } from '../../Tool.js'
-import type { Message } from '../../types/message.js'
+import type { CompactForceReason, Message } from '../../types/message.js'
 import { getGlobalConfig } from '../../utils/config.js'
 import { getContextWindowForModel } from '../../utils/context.js'
 import { logForDebugging } from '../../utils/debug.js'
@@ -85,7 +85,7 @@ export type AutoCompactTrackingState = {
   // When set, bypasses the normal token threshold. Message-count and
   // provider-overflow recovery also bypass user-disable; process-memory
   // pressure respects that setting.
-  forceReason?: 'memory-pressure' | 'message-count' | 'context-overflow'
+  forceReason?: CompactForceReason
 }
 
 // Threshold buffer: auto-compact fires when token usage reaches this far below
@@ -525,6 +525,9 @@ export async function autoCompactIfNeeded(
     previousCompactTurnId: effectiveTracking?.turnId,
     autoCompactThreshold: getAutoCompactThreshold(model),
     querySource,
+    // Carries through to compactMetadata.forceReason on the boundary, so a
+    // compaction that skipped the token check says so in the transcript.
+    forceReason: forcedBy,
   }
 
   // EXPERIMENT: Try session memory compaction first

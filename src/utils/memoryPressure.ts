@@ -113,8 +113,22 @@ export function startMemoryPressureMonitor(
         `[MemoryPressure] Level changed: ${previousLevel} -> ${currentLevel} (RSS: ${rss.toFixed(0)}MB)`,
       )
       if (currentLevel === 'critical') {
-        logForDebugging('[MemoryPressure] Critical — pruning registered caches')
+        logForDebugging(
+          '[MemoryPressure] Critical — pruning registered caches and requesting compaction',
+        )
         pruneRegisteredCaches()
+        // Forcing compaction throws away a healthy transcript, so it is
+        // reserved for genuine OOM risk: only 'critical' (90% of budget), and
+        // only on the transition into it.
+        //
+        // Requesting on every tick at merely 'elevated' (80%) meant a process
+        // that simply sat near its budget — an in-process swarm holding one
+        // transcript per teammate does exactly that — compacted repeatedly for
+        // a reason nothing recorded. A level that has not changed is not new
+        // evidence, and if the first compaction did not relieve RSS, repeating
+        // it will not either. Recovery back to normal re-arms this, so a
+        // genuinely new climb into critical is still protected.
+        compactionRequested = true
       }
       for (const listener of pressureListeners) {
         try {
@@ -123,14 +137,6 @@ export function startMemoryPressureMonitor(
           // Don't let listener errors crash the monitor
         }
       }
-    }
-
-    // Keep requesting compaction while pressure stays elevated/critical.
-    // The previous level-change-only gate meant one compact/prune cycle then
-    // silence even if RSS remained high.  consumeCompactionRequest() is
-    // one-shot so the existing autocompact cooldown prevents retry storms.
-    if (currentLevel !== 'normal') {
-      compactionRequested = true
     }
   }, resolved.checkIntervalMs)
 

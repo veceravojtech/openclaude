@@ -1,7 +1,7 @@
 import { feature } from "bun:bundle"
 import type { APIError } from "@anthropic-ai/sdk"
 import { randomUUID, type UUID } from "crypto"
-import type { Message, NormalizedMessage, StopHookInfo, SystemAgentsKilledMessage, SystemAPIErrorMessage, SystemApiMetricsMessage, SystemAwaySummaryMessage, SystemBridgeStatusMessage, SystemCompactBoundaryMessage, SystemInformationalMessage, SystemLocalCommandMessage, SystemMemorySavedMessage, SystemMicrocompactBoundaryMessage, SystemPermissionRetryMessage, SystemScheduledTaskFireMessage, SystemStopHookSummaryMessage, SystemTurnDurationMessage, SystemMessageLevel } from "../../types/message.js"
+import type { Message, NormalizedMessage, StopHookInfo, SystemAgentsKilledMessage, SystemAPIErrorMessage, SystemApiMetricsMessage, SystemAwaySummaryMessage, SystemBridgeStatusMessage, CompactForceReason, SystemCompactBoundaryMessage, SystemInformationalMessage, SystemLocalCommandMessage, SystemMemorySavedMessage, SystemMicrocompactBoundaryMessage, SystemPermissionRetryMessage, SystemScheduledTaskFireMessage, SystemStopHookSummaryMessage, SystemTurnDurationMessage, SystemMessageLevel } from "../../types/message.js"
 import { formatTokens } from "../format.js"
 import { logForDebugging } from "../debug.js"
 
@@ -206,6 +206,10 @@ export function createCompactBoundaryMessage(
   lastPreCompactMessageUuid?: UUID,
   userContext?: string,
   messagesSummarized?: number,
+  // Why a forced compaction fired. `trigger` cannot carry this: a forced
+  // compaction is still 'auto', so without the reason a transcript cannot
+  // distinguish one from an ordinary token-threshold compaction.
+  forceReason?: CompactForceReason,
 ): SystemCompactBoundaryMessage {
   return {
     type: 'system',
@@ -220,6 +224,7 @@ export function createCompactBoundaryMessage(
       preTokens,
       userContext,
       messagesSummarized,
+      ...(forceReason && { forceReason }),
     },
     ...(lastPreCompactMessageUuid && {
       logicalParentUuid: lastPreCompactMessageUuid,
