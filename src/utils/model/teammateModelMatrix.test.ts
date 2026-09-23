@@ -166,9 +166,19 @@ describe('checkTeammateModelAllowed', () => {
     )
   })
 
+  test('Claude Sonnet 5 is admitted on the Claude-native routes without the wildcard', () => {
+    expect(check('claude-sonnet-5', 'anthropic')).toBeNull()
+    expect(check('claude-sonnet-5[1m]', 'anthropic')).toBeNull()
+    expect(check('claude-sonnet-5', 'vertex')).toBeNull()
+    expect(check('claude-sonnet-5', 'foundry')).toBeNull()
+    expect(check('us.anthropic.claude-sonnet-5', 'bedrock')).toBeNull()
+    // Sonnet 4.6 is still not a teammate family.
+    expect(check('claude-sonnet-4-6', 'anthropic')).not.toBeNull()
+  })
+
   test('a valid model on the wrong provider is rejected', () => {
     expect(check('deepseek-v4-pro', 'anthropic')).toContain(
-      "Model 'deepseek-v4-pro' is not allowed for teammates on provider 'anthropic'. Allowed here: claude-opus-5-5, claude-fable-5-1. Configure teammateModelAllowlist to change this.",
+      "Model 'deepseek-v4-pro' is not allowed for teammates on provider 'anthropic'. Allowed here: claude-opus-5-5, claude-fable-5-1, claude-sonnet-5. Configure teammateModelAllowlist to change this.",
     )
   })
 

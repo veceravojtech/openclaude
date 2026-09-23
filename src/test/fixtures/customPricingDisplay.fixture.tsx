@@ -54,8 +54,13 @@ mock.module('../../utils/fastMode.js', () => ({
 // The Opus rows price the model the `opus` alias resolves to (the pinned
 // default under test), so key the custom pricing on that id rather than a
 // hardcoded version.
-const { getDefaultOpusModel } = await import('../../utils/model/model.js')
+const { getDefaultOpusModel, getDefaultSonnetModel } = await import(
+  '../../utils/model/model.js'
+)
 const defaultOpusModel = getDefaultOpusModel()
+// The Default row prices the default Sonnet (Sonnet 5); the explicit Sonnet
+// 4.6 1M rows price claude-sonnet-4-6. Both get the same custom $9/$10.
+const defaultSonnetModel = getDefaultSonnetModel()
 
 const originalSources = [...getAllowedSettingSources()]
 const originalFlagPath = getFlagSettingsPath()
@@ -67,6 +72,13 @@ function writePricing(opusInput: number, opusOutput: number): void {
     `${JSON.stringify({
       modelPricing: {
         'claude-sonnet-4-6': {
+          inputTokens: 9,
+          outputTokens: 10,
+          promptCacheReadTokens: 0,
+          promptCacheWriteTokens: 0,
+          webSearchRequests: 0,
+        },
+        [defaultSonnetModel]: {
           inputTokens: 9,
           outputTokens: 10,
           promptCacheReadTokens: 0,

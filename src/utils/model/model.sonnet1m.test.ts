@@ -155,12 +155,18 @@ test('an explicit claude-sonnet-4-6[1m] from the user is preserved', async () =>
   )
 })
 
-test('Sonnet 5 is not auto-tagged either way: it is neither Sonnet 4.x nor frontier', async () => {
-  for (const subscriber of [true, false]) {
-    const model = await importModel({
-      subscriber,
-      extraUsageDisabledReason: null,
-    })
-    expect(mainThread(model, 'claude-sonnet-5')).toBe('claude-sonnet-5')
-  }
+test('Sonnet 5 is 1M-native: tagged even for a subscriber without extra usage', async () => {
+  // The same subscriber whose claude-sonnet-4-6 stays plain.
+  const model = await importModel({
+    subscriber: true,
+    extraUsageDisabledReason: 'overage_not_provisioned',
+  })
+  expect(model.preferOneMillionContext('claude-sonnet-5')).toBe(
+    'claude-sonnet-5[1m]',
+  )
+  expect(mainThread(model, 'claude-sonnet-5')).toBe('claude-sonnet-5[1m]')
+  expect(mainThread(model, 'claude-sonnet-4-6')).toBe('claude-sonnet-4-6')
+
+  const noCache = await importModel({ subscriber: true })
+  expect(mainThread(noCache, 'claude-sonnet-5')).toBe('claude-sonnet-5[1m]')
 })

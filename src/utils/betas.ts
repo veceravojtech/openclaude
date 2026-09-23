@@ -1,4 +1,8 @@
-import { isFableAtLeast, isOpusAtLeast } from './model/opusVersion.js'
+import {
+  isFableAtLeast,
+  isOpusAtLeast,
+  isSonnetAtLeast,
+} from './model/opusVersion.js'
 import { feature } from 'bun:bundle'
 import memoize from 'lodash-es/memoize.js'
 import {
@@ -155,6 +159,7 @@ export function modelSupportsStructuredOutputs(model: string): boolean {
     return false
   }
   return (
+    isSonnetAtLeast(canonical, 5) ||
     canonical.includes('claude-sonnet-4-6') ||
     canonical.includes('claude-sonnet-4-5') ||
     isOpusAtLeast(canonical, 4, 1) ||

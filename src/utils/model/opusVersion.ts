@@ -104,6 +104,48 @@ export function formatFableMarketingName(version: FableVersion): string {
     : `Fable ${version.major}.${version.minor}`
 }
 
+// --- Sonnet family ---------------------------------------------------------
+//
+// Same shape and digit-boundary rules as the Opus/Fable parsers
+// (`claude-sonnet-5`, `us.anthropic.claude-sonnet-5`, `claude-sonnet-4-6`).
+// Dated 4.x ids (`claude-sonnet-4-20250514`) parse as 4.0, and the Claude 3
+// era (`claude-3-7-sonnet`) never parses.
+
+export type SonnetVersion = { major: number; minor: number }
+
+const SONNET_VERSION_RE = /sonnet[-_.](\d{1,2})(?!\d)(?:[-_.](\d{1,2})(?!\d))?/
+
+export function parseSonnetVersion(model: string): SonnetVersion | null {
+  const match = SONNET_VERSION_RE.exec(model.toLowerCase())
+  if (!match) {
+    return null
+  }
+  return {
+    major: Number(match[1]),
+    minor: match[2] === undefined ? 0 : Number(match[2]),
+  }
+}
+
+/** True when `model` is a Sonnet id at or above `major.minor` (e.g. 5). */
+export function isSonnetAtLeast(
+  model: string,
+  major: number,
+  minor = 0,
+): boolean {
+  const version = parseSonnetVersion(model)
+  return version !== null && compareOpusVersions(version, { major, minor }) >= 0
+}
+
+/**
+ * Claude models whose 1M context window is native: every request may use it
+ * with no long-context entitlement. That is the modern frontier family and
+ * Sonnet 5+. Sonnet 4.x also supports 1M, but only as a paid long-context
+ * feature, so it is deliberately not included here.
+ */
+export function isOneMillionNativeClaude(model: string): boolean {
+  return isModernFrontierClaude(model) || isSonnetAtLeast(model, 5)
+}
+
 /**
  * Frontier-class Claude models that share the modern capability set: adaptive
  * thinking, effort (including xhigh/max), 1M context and 128K output. That is

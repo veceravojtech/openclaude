@@ -1204,8 +1204,8 @@ function isSonnet1mUnavailable(model: string): boolean {
   const normalized = model.toLowerCase()
   return (
     !checkSonnet1mAccess() &&
-    (normalized.includes('sonnet[1m]') ||
-      normalized.includes('sonnet-4-6[1m]'))
+    // `sonnet[1m]` is Sonnet 5 on first-party, whose 1M window is native.
+    normalized.includes('sonnet-4-6[1m]')
   )
 }
 

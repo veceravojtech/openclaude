@@ -29,7 +29,8 @@ import {
   isCodexBaseUrl,
   shouldUseCodexTransport,
 } from '../../services/api/providerConfig.js'
-import { CLAUDE_FABLE_5_1_CONFIG, CLAUDE_OPUS_5_5_CONFIG } from './configs.js'
+import { CLAUDE_FABLE_5_1_CONFIG,
+  CLAUDE_SONNET_5_CONFIG, CLAUDE_OPUS_5_5_CONFIG } from './configs.js'
 
 /** One servable (route, model id) pair. */
 export type TeammateMatrixEntry = {
@@ -97,6 +98,15 @@ export const TEAMMATE_MODEL_MATRIX = {
       { route: 'vertex', id: CLAUDE_FABLE_5_1_CONFIG.vertex },
       { route: 'foundry', id: CLAUDE_FABLE_5_1_CONFIG.foundry },
       { route: 'bedrock', id: CLAUDE_FABLE_5_1_CONFIG.bedrock },
+    ],
+  },
+  'sonnet-5': {
+    label: 'Claude Sonnet 5',
+    entries: [
+      { route: 'anthropic', id: CLAUDE_SONNET_5_CONFIG.firstParty },
+      { route: 'vertex', id: CLAUDE_SONNET_5_CONFIG.vertex },
+      { route: 'foundry', id: CLAUDE_SONNET_5_CONFIG.foundry },
+      { route: 'bedrock', id: CLAUDE_SONNET_5_CONFIG.bedrock },
     ],
   },
   'deepseek-v4.1-flash': {

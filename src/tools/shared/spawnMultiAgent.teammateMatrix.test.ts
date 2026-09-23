@@ -242,7 +242,7 @@ test('a valid model on the wrong provider is refused: deepseek-v4-pro on first-p
       context(),
     ),
   ).rejects.toThrow(
-    "Model 'deepseek-v4-pro' is not allowed for teammates on provider 'anthropic'. Allowed here: claude-opus-5-5, claude-fable-5-1. Configure teammateModelAllowlist to change this.",
+    "Model 'deepseek-v4-pro' is not allowed for teammates on provider 'anthropic'. Allowed here: claude-opus-5-5, claude-fable-5-1, claude-sonnet-5. Configure teammateModelAllowlist to change this.",
   )
   expectNothingLeftBehind('matrix-team')
 })

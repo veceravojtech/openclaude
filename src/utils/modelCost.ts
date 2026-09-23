@@ -20,6 +20,7 @@ import {
   CLAUDE_OPUS_5_CONFIG,
   CLAUDE_SONNET_4_5_CONFIG,
   CLAUDE_SONNET_4_6_CONFIG,
+  CLAUDE_SONNET_5_CONFIG,
   CLAUDE_SONNET_4_CONFIG,
 } from './model/configs.js'
 import {
@@ -44,6 +45,16 @@ export const COST_TIER_3_15 = {
   outputTokens: 15,
   promptCacheWriteTokens: 3.75,
   promptCacheReadTokens: 0.3,
+  webSearchRequests: 0.01,
+} as const satisfies ModelCosts
+
+// Pricing for Sonnet 5: $2 input / $10 output per Mtok (cache write 1.25x,
+// cache read 0.1x of input, per the Anthropic pricing page)
+export const COST_SONNET_5 = {
+  inputTokens: 2,
+  outputTokens: 10,
+  promptCacheWriteTokens: 2.5,
+  promptCacheReadTokens: 0.2,
   webSearchRequests: 0.01,
 } as const satisfies ModelCosts
 
@@ -149,6 +160,8 @@ export const MODEL_COSTS: Record<ModelShortName, ModelCosts> = {
     COST_TIER_5_25,
   [firstPartyNameToCanonical(CLAUDE_FABLE_5_1_CONFIG.firstParty)]:
     COST_FABLE_51,
+  [firstPartyNameToCanonical(CLAUDE_SONNET_5_CONFIG.firstParty)]:
+    COST_SONNET_5,
 }
 
 /**

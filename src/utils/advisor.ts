@@ -1,4 +1,7 @@
-import { isModernFrontierClaude } from './model/opusVersion.js'
+import {
+  isModernFrontierClaude,
+  isSonnetAtLeast,
+} from './model/opusVersion.js'
 import type { BetaUsage } from '@anthropic-ai/sdk/resources/beta/messages/messages.mjs'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../services/analytics/growthbook.js'
 import { shouldIncludeFirstPartyOnlyBetas } from './betas.js'
@@ -92,6 +95,7 @@ export function modelSupportsAdvisor(model: string): boolean {
   return (
     isModernFrontierClaude(m) ||
     m.includes('sonnet-4-6') ||
+    isSonnetAtLeast(m, 5) ||
     process.env.USER_TYPE === 'ant'
   )
 }
@@ -102,6 +106,7 @@ export function isValidAdvisorModel(model: string): boolean {
   return (
     isModernFrontierClaude(m) ||
     m.includes('sonnet-4-6') ||
+    isSonnetAtLeast(m, 5) ||
     process.env.USER_TYPE === 'ant'
   )
 }

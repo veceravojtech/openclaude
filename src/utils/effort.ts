@@ -1,4 +1,8 @@
-import { isFableAtLeast, isOpusAtLeast } from './model/opusVersion.js'
+import {
+  isFableAtLeast,
+  isOpusAtLeast,
+  isSonnetAtLeast,
+} from './model/opusVersion.js'
 // biome-ignore-all assist/source/organizeImports: internal-only import markers must not be reordered
 import { isUltrathinkEnabled } from './thinking.js'
 import { getInitialSettings } from './settings/settings.js'
@@ -541,6 +545,7 @@ function legacyModelSupportsEffort(
     nativeTransport === 'anthropic' &&
     (isOpusAtLeast(m, 4, 5) ||
       isFableAtLeast(m, 5) ||
+      isSonnetAtLeast(m, 5) ||
       m.includes('sonnet-4-6'))
   ) {
     return true

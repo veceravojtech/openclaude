@@ -298,3 +298,21 @@ test('a subscriber with extra usage enabled gets the Sonnet 4.x 1M window', asyn
     'claude-sonnet-4-6[1m]',
   )
 })
+
+test('a Sonnet 5 teammate gets the 1M window even without extra usage', async () => {
+  const resolveTeammateModel = await importResolveTeammateModel({
+    provider: 'firstParty',
+    subscriber: true,
+    extraUsageDisabledReason: 'overage_not_provisioned',
+  })
+
+  expect(resolveTeammateModel('claude-sonnet-5', 'claude-opus-5[1m]')).toBe(
+    'claude-sonnet-5[1m]',
+  )
+  expect(resolveTeammateModel(undefined, 'claude-sonnet-5')).toBe(
+    'claude-sonnet-5[1m]',
+  )
+  expect(resolveTeammateModel(undefined, 'claude-sonnet-4-6')).toBe(
+    'claude-sonnet-4-6',
+  )
+})

@@ -39,9 +39,10 @@ import {
   canonicalOpusId,
   formatFableMarketingName,
   formatOpusMarketingName,
-  isModernFrontierClaude,
+  isOneMillionNativeClaude,
   parseFableVersion,
   parseOpusVersion,
+  parseSonnetVersion,
 } from './opusVersion.js'
 import { checkSonnet1mAccess } from './check1mAccess.js'
 import { capitalize } from '../stringUtils.js'
@@ -355,7 +356,7 @@ export function getDefaultSonnetModel(): ModelName {
   if (!isFirstPartyAnthropicProvider()) {
     return getModelStrings().sonnet45
   }
-  return getModelStrings().sonnet46
+  return getModelStrings().sonnet50
 }
 
 // @[MODEL LAUNCH]: Update the default Haiku model (3P providers may lag so keep defaults unchanged).
@@ -420,7 +421,8 @@ export function getDefaultHaikuModel(): ModelName {
  * - a model that already carries the tag;
  * - a Sonnet 4.x model when the account is not entitled to its 1M window
  *   (checkSonnet1mAccess: a Claude.ai subscriber without extra usage, or with
- *   no cached extra-usage state yet). Frontier Opus/Fable are not gated;
+ *   no cached extra-usage state yet). Frontier Opus/Fable and Sonnet 5+ are
+ *   1M-native (isOneMillionNativeClaude) and not gated;
  * - a model that does not support 1M, and every model when 1M is disabled
  *   (CLAUDE_CODE_DISABLE_1M_CONTEXT — modelSupports1M returns false then);
  * - on a route that is not Claude-native (a custom Anthropic-compatible base
@@ -451,9 +453,10 @@ export function preferOneMillionContext(model: ModelName): ModelName {
   }
   // Sonnet 4.x at 1M is a paid long-context feature for Claude.ai
   // subscribers: without extra usage the API answers 429 "Usage credits are
-  // required for long context requests". Frontier Opus/Fable are not gated.
+  // required for long context requests". Frontier Opus/Fable and Sonnet 5+
+  // are 1M-native and not gated.
   if (
-    !isModernFrontierClaude(getCanonicalName(model)) &&
+    !isOneMillionNativeClaude(getCanonicalName(model)) &&
     !checkSonnet1mAccess()
   ) {
     return model
@@ -618,6 +621,15 @@ export function firstPartyNameToCanonical(name: ModelName): ModelShortName {
   if (fableVersion && name.includes('claude-fable')) {
     return canonicalFableId(fableVersion)
   }
+  // Claude Sonnet 5 and later: version-derived, like Opus 5+ above. Without
+  // this `claude-sonnet-5[1m]` and the Bedrock/Vertex ids fall through to the
+  // generic fallback and never match the catalog.
+  const sonnetVersion = parseSonnetVersion(name)
+  if (sonnetVersion && sonnetVersion.major >= 5 && name.includes('claude-sonnet')) {
+    return sonnetVersion.minor === 0
+      ? `claude-sonnet-${sonnetVersion.major}`
+      : `claude-sonnet-${sonnetVersion.major}-${sonnetVersion.minor}`
+  }
   // Special cases for Claude 4+ models to differentiate versions
   // Order matters: check more specific versions first (4-8 before 4-7 before 4-6 before 4-5 before 4)
   if (name.includes('claude-opus-4-8')) {
@@ -701,14 +713,14 @@ export function getClaudeAiUserDefaultModelDescription(
     }
     return `${opusName} · Most capable for complex work${fastMode ? getOpus46PricingSuffix(true) : ''}`
   }
-  return 'Sonnet 4.6 · Best for everyday tasks'
+  return 'Sonnet 5 · Best for everyday tasks'
 }
 
 export function renderDefaultModelSetting(
   setting: ModelName | ModelAlias,
 ): string {
   if (setting === 'opusplan') {
-    return `${getDefaultOpusMarketingName()} in plan mode, else Sonnet 4.6`
+    return `${getDefaultOpusMarketingName()} in plan mode, else Sonnet 5`
   }
   return renderModelName(parseUserSpecifiedModel(setting))
 }
@@ -868,6 +880,10 @@ export function getPublicModelDisplayName(model: ModelName): string | null {
       return 'Opus 4.1'
     case getModelStrings().opus40:
       return 'Opus 4'
+    case getModelStrings().sonnet50 + '[1m]':
+      return 'Sonnet 5 (1M context)'
+    case getModelStrings().sonnet50:
+      return 'Sonnet 5'
     case getModelStrings().sonnet46 + '[1m]':
       return 'Sonnet 4.6 (1M context)'
     case getModelStrings().sonnet46:
@@ -1212,6 +1228,14 @@ export function getMarketingNameForModel(modelId: string): string | undefined {
   }
   if (canonical.includes('claude-opus-4')) {
     return 'Opus 4'
+  }
+  const sonnetVersion = parseSonnetVersion(canonical)
+  if (sonnetVersion && sonnetVersion.major >= 5) {
+    const name =
+      sonnetVersion.minor === 0
+        ? `Sonnet ${sonnetVersion.major}`
+        : `Sonnet ${sonnetVersion.major}.${sonnetVersion.minor}`
+    return has1m ? `${name} (with 1M context)` : name
   }
   if (canonical.includes('claude-sonnet-4-6')) {
     return has1m ? 'Sonnet 4.6 (with 1M context)' : 'Sonnet 4.6'

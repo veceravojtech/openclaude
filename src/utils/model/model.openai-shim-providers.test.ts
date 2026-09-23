@@ -25,6 +25,9 @@ async function importFreshModelModule() {
     if (process.env.CLAUDE_CODE_USE_GEMINI) return 'gemini'
     if (process.env.CLAUDE_CODE_USE_MISTRAL) return 'mistral'
     if (process.env.CLAUDE_CODE_USE_GITHUB) return 'github'
+    // Concentrate is an OpenAI-compatible route (the real getAPIProvider
+    // returns 'openai' for it), not first-party Anthropic.
+    if (process.env.CONCENTRATE_API_KEY) return 'openai'
     if (process.env.CLAUDE_CODE_USE_OPENAI) {
       const baseUrl = process.env.OPENAI_BASE_URL ?? ''
       const model = process.env.OPENAI_MODEL ?? ''

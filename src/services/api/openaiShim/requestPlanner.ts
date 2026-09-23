@@ -1,6 +1,7 @@
 import {
   isFableAtLeast,
   isOpusAtLeast,
+  isSonnetAtLeast,
   modelSupportsForcedToolChoice,
 } from '../../../utils/model/opusVersion.js'
 export function hydrateOpenAIShimCompatibilityEnv(
@@ -257,6 +258,7 @@ export function createRequestBodyPlanner(context: RequestBodyPlannerContext) {
       const isAdaptive =
         isOpusAtLeast(modelLower, 4, 6) ||
         isFableAtLeast(modelLower, 5) ||
+        isSonnetAtLeast(modelLower, 5) ||
         modelLower.includes('sonnet-4-6') ||
         modelLower.includes('sonnet-4.6')
       const isOpus45 =

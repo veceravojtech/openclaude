@@ -1,4 +1,7 @@
-import { isModernFrontierClaude } from './model/opusVersion.js'
+import {
+  isModernFrontierClaude,
+  isSonnetAtLeast,
+} from './model/opusVersion.js'
 // biome-ignore-all assist/source/organizeImports: internal-only import markers must not be reordered
 import type { Theme } from './theme.js'
 import { feature } from 'bun:bundle'
@@ -158,6 +161,7 @@ export function modelSupportsThinking(model: string): boolean {
   return (
     canonical.includes('sonnet-4') ||
     canonical.includes('opus-4') ||
+    isSonnetAtLeast(canonical, 5) ||
     isModernFrontierClaude(canonical)
   )
 }
@@ -170,7 +174,11 @@ export function modelSupportsAdaptiveThinking(model: string): boolean {
   }
   const canonical = getCanonicalName(model)
   // Supported by a subset of Claude 4 models
-  if (isModernFrontierClaude(canonical) || canonical.includes('sonnet-4-6')) {
+  if (
+    isModernFrontierClaude(canonical) ||
+    canonical.includes('sonnet-4-6') ||
+    isSonnetAtLeast(canonical, 5)
+  ) {
     return true
   }
   // Exclude any other known legacy models (allowlist above catches 4-6 variants first)

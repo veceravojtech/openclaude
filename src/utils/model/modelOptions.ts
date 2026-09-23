@@ -216,6 +216,11 @@ function getCustomSonnetOption(): ModelOption | undefined {
 // with the new model's label and description. These appear in the /model picker.
 function getSonnet46Option(): ModelOption {
   const is3P = getAPIProvider() !== 'firstParty'
+  // First-party `sonnet` resolves to Sonnet 5 (1M-native, so no separate
+  // 1M row); 3P keeps the explicit Sonnet 4.6 id until its rollout.
+  if (!is3P) {
+    return SonnetOption
+  }
   return {
     value: is3P ? getModelStrings().sonnet46 : 'sonnet',
     label: 'Sonnet',
@@ -426,10 +431,14 @@ function getMergedOpus1MOption(fastMode = false): ModelOption {
   }
 }
 
-const MaxSonnet46Option: ModelOption = {
+// First-party `sonnet` → Claude Sonnet 5. Its 1M window is native (no extra
+// usage needed), so there is no separate `sonnet[1m]` row on first-party.
+const SonnetOption: ModelOption = {
   value: 'sonnet',
   label: 'Sonnet',
-  description: 'Sonnet 4.6 · Best for everyday tasks',
+  description: `Sonnet 5 · Best for everyday tasks`,
+  descriptionForModel:
+    'Sonnet 5 - best for everyday tasks, 1M context. Generally recommended for most coding tasks',
 }
 
 const MaxHaiku45Option: ModelOption = {
@@ -694,7 +703,6 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
       getMergedOpus1MOption(fastMode),
       getFable51Option(),
       getSonnet46Option(),
-      getSonnet46_1MOption(),
       getHaiku45Option(),
       ...inactiveProfileOptions,
     ]
@@ -712,10 +720,7 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
       }
       premiumOptions.push(getFable51Option())
 
-      premiumOptions.push(MaxSonnet46Option)
-      if (checkSonnet1mAccess()) {
-        premiumOptions.push(getMaxSonnet46_1MOption())
-      }
+      premiumOptions.push(SonnetOption)
 
       premiumOptions.push(MaxHaiku45Option)
       premiumOptions.push(...inactiveProfileOptions)
@@ -726,9 +731,6 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
     const standardOptions = [getDefaultOptionForUser(fastMode)]
     if (canOfferOpus46Pinned1M()) {
       standardOptions.push(getOpus46Pinned1MOption(fastMode))
-    }
-    if (checkSonnet1mAccess()) {
-      standardOptions.push(getMaxSonnet46_1MOption())
     }
 
     if (isOpus1mMergeEnabled()) {
@@ -774,14 +776,11 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
     ]
   }
 
-  // PAYG 1P API: Default (Sonnet) + Opus 4.6 1M + Sonnet 1M + Opus (newest) + Opus 4.8 + Opus 4.7 + Opus 4.6 + Opus 1M + Haiku
+  // PAYG 1P API: Default (Sonnet 5, 1M-native) + Opus 4.6 1M + Opus (newest) + Opus 4.8 + Opus 4.7 + Opus 4.6 + Opus 1M + Haiku
   if (getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()) {
     const payg1POptions = [getDefaultOptionForUser(fastMode)]
     if (canOfferOpus46Pinned1M()) {
       payg1POptions.push(getOpus46Pinned1MOption(fastMode))
-    }
-    if (checkSonnet1mAccess()) {
-      payg1POptions.push(getSonnet46_1MOption())
     }
     if (isOpus1mMergeEnabled()) {
       payg1POptions.push(getMergedOpus1MOption(fastMode))
@@ -893,6 +892,7 @@ function getModelFamilyInfo(
 
   // Sonnet family
   if (
+    canonical.includes('claude-sonnet-') ||
     canonical.includes('claude-sonnet-4-6') ||
     canonical.includes('claude-sonnet-4-5') ||
     canonical.includes('claude-sonnet-4-') ||

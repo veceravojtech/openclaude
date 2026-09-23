@@ -249,6 +249,7 @@ const VERTEX_REGION_OVERRIDES: ReadonlyArray<[string, string]> = [
   ['claude-opus-5', 'VERTEX_REGION_CLAUDE_5_0_OPUS'],
   ['claude-opus-4-1', 'VERTEX_REGION_CLAUDE_4_1_OPUS'],
   ['claude-opus-4', 'VERTEX_REGION_CLAUDE_4_0_OPUS'],
+  ['claude-sonnet-5', 'VERTEX_REGION_CLAUDE_5_0_SONNET'],
   ['claude-sonnet-4-6', 'VERTEX_REGION_CLAUDE_4_6_SONNET'],
   ['claude-sonnet-4-5', 'VERTEX_REGION_CLAUDE_4_5_SONNET'],
   ['claude-sonnet-4', 'VERTEX_REGION_CLAUDE_4_0_SONNET'],

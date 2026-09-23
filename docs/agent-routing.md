@@ -110,6 +110,7 @@ binding) and the provider the teammate will actually run on:
 | --- | --- |
 | `opus-5.5` | Anthropic / Vertex / Foundry `claude-opus-5-5`; Bedrock `us.anthropic.claude-opus-5-5-v1` |
 | `fable-5.1` | Anthropic / Vertex / Foundry `claude-fable-5-1`; Bedrock `us.anthropic.claude-fable-5-1` |
+| `sonnet-5` | Anthropic / Vertex / Foundry `claude-sonnet-5`; Bedrock `us.anthropic.claude-sonnet-5` |
 | `glm-5.3` | Z.ai `glm-5.3`, `glm-5.3-flash`; CommandCode `z-ai/glm-5.3-flash` |
 | `gpt-6` | OpenAI and Codex (OAuth) `gpt-6-astra` |
 | `deepseek-v4-pro` | DeepSeek, OpenCode, OpenCode Go, HiCap `deepseek-v4-pro`; NVIDIA NIM, Atlas Cloud `deepseek-ai/deepseek-v4-pro`; Fireworks `accounts/fireworks/models/deepseek-v4-pro`; Ollama `deepseek-v4-pro:cloud`; llmtr, CommandCode `deepseek/deepseek-v4-pro`; ClinePass `cline-pass/deepseek-v4-pro` |
