@@ -39,9 +39,11 @@ import {
   canonicalOpusId,
   formatFableMarketingName,
   formatOpusMarketingName,
+  isModernFrontierClaude,
   parseFableVersion,
   parseOpusVersion,
 } from './opusVersion.js'
+import { checkSonnet1mAccess } from './check1mAccess.js'
 import { capitalize } from '../stringUtils.js'
 import { DEFAULT_GEMINI_MODEL } from '../providerProfile.js'
 import { getAntModelOverrideConfig, resolveAntModel } from './antModels.js'
@@ -416,6 +418,9 @@ export function getDefaultHaikuModel(): ModelName {
  *
  * Returned unchanged:
  * - a model that already carries the tag;
+ * - a Sonnet 4.x model when the account is not entitled to its 1M window
+ *   (checkSonnet1mAccess: a Claude.ai subscriber without extra usage, or with
+ *   no cached extra-usage state yet). Frontier Opus/Fable are not gated;
  * - a model that does not support 1M, and every model when 1M is disabled
  *   (CLAUDE_CODE_DISABLE_1M_CONTEXT — modelSupports1M returns false then);
  * - on a route that is not Claude-native (a custom Anthropic-compatible base
@@ -442,6 +447,15 @@ export function preferOneMillionContext(model: ModelName): ModelName {
     provider === 'foundry' ||
     (provider === 'firstParty' && isFirstPartyAnthropicBaseUrl())
   if (!isClaudeNative) {
+    return model
+  }
+  // Sonnet 4.x at 1M is a paid long-context feature for Claude.ai
+  // subscribers: without extra usage the API answers 429 "Usage credits are
+  // required for long context requests". Frontier Opus/Fable are not gated.
+  if (
+    !isModernFrontierClaude(getCanonicalName(model)) &&
+    !checkSonnet1mAccess()
+  ) {
     return model
   }
   const tagged = `${model}[1m]`

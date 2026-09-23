@@ -5,10 +5,12 @@ import {
 } from '../../test/sharedMutationLock.js'
 import type { GlobalConfig } from '../../utils/config.js'
 
+type AuthModule = typeof import('../../utils/auth.js')
 type ConfigModule = typeof import('../../utils/config.js')
 type ProvidersModule = typeof import('../../utils/model/providers.js')
 type SpawnMultiAgentModule = typeof import('./spawnMultiAgent.js')
 
+let actualAuth: AuthModule | undefined
 let actualConfig: ConfigModule | undefined
 let actualProviders: ProvidersModule | undefined
 
@@ -21,6 +23,9 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    if (actualAuth) {
+      mock.module('../../utils/auth.js', () => ({ ...actualAuth! }))
+    }
     if (actualConfig) {
       mock.module('../../utils/config.js', () => ({ ...actualConfig! }))
     }
@@ -32,15 +37,25 @@ afterEach(() => {
   }
 })
 
-/**
- * Import spawnMultiAgent with the two inputs that decide a teammate's default
- * model: the /config value (teammateDefaultModel) and the active provider.
- */
-async function importSpawnMultiAgent(options: {
+type ImportOptions = {
   provider: string
   teammateDefaultModel?: string | null
-}): Promise<SpawnMultiAgentModule> {
+  /** Claude.ai subscriber (OAuth) rather than API key. Default: false. */
+  subscriber?: boolean
+  /** cachedExtraUsageDisabledReason; omitted = no cache yet (undefined). */
+  extraUsageDisabledReason?: string | null
+}
+
+/**
+ * Import spawnMultiAgent with the inputs that decide a teammate's default
+ * model: the /config value (teammateDefaultModel), the active provider, and —
+ * for Sonnet 4.x's 1M window — subscription and cached extra-usage state.
+ */
+async function importSpawnMultiAgent(
+  options: ImportOptions,
+): Promise<SpawnMultiAgentModule> {
   const nonce = `${Date.now()}-${Math.random()}`
+  actualAuth ??= await import(`../../utils/auth.ts?teammateModelActual=${nonce}`)
   actualConfig ??= await import(`../../utils/config.ts?teammateModelActual=${nonce}`)
   actualProviders ??= await import(
     `../../utils/model/providers.ts?teammateModelActual=${nonce}`
@@ -50,12 +65,25 @@ async function importSpawnMultiAgent(options: {
     ...('teammateDefaultModel' in options
       ? { teammateDefaultModel: options.teammateDefaultModel }
       : {}),
+    ...('extraUsageDisabledReason' in options
+      ? { cachedExtraUsageDisabledReason: options.extraUsageDisabledReason }
+      : {}),
   } as unknown as GlobalConfig
+
+  mock.module('../../utils/auth.js', () => ({
+    ...actualAuth!,
+    isClaudeAISubscriber: () => options.subscriber ?? false,
+  }))
 
   mock.module('../../utils/config.js', () => ({
     ...actualConfig!,
     getGlobalConfig: () => globalConfig,
   }))
+  // Pin check1mAccess to a fresh real copy that reads the auth/config mocks
+  // above: other test files stub checkSonnet1mAccess and can leave that stub
+  // registered for the rest of the run.
+  const freshCheck1m = await import(`../../utils/model/check1mAccess.ts?teammateModelCheck1m=${nonce}`)
+  mock.module('../../utils/model/check1mAccess.js', () => ({ ...freshCheck1m }))
   mock.module('../../utils/model/providers.js', () => ({
     ...actualProviders!,
     getAPIProvider: () => options.provider,
@@ -67,10 +95,9 @@ async function importSpawnMultiAgent(options: {
   return import(`./spawnMultiAgent.js?teammateModel=${nonce}`)
 }
 
-async function importResolveTeammateModel(options: {
-  provider: string
-  teammateDefaultModel?: string | null
-}): Promise<SpawnMultiAgentModule['resolveTeammateModel']> {
+async function importResolveTeammateModel(
+  options: ImportOptions,
+): Promise<SpawnMultiAgentModule['resolveTeammateModel']> {
   return (await importSpawnMultiAgent(options)).resolveTeammateModel
 }
 
@@ -218,4 +245,56 @@ test('a teammate model picked in /config is still honoured, on its 1M variant', 
   const model = resolveTeammateModel(undefined, 'claude-opus-5[1m]')
   expect(model).toContain('sonnet')
   expect(model.endsWith('[1m]')).toBe(true)
+})
+
+test('a subscriber without extra usage keeps a Sonnet 4.x teammate off the 1M window', async () => {
+  // Regression: on a Claude.ai subscription without extra usage, Sonnet 4.x
+  // teammates were upgraded to claude-sonnet-4-6[1m] and every request came
+  // back 429 "Usage credits are required for long context requests".
+  const resolveTeammateModel = await importResolveTeammateModel({
+    provider: 'firstParty',
+    subscriber: true,
+    extraUsageDisabledReason: 'overage_not_provisioned',
+  })
+
+  expect(resolveTeammateModel('claude-sonnet-4-6', 'claude-opus-5[1m]')).toBe(
+    'claude-sonnet-4-6',
+  )
+  expect(resolveTeammateModel(undefined, 'claude-sonnet-4-6')).toBe(
+    'claude-sonnet-4-6',
+  )
+  // An explicit [1m] the user wrote is still theirs to keep.
+  expect(resolveTeammateModel(undefined, 'claude-sonnet-4-6[1m]')).toBe(
+    'claude-sonnet-4-6[1m]',
+  )
+  // Frontier models are not gated on extra usage.
+  expect(resolveTeammateModel('claude-opus-5-5', 'claude-sonnet-4-6')).toBe(
+    'claude-opus-5-5[1m]',
+  )
+  expect(resolveTeammateModel('claude-fable-5-1', 'claude-sonnet-4-6')).toBe(
+    'claude-fable-5-1[1m]',
+  )
+})
+
+test('a subscriber with no cached extra-usage state keeps Sonnet 4.x untagged', async () => {
+  const resolveTeammateModel = await importResolveTeammateModel({
+    provider: 'firstParty',
+    subscriber: true,
+  })
+
+  expect(resolveTeammateModel(undefined, 'claude-sonnet-4-6')).toBe(
+    'claude-sonnet-4-6',
+  )
+})
+
+test('a subscriber with extra usage enabled gets the Sonnet 4.x 1M window', async () => {
+  const resolveTeammateModel = await importResolveTeammateModel({
+    provider: 'firstParty',
+    subscriber: true,
+    extraUsageDisabledReason: null,
+  })
+
+  expect(resolveTeammateModel(undefined, 'claude-sonnet-4-6')).toBe(
+    'claude-sonnet-4-6[1m]',
+  )
 })
