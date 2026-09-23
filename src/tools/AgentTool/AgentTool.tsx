@@ -36,6 +36,7 @@ import { lazySchema } from '../../utils/lazySchema.js';
 import { logError } from '../../utils/log.js';
 import { createUserMessage, extractTextContent, isSyntheticMessage, normalizeMessages } from '../../utils/messages.js';
 import { getAgentModel } from '../../utils/model/agent.js';
+import { chooseTeammateRoute, familyOfModel, formatDispatchSummary, hasNamedAgentRouting, readTeammateDispatchSettings, toDispatchRecord, type TeammateRouteDecision } from '../../services/api/smartRouting/teammate.js';
 import { isModelAllowed } from '../../utils/model/modelAllowlist.js';
 import { permissionModeSchema } from '../../utils/permissions/PermissionMode.js';
 import type { PermissionResult } from '../../utils/permissions/PermissionResult.js';
@@ -310,6 +311,8 @@ type TeammateSpawnedOutput = {
   replicas?: Array<{ name: string; teammate_id: string; agent_id: string }>;
   /** Set when a multi-replica call stopped early; the replicas above are running. */
   failed?: { index: number; name: string; error: string };
+  /** One-line teammate dispatch summary (role → family, source, reason). */
+  dispatch?: string;
 };
 
 // Combined output type including both public and internal types
@@ -513,23 +516,57 @@ export const AgentTool = buildTool({
       if (agentDef?.color) {
         setAgentColor(subagent_type!, agentDef.color);
       }
-      const rawTeammateModel = model ?? agentDef?.model;
+      const settings = getInitialSettings();
+      // Teammate dispatch: with no model from the call, the agent definition,
+      // a provider_profile or a named agentRouting entry, pick one by role.
+      // Explicit choices are respected; only the reviewer/implementer
+      // separation rule is enforced on them (below, once resolved).
+      const dispatchMode = readTeammateDispatchSettings(settings).mode;
+      const dispatchInput = {
+        description,
+        prompt,
+        name,
+        subagent_type,
+        teamName,
+        settings,
+        leaderModel: toolUseContext.options.mainLoopModel,
+        allowProfileBinding: prompt !== undefined && !isInProcessEnabled()
+      };
+      const teammateModelIsExplicit =
+        model !== undefined ||
+        agentDef?.model !== undefined ||
+        providerProfileRef !== undefined ||
+        hasNamedAgentRouting(name, subagent_type, settings);
+      let dispatchDecision: TeammateRouteDecision | undefined;
+      let dispatchedModel: string | undefined;
+      let dispatchedProfile: string | undefined;
+      if (dispatchMode !== 'off' && !teammateModelIsExplicit) {
+        dispatchDecision = await chooseTeammateRoute(dispatchInput);
+        if (dispatchMode === 'auto' && dispatchDecision.model) {
+          dispatchedModel = dispatchDecision.model;
+          dispatchedProfile = dispatchDecision.providerProfile;
+        }
+      }
+      // The model argument every resolver below sees: the caller's, else the
+      // dispatcher's. A dispatched profile binding bypasses them (like an
+      // explicit provider_profile) and carries its model in the env.
+      const teammateModelArg = model ?? (dispatchedProfile ? undefined : dispatchedModel);
+      const rawTeammateModel = teammateModelArg ?? agentDef?.model;
       const resolvedTeammateModel =
         rawTeammateModel === undefined
           ? undefined
           : getAgentModel(
               agentDef?.model,
               toolUseContext.options.mainLoopModel,
-              model,
+              teammateModelArg,
               permissionMode
             );
-      const settings = getInitialSettings();
       // An explicitly supplied provider_profile is authoritative. Only run
       // model/name discovery when the tool call did not already bind a child
       // to a selected profile.
-      const routedTeammateProvider = providerProfileRef === undefined
+      const routedTeammateProvider = providerProfileRef === undefined && !dispatchedProfile
         ? resolveOutOfProcessTeammateProvider({
-            cliModel: model,
+            cliModel: teammateModelArg,
             agentName: name,
             agentType: subagent_type,
             agentDefinitionModel: agentDef?.model,
@@ -544,9 +581,9 @@ export const AgentTool = buildTool({
       // spawn. The child inherits the parent provider env, so passing the model is
       // enough. Only consulted when there is no cross-provider override.
       const routedTeammateModelOnly =
-        providerProfileRef === undefined && !routedTeammateProvider
+        providerProfileRef === undefined && !dispatchedProfile && !routedTeammateProvider
           ? resolveOutOfProcessTeammateModelOnly({
-              cliModel: model,
+              cliModel: teammateModelArg,
               agentName: name,
               agentType: subagent_type,
               agentDefinitionModel: agentDef?.model,
@@ -568,9 +605,9 @@ export const AgentTool = buildTool({
       // Idle (prompt-less) spawns are forced in-process by handleSpawn, as
       // is everything while the in-process backend is enabled; both share
       // the leader process and have no child env to inject.
-      const routedTeammateProfile = providerProfileRef === undefined
+      const routedTeammateProfile = providerProfileRef === undefined && !dispatchedProfile
         ? resolveOutOfProcessTeammateProviderProfile({
-            cliModel: model,
+            cliModel: teammateModelArg,
             agentName: name,
             agentType: subagent_type,
             agentDefinitionModel: agentDef?.model,
@@ -578,7 +615,7 @@ export const AgentTool = buildTool({
           })
         : null;
       let providerProfileEnv: Record<string, string> | undefined;
-      const effectiveProviderProfileRef =
+      let effectiveProviderProfileRef =
         providerProfileRef ?? routedTeammateProfile?.providerProfile;
       if (providerProfileRef !== undefined) {
         if (prompt === undefined || isInProcessEnabled()) {
@@ -595,10 +632,52 @@ export const AgentTool = buildTool({
           routedTeammateProfile.providerProfile,
           { model: routedTeammateProfile.model },
         );
+      } else if (dispatchedProfile && dispatchDecision) {
+        // The dispatcher's pick lives on a saved profile, not the leader's
+        // route. A binding that cannot be resolved must not fail the spawn:
+        // fall back to the default model and say so.
+        try {
+          providerProfileEnv = resolveProviderProfileEnv(dispatchedProfile, { model: dispatchedModel });
+          effectiveProviderProfileRef = dispatchedProfile;
+        } catch (error) {
+          const warning = `could not bind provider profile for ${dispatchedModel}: ${errorMessage(error)}; spawning on the default model`;
+          dispatchDecision = { ...dispatchDecision, family: undefined, model: undefined, providerProfile: undefined, warning, reason: `${dispatchDecision.reason}; WARNING: ${warning}` };
+        }
       }
       const boundModel = providerProfileEnv?.OPENCLAUDE_TEAMMATE_MODEL;
       if (boundModel && !isModelAllowed(boundModel)) {
         throw new Error(`Model '${boundModel}' is not available. Your organization restricts model selection.`);
+      }
+      // What the teammate will actually run (for the separation rule and the
+      // member record): binding > cross-provider route > model-only route >
+      // resolved model > the leader's own.
+      const effectiveTeammateModel =
+        boundModel ??
+        routedTeammateProvider?.model ??
+        routedTeammateModelOnly ??
+        resolvedTeammateModel ??
+        toolUseContext.options.mainLoopModel;
+      if (dispatchMode !== 'off' && teammateModelIsExplicit) {
+        dispatchDecision = await chooseTeammateRoute({
+          ...dispatchInput,
+          explicitModel: effectiveTeammateModel
+        });
+        if (dispatchDecision.refusal) {
+          if (dispatchMode === 'auto') {
+            throw new Error(dispatchDecision.refusal);
+          }
+          dispatchDecision = { ...dispatchDecision, reason: `${dispatchDecision.reason}; WOULD REFUSE: ${dispatchDecision.refusal}` };
+        }
+      }
+      const dispatchRecord = dispatchDecision
+        ? toDispatchRecord(dispatchDecision, {
+            model: effectiveTeammateModel,
+            family: familyOfModel(effectiveTeammateModel)
+          })
+        : undefined;
+      const dispatchSummary = dispatchDecision ? formatDispatchSummary(dispatchDecision) : undefined;
+      if (dispatchSummary) {
+        logForDebugging(`[AgentTool] ${name}: ${dispatchSummary}`);
       }
       const spawnOne = (spawnName: string) => spawnTeammate({
         name: spawnName,
@@ -610,11 +689,12 @@ export const AgentTool = buildTool({
         model: providerProfileEnv
           ? undefined
           : routedTeammateProvider?.model ?? routedTeammateModelOnly ?? resolvedTeammateModel,
-        modelWasToolSpecified: model !== undefined,
+        modelWasToolSpecified: teammateModelArg !== undefined,
         agent_type: subagent_type,
         providerEnv: providerProfileEnv,
         providerProfileRef: effectiveProviderProfileRef,
-        invokingRequestId: assistantMessage?.requestId
+        invokingRequestId: assistantMessage?.requestId,
+        ...(dispatchRecord ? { dispatch: dispatchRecord } : {})
       }, toolUseContext);
 
       if (replicas !== undefined && replicas > 1) {
@@ -647,7 +727,8 @@ export const AgentTool = buildTool({
           prompt,
           ...first,
           replicas: spawned,
-          ...(failed ? { failed } : {})
+          ...(failed ? { failed } : {}),
+          ...(dispatchSummary ? { dispatch: dispatchSummary } : {})
         };
         return {
           data: replicaResult
@@ -665,7 +746,8 @@ export const AgentTool = buildTool({
       const spawnResult: TeammateSpawnedOutput = {
         status: 'teammate_spawned' as const,
         prompt,
-        ...result.data
+        ...result.data,
+        ...(dispatchSummary ? { dispatch: dispatchSummary } : {})
       };
       return {
         data: spawnResult
@@ -816,11 +898,53 @@ export const AgentTool = buildTool({
 
     // Resolve agent params for logging and prebuilt system prompts. runAgent
     // resolves the same settings again before the actual query.
-    const resolvedAgentModel = getAgentModel(selectedAgent.model, toolUseContext.options.mainLoopModel, isForkPath ? undefined : model, permissionMode);
+    //
+    // Subagent dispatch (same policy as teammates, in-process so leader-route
+    // candidates only). The fork path keeps the parent's model: its request
+    // prefix must stay cache-identical.
+    let subagentModel = isForkPath ? undefined : model;
+    if (!isForkPath) {
+      const dispatchSettings = getInitialSettings();
+      const subagentDispatchMode = readTeammateDispatchSettings(dispatchSettings).mode;
+      if (subagentDispatchMode !== 'off') {
+        const subagentModelIsExplicit =
+          model !== undefined ||
+          selectedAgent.model !== undefined ||
+          !!process.env.CLAUDE_CODE_SUBAGENT_MODEL ||
+          hasNamedAgentRouting(name, selectedAgent.agentType, dispatchSettings);
+        const explicitSubagentModel = model ?? selectedAgent.model;
+        const subagentDecision = await chooseTeammateRoute({
+          description,
+          prompt,
+          name,
+          subagent_type: selectedAgent.agentType,
+          teamName,
+          settings: dispatchSettings,
+          leaderModel: toolUseContext.options.mainLoopModel,
+          allowProfileBinding: false,
+          ...(subagentModelIsExplicit
+            ? {
+                explicitModel:
+                  explicitSubagentModel === undefined || explicitSubagentModel === 'inherit'
+                    ? toolUseContext.options.mainLoopModel
+                    : explicitSubagentModel
+              }
+            : {})
+        });
+        if (subagentDecision.refusal && subagentDispatchMode === 'auto') {
+          throw new Error(subagentDecision.refusal);
+        }
+        if (!subagentModelIsExplicit && subagentDispatchMode === 'auto' && subagentDecision.model) {
+          subagentModel = subagentDecision.model;
+        }
+        logForDebugging(`[AgentTool] subagent ${name ?? selectedAgent.agentType}: ${formatDispatchSummary(subagentDecision)}`);
+      }
+    }
+    const resolvedAgentModel = getAgentModel(selectedAgent.model, toolUseContext.options.mainLoopModel, subagentModel, permissionMode);
     const { mainLoopModel: effectiveAgentModel } = resolveAgentRunModelRouting({
       resolvedAgentModel,
       parentModel: toolUseContext.options.mainLoopModel,
-      toolSpecifiedModel: isForkPath ? undefined : model,
+      toolSpecifiedModel: subagentModel,
       agentName: name,
       subagentType: selectedAgent.agentType,
       agentDefinitionModel: selectedAgent.model,
@@ -1010,7 +1134,7 @@ export const AgentTool = buildTool({
       canUseTool,
       isAsync: shouldRunAsync,
       querySource: toolUseContext.options.querySource ?? getQuerySourceForAgent(selectedAgent.agentType, isBuiltInAgent(selectedAgent)),
-      model: isForkPath ? undefined : model,
+      model: subagentModel,
       // Fork path: pass parent's system prompt AND parent's exact tool
       // array (cache-identical prefix). workerTools is rebuilt under
       // permissionMode 'bubble' which differs from the parent's mode, so
@@ -1748,7 +1872,7 @@ export const AgentTool = buildTool({
           type: 'tool_result',
           content: [{
             type: 'text',
-            text: `Spawned ${count} teammate${count === 1 ? '' : 's'} in team ${spawnData.team_name}:\n${lines}${failure}${idleNote}\nAddress one with SendMessage(to=<name>); ListAgents shows them all.`
+            text: `Spawned ${count} teammate${count === 1 ? '' : 's'} in team ${spawnData.team_name}:\n${lines}${failure}${idleNote}\nAddress one with SendMessage(to=<name>); ListAgents shows them all.${spawnData.dispatch ? `\n${spawnData.dispatch}` : ''}`
           }]
         };
       }
@@ -1761,7 +1885,7 @@ export const AgentTool = buildTool({
 agent_id: ${spawnData.teammate_id}
 name: ${spawnData.name}
 team_name: ${spawnData.team_name}
-The agent is now running and will receive instructions via mailbox.`
+The agent is now running and will receive instructions via mailbox.${spawnData.dispatch ? `\n${spawnData.dispatch}` : ''}`
         }]
       };
     }

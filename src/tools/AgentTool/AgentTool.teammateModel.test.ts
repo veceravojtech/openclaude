@@ -51,10 +51,27 @@ beforeEach(async () => {
   allowedModelsForTest = new Set(['allowed-model'])
   inProcessEnabledForTest = false
   providerProfileEnvForTest = codexProfileEnvFixture
+  // These tests pin the pre-dispatch resolution: give the teammate
+  // dispatcher no usable candidate so it leaves the default untouched.
+  // Dispatch itself is covered in AgentTool.dispatch.test.ts.
+  const { _setTeammateDispatchDepsForTesting } = await import(
+    '../../services/api/smartRouting/teammate.js'
+  )
+  _setTeammateDispatchDepsForTesting({
+    isJevConfigured: () => false,
+    leaderRoute: () => 'custom',
+    hasAnthropicAuth: () => false,
+    providerProfiles: () => [],
+    readTeamMembers: () => [],
+  })
 })
 
 afterEach(async () => {
   try {
+    const { _setTeammateDispatchDepsForTesting } = await import(
+      '../../services/api/smartRouting/teammate.js'
+    )
+    _setTeammateDispatchDepsForTesting(undefined)
     mock.restore()
     if (originalModelAllowlistModule) {
       mock.module(
@@ -684,4 +701,194 @@ test('propagates a provider_profile resolution failure before spawning', async (
   ).rejects.toThrow(/Unknown provider profile 'ghost'/)
 
   expect(spawnTeammate).not.toHaveBeenCalled()
+})
+
+// ---------------------------------------------------------------------------
+// Teammate dispatch (smartRouting/teammate.ts) through the Agent tool
+// ---------------------------------------------------------------------------
+
+async function setDispatchWorld(
+  members: Array<{ name: string; role?: string; family?: string; model?: string }> = [],
+): Promise<void> {
+  const { _setTeammateDispatchDepsForTesting } = await import(
+    '../../services/api/smartRouting/teammate.js'
+  )
+  _setTeammateDispatchDepsForTesting({
+    isJevConfigured: () => false,
+    leaderRoute: () => 'anthropic',
+    hasAnthropicAuth: () => true,
+    providerProfiles: () => [],
+    readTeamMembers: () => members,
+  })
+  allowedModelsForTest = new Set([
+    'allowed-model',
+    'claude-sonnet-5',
+    'claude-fable-5-1',
+    'claude-opus-5-5',
+  ])
+}
+
+function callDispatchTool(
+  AgentTool: typeof import('./AgentTool.js').AgentTool,
+  input: { description: string; prompt: string; name: string; model?: string },
+): ReturnType<typeof AgentTool.call> {
+  return AgentTool.call(
+    { team_name: 'review-team', ...input },
+    makeToolUseContext(),
+    mock(async () => ({ behavior: 'allow' })) as never,
+    { requestId: 'req-1' } as never,
+  )
+}
+
+function resultText(
+  AgentTool: typeof import('./AgentTool.js').AgentTool,
+  data: unknown,
+): string {
+  const block = AgentTool.mapToolResultToToolResultBlockParam(data as never, 'toolu_1')
+  const content = block.content as Array<{ text: string }>
+  return content.map(c => c.text).join('\n')
+}
+
+test('dispatch: an unset model is chosen by role and reported', async () => {
+  await setDispatchWorld()
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+  const result = await callDispatchTool(AgentTool, {
+    description: 'Implement the retry fix',
+    prompt: 'Fix the retry loop and commit.',
+    name: 'dev',
+  })
+  const config = getSpawnConfig(spawnTeammate)
+  expect(config.model).toBe('claude-sonnet-5')
+  expect(config.modelWasToolSpecified).toBe(true)
+  expect(config.dispatch).toMatchObject({
+    role: 'implement',
+    family: 'sonnet-5',
+    source: 'heuristic',
+    mode: 'auto',
+  })
+  expect(resultText(AgentTool, result.data)).toContain('dispatch: implement → sonnet-5')
+})
+
+test('dispatch: a reviewer after a sonnet-5 implementer never gets sonnet-5', async () => {
+  await setDispatchWorld([{ name: 'dev', role: 'implement', family: 'sonnet-5' }])
+  settingsForTest = {
+    teammateDispatch: { policy: { tiers: { deep: ['sonnet-5', 'opus-5.5'] } } },
+  }
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+  const result = await callDispatchTool(AgentTool, {
+    description: 'Review the retry diff',
+    prompt: 'Critique the diff.',
+    name: 'rev',
+  })
+  const config = getSpawnConfig(spawnTeammate)
+  expect(config.model).toBe('claude-opus-5-5')
+  expect(config.dispatch?.role).toBe('review')
+  expect(resultText(AgentTool, result.data)).toContain(
+    'dispatch: review → opus-5.5 (heuristic',
+  )
+  expect(resultText(AgentTool, result.data)).toContain('excluded sonnet-5 used by dev')
+})
+
+test('dispatch: an explicit same-family review model is refused with a clear error', async () => {
+  await setDispatchWorld([{ name: 'dev', role: 'implement', family: 'sonnet-5' }])
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+  await expect(
+    callDispatchTool(AgentTool, {
+      description: 'Review the retry diff',
+      prompt: 'Critique the diff.',
+      name: 'rev',
+      model: 'claude-sonnet-5',
+    }),
+  ).rejects.toThrow(/review teammate 'rev'.*'dev' implemented with sonnet-5.*fable-5\.1/)
+  expect(spawnTeammate).not.toHaveBeenCalled()
+})
+
+test('dispatch: an explicit non-review model is respected and its role recorded', async () => {
+  await setDispatchWorld([{ name: 'dev', role: 'implement', family: 'sonnet-5' }])
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+  await callDispatchTool(AgentTool, {
+    description: 'Implement the second half',
+    prompt: 'Write the parser.',
+    name: 'dev2',
+    model: 'claude-sonnet-5',
+  })
+  const config = getSpawnConfig(spawnTeammate)
+  expect(config.model).toBe('claude-sonnet-5')
+  expect(config.dispatch).toMatchObject({
+    role: 'implement',
+    family: 'sonnet-5',
+    source: 'explicit',
+  })
+})
+
+test('dispatch: suggest mode reports but does not apply', async () => {
+  await setDispatchWorld()
+  settingsForTest = { teammateDispatch: { mode: 'suggest' } }
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+  const result = await callDispatchTool(AgentTool, {
+    description: 'Review the retry diff',
+    prompt: 'Critique the diff.',
+    name: 'rev',
+  })
+  const config = getSpawnConfig(spawnTeammate)
+  expect(config.model).toBeUndefined()
+  expect(config.modelWasToolSpecified).toBe(false)
+  expect(resultText(AgentTool, result.data)).toContain(
+    'dispatch: review → fable-5.1',
+  )
+  expect(resultText(AgentTool, result.data)).toContain('[suggest only — not applied]')
+})
+
+test('dispatch: off mode is today\'s behaviour', async () => {
+  await setDispatchWorld()
+  settingsForTest = { teammateDispatch: { mode: 'off' } }
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+  const result = await callDispatchTool(AgentTool, {
+    description: 'Review the retry diff',
+    prompt: 'Critique the diff.',
+    name: 'rev',
+  })
+  const config = getSpawnConfig(spawnTeammate)
+  expect(config.model).toBeUndefined()
+  expect(config.dispatch).toBeUndefined()
+  expect(resultText(AgentTool, result.data)).not.toContain('dispatch:')
+})
+
+test('dispatch: a pick on a saved profile binds that profile', async () => {
+  const { _setTeammateDispatchDepsForTesting } = await import(
+    '../../services/api/smartRouting/teammate.js'
+  )
+  _setTeammateDispatchDepsForTesting({
+    isJevConfigured: () => false,
+    leaderRoute: () => 'anthropic',
+    hasAnthropicAuth: () => false,
+    readTeamMembers: () => [],
+    providerProfiles: () => [
+      {
+        id: 'prof_deepseek',
+        name: 'DeepSeek',
+        provider: 'deepseek',
+        baseUrl: 'https://api.deepseek.com/v1',
+        model: 'deepseek-v4-pro',
+        apiKey: 'sk-test-not-real',
+      },
+    ],
+  })
+  allowedModelsForTest = new Set(['allowed-model', 'deepseek-v4-pro'])
+  providerProfileEnvForTest = {
+    OPENAI_BASE_URL: 'https://api.deepseek.com/v1',
+    OPENAI_MODEL: 'deepseek-v4-pro',
+    OPENCLAUDE_TEAMMATE_MODEL: 'deepseek-v4-pro',
+    CLAUDE_CODE_USE_OPENAI: '1',
+  }
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+  await callDispatchTool(AgentTool, {
+    description: 'Implement the retry fix',
+    prompt: 'Fix it.',
+    name: 'dev',
+  })
+  const config = getSpawnConfig(spawnTeammate)
+  expect(config.providerProfileRef).toBe('prof_deepseek')
+  expect(config.providerEnv?.OPENCLAUDE_TEAMMATE_MODEL).toBe('deepseek-v4-pro')
+  expect(config.dispatch).toMatchObject({ role: 'implement', family: 'deepseek-v4-pro' })
 })

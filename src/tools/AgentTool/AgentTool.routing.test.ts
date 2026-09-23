@@ -402,3 +402,67 @@ function createToolUseContext(
     updateAttributionState: () => {},
   } as unknown as ToolUseContext
 }
+
+test('subagent dispatch: an unset model is chosen by role in-process', async () => {
+  const { _setTeammateDispatchDepsForTesting } = await import(
+    '../../services/api/smartRouting/teammate.js'
+  )
+  _setTeammateDispatchDepsForTesting({
+    isJevConfigured: () => false,
+    leaderRoute: () => 'anthropic',
+    hasAnthropicAuth: () => true,
+    providerProfiles: () => [],
+    readTeamMembers: () => [],
+    isModelAllowed: () => true,
+  })
+  try {
+    const { AgentTool, getRunAgentParams } = await importAgentToolWithRoutingMocks()
+    await AgentTool.call(
+      { description: 'Review the retry diff', prompt: 'Critique the diff.' },
+      createToolUseContext('parent-model', [createAgentDefinition()]),
+      mock(async () => ({ behavior: 'allow' })) as never,
+      { requestId: 'req-dispatch' } as never,
+    )
+    expect(getRunAgentParams()?.model).toBe('claude-fable-5-1')
+
+    settingsForTest = { teammateDispatch: { mode: 'off' } }
+    const off = await importAgentToolWithRoutingMocks()
+    await off.AgentTool.call(
+      { description: 'Review the retry diff', prompt: 'Critique the diff.' },
+      createToolUseContext('parent-model', [createAgentDefinition()]),
+      mock(async () => ({ behavior: 'allow' })) as never,
+      { requestId: 'req-dispatch-off' } as never,
+    )
+    expect(off.getRunAgentParams()?.model).toBeUndefined()
+  } finally {
+    _setTeammateDispatchDepsForTesting(undefined)
+  }
+})
+
+test('subagent dispatch: an agent-definition model is respected', async () => {
+  const { _setTeammateDispatchDepsForTesting } = await import(
+    '../../services/api/smartRouting/teammate.js'
+  )
+  _setTeammateDispatchDepsForTesting({
+    isJevConfigured: () => false,
+    leaderRoute: () => 'anthropic',
+    hasAnthropicAuth: () => true,
+    providerProfiles: () => [],
+    readTeamMembers: () => [],
+    isModelAllowed: () => true,
+  })
+  try {
+    const { AgentTool, getRunAgentParams } = await importAgentToolWithRoutingMocks()
+    await AgentTool.call(
+      { description: 'Review the retry diff', prompt: 'Critique the diff.' },
+      createToolUseContext('parent-model', [
+        { ...createAgentDefinition(), model: 'parent-model' } as AgentDefinition,
+      ]),
+      mock(async () => ({ behavior: 'allow' })) as never,
+      { requestId: 'req-dispatch-def' } as never,
+    )
+    expect(getRunAgentParams()?.model).toBeUndefined()
+  } finally {
+    _setTeammateDispatchDepsForTesting(undefined)
+  }
+})

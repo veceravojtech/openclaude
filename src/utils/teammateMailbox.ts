@@ -7,6 +7,7 @@
  * Note: Inboxes are keyed by agent name within a team.
  */
 
+import type { TeammateDispatchRecord } from '../services/api/smartRouting/teammate.js'
 import { mkdir, readFile, writeFile } from 'fs/promises'
 import { join } from 'path'
 import { z } from 'zod/v4'
@@ -462,6 +463,8 @@ export type TeammateStartupNotification = {
   model: string
   provider: string
   transport: string
+  /** Teammate dispatch decision (role, family, source, reason…), when one was made. */
+  dispatch?: TeammateDispatchRecord
 }
 
 export function createTeammateStartupNotification(
@@ -475,6 +478,7 @@ export function createTeammateStartupNotification(
     model: details.model,
     provider: details.provider,
     transport: details.transport,
+    ...(details.dispatch ? { dispatch: details.dispatch } : {}),
   }
 }
 

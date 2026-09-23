@@ -231,7 +231,7 @@ A teammate is a named agent in your team. It differs from a one-shot subagent in
 
 - **It starts with no history.** It has never seen your conversation. The prompt you write is its entire briefing.
 - **It persists.** After it reports, it stays. ${SEND_MESSAGE_TOOL_NAME} re-tasks it with its context still loaded.
-- **It can be specialized.** \`subagent_type\` picks a custom agent definition; \`model\` picks its model. Per-teammate models and providers can also be configured by name in settings (\`agentRouting\`), so a teammate called \`researcher\` can run on a different model — or a different provider — than you. Use this deliberately: cheap models for breadth, strong models for judgment.
+- **It can be specialized.** \`subagent_type\` picks a custom agent definition. Normally leave \`model\` unset: a dispatcher picks each teammate's model from its role — deep models for review and design, standard models for implementation, verification and research, fast vision models for computer use — and the Agent tool result reports its choice (\`dispatch: review → …\`). It also enforces that a reviewer or verifier never runs on the model family an implementer in the same team used, and refuses an explicit \`model\` that would break that. Set \`model\` only when you need a specific one. Per-teammate models and providers can also be configured by name in settings (\`agentRouting\`), so a teammate called \`researcher\` can run on a different model — or a different provider — than you.
 - **It cannot spawn teammates.** The roster is flat. A teammate that needs helpers creates its own sub-team first.
 
 ${teammateCapabilities}

@@ -188,3 +188,25 @@ test('the split-pane handler rejects an idle spawn with a clear error', async ()
     'idle spawn (no prompt) is only supported for in-process teammates',
   )
 })
+
+test('the dispatch decision is recorded on the team member entry', async () => {
+  const { spawnMultiAgent, teamFiles } = await importSpawnMultiAgentWithMocks()
+  const dispatch = {
+    role: 'review' as const,
+    family: 'fable-5.1',
+    model: 'claude-fable-5-1',
+    source: 'jev' as const,
+    mode: 'auto' as const,
+    reason: 'jev p=0.86; excluded sonnet-5 used by dev',
+    probabilities: { review: 0.86, implement: 0.14 },
+    costUsd: 0.0004,
+  }
+  await spawnMultiAgent.spawnTeammate(
+    { name: 'rev', team_name: 'dispatch-team', description: 'review', dispatch },
+    makeToolUseContext(),
+  )
+  const member = teamFiles.get('dispatch-team')?.members.find(m => m.name === 'rev')
+  expect(member?.role).toBe('review')
+  expect(member?.family).toBe('fable-5.1')
+  expect(member?.dispatch).toEqual(dispatch)
+})

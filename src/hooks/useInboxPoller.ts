@@ -276,7 +276,7 @@ export function useInboxPoller({
       const startup = isTeammateStartupNotification(message.text)
       if (!startup) continue
       logForDebugging(
-        `[InboxPoller] Teammate ${startup.from} ready: model=${startup.model}, provider=${startup.provider}, transport=${startup.transport}`,
+        `[InboxPoller] Teammate ${startup.from} ready: model=${startup.model}, provider=${startup.provider}, transport=${startup.transport}${startup.dispatch ? `, dispatch=${startup.dispatch.role}→${startup.dispatch.family ?? startup.dispatch.model ?? 'default'} (${startup.dispatch.source}: ${startup.dispatch.reason})` : ''}`,
       )
     }
 

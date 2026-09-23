@@ -11,6 +11,7 @@ import { execFileNoThrowWithCwd } from '../execFileNoThrow.js'
 import { gitExe } from '../git.js'
 import { lazySchema } from '../lazySchema.js'
 import type { PermissionMode } from '../permissions/PermissionMode.js'
+import type { TeammateDispatchRecord } from '../../services/api/smartRouting/teammate.js'
 import { jsonParse, jsonStringify } from '../slowOperations.js'
 import { getTasksDir, notifyTasksUpdated } from '../tasks.js'
 import { getAgentName, getTeamName, isTeammate } from '../teammate.js'
@@ -128,6 +129,12 @@ export type TeamFile = {
     tmuxSocket?: string
     isActive?: boolean // false when idle, undefined/true when active
     mode?: PermissionMode // Current permission mode for this teammate
+    /** Dispatcher role (research/implement/review/verify/design/computer_use). */
+    role?: string
+    /** Model family the teammate runs (teammate dispatch); absent when off-matrix. */
+    family?: string
+    /** The dispatch decision, echoed in the teammate_startup record. */
+    dispatch?: TeammateDispatchRecord
   }>
 }
 

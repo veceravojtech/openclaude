@@ -209,6 +209,83 @@ and `Plan` (if feature-gated on), and `code-reviewer` (requires diff inline). Fo
 verifier on `gpt-5-mini` while your main session stays on its model, but only when the verification gate is active. Absent
 any entry, the verifier inherits the main-loop model.
 
+### Teammate dispatch
+
+When a teammate (or subagent) is spawned with no `model` from the call, its
+agent definition, a `provider_profile` or a named `agentRouting` entry, a
+dispatcher picks one from the teammate's **role**:
+
+| Role | What it covers | Default tier |
+| --- | --- | --- |
+| `review` | code review, critiquing a diff | deep |
+| `design` | planning, architecture, hard debugging | deep |
+| `implement` | writing or modifying code, fixes | standard (deep when JEV rates it hard) |
+| `verify` | tests, proving a change works, QA | standard |
+| `research` | exploring, reading, finding, investigating | standard (fast when trivial) |
+| `computer_use` | browser/GUI/desktop automation, screenshots, Playwright | fast, vision-capable only |
+
+| Tier | Families, in order |
+| --- | --- |
+| deep | `fable-5.1`, `opus-5.5`, `gpt-6` |
+| standard | `sonnet-5`, `deepseek-v4-pro`, `glm-5.3`, `gpt-5.6` (sol) |
+| fast | `deepseek-v4.1-flash`, `glm-5.3` (flash), `gpt-5.6` (luna) |
+
+The role comes from a keyword heuristic first. When it is not confident and
+JEV is configured (`AI_GATEWAY_API_KEY`), one JEV call classifies the role,
+complexity and long-context need. A failed or unconfident JEV answer falls back
+to the heuristic, then to `implement`; a spawn never waits longer than the JEV
+timeout.
+
+The first family in the tier that is actually usable wins: it must be admitted
+by `teammateModelAllowlist`, served on this machine (the leader's own route —
+the Anthropic route needs Anthropic login or API key — or a saved provider
+profile, which is bound to the teammate like `provider_profile`) and, for
+`computer_use`, marked `supportsVision` in the model catalog. `gpt-5.6` is not
+in the teammate matrix, so it is only a candidate with
+`"teammateModelAllowlist": ["*"]`. If a tier has nothing usable the dispatcher
+tries the lower tiers, then the higher ones; if nothing qualifies at all the
+teammate spawns on the default model and the result says so.
+
+**Separation rule.** A `review` or `verify` teammate never gets a model family
+an `implement` teammate in the same team used. Each member's role and family are
+recorded in the team's `config.json`; for older members with no role, every
+non-review member's family is avoided. An explicit `model` that breaks the rule
+is refused:
+
+```text
+Refusing to spawn review teammate 'rev' on 'claude-sonnet-5' (sonnet-5): 'dev' implemented with sonnet-5 in team 'auth-fix'. A review teammate must use a different model family than the implementer. Use one of: fable-5.1, opus-5.5, gpt-6, deepseek-v4-pro, glm-5.3, gpt-5.6, deepseek-v4.1-flash, or omit model to let the dispatcher choose.
+```
+
+Every teammate spawn result ends with the decision, and the same decision is
+added to the teammate's `teammate_startup` record:
+
+```text
+dispatch: review → opus-5.5 (jev p=0.86; excluded sonnet-5 used by dev)
+```
+
+Configure it with `teammateDispatch`:
+
+```json
+{
+  "teammateDispatch": {
+    "mode": "auto",
+    "policy": {
+      "roles": { "research": "fast" },
+      "tiers": { "deep": ["opus-5.5", "fable-5.1"] }
+    },
+    "jev": { "enabled": true, "timeoutMs": 3000, "minP": 0.75, "minMargin": 0.15 }
+  }
+}
+```
+
+- `mode`: `auto` (default) applies the choice; `suggest` only reports it (and
+  reports, rather than refuses, a separation conflict); `off` restores the
+  previous behaviour.
+- `policy.roles` / `policy.tiers` override the tables above. Unknown roles,
+  tiers or families log one warning and are ignored.
+- `jev`: `enabled` (default `true`), `timeoutMs`, and the acceptance thresholds
+  `minP` / `minMargin`.
+
 ## GitHub Copilot sub-agent optimization
 
 When `CLAUDE_CODE_USE_GITHUB=1`, OpenClaude serializes sub-agent execution to

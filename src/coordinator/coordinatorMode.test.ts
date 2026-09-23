@@ -155,4 +155,11 @@ describe('getCoordinatorSystemPrompt — supervision', () => {
     expect(prompt).toContain('agentRouting')
     expect(prompt).not.toContain('Do not set the model parameter')
   })
+
+  it('tells the supervisor to let the dispatcher choose models', () => {
+    const prompt = getCoordinatorSystemPrompt()
+    expect(prompt).toContain('Normally leave `model` unset')
+    expect(prompt).toContain('never runs on the model family an implementer')
+    expect(prompt).not.toContain('cheap models for breadth')
+  })
 })

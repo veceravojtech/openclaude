@@ -950,6 +950,46 @@ export const SettingsSchema = lazySchema(() =>
             "A teammate that inherits the leader's own model and provider is always allowed. " +
             'Example: ["deepseek-v4-pro", "glm-5.3-flash"]',
         ),
+      teammateDispatch: z
+        .object({
+          mode: z
+            .enum(['auto', 'suggest', 'off'])
+            .optional()
+            .describe(
+              "'auto' (default) picks each teammate's model by role when the call and agent definition set none; " +
+                "'suggest' only reports the choice; 'off' keeps the default model.",
+            ),
+          policy: z
+            .object({
+              roles: z
+                .record(z.string(), z.string())
+                .optional()
+                .describe(
+                  'Role → tier overrides. Roles: research, implement, review, verify, design, computer_use. Tiers: deep, standard, fast.',
+                ),
+              tiers: z
+                .record(z.string(), z.array(z.string()))
+                .optional()
+                .describe(
+                  'Tier → ordered model-family list overrides (families: fable-5.1, opus-5.5, gpt-6, sonnet-5, deepseek-v4-pro, glm-5.3, gpt-5.6, deepseek-v4.1-flash). Unknown entries warn once and are ignored.',
+                ),
+            })
+            .optional(),
+          jev: z
+            .object({
+              enabled: z.boolean().optional(),
+              timeoutMs: z.number().optional(),
+              minP: z.number().optional(),
+              minMargin: z.number().optional(),
+            })
+            .optional()
+            .describe('JEV role classifier: enabled (default true), timeout and acceptance thresholds.'),
+        })
+        .optional()
+        .describe(
+          'Teammate dispatch: route each spawned teammate to a model by its role (review/design → deep, implement/verify/research → standard, computer use → fast vision). ' +
+            "A review/verify teammate never gets a model family used by an implementer in the same team. See docs/agent-routing.md.",
+        ),
       smartRouting: z
         .object({
           enabled: z.boolean().optional().describe('Opt in to per-turn simple-vs-strong model routing. Off by default.'),

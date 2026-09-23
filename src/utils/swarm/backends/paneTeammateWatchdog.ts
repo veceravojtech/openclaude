@@ -915,7 +915,7 @@ export function armPaneTeammateWatchdog({
         const startup = isTeammateStartupNotification(message.text)
         if (startup) {
           logForDebugging(
-            `[PaneWatchdog] ${teammateName} ready: model=${startup.model}, provider=${startup.provider}, transport=${startup.transport}`,
+            `[PaneWatchdog] ${teammateName} ready: model=${startup.model}, provider=${startup.provider}, transport=${startup.transport}${startup.dispatch ? `, dispatch=${startup.dispatch.role}→${startup.dispatch.family ?? startup.dispatch.model ?? 'default'} (${startup.dispatch.source}: ${startup.dispatch.reason})` : ''}`,
           )
         }
       }

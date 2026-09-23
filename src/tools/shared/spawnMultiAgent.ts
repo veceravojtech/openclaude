@@ -3,6 +3,7 @@
  * Extracted from TeammateTool to allow reuse by AgentTool.
  */
 
+import type { TeammateDispatchRecord } from '../../services/api/smartRouting/teammate.js'
 import {
   getChromeFlagOverride,
   getFlagSettingsPath,
@@ -253,6 +254,8 @@ export type SpawnTeammateConfig = {
    *  spawned this teammate. Threaded through to TeammateAgentContext for
    *  lineage tracing on tengu_api_* events. */
   invokingRequestId?: string
+  /** Teammate dispatch decision: role + family recorded on the member entry. */
+  dispatch?: TeammateDispatchRecord
 }
 
 // Internal input type matching TeammateTool's spawn parameters.
@@ -272,6 +275,8 @@ type SpawnInput = {
   providerEnv?: Record<string, string>
   providerProfileRef?: string
   invokingRequestId?: string
+  /** Teammate dispatch decision: role + family recorded on the member entry. */
+  dispatch?: TeammateDispatchRecord
 }
 
 // ============================================================================
@@ -924,6 +929,8 @@ export async function handleSpawnSplitPane(
     subscriptions: [],
     backendType: detectionResult.backend.type,
     ...(tmuxSocket !== undefined ? { tmuxSocket } : {}),
+
+    ...dispatchMemberFields(input.dispatch),
   })
   await writeTeamFileAsync(teamName, teamFile)
 
@@ -1141,6 +1148,8 @@ export async function handleSpawnSeparateWindow(
     subscriptions: [],
     backendType: 'tmux', // This handler always uses tmux directly
     tmuxSocket: getSwarmSocketName(),
+
+    ...dispatchMemberFields(input.dispatch),
   })
   await writeTeamFileAsync(teamName, teamFile)
 
@@ -1485,6 +1494,8 @@ async function handleSpawnInProcess(
     cwd: getCwd(),
     subscriptions: [],
     backendType: 'in-process',
+
+    ...dispatchMemberFields(input.dispatch),
   })
   await writeTeamFileAsync(teamName, teamFile)
 
@@ -1576,6 +1587,18 @@ async function handleSpawn(
 // ============================================================================
 // Main Export
 // ============================================================================
+
+/** Member-entry fields recording the teammate dispatch decision. */
+function dispatchMemberFields(
+  dispatch: TeammateDispatchRecord | undefined,
+): { role?: string; family?: string; dispatch?: TeammateDispatchRecord } {
+  if (!dispatch) return {}
+  return {
+    role: dispatch.role,
+    ...(dispatch.family ? { family: dispatch.family } : {}),
+    dispatch,
+  }
+}
 
 /**
  * Spawns a new teammate with the given configuration.

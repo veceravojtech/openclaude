@@ -127,6 +127,9 @@ export function initializeTeammateHooks(
                     : process.env.OPENAI_API_FORMAT === 'responses_compat'
                       ? 'openai-responses-compat'
                       : 'openai-chat-completions'
+  // The leader records the dispatch decision on this member's entry before
+  // the child boots; echo it so the startup record says why this model.
+  const ownDispatch = teamFile.members.find(m => m.name === agentName)?.dispatch
   void writeToMailbox(leadAgentName, {
     from: agentName,
     text: jsonStringify(
@@ -134,6 +137,7 @@ export function initializeTeammateHooks(
         model: startupModel,
         provider,
         transport,
+        ...(ownDispatch ? { dispatch: ownDispatch } : {}),
       }),
     ),
     timestamp: new Date().toISOString(),
