@@ -274,6 +274,95 @@ describe('resolveAgentProvider', () => {
     )
   })
 
+  // An EXPLICIT model argument naming an agentModels key is an instruction,
+  // like an agentRouting key: a half-configured entry throws on every path
+  // that takes one, instead of silently running the raw key on the leader's
+  // provider and credentials.
+  describe('an explicit model equal to a half-configured agentModels key throws', () => {
+    const HALF_MESSAGE =
+      'agentModels entry "half" has only one of base_url/api_key; both are required for cross-provider routing.'
+    const halfSettings = (entry: Record<string, string>) =>
+      ({
+        agentModels: {
+          half: entry,
+          full: {
+            model: 'glm-5.1',
+            base_url: 'https://api.z.ai/api/coding/paas/v4',
+            api_key: 'sk-zai',
+          },
+        },
+      }) as unknown as SettingsJson
+
+    for (const [label, entry] of [
+      ['api_key only', { api_key: 'sk-only' }],
+      ['base_url only', { base_url: 'https://api.example.com/v1' }],
+    ] as const) {
+      test(`${label}: strict lookup, in-process run routing, pane route and pane model-only`, () => {
+        const settings = halfSettings(entry)
+        expect(() =>
+          resolveAgentModelProvider('half', settings, { strict: true }),
+        ).toThrow(HALF_MESSAGE)
+        expect(() =>
+          resolveAgentRunModelRouting({
+            resolvedAgentModel: 'half',
+            parentModel: 'claude-opus-5-5',
+            toolSpecifiedModel: 'half',
+            settings,
+          }),
+        ).toThrow(HALF_MESSAGE)
+        expect(() =>
+          resolveOutOfProcessTeammateProvider({ cliModel: 'half', settings }),
+        ).toThrow(HALF_MESSAGE)
+        expect(() =>
+          resolveOutOfProcessTeammateModelOnly({
+            cliModel: 'half',
+            parentModel: 'claude-opus-5-5',
+            settings,
+          }),
+        ).toThrow(HALF_MESSAGE)
+        expect(errorSpy).not.toHaveBeenCalled()
+      })
+    }
+
+    test('a complete entry still routes through the same explicit paths', () => {
+      const settings = halfSettings({ api_key: 'sk-only' })
+      const override = {
+        model: 'glm-5.1',
+        baseURL: 'https://api.z.ai/api/coding/paas/v4',
+        apiKey: 'sk-zai',
+      }
+      expect(resolveAgentModelProvider('full', settings, { strict: true })).toEqual(override)
+      expect(
+        resolveAgentRunModelRouting({
+          resolvedAgentModel: 'full',
+          parentModel: 'claude-opus-5-5',
+          toolSpecifiedModel: 'full',
+          settings,
+        }),
+      ).toEqual({ mainLoopModel: 'glm-5.1', providerOverride: override })
+      expect(
+        resolveOutOfProcessTeammateProvider({ cliModel: 'full', settings }),
+      ).toEqual(override)
+    })
+
+    test('a model that is not an agentModels key is unaffected', () => {
+      const settings = halfSettings({ api_key: 'sk-only' })
+      expect(resolveAgentModelProvider('claude-opus-5-5', settings, { strict: true })).toBeNull()
+      expect(
+        resolveAgentRunModelRouting({
+          resolvedAgentModel: 'claude-opus-5-5',
+          parentModel: 'claude-opus-5-5',
+          toolSpecifiedModel: 'claude-opus-5-5',
+          settings,
+        }),
+      ).toEqual({ mainLoopModel: 'claude-opus-5-5' })
+      expect(
+        resolveOutOfProcessTeammateProvider({ cliModel: 'claude-opus-5-5', settings }),
+      ).toBeNull()
+      expect(errorSpy).not.toHaveBeenCalled()
+    })
+  })
+
 })
 
 const modelOnlySettings = {

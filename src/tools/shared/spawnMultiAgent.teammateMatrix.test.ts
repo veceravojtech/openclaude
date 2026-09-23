@@ -474,6 +474,53 @@ test('a broken agentRouting key refuses the spawn cleanly, naming key and entry'
   expectNothingLeftBehind('matrix-team')
 })
 
+// An explicit `model` naming a half-configured agentModels entry used to warn,
+// skip the route, and spawn the raw key on the LEADER's provider — with ['*']
+// straight through to a first-request failure, and on a matching route
+// silently on the leader's credentials. It now refuses like a routing key.
+for (const backend of ['in-process', 'split pane', 'separate window'] as const) {
+  for (const allowlist of [undefined, ['*']]) {
+    test(`${backend}${allowlist ? ' with ["*"]' : ''}: an explicit model equal to a half-configured agentModels key is refused`, async () => {
+      const spawnMultiAgent = await load({
+        inProcess: backend === 'in-process',
+        settings: {
+          agentModels: { half: { api_key: 'sk-only' } },
+          ...(allowlist ? { teammateModelAllowlist: allowlist } : {}),
+        },
+      })
+      await expect(
+        spawnMultiAgent.spawnTeammate(
+          {
+            name: 'half',
+            prompt: 'work',
+            team_name: 'matrix-team',
+            use_splitpane: backend !== 'separate window',
+            model: 'half',
+          },
+          context(),
+        ),
+      ).rejects.toThrow(
+        'agentModels entry "half" has only one of base_url/api_key; both are required for cross-provider routing.',
+      )
+      expectNothingLeftBehind('matrix-team')
+    })
+  }
+}
+
+test('a deepseek-route leader: an api_key-only `deepseek-v4-pro` entry is refused, not run on the leader credentials', async () => {
+  Object.assign(process.env, DEEPSEEK_ENV)
+  const spawnMultiAgent = await load({
+    settings: { agentModels: { 'deepseek-v4-pro': { api_key: 'sk-other' } } },
+  })
+  await expect(
+    spawnMultiAgent.spawnTeammate(
+      { name: 'ds', prompt: 'work', team_name: 'matrix-team', model: 'deepseek-v4-pro' },
+      context('deepseek-v4-pro'),
+    ),
+  ).rejects.toThrow('agentModels entry "deepseek-v4-pro" has only one of base_url/api_key')
+  expectNothingLeftBehind('matrix-team')
+})
+
 test('the in-process provider_profile error wins over the model check', async () => {
   const spawnMultiAgent = await load({ inProcess: true })
   await expect(

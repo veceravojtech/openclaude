@@ -221,16 +221,27 @@ export function resolveAgentProvider(
  * With no usable agentModels entry, a session on Anthropic's own API also looks
  * for a saved provider profile that serves a non-Claude model (see
  * resolveProviderProfileRoute). An explicit agentModels entry always wins.
+ *
+ * `strict` is for an EXPLICIT model argument (the Agent tool's `model`, a
+ * teammate's `--model`). When that argument names an agentModels key, the key
+ * is an instruction, just like an agentRouting key: a broken entry throws with
+ * the key named, instead of being skipped. Skipping it would run the teammate
+ * on the leader's provider with the raw key as its model id — silently on the
+ * leader's credentials, or failing at the first API call. A model that is not
+ * an agentModels key resolves exactly as it does without `strict`.
  */
 export function resolveAgentModelProvider(
   modelName: string | undefined,
   settings: SettingsJson | null,
+  options?: { strict?: boolean },
 ): AgentRoute | null {
   if (!modelName) return null
 
   const trimmedModelName = modelName.trim()
   const configured = settings?.agentModels
-    ? toAgentRoute(trimmedModelName, settings.agentModels[trimmedModelName])
+    ? toAgentRoute(trimmedModelName, settings.agentModels[trimmedModelName], {
+        strict: options?.strict,
+      })
     : null
   return configured ?? resolveProviderProfileRoute(trimmedModelName)
 }
@@ -352,7 +363,9 @@ export function resolveAgentRunModelRouting({
     // Tool-specified models are explicit. If the request is not a configured
     // agentModels key, preserve getAgentModel() alias/inherit/custom-ID behavior
     // instead of falling through to persistent agentRouting.
-    const route = resolveAgentModelProvider(toolRequestedModel, settings)
+    const route = resolveAgentModelProvider(toolRequestedModel, settings, {
+      strict: true,
+    })
     if (!route) return { mainLoopModel: resolvedAgentModel }
     if (isProviderOverride(route)) {
       return { mainLoopModel: route.model, providerOverride: route }
@@ -452,7 +465,9 @@ function resolveOutOfProcessTeammateRoute({
 }: OutOfProcessTeammateRouteInput): AgentRoute | null {
   const requestedModel = cliModel?.trim()
   if (requestedModel) {
-    const route = resolveAgentModelProvider(requestedModel, settings)
+    const route = resolveAgentModelProvider(requestedModel, settings, {
+      strict: true,
+    })
     return route ?? resolveDiscoveredProviderProfileRoute(requestedModel)
   }
 
@@ -512,7 +527,9 @@ export function resolveOutOfProcessTeammateModelOnly({
 }): string | undefined {
   const requestedModel = cliModel?.trim()
   if (requestedModel) {
-    const route = resolveAgentModelProvider(requestedModel, settings)
+    const route = resolveAgentModelProvider(requestedModel, settings, {
+      strict: true,
+    })
     return route && !isProviderOverride(route) && !isProviderProfileRoute(route)
       ? resolveModelOnlyModel(route.model, parentModel, permissionMode)
       : undefined
