@@ -18,6 +18,8 @@ import {
   readTeammateDispatchSettings,
   separationFamilyOf,
   pruneRouteCatalog,
+  toDispatchRecord,
+  vendorOf,
   type TeamMemberLike,
   type TeammateDispatchDeps,
 } from './teammate.js'
@@ -837,5 +839,233 @@ describe('spawnable candidates under "*"', () => {
     const decision = await chooseTeammateRoute({ description: 'Review the diff', settings: s })
     expect(decision.model).not.toBe('claude-fable-5-1')
     expect(decision.model).toBe('claude-opus-5-5')
+  })
+})
+
+describe('usage-aware dispatch', () => {
+  const allProfiles = [codexProfile, zaiProfile, deepseekProfile]
+  const usageOf = (levels: Record<string, number | 'unknown'>): TeammateDispatchDeps['routeUsage'] =>
+    route => {
+      const level = levels[route] ?? 'unknown'
+      return level === 'unknown' ? { route, level } : { route, level, window: '7d', source: 'headers' }
+    }
+  const jevWith = (result: JevResult, extra: Partial<TeammateDispatchDeps> = {}) =>
+    setDeps({
+      providerProfiles: () => allProfiles,
+      isJevConfigured: () => true,
+      evaluateJev: async (req, opts) => {
+        jevCalls.push({ req, opts })
+        return result
+      },
+      ...extra,
+    })
+
+  test('settings: defaults, and exhausted never below high', () => {
+    const defaults = readTeammateDispatchSettings(settings())
+    expect(defaults.usage).toEqual({ enabled: true, high: 0.8, exhausted: 0.95 })
+    const custom = readTeammateDispatchSettings(settings({ teammateDispatch: { usage: { enabled: false, high: 0.5, exhausted: 0.9 } } }))
+    expect(custom.usage).toEqual({ enabled: false, high: 0.5, exhausted: 0.9 })
+    const original = console.warn
+    console.warn = () => {}
+    try {
+      const inverted = readTeammateDispatchSettings(settings({ teammateDispatch: { usage: { high: 0.9, exhausted: 0.5 } } }))
+      expect(inverted.usage).toEqual({ enabled: true, high: 0.9, exhausted: 0.9 })
+    } finally {
+      console.warn = original
+    }
+  })
+
+  test('anthropic at 0.85: a review goes to gpt-6, an implement to deepseek-v4-pro (tier fallback)', async () => {
+    setDeps({ providerProfiles: () => allProfiles, routeUsage: usageOf({ anthropic: 0.85 }) })
+    const review = await chooseTeammateRoute({ description: 'Review the diff', settings: settings() })
+    expect(review.family).toBe('gpt-6')
+    expect(review.model).toBe('gpt-6-astra')
+    expect(review.providerProfile).toBe('prof_codex')
+    expect(review.reason).toContain('model tier: anthropic at 85% (7d) → gpt-6')
+    expect(review.routeUsage).toEqual({ anthropic: 0.85, codex: 'unknown', deepseek: 'unknown', zai: 'unknown' })
+    expect(formatDispatchSummary(review)).toContain('anthropic at 85% (7d) → gpt-6')
+
+    const implement = await chooseTeammateRoute({ description: 'Implement the fix', settings: settings() })
+    expect(implement.family).toBe('deepseek-v4-pro')
+    expect(implement.tier).toBe('standard')
+    expect(implement.reason).toContain('anthropic at 85% (7d) → deepseek-v4-pro')
+  })
+
+  test('anthropic at 0.97 is excluded from the JEV offer; the pick of an excluded model is corrected', async () => {
+    jevWith(
+      withModel(jevOk('review', { review: 0.95, verify: 0.05 }), 'claude-fable-5-1', {
+        'claude-fable-5-1': 0.9,
+        'gpt-6-astra': 0.1,
+      }),
+      { routeUsage: usageOf({ anthropic: 0.97 }) },
+    )
+    const decision = await chooseTeammateRoute({ description: 'Handle payments', name: 'rev', settings: settings() })
+    const model = jevCalls[0]!.req.questions.model
+    const keys = model?.type === 'choice' ? Object.keys(model.criteria) : []
+    expect(keys).not.toContain('claude-fable-5-1')
+    expect(keys).toContain('gpt-6-astra')
+    expect(keys).toContain('deepseek-v4-pro')
+    expect(decision.excludedModels).toContainEqual({ model: 'claude-fable-5-1', reason: 'usage: anthropic at 97% (7d), excluded' })
+    expect(decision.model).toBe('gpt-6-astra')
+    expect(decision.modelSource).toBe('jev')
+    expect(decision.reason).toContain('corrected from claude-fable-5-1 usage: anthropic at 97% (7d), excluded')
+    expect(decision.warning).toBeUndefined()
+  })
+
+  test('a demoted (high) route leaves the JEV offer when a calmer route remains, and the instruction stays silent about it', async () => {
+    jevWith(
+      withModel(jevOk('implement', { implement: 0.95, research: 0.05 }), 'claude-sonnet-5', {
+        'claude-sonnet-5': 0.9,
+        'deepseek-v4-pro': 0.1,
+      }),
+      { routeUsage: usageOf({ anthropic: 0.85 }) },
+    )
+    const decision = await chooseTeammateRoute({ description: 'Handle payments', settings: settings() })
+    const model = jevCalls[0]!.req.questions.model
+    const keys = model?.type === 'choice' ? Object.keys(model.criteria) : []
+    expect(keys).not.toContain('claude-sonnet-5')
+    expect(jevCalls[0]!.req.instruction).not.toContain('Provider usage is high')
+    expect(decision.excludedModels).toContainEqual({ model: 'claude-sonnet-5', reason: 'usage: anthropic at 85% (7d), demoted' })
+    expect(decision.model).toBe('deepseek-v4-pro')
+    expect(decision.reason).toContain('corrected from claude-sonnet-5 usage: anthropic at 85% (7d), demoted')
+  })
+
+  test('everything high: the least-used route wins, exhausted routes are kept only with a warning, and JEV is told', async () => {
+    setDeps({ providerProfiles: () => allProfiles, routeUsage: usageOf({ anthropic: 0.9, codex: 0.82, zai: 0.88, deepseek: 0.85 }) })
+    const review = await chooseTeammateRoute({ description: 'Review the diff', settings: settings() })
+    expect(review.family).toBe('gpt-6')
+    expect(review.reason).toContain('anthropic at 90% (7d) → gpt-6 (least used, codex at 82% (7d))')
+    expect(review.warning).toBeUndefined()
+
+    setDeps({ providerProfiles: () => allProfiles, routeUsage: usageOf({ anthropic: 0.99, codex: 0.96, zai: 0.98, deepseek: 0.97 }) })
+    const exhausted = await chooseTeammateRoute({ description: 'Review the diff', settings: settings() })
+    expect(exhausted.family).toBe('gpt-6')
+    expect(exhausted.warning).toContain('exhausted threshold; using the least used (codex at 96% (7d))')
+
+    jevWith({ ok: false, reason: 'timeout', latencyMs: 1 }, { routeUsage: usageOf({ anthropic: 0.9, codex: 0.82, zai: 0.88, deepseek: 0.85 }) })
+    await chooseTeammateRoute({ description: 'Review the diff', settings: settings() })
+    const instruction = jevCalls[0]!.req.instruction
+    expect(instruction).toContain('Provider usage is high: ')
+    expect(instruction).toContain('anthropic at 90% (7d)')
+    expect(instruction).toContain('codex at 82% (7d)')
+    expect(instruction).toContain('prefer other providers, and among these the least used')
+  })
+
+  test('unknown usage counts as low', async () => {
+    setDeps({ providerProfiles: () => allProfiles, routeUsage: usageOf({ codex: 0.9 }) })
+    const decision = await chooseTeammateRoute({ description: 'Review the diff', settings: settings() })
+    expect(decision.family).toBe('fable-5.1')
+    expect(decision.reason).not.toContain('→')
+    expect(decision.routeUsage?.anthropic).toBe('unknown')
+  })
+
+  test('usage.enabled=false keeps the old behaviour and reads nothing', async () => {
+    let reads = 0
+    setDeps({
+      providerProfiles: () => allProfiles,
+      routeUsage: route => {
+        reads++
+        return { route, level: 0.99 }
+      },
+    })
+    const decision = await chooseTeammateRoute({
+      description: 'Review the diff',
+      settings: settings({ teammateDispatch: { usage: { enabled: false } } }),
+    })
+    expect(decision.family).toBe('fable-5.1')
+    expect(decision.routeUsage).toBeUndefined()
+    expect(reads).toBe(0)
+  })
+
+  test('the separation rule wins over usage', async () => {
+    // Codex is the only calm route, but the implementer used it. The reviewer
+    // must still avoid gpt-6 and lands on an exhausted Anthropic model.
+    members = [{ name: 'dev', role: 'implement', model: 'gpt-6-astra' }]
+    setDeps({ providerProfiles: () => allProfiles, routeUsage: usageOf({ anthropic: 0.99, codex: 0.1, zai: 0.99, deepseek: 0.99 }) })
+    const decision = await chooseTeammateRoute({ description: 'Review the diff', name: 'rev', teamName: 't', settings: settings() })
+    expect(decision.family).toBe('fable-5.1')
+    expect(decision.excluded).toEqual([{ family: 'gpt-6', by: 'dev' }])
+    expect(decision.warning).toContain('exhausted')
+    // And a JEV pick that breaks separation is corrected even when its route is the calm one.
+    jevWith(
+      withModel(jevOk('review', { review: 0.95, verify: 0.05 }), 'gpt-6-astra', { 'gpt-6-astra': 0.9, 'claude-fable-5-1': 0.1 }),
+      { routeUsage: usageOf({ anthropic: 0.9, codex: 0.1, zai: 0.9, deepseek: 0.9 }) },
+    )
+    const corrected = await chooseTeammateRoute({ description: 'Handle payments', name: 'rev', teamName: 't', settings: settings() })
+    expect(corrected.model).toBe('claude-fable-5-1')
+    expect(corrected.reason).toContain('separation: gpt-6 is an implementer')
+  })
+
+  test('the debug line and the record carry every route usage', async () => {
+    setDeps({ providerProfiles: () => allProfiles, routeUsage: usageOf({ anthropic: 0.41 }) })
+    const decision = await chooseTeammateRoute({ description: 'Review the diff', settings: settings() })
+    const record = toDispatchRecord(decision)
+    expect(record.routeUsage).toEqual({ anthropic: 0.41, codex: 'unknown', deepseek: 'unknown', zai: 'unknown' })
+  })
+})
+
+describe('cross-vendor review preference', () => {
+  const allProfiles = [codexProfile, zaiProfile, deepseekProfile]
+
+  test('vendorOf', () => {
+    expect(vendorOf('claude-sonnet-5')).toBe('anthropic')
+    expect(vendorOf('claude-sonnet')).toBe('anthropic')
+    expect(vendorOf('fable-5.1')).toBe('anthropic')
+    expect(vendorOf('us.anthropic.claude-opus-4-1-20250805-v1:0')).toBe('anthropic')
+    expect(vendorOf('gpt-6-astra')).toBe('openai')
+    expect(vendorOf('gpt-5')).toBe('openai')
+    expect(vendorOf('glm-5.3-flash')).toBe('zai')
+    expect(vendorOf('glm')).toBe('zai')
+    expect(vendorOf('deepseek-ai/deepseek-v4-pro')).toBe('deepseek')
+    expect(vendorOf('kimi-k2')).toBeUndefined()
+    expect(vendorOf(undefined)).toBeUndefined()
+  })
+
+  test('implementer on sonnet-5 → the reviewer is gpt-6 via the tier fallback', async () => {
+    members = [{ name: 'dev', role: 'implement', model: 'claude-sonnet-5' }]
+    setDeps({ providerProfiles: () => allProfiles })
+    const decision = await chooseTeammateRoute({ description: 'Review the diff', name: 'rev', teamName: 't', settings: settings() })
+    expect(decision.family).toBe('gpt-6')
+    expect(decision.tier).toBe('deep')
+    expect(decision.reason).toContain('other vendor than anthropic preferred')
+    // Without a Codex profile the same-vendor deep model is still fine.
+    setDeps({ providerProfiles: () => [zaiProfile, deepseekProfile] })
+    const noCodex = await chooseTeammateRoute({ description: 'Review the diff', name: 'rev', teamName: 't', settings: settings() })
+    expect(noCodex.family).toBe('fable-5.1')
+    expect(noCodex.reason).not.toContain('other vendor')
+  })
+
+  test('implementer on gpt-6-astra → the reviewer is fable-5.1', async () => {
+    members = [{ name: 'dev', role: 'implement', model: 'gpt-6-astra' }]
+    setDeps({ providerProfiles: () => allProfiles })
+    const decision = await chooseTeammateRoute({ description: 'Review the diff', name: 'rev', teamName: 't', settings: settings() })
+    expect(decision.family).toBe('fable-5.1')
+    expect(decision.excluded).toEqual([{ family: 'gpt-6', by: 'dev' }])
+  })
+
+  test('design roles are unaffected', async () => {
+    members = [{ name: 'dev', role: 'implement', model: 'claude-sonnet-5' }]
+    setDeps({ providerProfiles: () => allProfiles })
+    const decision = await chooseTeammateRoute({ description: 'Plan the architecture', name: 'architect', teamName: 't', settings: settings() })
+    expect(decision.role).toBe('design')
+    expect(decision.family).toBe('fable-5.1')
+    expect(decision.reason).not.toContain('other vendor')
+  })
+
+  test('JEV is hinted, and its confident same-vendor pick still stands', async () => {
+    members = [{ name: 'dev', role: 'implement', model: 'claude-sonnet-5' }]
+    setDeps({
+      providerProfiles: () => allProfiles,
+      isJevConfigured: () => true,
+      evaluateJev: async (req, opts) => {
+        jevCalls.push({ req, opts })
+        return withModel(jevOk('review', { review: 0.95, verify: 0.05 }), 'claude-fable-5-1', { 'claude-fable-5-1': 0.9, 'gpt-6-astra': 0.1 })
+      },
+    })
+    const decision = await chooseTeammateRoute({ description: 'Handle payments', name: 'rev', teamName: 't', settings: settings() })
+    expect(jevCalls[0]!.req.instruction).toContain('prefer a model from a different vendor than the implementer (implementer vendor: anthropic)')
+    expect(decision.model).toBe('claude-fable-5-1')
+    expect(decision.modelSource).toBe('jev')
+    expect(decision.reason).not.toContain('corrected')
   })
 })

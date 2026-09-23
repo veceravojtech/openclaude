@@ -16,6 +16,15 @@
  * probability (Rule A on the renormalized rest), else to the heuristic: a
  * keyword role guess and the role → tier → family table.
  *
+ * Two soft preferences sit under the hard rules. Usage-aware dispatch
+ * (teammateDispatch.usage, routeUsage.ts): a route at or over `exhausted`
+ * leaves the candidate list (unless nothing rule-abiding would remain), a
+ * route at or over `high` is demoted behind calmer providers, unknown
+ * counts as calm. Cross-vendor review: a review/verify teammate prefers a
+ * vendor no implementer used (a Claude implementer gets a GPT reviewer when
+ * one is available), ranked ahead in the tier table and hinted to JEV; a
+ * confident same-vendor JEV pick still stands.
+ *
  * Never throws. Never blocks longer than the JEV timeout. When nothing
  * qualifies the teammate spawns on today's default model with a warning —
  * except a review/verify teammate with implementers to avoid, which gets a
@@ -52,6 +61,7 @@ import { isModelAllowed } from '../../../utils/model/modelAllowlist.js'
 import { hasAnthropicApiKeyAuth, isAnthropicAuthEnabled } from '../../../utils/auth.js'
 import * as jevClient from '../../jev/client.js'
 import type { JevAnswer, JevRequest, JevResult } from '../../jev/client.js'
+import { formatRouteUsage, readRouteUsage, type RouteUsageLevel } from './routeUsage.js'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -146,6 +156,8 @@ export type TeammateRouteDecision = {
   refusal?: string
   /** Set when nothing qualified and the default model is used. */
   warning?: string
+  /** Usage level of every route a candidate was on (usage-aware dispatch). */
+  routeUsage?: Record<string, RouteUsageLevel['level']>
 }
 
 /** Compact form stored on the team member and in the startup record. */
@@ -160,6 +172,7 @@ export type TeammateDispatchRecord = {
   reason: string
   probabilities?: Record<string, number>
   costUsd?: number
+  routeUsage?: Record<string, RouteUsageLevel['level']>
 }
 
 // ---------------------------------------------------------------------------
@@ -245,7 +258,12 @@ export type NormalizedTeammateDispatch = {
   jev: { enabled: boolean; timeoutMs?: number; minP?: number; minMargin?: number }
   /** Lower-cased exact ids the user pruned (teammateDispatch.excludeModels). */
   excludeModels: string[]
+  /** Usage-aware dispatch thresholds (teammateDispatch.usage). */
+  usage: { enabled: boolean; high: number; exhausted: number }
 }
+
+export const DEFAULT_USAGE_HIGH = 0.8
+export const DEFAULT_USAGE_EXHAUSTED = 0.95
 
 const warnedPolicyEntries = new Set<string>()
 
@@ -300,6 +318,13 @@ export function readTeammateDispatchSettings(
     tierFamilies[tier] = known
   }
   const jev = raw?.jev
+  const usageRaw = raw?.usage
+  const high = probability(usageRaw?.high) ?? DEFAULT_USAGE_HIGH
+  let exhausted = probability(usageRaw?.exhausted) ?? DEFAULT_USAGE_EXHAUSTED
+  if (exhausted < high) {
+    warnOnce(`usage:${high}:${exhausted}`, `teammateDispatch.usage.exhausted (${exhausted}) is below high (${high}); using ${high} for both.`)
+    exhausted = high
+  }
   return {
     mode,
     roleTiers,
@@ -315,6 +340,7 @@ export function readTeammateDispatchSettings(
           .filter((id): id is string => typeof id === 'string' && id.trim() !== '')
           .map(id => id.trim().toLowerCase())
       : [],
+    usage: { enabled: usageRaw?.enabled !== false, high, exhausted },
   }
 }
 
@@ -480,6 +506,8 @@ export type TeammateDispatchDeps = {
   routeCatalog: (route: string) => CatalogFacts[]
   /** Organization model allowlist (availableModels). */
   isModelAllowed: (model: string) => boolean
+  /** Passive usage level of a provider route (routeUsage.ts). */
+  routeUsage: (route: string) => RouteUsageLevel
 }
 
 function catalogVision(modelId: string, family?: DispatchFamily): boolean {
@@ -533,6 +561,7 @@ const DEFAULT_DEPS: TeammateDispatchDeps = {
   supportsVision: catalogVision,
   routeCatalog: route => defaultRouteCatalog(route),
   isModelAllowed: model => isModelAllowed(model),
+  routeUsage: route => readRouteUsage(route),
 }
 
 let depsOverride: Partial<TeammateDispatchDeps> | undefined
@@ -884,6 +913,122 @@ function hardRuleViolation(
 }
 
 // ---------------------------------------------------------------------------
+// Usage-aware dispatch and vendor preference
+// ---------------------------------------------------------------------------
+
+export type ModelVendor = 'anthropic' | 'openai' | 'zai' | 'deepseek'
+
+/**
+ * The vendor of a model id, dispatch family or separation family:
+ * anthropic (every claude-, opus, sonnet, haiku, fable id), openai (gpt-),
+ * zai (glm-), deepseek (deepseek-). Undefined for anything else.
+ */
+export function vendorOf(modelOrFamily: string | undefined): ModelVendor | undefined {
+  if (!modelOrFamily || modelOrFamily === 'inherit') return undefined
+  const n = bareModelId(modelOrFamily)
+  if (/^claude(?:$|[-\d])/.test(n) || /^(?:opus|sonnet|haiku|fable)(?:$|[-.\d])/.test(n)) return 'anthropic'
+  if (/^gpt-?\d/.test(n) || /^o\d(?:$|-)/.test(n)) return 'openai'
+  if (/^glm(?:$|[-\d])/.test(n)) return 'zai'
+  if (/^deepseek(?:$|[-\d])/.test(n)) return 'deepseek'
+  return undefined
+}
+
+export type UsageBand = 'ok' | 'high' | 'exhausted'
+
+/**
+ * The usage level of every route touched by one dispatch, read once per
+ * route through deps.routeUsage. Disabled → every route is `unknown`, which
+ * ranks as `ok`, so the old behaviour holds exactly.
+ */
+class UsageView {
+  private readonly cache = new Map<string, RouteUsageLevel>()
+  constructor(
+    private readonly config: NormalizedTeammateDispatch['usage'],
+    private readonly deps: TeammateDispatchDeps,
+  ) {}
+
+  of(route: string): RouteUsageLevel {
+    const cached = this.cache.get(route)
+    if (cached) return cached
+    let usage: RouteUsageLevel = { route, level: 'unknown' }
+    if (this.config.enabled) {
+      try {
+        usage = this.deps.routeUsage(route)
+      } catch {
+        usage = { route, level: 'unknown' }
+      }
+    }
+    this.cache.set(route, usage)
+    return usage
+  }
+
+  /** 0..1, with unknown as 0 (treated as below high). */
+  level(route: string): number {
+    const usage = this.of(route)
+    return usage.level === 'unknown' ? 0 : usage.level
+  }
+
+  band(route: string): UsageBand {
+    const level = this.of(route).level
+    if (level === 'unknown') return 'ok'
+    if (level >= this.config.exhausted) return 'exhausted'
+    if (level >= this.config.high) return 'high'
+    return 'ok'
+  }
+
+  describe(route: string): string {
+    return formatRouteUsage(this.of(route))
+  }
+
+  /** Every route queried so far, for the record and the debug line. */
+  snapshot(): Record<string, RouteUsageLevel['level']> | undefined {
+    if (!this.config.enabled || this.cache.size === 0) return undefined
+    return Object.fromEntries([...this.cache.values()].map(u => [u.route, u.level]))
+  }
+}
+
+const BAND_RANK: Record<UsageBand, number> = { ok: 0, high: 1, exhausted: 2 }
+
+/**
+ * Split candidates by usage band. `offered` is what JEV may choose from:
+ * the `ok` ones when any exist; else the `high` ones (the least-used route
+ * question is then JEV's, with the percentages in the instruction); else —
+ * every route exhausted — all of them, with a warning. Dropped candidates
+ * come back with a reason so a JEV pick of one is corrected.
+ */
+function applyUsageToOffer<T extends { id: string; route: string }>(
+  candidates: readonly T[],
+  usage: UsageView,
+): { offered: T[]; dropped: Map<string, string>; warning?: string } {
+  const bands = new Map<T, UsageBand>(candidates.map(c => [c, usage.band(c.route)]))
+  const keep: UsageBand = bands.size === 0
+    ? 'ok'
+    : [...bands.values()].reduce<UsageBand>((best, b) => (BAND_RANK[b] < BAND_RANK[best] ? b : best), 'exhausted')
+  const offered: T[] = []
+  const dropped = new Map<string, string>()
+  for (const candidate of candidates) {
+    const band = bands.get(candidate)!
+    if (BAND_RANK[band] <= BAND_RANK[keep]) offered.push(candidate)
+    else dropped.set(candidate.id, `usage: ${usage.describe(candidate.route)}, ${band === 'exhausted' ? 'excluded' : 'demoted'}`)
+  }
+  const warning =
+    keep === 'exhausted' && offered.length > 0
+      ? `every usable provider route is at or over the exhausted threshold (${[...new Set(offered.map(c => usage.describe(c.route)))].join(', ')}); keeping them`
+      : undefined
+  return { offered, dropped, ...(warning ? { warning } : {}) }
+}
+
+/** The vendors implementers in the team used, from their separation families. */
+function implementerVendors(excluded: readonly TeammateRouteExclusion[]): Set<ModelVendor> {
+  const out = new Set<ModelVendor>()
+  for (const e of excluded) {
+    const vendor = vendorOf(e.family)
+    if (vendor) out.add(vendor)
+  }
+  return out
+}
+
+// ---------------------------------------------------------------------------
 // Agent types
 // ---------------------------------------------------------------------------
 
@@ -986,7 +1131,15 @@ const SEPARATED_ROLES: ReadonlySet<TeammateRole> = new Set(['review', 'verify'])
 
 function buildInstruction(
   config: NormalizedTeammateDispatch,
-  opts: { askModel: boolean; askType: boolean; excluded: readonly TeammateRouteExclusion[] },
+  opts: {
+    askModel: boolean
+    askType: boolean
+    excluded: readonly TeammateRouteExclusion[]
+    /** Routes at or over the high threshold that are still offered, described. */
+    busyRoutes?: readonly string[]
+    /** Vendors the implementers used, for the cross-vendor review preference. */
+    implementerVendors?: ReadonlySet<ModelVendor>
+  },
 ): string {
   const parts = [
     'Route a task a lead is delegating to a coding-agent teammate.',
@@ -1007,6 +1160,17 @@ function buildInstruction(
     if (opts.excluded.length > 0) {
       parts.push(
         `A review or verify teammate must not use an implementer's model family: ${describeExclusions(opts.excluded)}.`,
+      )
+      const vendors = [...(opts.implementerVendors ?? [])]
+      if (vendors.length > 0) {
+        parts.push(
+          `For a review or verify teammate prefer a model from a different vendor than the implementer (implementer vendor${vendors.length > 1 ? 's' : ''}: ${vendors.join(', ')}); another family from the same vendor is acceptable when it is clearly the better fit.`,
+        )
+      }
+    }
+    if (opts.busyRoutes && opts.busyRoutes.length > 0) {
+      parts.push(
+        `Provider usage is high: ${opts.busyRoutes.join('; ')}; prefer other providers, and among these the least used.`,
       )
     }
   }
@@ -1312,7 +1476,7 @@ function logDecision(input: TeammateRouteInput, d: TeammateRouteDecision): void 
     `[teammateDispatch] ${input.name ?? input.subagent_type ?? 'agent'}: model=${d.model ?? 'default'} role=${d.role} type=${d.agentType ?? '-'} source=${d.source} mode=${d.mode}` +
       ` top3.model=${top3(d.modelProbabilities)} top3.role=${top3(d.probabilities)} top3.type=${top3(d.agentTypeProbabilities)}` +
       ` cost=${d.costUsd !== undefined ? `$${d.costUsd.toFixed(5)}` : '-'} latency=${d.latencyMs !== undefined ? `${d.latencyMs}ms` : '-'}` +
-      ` excluded=[${excluded.join('; ')}]${d.warning ? ` warning=${d.warning}` : ''}`,
+      ` usage=[${formatUsageSnapshot(d.routeUsage)}] excluded=[${excluded.join('; ')}]${d.warning ? ` warning=${d.warning}` : ''}`,
   )
 }
 
@@ -1349,13 +1513,24 @@ async function chooseTeammateRouteInner(
   // Hard rules before asking, by the best role guess we have.
   const preRole = heuristic.role
   const excludedModels: ModelExclusion[] = [...listing.excluded]
-  const offered: SpawnableModel[] = []
+  const ruleAbiding: SpawnableModel[] = []
   for (const candidate of listing.candidates) {
     const violation = hardRuleViolation(candidate, preRole, excludedFamilies)
     if (violation) excludedModels.push({ model: candidate.id, reason: violation })
-    else offered.push(candidate)
+    else ruleAbiding.push(candidate)
   }
+  // Usage after the hard rules: a busy route's models leave the offer only
+  // when a rule-abiding model on a calmer route remains.
+  const usage = new UsageView(config.usage, deps)
+  const offer = applyUsageToOffer(ruleAbiding, usage)
+  const offered = offer.offered
+  for (const [model, reason] of offer.dropped) excludedModels.push({ model, reason })
+  const usageWarnings: string[] = offer.warning ? [offer.warning] : []
+  const busyRoutes = [...new Set(offered.map(c => c.route))]
+    .filter(route => usage.band(route) !== 'ok')
+    .map(route => usage.describe(route))
   const askModel = offered.length > 0
+  const vendorsToAvoid = implementerVendors(excluded)
 
   // Always ask JEV (auto and suggest); the heuristic is only the fallback.
   let jev: JevCall = { ok: false, why: 'reused prior classification' }
@@ -1383,7 +1558,15 @@ async function chooseTeammateRouteInner(
       questions.agent_type = { type: 'choice', criteria: buildAgentTypeCriteria(typeOptions, path) }
     }
     request = {
-      instruction: buildInstruction(config, { askModel, askType, excluded }),
+      instruction: buildInstruction(config, {
+        askModel,
+        askType,
+        excluded,
+        busyRoutes,
+        // The hint only matters for review/verify; the role is unknown before
+        // asking, so it is given whenever implementers exist.
+        implementerVendors: vendorsToAvoid,
+      }),
       state: {
         description: input.description ?? '',
         name: input.name ?? '',
@@ -1499,6 +1682,12 @@ async function chooseTeammateRouteInner(
     ...(agentTypeProbabilities ? { agentTypeProbabilities } : {}),
     ...(choiceProbabilities(answers.model) ? { modelProbabilities: choiceProbabilities(answers.model) } : {}),
   }
+  /** Adds the route-usage snapshot (read lazily, so taken at return time). */
+  const withUsage = <T extends object>(decision: T): T & { routeUsage?: TeammateRouteDecision['routeUsage'] } => {
+    const snapshot = usage.snapshot()
+    return snapshot ? { ...decision, routeUsage: snapshot } : decision
+  }
+  const usageWarningNote = usageWarnings.length > 0 ? `; WARNING: ${usageWarnings.join('; ')}` : ''
 
   // Explicit model — the caller's, or the chosen definition's frontmatter:
   // respected, enforcing only the separation rule.
@@ -1539,27 +1728,30 @@ async function chooseTeammateRouteInner(
     return { ...base, source: roleSource, reason: `${roleReason}${agentTypeNote}` }
   }
 
-  // Model (B): JEV's pick, corrected by the hard rules.
+  // Model (B): JEV's pick, corrected by the hard rules and by usage. A
+  // same-vendor pick for a reviewer is a preference miss, not a violation:
+  // it stands.
   const byId = new Map(listing.candidates.map(m => [m.id, m]))
   const modelViolation = (key: string): string | undefined => {
     const candidate = byId.get(key)
     if (!candidate) return 'not a spawnable model'
-    return hardRuleViolation(candidate, role, excludedFamilies)
+    return hardRuleViolation(candidate, role, excludedFamilies) ?? offer.dropped.get(key)
   }
   let jevModelNote = ''
   if (askModel && jev.ok) {
     const picked = pickWithRules(answers.model, modelViolation, deps, rule)
     if (picked) {
       const candidate = byId.get(picked.key)!
-      return {
+      return withUsage({
         ...base,
         ...(candidate.family ? { family: candidate.family } : {}),
         model: candidate.id,
         ...(candidate.providerProfile ? { providerProfile: candidate.providerProfile } : {}),
         source: 'jev',
         modelSource: 'jev',
-        reason: `role ${roleReason}; model jev p=${(picked.p ?? 0).toFixed(2)}${picked.corrected ? ` (corrected from ${picked.corrected})` : ''}${agentTypeNote}${exclusionNote}`,
-      }
+        reason: `role ${roleReason}; model jev p=${(picked.p ?? 0).toFixed(2)}${picked.corrected ? ` (corrected from ${picked.corrected})` : ''}${agentTypeNote}${exclusionNote}${usageWarningNote}`,
+        ...(usageWarnings.length > 0 ? { warning: usageWarnings.join('; ') } : {}),
+      })
     }
     const modelAnswer = answers.model
     if (modelAnswer?.type === 'choice') {
@@ -1574,9 +1766,18 @@ async function chooseTeammateRouteInner(
     }
   }
 
-  // Fallback: the tier table.
+  // Fallback: the tier table. Every usable entry is ranked: calm routes
+  // before busy ones (busy ones by usage, least used first), then the
+  // role's tier before the fallback tiers, then — for review/verify — a
+  // vendor the implementers did not use, then table order. The plain table
+  // order (tier, then position) is what the old dispatcher chose; when the
+  // ranking picks something else the reason says why.
   const needsVision = role === 'computer_use'
-  for (const candidateTier of tierFallbackOrder(tier)) {
+  type Ranked = { candidate: Candidate; family: DispatchFamily; tier: DispatchTier; tierIndex: number; order: number; band: UsageBand; level: number; otherVendor: boolean }
+  const ranked: Ranked[] = []
+  const preferOtherVendor = SEPARATED_ROLES.has(role) && vendorsToAvoid.size > 0
+  let order = 0
+  tierFallbackOrder(tier).forEach((candidateTier, tierIndex) => {
     for (const family of config.tierFamilies[candidateTier]) {
       const candidate = resolveCandidate(family, candidateTier, ctx)
       if (!candidate) continue
@@ -1585,18 +1786,56 @@ async function chooseTeammateRouteInner(
       if (bindingExclusions.some(e => e.family === family || e.family === sep)) continue
       if (needsVision && !deps.supportsVision(candidate.model, family)) continue
       if (!deps.isModelAllowed(candidate.model)) continue
-      const tierNote = candidateTier === tier ? '' : `; ${tier} tier unavailable, used ${candidateTier}`
-      return {
-        ...base,
-        tier: candidateTier,
+      const vendor = vendorOf(candidate.model) ?? vendorOf(family)
+      ranked.push({
+        candidate,
         family,
-        model: candidate.model,
-        ...(candidate.providerProfile ? { providerProfile: candidate.providerProfile } : {}),
-        source: roleSource,
-        modelSource: 'tier',
-        reason: `role ${roleReason}; model tier${jevModelNote}${tierNote}${agentTypeNote}${exclusionNote}`,
-      }
+        tier: candidateTier,
+        tierIndex,
+        order: order++,
+        band: usage.band(candidate.route),
+        level: usage.level(candidate.route),
+        otherVendor: preferOtherVendor && (vendor === undefined || !vendorsToAvoid.has(vendor)),
+      })
     }
+  })
+  if (ranked.length > 0) {
+    const plain = ranked[0]!
+    const sorted = [...ranked].sort((a, b) =>
+      BAND_RANK[a.band] - BAND_RANK[b.band]
+      || (a.band !== 'ok' ? a.level - b.level : 0)
+      || a.tierIndex - b.tierIndex
+      || Number(b.otherVendor) - Number(a.otherVendor)
+      || a.order - b.order,
+    )
+    const best = sorted[0]!
+    const tierNote = best.tier === tier ? '' : `; ${tier} tier unavailable, used ${best.tier}`
+    let usageNote = ''
+    if (best !== plain && plain.band !== 'ok' && best.band === 'ok') {
+      usageNote = `: ${usage.describe(plain.candidate.route)} → ${best.family}`
+    } else if (best !== plain && plain.band !== 'ok' && best.candidate.route !== plain.candidate.route) {
+      usageNote = `: ${usage.describe(plain.candidate.route)} → ${best.family} (least used, ${usage.describe(best.candidate.route)})`
+    }
+    const vendorNote =
+      best !== plain && !usageNote && best.otherVendor && !plain.otherVendor
+        ? `; other vendor than ${[...vendorsToAvoid].join('/')} preferred`
+        : ''
+    const warnings =
+      best.band === 'exhausted'
+        ? [`every usable provider route is at or over the exhausted threshold; using the least used (${usage.describe(best.candidate.route)})`]
+        : [...usageWarnings]
+    const warningNote = warnings.length > 0 ? `; WARNING: ${warnings.join('; ')}` : ''
+    return withUsage({
+      ...base,
+      tier: best.tier,
+      family: best.family,
+      model: best.candidate.model,
+      ...(best.candidate.providerProfile ? { providerProfile: best.candidate.providerProfile } : {}),
+      source: roleSource,
+      modelSource: 'tier',
+      reason: `role ${roleReason}; model tier${usageNote}${vendorNote}${jevModelNote}${tierNote}${agentTypeNote}${exclusionNote}${warningNote}`,
+      ...(warnings.length > 0 ? { warning: warnings.join('; ') } : {}),
+    })
   }
   if (bindingExclusions.length > 0) {
     // A review/verify teammate with nothing rule-abiding to run on must not
@@ -1604,22 +1843,29 @@ async function chooseTeammateRouteInner(
     // implementer's own family.
     const implementers = describeExclusions(bindingExclusions)
     const refusal = `Refusing to spawn ${role} teammate${input.name ? ` '${input.name}'` : ''}: no allowed${needsVision ? ' vision-capable' : ''} model outside the implementer's model family (${implementers}${input.teamName ? ` in team '${input.teamName}'` : ''}). A ${role} teammate must use a different model family than the implementer. Widen teammateModelAllowlist (e.g. add a model from another family, or "*"), or pass model with a model from another family.`
-    return {
+    return withUsage({
       ...base,
       source: roleSource,
       modelSource: 'none',
       reason: `role ${roleReason}; model none${jevModelNote}${agentTypeNote}${exclusionNote}`,
       refusal,
-    }
+    })
   }
   const warning = `no configured${needsVision ? ' vision-capable' : ''} model is allowed for ${role}; spawning on the default model`
-  return {
+  return withUsage({
     ...base,
     source: roleSource,
     modelSource: 'none',
     reason: `role ${roleReason}; model none${jevModelNote}${agentTypeNote}; WARNING: ${warning}`,
     warning,
-  }
+  })
+}
+
+function formatUsageSnapshot(snapshot: TeammateRouteDecision['routeUsage']): string {
+  if (!snapshot) return '-'
+  return Object.entries(snapshot)
+    .map(([route, level]) => `${route}:${level === 'unknown' ? 'unknown' : `${Math.round(level * 100)}%`}`)
+    .join(',')
 }
 
 /**
@@ -1649,5 +1895,6 @@ export function toDispatchRecord(
     reason: decision.reason,
     ...(decision.probabilities ? { probabilities: decision.probabilities } : {}),
     ...(decision.costUsd !== undefined ? { costUsd: decision.costUsd } : {}),
+    ...(decision.routeUsage ? { routeUsage: decision.routeUsage } : {}),
   }
 }

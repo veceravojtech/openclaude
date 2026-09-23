@@ -990,6 +990,18 @@ export const SettingsSchema = lazySchema(() =>
             .describe(
               'Exact model ids the dispatcher must never pick (e.g. a model your plan is not entitled to). Applied to JEV candidates and the tier-table fallback.',
             ),
+          usage: z
+            .object({
+              enabled: z.boolean().optional(),
+              high: z.number().optional(),
+              exhausted: z.number().optional(),
+            })
+            .optional()
+            .describe(
+              'Usage-aware dispatch from the quota figures the Usage tool reports (passive, no fetch). ' +
+                'A provider route at or above `exhausted` (default 0.95) is excluded; one at or above `high` (default 0.80) is demoted behind other providers. ' +
+                'Hard rules (separation, vision) still win. `enabled` default true.',
+            ),
         })
         .optional()
         .describe(

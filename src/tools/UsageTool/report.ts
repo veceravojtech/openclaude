@@ -11,6 +11,11 @@ import {
   formatCodexPlanType,
   type CodexUsageData,
 } from '../../services/api/codexUsage.js'
+import {
+  claudeLiveUsageCache,
+  clearLiveUsageCache,
+  liveUsageCache,
+} from '../../services/api/liveUsageCache.js'
 import { fetchMiniMaxUsage } from '../../services/api/minimaxUsage/fetch.js'
 import { buildMiniMaxUsageRows } from '../../services/api/minimaxUsage/parse.js'
 import type { MiniMaxUsageData } from '../../services/api/minimaxUsage/types.js'
@@ -83,29 +88,9 @@ export type UsageReport = {
   providers: UsageProviderSection[]
 }
 
-type CachedLiveUsage =
-  | { kind: 'codex'; data: CodexUsageData; fetchedAt: string }
-  | { kind: 'minimax'; data: MiniMaxUsageData; fetchedAt: string }
-
-const liveUsageCache = new Map<string, CachedLiveUsage>()
-
-/**
- * Live first-party fetches, keyed by the account they were fetched FOR:
- * currentAccountUsageKey() read at fetch time, so unattributed API-key traffic
- * lands on the reserved NO_ACCOUNT_USAGE_KEY slot like everywhere else. One
- * slot per account rather than one for the whole process, because a second
- * account's fetch used to overwrite the first's and the user then read one
- * account's figures under every account's name.
- */
-const claudeLiveUsageCache = new Map<
-  string,
-  { data: Utilization; fetchedAt: string }
->()
-
 /** Test-only: drop cached live fetches between cases. */
 export function clearUsageReportCache(): void {
-  liveUsageCache.clear()
-  claudeLiveUsageCache.clear()
+  clearLiveUsageCache()
 }
 
 export type UsageReportFetchers = {

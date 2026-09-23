@@ -313,6 +313,57 @@ example `"teammateModelAllowlist": ["sonnet-5"]` with the implementer on
 Sonnet), the spawn is refused with the same advice: widen
 `teammateModelAllowlist` or pass a model from another family.
 
+**Cross-vendor reviewers.** On top of the separation rule, a `review` or
+`verify` teammate prefers a model from a different *vendor* than the
+implementers used. Vendors are `anthropic` (every Claude id), `openai`
+(`gpt-*`), `zai` (`glm-*`) and `deepseek`. In the tier table this moves the
+other-vendor families to the front of each tier, so an implementer on
+`sonnet-5` gets a `gpt-6` reviewer when a Codex profile is configured, and an
+implementer on `gpt-6-astra` gets `fable-5.1`; without another vendor in the
+tier the next family of the same vendor is used as before, and the reason
+says `other vendor than anthropic preferred` when the preference changed the
+pick. JEV is told the implementer's vendor and asked to prefer another, but
+this is a preference, not a rule: a confident JEV pick from the same vendor
+(a different family, as separation requires) is accepted. `design` and other
+roles are unaffected.
+
+**Usage-aware dispatch.** The dispatcher reads the quota figures the Usage
+tool reports — passively, from data already captured; it never fetches:
+
+| Route | Source |
+| --- | --- |
+| `anthropic` | `anthropic-ratelimit-unified-5h/7d` headers of the active account (what the status line shows), or the plan usage a Usage `refresh` cached for that account when it is fresher |
+| `codex` | the Codex plan windows a Usage `refresh` cached |
+| any other route | `x-ratelimit-remaining/limit-requests/tokens` headers, as `1 - remaining/limit` |
+
+Each route's level is the highest utilization across its windows; a route
+with nothing captured is `unknown` and counts as calm (Z.AI and DeepSeek
+coding plans send nothing usable, so they are normally unknown). Then:
+
+- at or over `usage.exhausted` (default `0.95`): the route's models leave the
+  candidate list — unless that would leave no model that passes the hard
+  rules, in which case they stay and the decision carries a warning;
+- at or over `usage.high` (default `0.80`): the route is *demoted*. Its models
+  are removed from JEV's choice when a calmer rule-abiding model exists
+  (JEV never sees them, so nothing has to be corrected afterwards; a JEV pick
+  of a dropped model is still corrected like a rule violation). When every
+  route is busy they stay offered and the instruction says
+  `Provider usage is high: anthropic at 90% (7d); …; prefer other providers,
+  and among these the least used`. In the tier table calm routes come first
+  in table order; when none is calm the least-used route wins.
+- The hard rules always win: a reviewer never lands on the implementer's
+  family because that family's route is calmer, and `computer_use` still
+  needs vision.
+
+The debug line lists every route's level (`usage=[anthropic:85%,codex:unknown,…]`)
+and the same map is stored in the dispatch record as `routeUsage`. When usage
+changed the choice, the summary says so:
+
+```text
+dispatch: review → gpt-6 (role heuristic 'review' in description (jev not configured); model tier: anthropic at 85% (7d) → gpt-6)
+dispatch: implement → deepseek-v4-pro (role jev p=0.93; model tier: anthropic at 90% (7d) → deepseek-v4-pro (least used, deepseek at 82% (requests)))
+```
+
 Every teammate spawn result ends with the decision, and the same decision is
 added to the teammate's `teammate_startup` record:
 
@@ -336,7 +387,8 @@ Configure it with `teammateDispatch`:
       "tiers": { "deep": ["opus-5.5", "fable-5.1"] }
     },
     "jev": { "enabled": true, "timeoutMs": 3000, "minP": 0.75, "minMargin": 0.15 },
-    "excludeModels": ["gpt-5.4"]
+    "excludeModels": ["gpt-5.4"],
+    "usage": { "enabled": true, "high": 0.8, "exhausted": 0.95 }
   }
 }
 ```
@@ -351,6 +403,10 @@ Configure it with `teammateDispatch`:
 - `excludeModels`: exact model ids the dispatcher must never pick, for example a
   model your plan is not entitled to. Applied to the JEV candidates and the
   tier-table fallback; each shows up in the debug line as excluded.
+- `usage`: usage-aware dispatch (above). `enabled` (default `true`) turns it
+  off entirely — no usage is read and the tables apply as before; `high`
+  (default `0.80`) and `exhausted` (default `0.95`) are the 0–1 thresholds. An
+  `exhausted` below `high` warns once and is raised to `high`.
 - In `suggest` mode a refusal is reported as `WOULD REFUSE: …` instead.
 
 ## GitHub Copilot sub-agent optimization
