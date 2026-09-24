@@ -27,6 +27,7 @@ OpenClaude originated from the Claude Code codebase and has since been substanti
 - [README](https://github.com/Gitlawb/openclaude/blob/main/README.md): overview, supported providers, features
 - [Advanced setup](https://github.com/Gitlawb/openclaude/blob/main/docs/advanced-setup.md)
 - [Smart routing](https://github.com/Gitlawb/openclaude/blob/main/docs/smart-routing.md)
+- [Cyber mode](https://github.com/Gitlawb/openclaude/blob/main/docs/cyber-mode.md)
 - [Agent routing](https://github.com/Gitlawb/openclaude/blob/main/docs/agent-routing.md)
 - [Headless gRPC server](https://github.com/Gitlawb/openclaude/blob/main/docs/grpc-server.md)
 - [Repository map](https://github.com/Gitlawb/openclaude/blob/main/docs/repo-map.md)

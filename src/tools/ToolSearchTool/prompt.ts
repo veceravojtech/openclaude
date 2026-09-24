@@ -1,5 +1,5 @@
 import { feature } from 'bun:bundle'
-import { isReplBridgeActive } from '../../bootstrap/state.js'
+import { getCyberMode, isReplBridgeActive } from '../../bootstrap/state.js'
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js'
 import type { Tool } from '../../Tool.js'
 import { AGENT_TOOL_NAME } from '../AgentTool/constants.js'
@@ -60,6 +60,7 @@ Query forms:
  * _meta['anthropic/alwaysLoad']). This check runs first, before any other rule.
  */
 export function isDeferredTool(tool: Tool): boolean {
+  if (getCyberMode().enabled && tool.name.startsWith('mcp__binary_ninja_mcp__')) return false
   // Explicit opt-out via _meta['anthropic/alwaysLoad'] — tool appears in the
   // initial prompt with full schema. Checked first so MCP tools can opt out.
   if (tool.alwaysLoad === true) return false

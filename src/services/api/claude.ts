@@ -1,3 +1,6 @@
+import { findProviderProfileRouteForModel } from '../../utils/providerProfiles.js'
+import { getCyberMode, unlockCyberEscalation, clearCyberEscalation } from '../../bootstrap/state.js'
+import { assertCyberModelAllowed, CYBER_MODELS, withCyberScope } from '../../utils/model/cyber.js'
 import type {
   BetaContentBlock,
   BetaContentBlockParam,
@@ -1211,6 +1214,53 @@ export function shouldCompressNativeToolHistory(options: {
 }
 
 async function* queryModel(
+  messages: Message[],
+  systemPrompt: SystemPrompt,
+  thinkingConfig: ThinkingConfig,
+  tools: Tools,
+  signal: AbortSignal,
+  options: Options,
+): AsyncGenerator<StreamEvent | AssistantMessage | SystemAPIErrorMessage, void> {
+  if (!getCyberMode().enabled) {
+    yield* queryModelInner(messages, systemPrompt, thinkingConfig, tools, signal, options)
+    return
+  }
+  if (options.advisorModel) options = { ...options, advisorModel: CYBER_MODELS.lead }
+  const source = String(options.querySource ?? '')
+  const foreground = source === 'sdk' || source === 'repl_main_thread' || source.startsWith('agent:') || source === 'cyber_escalation'
+  if (!foreground) options = { ...options, model: CYBER_MODELS.lead, requestModel: undefined, providerOverride: findProviderProfileRouteForModel(CYBER_MODELS.lead) ?? undefined }
+  if (!options.providerOverride) {
+    options = { ...options, providerOverride: findProviderProfileRouteForModel(options.model) ?? undefined }
+  }
+  systemPrompt = asSystemPrompt([...systemPrompt,
+    'Cyber mode: prefer Binary Ninja MCP for binary analysis. Start with load_binary and analysis_progress; then use decompilation, xrefs, strings, types and renaming. Other tools remain available. Use CyberEscalate with a reason and work so far when uncertain.'])
+  assertCyberModelAllowed(options.requestModel ?? options.model)
+  let iterator = queryModelInner(messages, systemPrompt, thinkingConfig, tools, signal, options)
+  let scope: string | undefined
+  try {
+    while (true) {
+      try {
+        const next = await (scope ? withCyberScope(scope, () => iterator.next()) : iterator.next())
+        if (next.done) return
+        yield next.value
+      } catch (error) {
+        if (!(error instanceof FallbackTriggeredError) || scope || signal.aborted) throw error
+        scope = randomUUID()
+        if (error.fallbackModel === CYBER_MODELS.escalation) unlockCyberEscalation(scope, 'Primary model unavailable after normal retries')
+        options = { ...options, model: error.fallbackModel, requestModel: undefined, providerOverride: findProviderProfileRouteForModel(error.fallbackModel) ?? undefined }
+        iterator = queryModelInner(messages, systemPrompt, thinkingConfig, tools, signal, options)
+      }
+    }
+  } finally {
+    try {
+      await iterator.return()
+    } finally {
+      if (scope) clearCyberEscalation(scope)
+    }
+  }
+}
+
+async function* queryModelInner(
   messages: Message[],
   systemPrompt: SystemPrompt,
   thinkingConfig: ThinkingConfig,

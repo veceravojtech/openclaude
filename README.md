@@ -297,6 +297,7 @@ Advanced and source-build guides:
 
 - [Advanced Setup](docs/advanced-setup.md)
 - [Smart Auto-Routing](docs/smart-routing.md)
+- [Cyber Mode](docs/cyber-mode.md)
 - [Agent Routing and Step Limits](docs/agent-routing.md)
 - [Headless gRPC Server](docs/grpc-server.md)
 - [Repo Map (codebase intelligence)](docs/repo-map.md)

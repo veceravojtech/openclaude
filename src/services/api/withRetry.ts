@@ -1,3 +1,6 @@
+import { isModelAllowed } from '../../utils/model/modelAllowlist.js'
+import { getCyberMode } from '../../bootstrap/state.js'
+import { assertCyberModelAllowed, cyberModelId, CYBER_MODELS } from '../../utils/model/cyber.js'
 import type { QueryActivity } from '../../Tool.js'
 import { feature } from 'bun:bundle'
 import type Anthropic from '@anthropic-ai/sdk'
@@ -345,6 +348,10 @@ export async function* withRetry<T>(
         client = await getClient()
       }
 
+      assertCyberModelAllowed(retryContext.model)
+      if (getCyberMode().enabled && !isModelAllowed(retryContext.model)) {
+        throw new Error(`Cyber model '${retryContext.model}' is blocked by availableModels.`)
+      }
       const result = await operation(client, attempt, retryContext)
       // A request that succeeds after an auto-wait or an account switch is
       // the only evidence we get that the blocker is gone. Teammates parked
@@ -456,9 +463,16 @@ export async function* withRetry<T>(
         continue
       }
 
+      if (getCyberMode().enabled && attempt > maxRetries &&
+        (error instanceof APIConnectionError || (error instanceof APIError && (error.status ?? 0) >= 500))) {
+        const id = cyberModelId(options.model)
+        const fallback = id === CYBER_MODELS.lead ? CYBER_MODELS.escalation
+          : id === CYBER_MODELS.worker ? CYBER_MODELS.easy : undefined
+        if (fallback) throw new FallbackTriggeredError(options.model, fallback)
+      }
       // Non-foreground sources bail immediately on 529 — no retry amplification
       // during capacity cascades. User never sees these fail.
-      if (is529Error(error) && !shouldRetry529(options.querySource)) {
+      if (!getCyberMode().enabled && is529Error(error) && !shouldRetry529(options.querySource)) {
         logEvent('tengu_api_529_background_dropped', {
           query_source:
             options.querySource as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
@@ -468,6 +482,7 @@ export async function* withRetry<T>(
 
       // Track consecutive 529 errors
       if (
+        !getCyberMode().enabled &&
         is529Error(error) &&
         // If FALLBACK_FOR_ALL_PRIMARY_MODELS is not set, fall through only if the primary model is a non-custom Opus model.
         // TODO: Revisit if the isNonCustomOpusModel check should still exist, or if isNonCustomOpusModel is a stale artifact of when Claude Code was hardcoded on Opus.

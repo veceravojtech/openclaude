@@ -1,3 +1,4 @@
+import { setCyberModeEnabled } from '../../bootstrap/state.js'
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import type Anthropic from '@anthropic-ai/sdk'
 import { APIConnectionError, APIError, APIUserAbortError } from '@anthropic-ai/sdk'
@@ -54,6 +55,7 @@ beforeEach(async () => {
 })
 
 afterEach(() => {
+  setCyberModeEnabled(false)
   try {
     for (const key of envKeys) {
       if (originalEnv[key] === undefined) delete process.env[key]
@@ -191,6 +193,37 @@ async function drainAsyncGenerator<T>(generator: AsyncGenerator<unknown, T>): Pr
     if (result.done) return result.value
   }
 }
+
+describe('cyber retry enforcement', () => {
+  test('exhausted retries select scoped fallback models', async () => {
+    const { withRetry, FallbackTriggeredError } = await importFreshWithRetryModule('openai')
+    setCyberModeEnabled(true)
+    for (const [model, fallback] of [['glm-5.3', 'claude-opus-4-8'], ['claude-opus-4-6', 'deepseek-v4-pro']]) {
+      let attempts = 0
+      try {
+        await drainAsyncGenerator(withRetry(async () => ({} as Anthropic), async () => {
+          attempts++
+          throw new APIConnectionError({ message: 'connection failed' })
+        }, { model: model!, maxRetries: 1, thinkingConfig: { type: 'disabled' } }))
+        throw new Error('expected fallback')
+      } catch (error) {
+        expect(error).toBeInstanceOf(FallbackTriggeredError)
+        expect((error as InstanceType<typeof FallbackTriggeredError>).fallbackModel).toBe(fallback!)
+      }
+      expect(attempts).toBe(2)
+    }
+  })
+
+  test('last-line policy blocks a forbidden model before operation', async () => {
+    const { withRetry } = await importFreshWithRetryModule('openai')
+    setCyberModeEnabled(true)
+    let called = false
+    await expect(drainAsyncGenerator(withRetry(async () => ({} as Anthropic), async () => {
+      called = true
+    }, { model: 'glm-5.3-flash', maxRetries: 0, thinkingConfig: { type: 'disabled' } }))).rejects.toThrow()
+    expect(called).toBe(false)
+  })
+})
 
 describe('retry configuration', () => {
   test('uses default retry attempts when env var is absent', async () => {

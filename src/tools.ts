@@ -80,6 +80,7 @@ import { TaskGetTool } from './tools/TaskGetTool/TaskGetTool.js'
 import { TaskUpdateTool } from './tools/TaskUpdateTool/TaskUpdateTool.js'
 import { TaskListTool } from './tools/TaskListTool/TaskListTool.js'
 import { ListAgentsTool } from './tools/ListAgentsTool/ListAgentsTool.js'
+import { CyberEscalateTool } from './tools/CyberEscalateTool.js'
 import { UsageTool } from './tools/UsageTool/UsageTool.js'
 import uniqBy from 'lodash-es/uniqBy.js'
 import { isToolSearchEnabledOptimistic } from './utils/toolSearch.js'
@@ -225,6 +226,7 @@ export function getAllBaseTools(): Tools {
     // Read-only peer discovery for SendMessage; gated by isEnabled() like it.
     ListAgentsTool,
     UsageTool,
+    CyberEscalateTool,
     ...(ListPeersTool ? [ListPeersTool] : []),
     ...(isAgentSwarmsEnabled()
       ? (() => { const tct = getTeamCreateTool(); const tdt = getTeamDeleteTool(); const rtt = getRecoverTeamTool(); const htt = getHandoffTeamTool(); return [tct, tdt, rtt, htt].filter(Boolean) })()
