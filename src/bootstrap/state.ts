@@ -39,7 +39,15 @@ export type ChannelEntry =
   | { kind: 'plugin'; name: string; marketplace: string; dev?: boolean }
   | { kind: 'server'; name: string; dev?: boolean }
 
+export type CyberModeState = {
+  enabled: boolean
+  previousMainModel: ModelSetting | undefined
+  // Unlocks belong to individual request/agent IDs, never the whole session.
+  escalationScopes: ReadonlyMap<string, string>
+}
+
 type State = {
+  cyberMode: CyberModeState
   originalCwd: string
   // Stable project root - set once at startup (including by --worktree flag),
   // never updated by mid-session EnterWorktreeTool.
@@ -280,6 +288,11 @@ function getInitialState(): State {
     hasUnknownModelCost: false,
     cwd: resolvedCwd,
     modelUsage: emptyModelUsage(),
+    cyberMode: {
+      enabled: process.env.OPENCLAUDE_CYBER_MODE === '1',
+      previousMainModel: undefined,
+      escalationScopes: new Map(),
+    },
     mainLoopModelOverride: undefined,
     initialMainLoopModel: null,
     modelStrings: null,
@@ -943,6 +956,34 @@ export function getUsageForModel(model: string): ModelUsage | undefined {
  * Gets the model override set from the --model CLI flag or after the user
  * updates their configured model.
  */
+export function getCyberMode(): CyberModeState {
+  return { ...STATE.cyberMode, escalationScopes: new Map(STATE.cyberMode.escalationScopes) }
+}
+
+export function setCyberModeEnabled(enabled: boolean): void {
+  if (enabled === STATE.cyberMode.enabled) return
+  if (enabled) {
+    STATE.cyberMode = { enabled, previousMainModel: STATE.mainLoopModelOverride, escalationScopes: new Map() }
+    STATE.mainLoopModelOverride = 'glm-5.3'
+  } else {
+    STATE.mainLoopModelOverride = STATE.cyberMode.previousMainModel
+    STATE.cyberMode = { enabled, previousMainModel: undefined, escalationScopes: new Map() }
+  }
+}
+
+export function unlockCyberEscalation(scope: string, reason: string): void {
+  if (!STATE.cyberMode.enabled || !scope.trim() || !reason.trim()) {
+    throw new Error('Cyber escalation requires an enabled mode, a request/agent scope and a reason.')
+  }
+  STATE.cyberMode.escalationScopes = new Map(STATE.cyberMode.escalationScopes).set(scope, reason)
+}
+
+export function clearCyberEscalation(scope: string): void {
+  const scopes = new Map(STATE.cyberMode.escalationScopes)
+  scopes.delete(scope)
+  STATE.cyberMode.escalationScopes = scopes
+}
+
 export function getMainLoopModelOverride(): ModelSetting | undefined {
   return STATE.mainLoopModelOverride
 }

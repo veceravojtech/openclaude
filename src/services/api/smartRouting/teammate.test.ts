@@ -1,3 +1,4 @@
+import { setCyberModeEnabled } from '../../../bootstrap/state.js'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import type { ProviderProfile } from '../../../utils/config.js'
 import type { SettingsJson } from '../../../utils/settings/types.js'
@@ -114,7 +115,33 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  setCyberModeEnabled(false)
   _setTeammateDispatchDepsForTesting(undefined)
+})
+
+describe('cyber role routing', () => {
+  const input = { settings: { teammateModelAllowlist: ['*'] } as SettingsJson, teamName: 'cyber-test' }
+  beforeEach(() => {
+    setCyberModeEnabled(true)
+    setDeps({ providerProfiles: () => [deepseekProfile, zaiProfile] })
+  })
+  test('easy workers use DeepSeek and hard workers use Opus 4.6', async () => {
+    expect((await chooseTeammateRoute({ ...input, description: 'Implement a one-line fix' })).model).toBe('deepseek-v4-pro')
+    expect((await chooseTeammateRoute({ ...input, description: 'Implement architecture refactor across multiple files', prior: { role: 'implement', complexity: 'hard', tier: 'deep', source: 'heuristic', mode: 'auto', reason: 'hard' } })).model).toBe('claude-opus-4-6')
+  })
+  test('review uses GLM, then falls back across implementer families', async () => {
+    expect((await chooseTeammateRoute({ ...input, subagent_type: 'verification' })).model).toBe('glm-5.3')
+    setDeps({ providerProfiles: () => [deepseekProfile], isModelAllowed: model => model !== 'glm-5.3' })
+    members = [{ name: 'worker', model: 'deepseek-v4-pro', dispatch: { role: 'implement' } } as TeamMemberLike]
+    expect((await chooseTeammateRoute({ ...input, subagent_type: 'verification' })).model).toBe('claude-opus-4-6')
+    members = [{ name: 'worker', model: 'claude-opus-4-8', dispatch: { role: 'implement' } } as TeamMemberLike]
+    expect((await chooseTeammateRoute({ ...input, subagent_type: 'verification' })).model).toBe('deepseek-v4-pro')
+  })
+  test('keeps a prior worker model and refuses an outside explicit model', async () => {
+    const prior = await chooseTeammateRoute({ ...input, explicitModel: 'claude-opus-4-6', description: 'Implement fix' })
+    expect((await chooseTeammateRoute({ ...input, prior, description: 'Implement a one-line fix' })).model).toBe(prior.model)
+    await expect(chooseTeammateRoute({ ...input, explicitModel: 'sonnet' })).rejects.toThrow('Cyber mode')
+  })
 })
 
 const settings = (extra: SettingsJson = {}): SettingsJson => extra

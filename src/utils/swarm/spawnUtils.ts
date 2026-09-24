@@ -3,6 +3,7 @@
  */
 
 import {
+  getCyberMode,
   getChromeFlagOverride,
   getFlagSettingsPath,
   getInlinePlugins,
@@ -59,7 +60,7 @@ export function buildInheritedCliFlags(options?: {
 
   // Propagate --model if explicitly set via CLI
   const modelOverride = getMainLoopModelOverride()
-  if (modelOverride) {
+  if (modelOverride && !getCyberMode().enabled) {
     flags.push(`--model ${quote([modelOverride])}`)
   }
 
@@ -261,6 +262,7 @@ const TEAMMATE_ENV_VARS = [
   // Custom API endpoint
   'ANTHROPIC_BASE_URL',
   // Config directory override (preferred name + legacy alias)
+  'OPENCLAUDE_CYBER_MODE',
   'OPENCLAUDE_CONFIG_DIR',
   'CLAUDE_CONFIG_DIR',
   // CCR marker — teammates need this for CCR-aware code paths. Auth finds
@@ -303,11 +305,14 @@ const TEAMMATE_ENV_VARS = [
  *   Empty values are skipped, matching the inherited-var guard.
  */
 export function buildInheritedEnvVars(extra?: Record<string, string>): string {
+  // Derive from session state, not a stale inherited environment value.
+  extra = { ...extra, OPENCLAUDE_CYBER_MODE: getCyberMode().enabled ? '1' : '0' }
   if (extra?.OPENCLAUDE_TEAMMATE_PROFILE_ID) {
     const values: Record<string, string> = {
       CLAUDECODE: '1', CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
       CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST: '1',
       OPENCLAUDE_TEAMMATE_PROFILE_ID: extra.OPENCLAUDE_TEAMMATE_PROFILE_ID,
+      OPENCLAUDE_CYBER_MODE: extra.OPENCLAUDE_CYBER_MODE!,
       OPENCLAUDE_TEAMMATE_MODEL: extra.OPENCLAUDE_TEAMMATE_MODEL ?? '',
     }
     for (const key of ['OPENCLAUDE_CONFIG_DIR', 'CLAUDE_CONFIG_DIR', 'PATH', 'CLAUDE_CODE_REMOTE', 'CLAUDE_CODE_REMOTE_MEMORY_DIR']) {

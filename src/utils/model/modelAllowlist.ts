@@ -1,3 +1,4 @@
+import { isCyberModelAllowed } from './cyber.js'
 import { getSettings_DEPRECATED } from '../settings/settings.js'
 import { isModelAlias, isModelFamilyAlias } from './aliases.js'
 import { parseUserSpecifiedModel } from './model.js'
@@ -97,7 +98,9 @@ function familyHasSpecificEntries(
  * 2. Version prefixes ("opus-4-5", "claude-opus-4-5") — any build of that version
  * 3. Full model IDs ("claude-opus-4-5-20251101") — exact match only
  */
-export function isModelAllowed(model: string): boolean {
+export function isModelAllowed(model: string, cyberScope?: string): boolean {
+  const concreteModel = isModelAlias(model) ? parseUserSpecifiedModel(model) : resolveOverriddenModel(model)
+  if (!isCyberModelAllowed(concreteModel, cyberScope)) return false
   const settings = getSettings_DEPRECATED() || {}
   const { availableModels } = settings
   if (!availableModels) {

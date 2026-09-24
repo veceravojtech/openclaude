@@ -1,3 +1,4 @@
+import { getCyberMode } from '../../bootstrap/state.js'
 import type { SettingsJson } from '../settings/types.js'
 import { getInitialSettings } from '../settings/settings.js'
 import type { PermissionMode } from '../permissions/PermissionMode.js'
@@ -180,8 +181,8 @@ function assertToolSpecifiedModelAllowed(
   effectiveModel: string,
 ): void {
   if (
-    isModelAllowed(requestedModel) ||
-    (effectiveModel !== requestedModel && isModelAllowed(effectiveModel))
+    isModelAllowed(effectiveModel) ||
+    (!getCyberMode().enabled && isModelAllowed(requestedModel))
   ) {
     return
   }

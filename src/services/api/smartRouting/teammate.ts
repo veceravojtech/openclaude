@@ -31,6 +31,8 @@
  * refusal: the default model may be the implementer's own family. The
  * caller re-checks separation on the FINAL model whatever its source.
  */
+import { getCyberMode } from '../../../bootstrap/state.js'
+import { CYBER_MODELS, cyberModelId } from '../../../utils/model/cyber.js'
 import type { ProviderProfile } from '../../../utils/config.js'
 import type { SettingsJson } from '../../../utils/settings/types.js'
 import {
@@ -1430,6 +1432,46 @@ function suggestFamilies(
 // Entry point
 // ---------------------------------------------------------------------------
 
+function chooseCyberTeammateRoute(
+  input: TeammateRouteInput,
+  config: NormalizedTeammateDispatch,
+  deps: TeammateDispatchDeps,
+): TeammateRouteDecision {
+  const heuristic = classifyRoleHeuristic(input)
+  const role = input.prior?.role ?? heuristic.role ?? 'implement'
+  const complexity = input.prior?.complexity ?? heuristic.complexity
+  const tier = complexity === 'hard' ? 'deep' : config.roleTiers[role]
+  const review = SEPARATED_ROLES.has(role)
+  const members = input.teamName ? deps.readTeamMembers(input.teamName).filter(m => m.name !== input.name) : []
+  const excluded = review ? collectExcludedFamilies(members, input.leaderModel) : []
+  const excludedFamilies = new Set(excluded.map(e => e.family))
+  const ids = review
+    ? [CYBER_MODELS.lead, CYBER_MODELS.worker, CYBER_MODELS.easy]
+    : complexity === 'hard' || tier === 'deep'
+      ? [CYBER_MODELS.worker, CYBER_MODELS.easy]
+      : [CYBER_MODELS.easy, CYBER_MODELS.worker]
+  const listing = listCandidates(buildRouteContext(input, deps), deps)
+  const candidates = listing.candidates.filter(candidate => {
+    const id = cyberModelId(candidate.id)
+    return id !== undefined && ids.some(allowed => allowed === id) &&
+      !hardRuleViolation(candidate, role, excludedFamilies)
+  })
+  const explicit = input.explicitModel ?? input.prior?.model
+  const chosen = explicit
+    ? candidates.find(candidate => candidate.id === explicit || cyberModelId(candidate.id) === cyberModelId(explicit))
+    : ids.flatMap(id => candidates.filter(candidate => cyberModelId(candidate.id) === id))[0]
+  if (!chosen) {
+    throw new Error(`Cyber mode: no available model for ${role}${explicit ? ` (${explicit})` : ''}. Allowed models: glm-5.3, claude-opus-4-6, deepseek-v4-pro. Reviewer fallback must differ from the implementer family.`)
+  }
+  return {
+    role, tier, complexity, model: explicit ?? chosen.id,
+    providerProfile: chosen.providerProfile, family: chosen.family,
+    source: explicit ? 'explicit' : 'heuristic', mode: 'auto',
+    reason: `cyber ${role}: ${complexity ?? tier}; strict role policy`,
+    excluded, excludedModels: listing.excluded,
+  }
+}
+
 export async function chooseTeammateRoute(
   input: TeammateRouteInput,
 ): Promise<TeammateRouteDecision> {
@@ -1439,6 +1481,7 @@ export async function chooseTeammateRoute(
   } catch {
     config = readTeammateDispatchSettings(undefined)
   }
+  if (getCyberMode().enabled) return chooseCyberTeammateRoute(input, config, getDeps())
   if (config.mode === 'off') {
     return {
       role: 'implement',

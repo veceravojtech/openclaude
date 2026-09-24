@@ -5,7 +5,7 @@
  * literals with process.env.USER_TYPE === 'ant' for Bun to remove the codenames
  * during dead code elimination
  */
-import { getMainLoopModelOverride } from '../../bootstrap/state.js'
+import { getCyberMode, getMainLoopModelOverride } from '../../bootstrap/state.js'
 import {
   getSubscriptionType,
   isClaudeAISubscriber,
@@ -83,6 +83,7 @@ function getAllowedConcentrateConfigModel(): string | undefined {
 }
 
 export function getSmallFastModel(): ModelName {
+  if (getCyberMode().enabled) return 'glm-5.3'
   if (process.env.ANTHROPIC_SMALL_FAST_MODEL) return process.env.ANTHROPIC_SMALL_FAST_MODEL
   if (isCustomAnthropicProvider()) {
     return process.env.ANTHROPIC_MODEL || getDefaultHaikuModel()
