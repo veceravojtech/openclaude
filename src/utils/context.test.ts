@@ -1,3 +1,6 @@
+import { setCyberModeEnabled } from '../bootstrap/state.js'
+import * as configModule from './config.js'
+import { getAutoCompactThreshold } from '../services/compact/autoCompact.js'
 import { afterEach, beforeEach, expect, mock, spyOn, test } from 'bun:test'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../test/sharedMutationLock.js'
 
@@ -10,6 +13,35 @@ import {
   modelSupports1M,
   clearSessionContextWindowOverride,
 } from './context.ts'
+
+test('cyber limits follow the serving saved profile and off restores active-route limits', () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  const original = configModule.getGlobalConfig()
+  const configSpy = spyOn(configModule, 'getGlobalConfig')
+  try {
+    for (const reverse of [false, true]) {
+      process.env.OPENAI_BASE_URL = reverse ? 'https://api.z.ai/api/coding/paas/v4' : 'https://api.openai.com/v1'
+      configSpy.mockReturnValue({ ...original, providerProfiles: [{
+        id: 'cyber-limits', name: 'Cyber limits', provider: reverse ? 'openai' : 'zai',
+        baseUrl: reverse ? 'https://api.openai.com/v1' : 'https://api.z.ai/api/coding/paas/v4',
+        apiKey: 'test-key', model: 'glm-5.3',
+      }] })
+      const before = getContextWindowForModel('glm-5.3')
+      expect(before).toBe(reverse ? 1_000_000 : 128_000)
+      setCyberModeEnabled(true)
+      expect(getContextWindowForModel('glm-5.3')).toBe(reverse ? 128_000 : 1_000_000)
+      if (!reverse) {
+        expect(getModelMaxOutputTokens('glm-5.3').upperLimit).toBe(131_072)
+        expect(getAutoCompactThreshold('glm-5.3')).toBeGreaterThan(900_000)
+      }
+      setCyberModeEnabled(false)
+      expect(getContextWindowForModel('glm-5.3')).toBe(before)
+    }
+  } finally {
+    setCyberModeEnabled(false)
+    configSpy.mockRestore()
+  }
+})
 
 const originalEnv = {
   CLAUDE_CODE_USE_OPENAI: process.env.CLAUDE_CODE_USE_OPENAI,

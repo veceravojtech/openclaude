@@ -1,3 +1,6 @@
+import { getCyberMode } from '../bootstrap/state.js'
+import { findProviderProfileRouteForModel } from './providerProfiles.js'
+import { resolveRouteIdFromBaseUrl } from '../integrations/routeMetadata.js'
 import {
   isModernFrontierClaude,
   isOneMillionNativeClaude,
@@ -222,6 +225,18 @@ function warnUnknownIntegrationRuntimeLimits(model: string): void {
   )
 }
 
+function getCyberRequestRuntimeLimits(model: string) {
+  if (!getCyberMode().enabled) return undefined
+  const route = findProviderProfileRouteForModel(model)
+  if (!route) return undefined
+  return resolveModelRuntimeLimits({
+    model: route.model,
+    baseUrl: route.baseURL,
+    // An explicit request route must not inherit the session's provider flags.
+    resolvedRouteId: resolveRouteIdFromBaseUrl(route.baseURL),
+  })
+}
+
 export function getContextWindowForModel(
   model: string,
   betas?: string[],
@@ -257,7 +272,9 @@ export function getContextWindowForModel(
   // Unknown models get a conservative 128k default. This was previously 8k,
   // but that caused auto-compact to fire on every turn because the effective
   // context (8k minus output reservation) became negative (issue #635).
-  if (runtimeLimits?.contextWindow !== undefined || shouldUseIntegrationRuntimeLimits()) {
+  const cyberLimits = runtimeLimits === undefined ? getCyberRequestRuntimeLimits(model) : undefined
+  runtimeLimits ??= cyberLimits
+  if (runtimeLimits?.contextWindow !== undefined || cyberLimits !== undefined || shouldUseIntegrationRuntimeLimits()) {
     const resolvedRuntimeLimits = runtimeLimits ?? resolveModelRuntimeLimits({
       model,
       activeProfileProvider: getAppliedActiveProfileProvider(),
@@ -363,8 +380,9 @@ export function getModelMaxOutputTokens(model: string): {
   }
 
   // OpenAI-compatible provider — use known output limits to avoid 400 errors
-  if (shouldUseIntegrationRuntimeLimits()) {
-    const runtimeLimits = resolveModelRuntimeLimits({
+  const cyberLimits = getCyberRequestRuntimeLimits(model)
+  if (cyberLimits !== undefined || shouldUseIntegrationRuntimeLimits()) {
+    const runtimeLimits = cyberLimits ?? resolveModelRuntimeLimits({
       model,
       activeProfileProvider: getAppliedActiveProfileProvider(),
     })
