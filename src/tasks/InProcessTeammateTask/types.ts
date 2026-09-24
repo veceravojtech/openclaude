@@ -64,6 +64,8 @@ export type InProcessTeammateTaskState = TaskStateBase & {
 
   // Lifecycle
   isIdle: boolean
+  /** Last pane report; never changes the owner's own scheduling state. */
+  delegatedActivity?: import('../../utils/swarm/delegatedActivity.js').DelegatedActivity
   shutdownRequested: boolean
 
   /**

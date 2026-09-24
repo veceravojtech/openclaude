@@ -10,7 +10,7 @@ Takes no parameters.
 ## When to Use This Tool
 
 - Before SendMessage, when you don't know a peer's exact name
-- To check whether a teammate is idle (free for work) or busy, or whether a background agent has finished
+- To check whether a teammate is self-idle, waiting on descendants, or busy, or whether a background agent has finished
 - To confirm an agent still exists before messaging it
 
 ## Output
@@ -18,7 +18,8 @@ Takes no parameters.
 One line per agent: \`name  kind  status  to=<value>  [task=<id>]  [marker]  - description\`
 
 - **kind**: 'team_lead', 'teammate', or 'background_agent'
-- **status**: 'idle' | 'busy' for teammates; 'running' | 'completed' | 'failed' | 'killed' for background agents; 'unknown' when not tracked
+- **status**: 'idle' | 'waiting' | 'busy' for teammates; 'running' | 'completed' | 'failed' | 'killed' for background agents; 'unknown' when not tracked. 'waiting' means self-idle with working or unconfirmed descendants. Idle and parked owners retain their objectives; neither means permission to spawn a replacement.
+- **delegated**: recursive descendant activity and names; roster-only descendants are explicitly unknown, not proof of work or completion.
 - **to**: the exact value to pass as SendMessage's \`to\` — copy it verbatim
 - **task=**: the task id, present when a live local task backs the row. This is the id TaskStop takes; a row without it cannot be stopped from here.
 - **${TEAM_FILE_ONLY_MARKER}**: the row comes from the team file on disk and nothing else. The file is written when a teammate spawns and is not corrected when one dies, so such an agent may have died at startup or may belong to another session. Its status is always 'unknown' — treat it as unconfirmed, and do not assume a reply will come.

@@ -731,6 +731,61 @@ test('a child whose row is still inside its 30s grace window does not hold the g
   )
 })
 
+test('busy grandchild prevents idle shutdown through an idle child', async () => {
+  process.env.CLAUDE_CODE_TEAMMATE_IDLE_SHUTDOWN_MS = '1000'
+  const harness = await importRunnerWithMocks()
+  const world = createWorld()
+  writeSubTeamWorld([{ agentId: `worker@${SUB_TEAM}`, name: 'worker' }])
+  const grandTeam = `${SUB_TEAM}/worker`
+  writeTeam(grandTeam, [
+    { agentId: `team-lead@${grandTeam}`, name: TEAM_LEAD },
+    { agentId: `grand@${grandTeam}`, name: 'grand' },
+  ], { parentTeam: SUB_TEAM, parentAgentId: `worker@${SUB_TEAM}` })
+  await registerTeammate(world, 'worker', SUB_TEAM)
+  await registerTeammate(world, 'grand', grandTeam, 'busy')
+  const subLead = await startIdleTeammate(harness, world, SUB_LEAD, PARENT_TEAM)
+  await waitFor(() => virtualNow >= 1_700_000_005_000, 'recursive shutdown refusal')
+  expect(memberNames(PARENT_TEAM)).toContain(SUB_LEAD)
+  expect(harness.inbox(TEAM_LEAD, PARENT_TEAM).some(m => m.text.includes(`grand@${grandTeam}`))).toBe(true)
+  subLead.abortController.abort()
+  await subLead.done
+})
+
+test('pane Stop hook uses live getter, writes self-idle, and refreshes delegated quiet', async () => {
+  const harness = await importRunnerWithMocks()
+  const { initializeTeammateHooks, refreshTeammateDelegatedActivity } = await import('./teammateInit.js')
+  const world = createWorld()
+  writeSubTeamWorld([{ agentId: `worker@${SUB_TEAM}`, name: 'worker' }])
+  const worker = await registerTeammate(world, 'worker', SUB_TEAM, 'work')
+  initializeTeammateHooks(world.setAppState, 'pane-test', { teamName: PARENT_TEAM, agentName: SUB_LEAD, agentId: SUB_LEAD_AGENT_ID }, world.getState)
+  const hook = world.getState().sessionHooks.get('pane-test')?.hooks.Stop?.[0]?.hooks[0]?.hook
+  if (!hook || hook.type !== 'function') throw new Error('Stop hook missing')
+  await hook.callback([])
+  expect(readTeamFile(PARENT_TEAM)?.members.find(m => m.name === SUB_LEAD)?.isActive).toBe(false)
+  expect(harness.inbox(TEAM_LEAD, PARENT_TEAM).some(m => m.text.includes('waiting_for_children'))).toBe(true)
+  world.setAppState(prev => ({ ...prev, tasks: { ...prev.tasks, [worker.taskId]: { ...prev.tasks[worker.taskId]!, isIdle: true } as InProcessTeammateTaskState } }))
+  await refreshTeammateDelegatedActivity()
+  expect(harness.inbox(TEAM_LEAD, PARENT_TEAM).some(m => m.text.includes('"idleReason":"available"'))).toBe(true)
+})
+
+test('delegated activity refreshes during the same self-idle period', async () => {
+  const harness = await importRunnerWithMocks()
+  const world = createWorld()
+  writeSubTeamWorld([{ agentId: `worker@${SUB_TEAM}`, name: 'worker' }])
+  const worker = await registerTeammate(world, 'worker', SUB_TEAM, 'work')
+  const subLead = await startIdleTeammate(harness, world, SUB_LEAD, PARENT_TEAM)
+  const reasons = () => harness.inbox(TEAM_LEAD, PARENT_TEAM)
+    .map(m => { try { return JSON.parse(m.text).idleReason } catch { return undefined } })
+    .filter(Boolean)
+  await waitFor(() => reasons().includes('waiting_for_children'), 'delegated wait report')
+  expect((world.getState().tasks[subLead.taskId] as InProcessTeammateTaskState).isIdle).toBe(true)
+  world.setAppState(prev => ({ ...prev, tasks: { ...prev.tasks, [worker.taskId]: { ...prev.tasks[worker.taskId]!, isIdle: true } as InProcessTeammateTaskState } }))
+  await waitFor(() => reasons().includes('available'), 'quiet aggregate transition')
+  expect(reasons()).toEqual(['waiting_for_children', 'available'])
+  subLead.abortController.abort()
+  await subLead.done
+})
+
 test('a teammate that leads no sub-team is unaffected by the gate', async () => {
   process.env.CLAUDE_CODE_TEAMMATE_IDLE_SHUTDOWN_MS = '1000'
   const harness = await importRunnerWithMocks()

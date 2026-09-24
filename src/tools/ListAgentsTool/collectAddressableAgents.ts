@@ -27,6 +27,8 @@ import type { AppState } from '../../state/AppState.js'
 import type { TaskStatus } from '../../Task.js'
 import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js'
 import { TEAM_LEAD_NAME } from '../../utils/swarm/constants.js'
+import { resolveDelegatedActivity, type DelegatedActivity } from '../../utils/swarm/delegatedActivity.js'
+import type { TeamFile } from '../../utils/swarm/teamHelpers.js'
 import type { TeammateStatus } from '../../utils/teamDiscovery.js'
 import { formatRecipientAddress } from '../SendMessageTool/addressing.js'
 
@@ -38,6 +40,7 @@ export const ADDRESSABLE_AGENT_KINDS = [
 export type AddressableAgentKind = (typeof ADDRESSABLE_AGENT_KINDS)[number]
 
 export const ADDRESSABLE_AGENT_STATUSES = [
+  'waiting',
   'idle',
   'busy',
   'running',
@@ -68,6 +71,7 @@ export type AddressableAgent = {
   agentId: string
   kind: AddressableAgentKind
   status: AddressableAgentStatus
+  delegatedActivity?: DelegatedActivity
   description: string
   model?: string
   team?: string
@@ -113,6 +117,8 @@ export type CollectAddressableAgentsInput = {
    */
   includeTeamLead: boolean
   tree?: TeamNeighbourhood
+  delegatedTeams?: readonly TeamFile[]
+  delegatedByAgentId?: ReadonlyMap<string, DelegatedActivity>
 }
 
 const KIND_ORDER: Record<AddressableAgentKind, number> = {
@@ -216,6 +222,15 @@ export function collectAddressableAgents(
     }
     seenAgentIds.add(agent.agentId)
     seenAddresses.add(addressKey)
+    const delegatedActivity = input.delegatedByAgentId?.get(agent.agentId) ??
+      resolveDelegatedActivity(agent.agentId, tasks, input.delegatedTeams)
+    const task = agent.taskId ? tasks[agent.taskId] : undefined
+    const reported = task?.type === 'in_process_teammate' ? task.delegatedActivity : undefined
+    const aggregate = delegatedActivity.status !== 'none' ? delegatedActivity : reported ?? delegatedActivity
+    if (agent.status === 'idle' && aggregate.status !== 'none') agent.status = 'waiting'
+    if (aggregate.status !== 'none' && (agent.status === 'waiting' || agent.status === 'unknown' || agent.status === 'busy')) {
+      agent.delegatedActivity = aggregate
+    }
     agents.push(agent)
   }
 
@@ -439,6 +454,10 @@ export function renderAddressableAgents(
     }
     if (agent.source === 'team_file') {
       parts.push(TEAM_FILE_ONLY_MARKER)
+    }
+    if (agent.delegatedActivity) {
+      const activity = agent.delegatedActivity
+      parts.push(`delegated=${activity.status} [${[...activity.activeDescendants, ...activity.unknownDescendants.map(name => `${name} (unknown)`)].join(', ')}]`)
     }
     const line = parts.join('  ')
     return agent.description ? `${line}  - ${agent.description}` : line

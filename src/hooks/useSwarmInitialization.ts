@@ -9,7 +9,7 @@
 
 import { useEffect } from 'react'
 import { getSessionId } from '../bootstrap/state.js'
-import type { AppState } from '../state/AppState.js'
+import { type AppState, useAppStateStore } from '../state/AppState.js'
 import type { Message } from '../types/message.js'
 import { isAgentSwarmsEnabled } from '../utils/agentSwarmsEnabled.js'
 import { initializeTeammateContextFromSession } from '../utils/swarm/reconnection.js'
@@ -32,6 +32,7 @@ export function useSwarmInitialization(
   initialMessages: Message[] | undefined,
   { enabled = true }: { enabled?: boolean } = {},
 ): void {
+  const store = useAppStateStore()
   useEffect(() => {
     if (!enabled) return
     if (isAgentSwarmsEnabled()) {
@@ -61,7 +62,7 @@ export function useSwarmInitialization(
             teamName,
             agentId: member.agentId,
             agentName,
-          })
+          }, store.getState)
         }
       } else {
         // Fresh spawn or standalone session
@@ -73,9 +74,9 @@ export function useSwarmInitialization(
             teamName: context.teamName,
             agentId: context.agentId,
             agentName: context.agentName,
-          })
+          }, store.getState)
         }
       }
     }
-  }, [setAppState, initialMessages, enabled])
+  }, [setAppState, initialMessages, enabled, store])
 }

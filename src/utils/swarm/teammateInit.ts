@@ -19,7 +19,15 @@ import {
   writeToMailbox,
 } from '../teammateMailbox.js'
 import { getAPIProvider } from '../model/providers.js'
+import { readDelegatedActivity } from './delegatedActivity.js'
 import { readTeamFile, setMemberActive } from './teamHelpers.js'
+
+// Refreshed by the existing inbox poll. A new turn invalidates an in-flight
+// refresh through the roster's self-active state, without owning a timer.
+let idleReporter: (() => Promise<void>) | undefined
+export async function refreshTeammateDelegatedActivity(): Promise<void> {
+  await idleReporter?.()
+}
 
 /**
  * Initializes hooks for a teammate running in a swarm.
@@ -32,6 +40,7 @@ export function initializeTeammateHooks(
   setAppState: (updater: (prev: AppState) => AppState) => void,
   sessionId: string,
   teamInfo: { teamName: string; agentId: string; agentName: string },
+  getAppState: () => AppState,
 ): void {
   const { teamName, agentId, agentName } = teamInfo
 
@@ -152,6 +161,29 @@ export function initializeTeammateHooks(
     `[TeammateInit] Registering Stop hook for teammate ${agentName} to notify leader ${leadAgentName}`,
   )
 
+  let lastDelegated: string | undefined
+  let stopped = false
+  let idleSummary: string | undefined
+  const reportIdle = async () => {
+    if (!stopped) return
+    const own = readTeamFile(teamName)?.members.find(m => m.agentId === agentId)
+    if (!own || own.isActive !== false) return
+    const delegatedActivity = readDelegatedActivity(teamInfo, getAppState().tasks)
+    const key = JSON.stringify(delegatedActivity)
+    if (key === lastDelegated) return
+    lastDelegated = key
+    await writeToMailbox(leadAgentName, {
+      from: agentName,
+      text: jsonStringify(createIdleNotification(agentName, {
+        idleReason: delegatedActivity.status === 'none' ? 'available' : 'waiting_for_children',
+        delegatedActivity,
+        summary: idleSummary,
+      })),
+      timestamp: new Date().toISOString(),
+      color: getTeammateColor(),
+    }, teamName)
+  }
+
   // Register Stop hook to notify leader when this teammate stops
   addFunctionHook(
     setAppState,
@@ -159,21 +191,12 @@ export function initializeTeammateHooks(
     'Stop',
     '', // No matcher - applies to all Stop events
     async (messages, _signal) => {
-      // Mark this teammate as idle in the team config (fire and forget)
-      void setMemberActive(teamName, agentName, false)
-
-      // Send idle notification to the team leader using agent name (not UUID)
-      // Must await to ensure the write completes before process shutdown
-      const notification = createIdleNotification(agentName, {
-        idleReason: 'available',
-        summary: getLastPeerDmSummary(messages),
-      })
-      await writeToMailbox(leadAgentName, {
-        from: agentName,
-        text: jsonStringify(notification),
-        timestamp: new Date().toISOString(),
-        color: getTeammateColor(),
-      })
+      await setMemberActive(teamName, agentName, false)
+      stopped = true
+      idleSummary = getLastPeerDmSummary(messages)
+      lastDelegated = undefined
+      idleReporter = reportIdle
+      await reportIdle()
       logForDebugging(
         `[TeammateInit] Sent idle notification to leader ${leadAgentName}`,
       )
@@ -201,6 +224,7 @@ export async function reportTeammateTurnFailure(
   agentName: string,
   kind: 'provider' | 'runtime' = 'provider',
 ): Promise<void> {
+  idleReporter = undefined
   const teamFile = readTeamFile(teamName)
   if (!teamFile) return
 

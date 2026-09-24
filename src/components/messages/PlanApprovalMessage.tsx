@@ -171,7 +171,10 @@ function getPlanApprovalSummary(content: string): string | null {
  * Get a brief summary text for an idle notification.
  */
 function getIdleNotificationSummary(msg: IdleNotificationMessage): string {
-  const parts: string[] = ['Agent idle'];
+  const parts: string[] = [msg.idleReason === 'waiting_for_children' ? 'Agent waiting for descendants' : msg.idleReason === 'parked' ? 'Agent parked' : 'Agent idle'];
+  if (msg.delegatedActivity && msg.delegatedActivity.status !== 'none') {
+    parts.push(`Delegated work: ${msg.delegatedActivity.status}`);
+  }
   if (msg.completedTaskId) {
     const status = msg.completedStatus || 'completed';
     parts.push(`Task ${msg.completedTaskId} ${status}`);

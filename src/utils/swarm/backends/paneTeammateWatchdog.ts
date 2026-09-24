@@ -690,6 +690,8 @@ export function armPaneTeammateWatchdog({
   // True while the teammate is parked on a usage limit: failure deadlines
   // stand down (parked is alive and resumable), completion still watched for.
   let parked = false
+  let consumedWaiting: string | undefined
+  let waitingForChildren = false
   // True once THIS watchdog failed the task on a deadline. The watchdog then
   // keeps watching for the child's idle notification: a merely-slow teammate
   // was failed spuriously, and its late completion must WIN — the task flips
@@ -880,8 +882,41 @@ export function armPaneTeammateWatchdog({
           latestIdle = idle
         }
       }
+      if (latestIdle?.idleReason === 'waiting_for_children') {
+        const key = JSON.stringify(latestIdle)
+        const member = (await readTeamFile(teamName))?.members?.find(m => m.name === teammateName)
+        if (disposed) return
+        if (member?.isActive === true) {
+          if (waitingForChildren) lastSignalAt = now()
+          waitingForChildren = false
+          consumedWaiting = key
+          updateTaskState(taskId, setAppState, task => ({ ...task, isIdle: false, delegatedActivity: undefined }))
+          latestIdle = null
+        } else if (key === consumedWaiting && !waitingForChildren) {
+          latestIdle = null
+        } else {
+          waitingForChildren = true
+          consumedWaiting = key
+        }
+      }
       if (latestIdle) {
+        if (latestIdle.idleReason === 'waiting_for_children') {
+          // Waiting is not completion. Keep the watchdog alive, including its
+          // death probe, until the child's existing poll emits the quiet edge.
+          updateTaskState(taskId, setAppState, task => ({
+            ...task,
+            isIdle: true,
+            delegatedActivity: latestIdle!.delegatedActivity,
+          }))
+          const liveness = await probePane()
+          if (disposed) return
+          if (liveness === 'dead') failTask('Pane exited while waiting for descendants')
+          return
+        }
         if (latestIdle.idleReason === 'parked') {
+          updateTaskState(taskId, setAppState, task => ({
+            ...task, isIdle: true, delegatedActivity: latestIdle!.delegatedActivity,
+          }))
           parked = true
           logForDebugging(
             `[PaneWatchdog] ${teammateName} parked (usage limit); failure deadlines stand down`,

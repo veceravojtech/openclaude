@@ -44,6 +44,7 @@ import {
   removeTeammateFromTeamFile,
   setMemberMode,
 } from '../utils/swarm/teamHelpers.js'
+import { refreshTeammateDelegatedActivity } from '../utils/swarm/teammateInit.js'
 import { retireTeammateFromLeaderView } from '../utils/swarm/teammateRetirement.js'
 import { unassignTeammateTasks } from '../utils/tasks.js'
 import {
@@ -155,7 +156,10 @@ export function useInboxPoller({
       currentAppState.teamContext?.teamName,
     )
 
-    if (unread.length === 0) return
+    if (unread.length === 0) {
+      if (!isLoading && isTeammate()) await refreshTeammateDelegatedActivity()
+      return
+    }
 
     logForDebugging(`[InboxPoller] Found ${unread.length} unread message(s)`)
 

@@ -114,6 +114,26 @@ function state(
 /** A lead calling from outside any team context. */
 const asLead = { teamMembers: [], includeTeamLead: false } as const
 
+test('self-idle owner of running fork projects waiting without changing task state', () => {
+  const owner = teammate('owner', { isIdle: true })
+  owner.parkedNotice = 'quota window'
+  const fork = { ...backgroundAgent('fork'), parentAgentId: owner.identity.agentId as AgentId }
+  const agents = collectAddressableAgents({ ...state([owner, fork]), ...asLead })
+  expect(agents[0]?.status).toBe('waiting')
+  expect(agents[0]?.delegatedActivity?.activeDescendants).toEqual(['fork'])
+  expect(owner.isIdle).toBe(true)
+  expect(owner.parkedNotice).toBe('quota window')
+  expect(renderAddressableAgents(agents)).toContain('delegated=working [fork]')
+})
+
+test('dead pane precedence beats delegated waiting', () => {
+  const owner = teammate('owner', { isIdle: true })
+  const fork = { ...backgroundAgent('fork'), parentAgentId: owner.identity.agentId as AgentId }
+  const agents = collectAddressableAgents({ ...state([owner, fork]), ...asLead, teamMembers: [member('owner', { status: 'dead' })] })
+  expect(agents[0]?.status).toBe('killed')
+  expect(agents[0]?.delegatedActivity).toBeUndefined()
+})
+
 test('empty state lists nothing', () => {
   const agents = collectAddressableAgents({ ...state([]), ...asLead })
   expect(agents).toEqual([])

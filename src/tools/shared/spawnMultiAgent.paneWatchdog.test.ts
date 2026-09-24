@@ -79,7 +79,7 @@ const MAX_UNKNOWN_RETRIES = 3
 function idleNotification(
   from: string,
   nowMs: number,
-  idleReason?: 'available' | 'interrupted' | 'failed' | 'parked',
+  idleReason?: 'available' | 'interrupted' | 'failed' | 'parked' | 'waiting_for_children',
   summary?: string,
   failureReason?: string,
 ): PaneWatchdogMailboxMessage {
@@ -96,6 +96,46 @@ function idleNotification(
     timestamp: new Date(nowMs).toISOString(),
   }
 }
+
+test('delegated waiting does not complete or timeout, then quiet completes', async () => {
+  const world = makeWorld()
+  registerTeammate(world)
+  const handle = world.handles[0]!
+  world.mailbox.push(idleNotification('worker', world.nowMs, 'waiting_for_children'))
+  world.probes.push('alive', 'alive')
+  await handle.scan()
+  expect(world.state.tasks[world.taskId()!]!.status).toBe('running')
+  world.nowMs += PROGRESS_TIMEOUT_MS * 2
+  await handle.scan()
+  expect(world.state.tasks[world.taskId()!]!.status).toBe('running')
+  expect(world.notifications()).toHaveLength(0)
+  world.mailbox.push(idleNotification('worker', world.nowMs, 'available'))
+  await handle.scan()
+  expect(world.state.tasks[world.taskId()!]!.status).toBe('completed')
+})
+
+test('delegated waiting still detects a dead pane', async () => {
+  const world = makeWorld()
+  registerTeammate(world)
+  world.mailbox.push(idleNotification('worker', world.nowMs, 'waiting_for_children'))
+  world.probes.push('dead')
+  await world.handles[0]!.scan()
+  expect(world.state.tasks[world.taskId()!]!.status).toBe('failed')
+})
+
+test('new self-active turn invalidates stale delegated waiting', async () => {
+  const world = makeWorld()
+  registerTeammate(world)
+  world.mailbox.push(idleNotification('worker', world.nowMs, 'waiting_for_children'))
+  world.probes.push('alive')
+  await world.handles[0]!.scan()
+  world.teamFile.members[1]!.isActive = true
+  await world.handles[0]!.scan()
+  world.nowMs += PROGRESS_TIMEOUT_MS + 1
+  world.probes.push('alive')
+  await world.handles[0]!.scan()
+  expect(world.state.tasks[world.taskId()!]!.status).toBe('failed')
+})
 
 function makeWorld(teammateName = 'worker'): World {
   const world: World = {

@@ -10,6 +10,7 @@ import {
   readSubTeamLedBy,
   readTeamFileAsync,
 } from '../../utils/swarm/teamHelpers.js'
+import { readDelegatedActivity } from '../../utils/swarm/delegatedActivity.js'
 import { getTeammateStatuses } from '../../utils/teamDiscovery.js'
 import { getTeamName } from '../../utils/teammate.js'
 import {
@@ -82,6 +83,11 @@ const outputSchema = lazySchema(() =>
         idleSince: z.string().optional(),
         to: z.string(),
         source: z.enum(ADDRESSABLE_AGENT_SOURCES).optional(),
+        delegatedActivity: z.object({
+          status: z.enum(['none', 'working', 'unknown']),
+          activeDescendants: z.array(z.string()),
+          unknownDescendants: z.array(z.string()),
+        }).optional(),
         taskId: z.string().optional(),
       }),
     ),
@@ -147,7 +153,14 @@ export const ListAgentsTool = buildTool({
     const tree = await readTeamNeighbourhood(identity, teamName)
     const teamMembers = teamName ? await getTeammateStatuses(teamName) : []
 
+    const owners = [
+      ...teamMembers.map(member => ({ agentId: member.agentId, agentName: member.name })),
+      ...(tree.subTeam?.members ?? []).map(member => ({ agentId: member.agentId, agentName: member.name })),
+      ...Object.values(appState.tasks).flatMap(task => task.type === 'in_process_teammate' ? [task.identity] : []),
+    ]
+    const delegatedByAgentId = new Map(owners.map(owner => [owner.agentId, readDelegatedActivity(owner, appState.tasks)]))
     const agents = collectAddressableAgents({
+      delegatedByAgentId,
       tasks: appState.tasks,
       agentNameRegistry: appState.agentNameRegistry,
       teamMembers,

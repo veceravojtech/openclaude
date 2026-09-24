@@ -190,6 +190,7 @@ import {
   removeMemberByAgentId,
 } from './teamHelpers.js'
 import { TEAMMATE_SYSTEM_PROMPT_ADDENDUM } from './teammatePromptAddendum.js'
+import { readDelegatedActivity, type DelegatedActivity } from './delegatedActivity.js'
 import { createInProcessPermissionAbortCompleter } from './inProcessPermissionAbort.js'
 
 type SetAppStateFn = (updater: (prev: AppState) => AppState) => void
@@ -730,7 +731,10 @@ async function sendMessageToLeader(
   text: string,
   color: string | undefined,
   teamName: string,
+  isCurrent?: () => boolean,
 ): Promise<void> {
+  const inboxTeam = await resolveUpwardInboxTeam(teamName)
+  if (isCurrent && !isCurrent()) return
   await writeToMailbox(
     TEAM_LEAD_NAME,
     {
@@ -739,7 +743,7 @@ async function sendMessageToLeader(
       timestamp: new Date().toISOString(),
       color,
     },
-    await resolveUpwardInboxTeam(teamName),
+    inboxTeam,
   )
 }
 
@@ -755,12 +759,14 @@ async function sendIdleNotification(
     // Mirrors IdleNotificationMessage['idleReason'] in teammateMailbox.ts —
     // widening one without the other is a type error at the park call site
     // below, which is the coupling that keeps the two in step.
-    idleReason?: 'available' | 'interrupted' | 'failed' | 'parked'
+    idleReason?: 'available' | 'interrupted' | 'failed' | 'parked' | 'waiting_for_children'
+    delegatedActivity?: DelegatedActivity
     summary?: string
     completedTaskId?: string
     completedStatus?: 'resolved' | 'blocked' | 'failed'
     failureReason?: string
   },
+  isCurrent?: () => boolean,
 ): Promise<void> {
   const notification = createIdleNotification(agentName, options)
 
@@ -769,6 +775,7 @@ async function sendIdleNotification(
     jsonStringify(notification),
     agentColor,
     teamName,
+    isCurrent,
   )
 }
 
@@ -1211,6 +1218,7 @@ async function waitForNextPromptOrShutdown(
   getAppState: () => AppState,
   setAppState: SetAppStateFn,
   taskListId: string,
+  refreshDelegated?: () => Promise<void>,
 ): Promise<WaitResult> {
   const task = getAppState().tasks[taskId]
   const idlePolicy = createIdlePolicy(
@@ -1226,6 +1234,7 @@ async function waitForNextPromptOrShutdown(
       setAppState,
       taskListId,
       idlePolicy,
+      refreshDelegated,
     )
   } finally {
     idlePolicy.dispose()
@@ -1240,6 +1249,7 @@ async function pollForNextPromptOrShutdown(
   setAppState: SetAppStateFn,
   taskListId: string,
   idlePolicy: IdlePolicy,
+  refreshDelegated?: () => Promise<void>,
 ): Promise<WaitResult> {
   const POLL_INTERVAL_MS = 500
   const subTeamInbox = createSubTeamInboxResolver(identity)
@@ -1490,6 +1500,8 @@ async function pollForNextPromptOrShutdown(
       }
     }
 
+    await refreshDelegated?.()
+
     // Nothing to do this round: let the idle policy fire TeammateIdleTimeout
     // hooks or end the wait with an idle shutdown.
     const idleResult = idlePolicy.check(Date.now() - idleStartedAt)
@@ -1600,6 +1612,7 @@ async function finalizeIdleShutdown(
   taskListId: string,
   result: Extract<WaitResult, { type: 'idle_shutdown' }>,
 ): Promise<boolean> {
+  if (readDelegatedActivity(identity, getAppState().tasks).status !== 'none') return false
   // A sub-lead does not get to go idle out from under its own team. Its
   // children report INTO its sub-team inbox and claim from its task list, so
   // tearing it down while any of them is still working orphans them: their
@@ -2080,22 +2093,32 @@ async function idleUntilNextPrompt(params: {
   // Teammates should use the Teammate tool to communicate with the leader.
   // This matches process-based teammates where output is not visible to the leader.
 
-  // Only send idle notification on transition to idle (not if already idle)
-  if (!wasAlreadyIdle) {
-    await sendIdleNotification(
-      identity.agentName,
-      identity.color,
-      identity.teamName,
-      {
-        idleReason: workWasAborted ? 'interrupted' : 'available',
-        summary: getLastPeerDmSummary(allMessages),
-      },
-    )
-  } else {
-    logForDebugging(
-      `[inProcessRunner] Skipping duplicate idle notification for ${identity.agentName}`,
-    )
+  // Self-idle stays a scheduling fact; availability additionally includes the
+  // recursive delegation tree. Refresh in the existing poll, never a timer.
+  let lastDelegated = wasAlreadyIdle
+    ? JSON.stringify(readDelegatedActivity(identity, toolUseContext.getAppState().tasks))
+    : undefined
+  const refreshDelegated = async () => {
+    const current = toolUseContext.getAppState().tasks[taskId]
+    if (abortController.signal.aborted || current?.type !== 'in_process_teammate' ||
+        !current.isIdle || current.pendingUserMessages.length) return
+    const delegatedActivity = readDelegatedActivity(identity, toolUseContext.getAppState().tasks)
+    const key = JSON.stringify(delegatedActivity)
+    if (key === lastDelegated) return
+    lastDelegated = key
+    await sendIdleNotification(identity.agentName, identity.color, identity.teamName, {
+      idleReason: current.parkedNotice ? 'parked' : workWasAborted ? 'interrupted'
+        : delegatedActivity.status === 'none' ? 'available' : 'waiting_for_children',
+      delegatedActivity,
+      summary: getLastPeerDmSummary(allMessages),
+    }, () => {
+      const latest = toolUseContext.getAppState().tasks[taskId]
+      return !abortController.signal.aborted && latest?.type === 'in_process_teammate' &&
+        latest.isIdle && latest.pendingUserMessages.length === 0 &&
+        JSON.stringify(readDelegatedActivity(identity, toolUseContext.getAppState().tasks)) === key
+    })
   }
+  await refreshDelegated()
 
   logForDebugging(
     `[inProcessRunner] ${identity.agentId} finished prompt, waiting for next`,
@@ -2125,6 +2148,7 @@ async function idleUntilNextPrompt(params: {
     toolUseContext.getAppState,
     setAppState,
     taskListId,
+    refreshDelegated,
   )
   while (waitResult.type === 'idle_shutdown') {
     // A handoff is a retirement WITH a successor, so it takes the additive
@@ -2152,6 +2176,7 @@ async function idleUntilNextPrompt(params: {
       toolUseContext.getAppState,
       setAppState,
       taskListId,
+      refreshDelegated,
     )
   }
 
@@ -2832,6 +2857,7 @@ export async function runInProcessTeammate(
               // same reason: nothing completed, and this send never carried a
               // completedTaskId for its one reader to key on anyway.
               idleReason: 'parked',
+              delegatedActivity: readDelegatedActivity(identity, toolUseContext.getAppState().tasks),
               failureReason: usageLimitNotice,
             },
           )

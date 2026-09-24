@@ -399,13 +399,14 @@ export type IdleNotificationMessage = {
   /**
    * Why the agent went idle.
    *
-   * 'parked' is the one value that does NOT mean the turn is over for good:
-   * the teammate hit an account-wide usage limit, handed its claim back and is
+   * 'parked' means the teammate hit an account-wide usage limit, handed its claim back and is
    * waiting for a prompt. It is alive and resumable — messaging it is what
    * resumes it — so a lead reading this must not treat it as a finished or
    * failed agent. `failureReason` carries the notice, including the reset time.
    */
-  idleReason?: 'available' | 'interrupted' | 'failed' | 'parked'
+  idleReason?: 'available' | 'interrupted' | 'failed' | 'parked' | 'waiting_for_children'
+  /** Delegation is independent of the owner's own stop/park/failure cause. */
+  delegatedActivity?: import('./swarm/delegatedActivity.js').DelegatedActivity
   /** Brief summary of the last DM sent this turn (if any) */
   summary?: string
   completedTaskId?: string
@@ -420,6 +421,7 @@ export function createIdleNotification(
   agentId: string,
   options?: {
     idleReason?: IdleNotificationMessage['idleReason']
+    delegatedActivity?: IdleNotificationMessage['delegatedActivity']
     summary?: string
     completedTaskId?: string
     completedStatus?: 'resolved' | 'blocked' | 'failed'
@@ -431,6 +433,7 @@ export function createIdleNotification(
     from: agentId,
     timestamp: new Date().toISOString(),
     idleReason: options?.idleReason,
+    ...(options?.delegatedActivity ? { delegatedActivity: options.delegatedActivity } : {}),
     summary: options?.summary,
     completedTaskId: options?.completedTaskId,
     completedStatus: options?.completedStatus,
