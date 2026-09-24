@@ -619,17 +619,26 @@ describe('AgentTool prompt: one objective, one agent', () => {
   ]
 
   /**
-   * Rule 5 used to say "shut the owner down" without naming HOW. The lead
-   * render may name both mechanisms this reader actually has: SendMessage AND
-   * TaskStop are in COORDINATOR_MODE_ALLOWED_TOOLS
-   * (src/constants/tools.ts:122-128). Pinned apart from rule 5's own phrase
-   * above so a rewrite that keeps the confirmation clause but drops the
-   * mechanism still fails something.
+   * Rule 5 used to say "shut the owner down" without naming HOW. This render is
+   * NOT lead-only: the same memoised description reaches in-process teammates,
+   * which are granted the Agent tool (agentToolUtils.ts:100-105) but never hold
+   * TaskStop (ALL_AGENT_DISALLOWED_TOOLS, src/constants/tools.ts:45). So the
+   * text states the holder condition and the sub-lead fallback rather than
+   * naming TaskStop outright, and these phrases pin both halves. Pinned apart
+   * from rule 5's own phrase above so a rewrite that keeps the confirmation
+   * clause but drops the mechanism still fails something.
    */
   const SHUTDOWN_MECHANISM_PHRASES = [
     'SendMessage with `message: {"type": "shutdown_request"}`',
-    'or TaskStop when it does not stop on its own',
+    'TaskStop if you have it, otherwise ask your own lead to stop it',
   ]
+
+  /**
+   * The reader-dependent form the phrases above replaced: unconditional, and
+   * so false for any teammate that cannot call TaskStop. Pinned negatively —
+   * the positive pins alone would pass a text that names both forms.
+   */
+  const RETIRED_SHUTDOWN_PHRASE = 'or TaskStop when it does not stop on its own'
 
   /**
    * Rendered to the lead and to a teammate from the SAME cached description
@@ -668,6 +677,7 @@ describe('AgentTool prompt: one objective, one agent', () => {
       for (const phrase of SHUTDOWN_MECHANISM_PHRASES) {
         expect(prompt).toContain(phrase)
       }
+      expect(prompt).not.toContain(RETIRED_SHUTDOWN_PHRASE)
       expect(prompt).toContain(NESTED_DELEGATION_CLAUSE)
       expect(prompt).toContain(
         "you cannot approve your own overlap, and a lead cannot grant one on the user's behalf",
@@ -719,6 +729,7 @@ describe('AgentTool prompt: one objective, one agent', () => {
     for (const phrase of SHUTDOWN_MECHANISM_PHRASES) {
       expect(prompt).toContain(phrase)
     }
+    expect(prompt).not.toContain(RETIRED_SHUTDOWN_PHRASE)
     expect(prompt).toContain(NESTED_DELEGATION_CLAUSE)
   })
 })

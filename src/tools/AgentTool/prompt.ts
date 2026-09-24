@@ -173,6 +173,11 @@ const TEAMMATE_DEFAULT_RECOMMENDATION = `
  * whatever its lead's render cached, so the nested-delegation clause is stated
  * to both readers rather than gated on being one of them.
  *
+ * Rule 5 names its shutdown mechanism the same way: that shared reader is an
+ * in-process teammate (`agentToolUtils.ts:100-105`) which does not hold
+ * TaskStop (`constants/tools.ts:45`), so the tool is stated with the holder
+ * condition and a fallback instead of being branched on the reader.
+ *
  * Gated on `isAgentSwarmsEnabled()` like its neighbours: it names
  * SendMessage and ListAgents, whose own isEnabled() is that same flag
  * (`SendMessageTool.ts:836-838`, `ListAgentsTool.ts:114-115`), so with Agent
@@ -190,7 +195,7 @@ const TEAMMATE_OBJECTIVE_RULES = `
 - Do not spawn a second agent for an objective another agent already owns. Send the follow-up to the owner with ${SEND_MESSAGE_TOOL_NAME} — its context is still loaded, which is the point of a teammate.
 - A second agent on the same objective needs the user's approval, asked for before you create the overlap, and two is the ceiling. Silence is not approval, and neither is a request that merely sounds urgent.
 - While an owner is still working, do not start a speculative replacement, a competing implementation, or a second investigator for the same question. Wait for its result.
-- Capture the result, then shut the owner down — ${SEND_MESSAGE_TOOL_NAME} with \`message: {"type": "shutdown_request"}\`, or ${TASK_STOP_TOOL_NAME} when it does not stop on its own — then confirm with ${LIST_AGENTS_TOOL_NAME} that it is no longer listed. A completion message or a shutdown acknowledgement is not proof that it stopped. Only then may a successor start on that objective.
+- Capture the result, then shut the owner down: ${SEND_MESSAGE_TOOL_NAME} with \`message: {"type": "shutdown_request"}\`, and if it does not stop on its own, ${TASK_STOP_TOOL_NAME} if you have it, otherwise ask your own lead to stop it. Then confirm with ${LIST_AGENTS_TOOL_NAME} that it is no longer listed. A completion message or a shutdown acknowledgement is not proof that it stopped. Only then may a successor start on that objective.
 - Re-wording the objective, renaming the agent, changing its model or role, or splitting the same work under a new label does not make it a new objective.
 - A teammate parked on a usage limit is idle, not finished: it still owns its objective, and the continuation goes to it, not to a replacement.
 - These rules bind whoever delegates. If you lead a sub-team they apply unchanged to the objectives you hand out; delegating one level down does not reset the count. Splitting an objective you were given and putting two agents on the same split is still the two-agent case and still needs the user's approval — you cannot approve your own overlap, and a lead cannot grant one on the user's behalf.`
