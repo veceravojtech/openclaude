@@ -107,7 +107,46 @@ function setDeps(overrides: Partial<TeammateDispatchDeps> = {}): void {
   })
 }
 
+// Alias resolution (separationFamilyOf('opus'), familyOfModel, ...) goes through
+// parseUserSpecifiedModel, which follows the ambient provider env. Pin it so
+// these tests do not depend on how the process was launched (teammates run bound
+// to DeepSeek/Codex/etc.).
+const ROUTE_ENV_KEYS = [
+  'ANTHROPIC_BASE_URL',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_GEMINI',
+  'CLAUDE_CODE_USE_GITHUB',
+  'CLAUDE_CODE_USE_MISTRAL',
+  'CLAUDE_CODE_USE_OPENAI',
+  'CLAUDE_CODE_USE_VERTEX',
+  'MIMO_API_KEY',
+  'MINIMAX_API_KEY',
+  'NVIDIA_NIM',
+  'OPENAI_API_BASE',
+  'OPENAI_BASE_URL',
+  'OPENAI_MODEL',
+  'OPENCLAUDE_TEAMMATE_PROFILE_ID',
+] as const
+const savedRouteEnv: Partial<Record<(typeof ROUTE_ENV_KEYS)[number], string>> = {}
+
+function clearRouteEnv(): void {
+  for (const key of ROUTE_ENV_KEYS) {
+    savedRouteEnv[key] = process.env[key]
+    delete process.env[key]
+  }
+}
+
+function restoreRouteEnv(): void {
+  for (const key of ROUTE_ENV_KEYS) {
+    const saved = savedRouteEnv[key]
+    if (saved === undefined) delete process.env[key]
+    else process.env[key] = saved
+  }
+}
+
 beforeEach(() => {
+  clearRouteEnv()
   jevCalls = []
   members = []
   _resetTeammateDispatchWarningsForTesting()
@@ -117,6 +156,7 @@ beforeEach(() => {
 afterEach(() => {
   setCyberModeEnabled(false)
   _setTeammateDispatchDepsForTesting(undefined)
+  restoreRouteEnv()
 })
 
 describe('cyber role routing', () => {
