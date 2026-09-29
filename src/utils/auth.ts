@@ -1450,6 +1450,8 @@ export function clearOAuthTokenCache(): void {
 }
 
 let lastCredentialsMtimeMs = 0
+let lastOAuthCacheCheckAt = 0
+const OAUTH_CACHE_MAX_AGE_MS = 30_000
 
 // Cross-process staleness: another CC instance may write fresh tokens to
 // disk (refresh or /login), but this process's memoize caches forever.
@@ -1457,6 +1459,13 @@ let lastCredentialsMtimeMs = 0
 // then revokes terminal 1 server-side, and terminal 1's memoize never
 // re-reads — infinite /login regress (CC-1096, GH#24317).
 async function invalidateOAuthCacheIfDiskChanged(): Promise<void> {
+  // Native vault writes do not touch the plaintext fallback's mtime. Bound the
+  // outer memoize too, even when an old fallback file still exists on disk.
+  const now = Date.now()
+  if (now - lastOAuthCacheCheckAt >= OAUTH_CACHE_MAX_AGE_MS) {
+    lastOAuthCacheCheckAt = now
+    clearOAuthTokenCache()
+  }
   try {
     const { mtimeMs } = await stat(
       join(getClaudeConfigHomeDir(), '.credentials.json'),
@@ -1480,6 +1489,31 @@ async function invalidateOAuthCacheIfDiskChanged(): Promise<void> {
 // nukes readInFlight in macOsKeychainStorage and triggers a fresh spawn —
 // sync spawns stacked to 800ms+ of blocked render frames.
 const pending401Handlers = new Map<string, Promise<boolean>>()
+
+/**
+ * Recover from a revoked OAuth access token WITHOUT touching the refresh
+ * endpoint. Another process (a sibling teammate, or the lead) may already
+ * have rotated the grant and stored a fresh token — in the OS vault or the
+ * plaintext fallback — while this process still holds the old one in memory.
+ *
+ * Re-reads storage once and reports whether it now holds a DIFFERENT,
+ * unexpired access token. It never refreshes: presenting a rotated-away
+ * refresh token can revoke the whole grant family.
+ *
+ * @param failedAccessToken - The access token the API rejected as revoked
+ * @returns true if storage now holds a different, usable access token
+ */
+export async function recoverRotatedOAuthToken(
+  failedAccessToken: string,
+): Promise<boolean> {
+  clearOAuthTokenCache()
+  const current = await getClaudeAIOAuthTokensAsync()
+  return (
+    !!current?.accessToken &&
+    current.accessToken !== failedAccessToken &&
+    !isOAuthTokenExpired(current.expiresAt)
+  )
+}
 
 /**
  * Handle a 401 "OAuth token has expired" error from the API.

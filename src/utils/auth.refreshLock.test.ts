@@ -11,8 +11,8 @@
  * one that would deadlock.
  */
 
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync } from 'fs'
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import type { OAuthTokens } from '../services/oauth/types.js'
@@ -57,10 +57,14 @@ describe('token refresh persists through the non-reentrant credential lock', () 
   let tmpRoot: string
   let configDir: string
   let store: SecureStorageData
+  const envKeys = ['CLAUDE_CODE_USE_OPENAI', 'OPENAI_BASE_URL', 'OPENAI_MODEL', 'OPENAI_API_KEY', 'OPENCLAUDE_TEAMMATE_PROFILE_ID', 'CLAUDE_CODE_OAUTH_TOKEN'] as const
+  let savedEnv: NodeJS.ProcessEnv
 
   beforeEach(async () => {
     await acquireSharedMutationLock('utils/auth.refreshLock.test.ts')
     mock.restore()
+    savedEnv = { ...process.env }
+    for (const key of envKeys) delete process.env[key]
     tmpRoot = mkdtempSync(join(tmpdir(), 'openclaude-refresh-lock-'))
     configDir = join(tmpRoot, 'config')
     mkdirSync(configDir)
@@ -71,6 +75,10 @@ describe('token refresh persists through the non-reentrant credential lock', () 
   afterEach(() => {
     try {
       mock.restore()
+      for (const key of envKeys) {
+        if (savedEnv[key] === undefined) delete process.env[key]
+        else process.env[key] = savedEnv[key]
+      }
       mock.module('./secureStorage/index.js', () => ({ ...pristineRealSecureStorage }))
       mock.module('../services/oauth/client.js', () => ({ ...pristineRealOAuthClient }))
       setClaudeConfigHomeDirForTesting(undefined)
@@ -98,6 +106,32 @@ describe('token refresh persists through the non-reentrant credential lock', () 
   async function importAuthFresh() {
     return import(`./auth.ts?ts=${Date.now()}-${Math.random()}`)
   }
+
+  test('native vault changes invalidate the memoized token despite unchanged fallback mtime', async () => {
+    mockStorage()
+    writeFileSync(join(configDir, '.credentials.json'), '{}')
+    store = { claudeAiOauth: freshTokens() }
+    const auth = await importAuthFresh()
+    await auth.checkAndRefreshOAuthTokenIfNeeded()
+    expect(auth.getClaudeAIOAuthTokens()?.accessToken).toBe('fresh-access')
+    store = { claudeAiOauth: { ...freshTokens(), accessToken: 'sibling-access' } }
+    const now = Date.now()
+    const clock = spyOn(Date, 'now').mockReturnValue(now + 31_000)
+    try {
+      await auth.checkAndRefreshOAuthTokenIfNeeded()
+      expect(auth.getClaudeAIOAuthTokens()?.accessToken).toBe('sibling-access')
+    } finally { clock.mockRestore() }
+  })
+
+  test('revocation recovery adopts only a different unexpired stored token', async () => {
+    mockStorage()
+    const auth = await importAuthFresh()
+    store = { claudeAiOauth: freshTokens() }
+    expect(await auth.recoverRotatedOAuthToken('fresh-access')).toBe(false)
+    expect(await auth.recoverRotatedOAuthToken('old-access')).toBe(true)
+    store = { claudeAiOauth: expiredTokens() }
+    expect(await auth.recoverRotatedOAuthToken('old-access')).toBe(false)
+  })
 
   test('an expired token is refreshed and the new one is written', async () => {
     mockStorage()

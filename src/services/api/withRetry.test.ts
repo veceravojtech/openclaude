@@ -45,6 +45,8 @@ const envKeys = [
   'OPENAI_MODEL',
   'OPENAI_BASE_URL',
   'OPENAI_API_BASE',
+  'OPENAI_API_KEY',
+  'OPENCLAUDE_TEAMMATE_PROFILE_ID',
 ] as const
 
 beforeEach(async () => {
@@ -181,6 +183,7 @@ async function importFreshWithRetryModule(
     originalAuthModule ??= await importActualAuth()
     mock.module('src/utils/auth.js', () => ({
       ...originalAuthModule!,
+      recoverRotatedOAuthToken: async () => false,
       ...options.auth,
     }))
   }
@@ -1337,6 +1340,47 @@ describe('revoked OAuth grant is terminal', () => {
     // exponential backoff (500ms * 2^(n-1), capped at 32s).
     expect(operation).toHaveBeenCalledTimes(1)
     expect(handleOAuth401Error).toHaveBeenCalledTimes(0)
+  })
+
+  test('a revoked access token adopts a sibling token once without refreshing the grant', async () => {
+    const recover = mock(async () => true)
+    const refresh = mock(async () => { throw new Error('must not refresh revoked grant') })
+    const { withRetry } = await importFreshWithRetryModule('firstParty', {
+      auth: {
+        isClaudeAISubscriber: () => true,
+        getClaudeAIOAuthTokens: () => ({ accessToken: 'old-access' }) as any,
+        recoverRotatedOAuthToken: recover,
+        handleOAuth401Error: refresh,
+      },
+    })
+    let attempts = 0
+    const operation = mock(async () => {
+      if (++attempts === 1) throw revoked401()
+      return 'ok'
+    })
+    const result: unknown = await drainAsyncGenerator(
+      withRetry(async () => ({}) as Anthropic, operation, runOptions()),
+    )
+    expect(result).toBe('ok')
+    expect(recover).toHaveBeenCalledWith('old-access')
+    expect(recover).toHaveBeenCalledTimes(1)
+    expect(refresh).toHaveBeenCalledTimes(0)
+    expect(operation).toHaveBeenCalledTimes(2)
+  })
+
+  test('a replacement token rejected again is terminal', async () => {
+    const recover = mock(async () => true)
+    const { withRetry, CannotRetryError } = await importFreshWithRetryModule('firstParty', {
+      auth: {
+        isClaudeAISubscriber: () => true,
+        getClaudeAIOAuthTokens: () => ({ accessToken: 'old-access' }) as any,
+        recoverRotatedOAuthToken: recover,
+      },
+    })
+    const operation = mock(async () => { throw revoked401() })
+    await expect(drainAsyncGenerator(withRetry(async () => ({}) as Anthropic, operation, runOptions()))).rejects.toBeInstanceOf(CannotRetryError)
+    expect(recover).toHaveBeenCalledTimes(1)
+    expect(operation).toHaveBeenCalledTimes(2)
   })
 
   test('an expired-but-refreshable 401 still refreshes and retries', async () => {

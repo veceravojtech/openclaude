@@ -26,6 +26,7 @@ import {
   clearGcpCredentialsCache,
   getClaudeAIOAuthTokens,
   handleOAuth401Error,
+  recoverRotatedOAuthToken,
   isClaudeAISubscriber,
   isEnterpriseSubscriber,
 } from '../../utils/auth.js'
@@ -254,6 +255,8 @@ export async function* withRetry<T>(
   let client: Anthropic | null = null
   let consecutive529Errors = options.initialConsecutive529Errors ?? 0
   let lastError: unknown
+  let requestAccessToken: string | undefined
+  let recoveredRotatedToken = false
   let persistentAttempt = 0
   // One auto-wait per request. If the retry after the wait is rejected too,
   // that is reported rather than slept on again — which is what stops this
@@ -346,6 +349,9 @@ export async function* withRetry<T>(
           }
         }
         client = await getClient()
+        requestAccessToken = isClaudeAISubscriber()
+          ? getClaudeAIOAuthTokens()?.accessToken
+          : undefined
       }
 
       assertCyberModelAllowed(retryContext.model, undefined, isCyberSpawnQuerySource(options.querySource))
@@ -657,6 +663,23 @@ export async function* withRetry<T>(
           provider: getAPIProviderForStatsig(),
         })
         throw new CannotRetryError(error, retryContext)
+      }
+
+      // A revoked access token may have been replaced by a sibling process.
+      // Recover once from storage only; shouldRetry still refuses a dead grant
+      // and we never re-present it to the OAuth refresh endpoint.
+      if (
+        !recoveredRotatedToken &&
+        attempt <= maxRetries &&
+        getAPIProvider() === 'firstParty' &&
+        requestAccessToken &&
+        isOAuthGrantRevokedError(error) &&
+        await recoverRotatedOAuthToken(requestAccessToken)
+      ) {
+        recoveredRotatedToken = true
+        client = null
+        lastError = undefined
+        continue
       }
 
       // AWS/GCP errors aren't always APIError, but can be retried

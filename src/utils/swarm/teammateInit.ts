@@ -219,10 +219,52 @@ export function initializeTeammateHooks(
  * provider errors can contain credentials, proxy URLs, or request bodies and
  * must never enter mailbox text or task metadata.
  */
+export type TeammateFailureKind =
+  | 'provider'
+  | 'runtime'
+  | 'authentication'
+  | 'quota'
+  | 'rate_limit'
+
+const TEAMMATE_FAILURE_REASONS: Record<TeammateFailureKind, string> = {
+  authentication:
+    'Teammate authentication failed (OAuth token revoked or invalid). Run /login for its provider, then retry.',
+  quota:
+    "Teammate provider quota exhausted or not enabled. Pick a model on another provider or wait for the provider's quota to reset.",
+  rate_limit:
+    'Teammate provider rate limit reached. Retry later or pick a model on another provider.',
+  provider: 'Teammate provider request failed before completion.',
+  runtime: 'Teammate runtime failed before completion.',
+}
+
+/**
+ * Map a terminal API-error message to a fixed failure category. Only the
+ * category leaves this function — never the raw text — so credentials or
+ * request bodies embedded in provider errors cannot reach the mailbox.
+ */
+export function classifyTeammateApiError(
+  errorCode: string | undefined,
+  text: string | undefined,
+): Exclude<TeammateFailureKind, 'runtime'> {
+  if (
+    errorCode === 'authentication_failed' ||
+    (text !== undefined && /OAuth token (has been )?revoked|Please run \/login/i.test(text))
+  ) {
+    return 'authentication'
+  }
+  if (text !== undefined && /quota exhausted|insufficient_quota|exceeded your current quota/i.test(text)) {
+    return 'quota'
+  }
+  if (errorCode === 'rate_limit' || (text !== undefined && /rate limit|429/i.test(text))) {
+    return 'rate_limit'
+  }
+  return 'provider'
+}
+
 export async function reportTeammateTurnFailure(
   teamName: string,
   agentName: string,
-  kind: 'provider' | 'runtime' = 'provider',
+  kind: TeammateFailureKind = 'provider',
 ): Promise<void> {
   idleReporter = undefined
   const teamFile = readTeamFile(teamName)
@@ -235,10 +277,7 @@ export async function reportTeammateTurnFailure(
     m => m.agentId === teamFile.leadAgentId,
   )
   const leadAgentName = leadMember?.name || 'team-lead'
-  const failureReason =
-    kind === 'provider'
-      ? 'Teammate provider request failed before completion.'
-      : 'Teammate runtime failed before completion.'
+  const failureReason = TEAMMATE_FAILURE_REASONS[kind]
 
   await setMemberActive(teamName, agentName, false)
   await writeToMailbox(leadAgentName, {

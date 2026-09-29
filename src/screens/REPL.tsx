@@ -45,7 +45,7 @@ import { isEnvTruthy } from '../utils/envUtils.js';
 import { formatTokens, truncateToWidth } from '../utils/format.js';
 import { consumeEarlyInput } from '../utils/earlyInput.js';
 import { setMemberActive } from '../utils/swarm/teamHelpers.js';
-import { reportTeammateTurnFailure } from '../utils/swarm/teammateInit.js';
+import { classifyTeammateApiError, reportTeammateTurnFailure, type TeammateFailureKind } from '../utils/swarm/teammateInit.js';
 import { isSwarmWorker, generateSandboxRequestId, sendSandboxPermissionRequestViaMailbox, sendSandboxPermissionResponseViaMailbox } from '../utils/swarm/permissionSync.js';
 import { registerSandboxPermissionCallback } from '../hooks/useSwarmPermissionPoller.js';
 import { getTeamName, getAgentName, isTeammate } from '../utils/teammate.js';
@@ -1567,7 +1567,7 @@ export function REPL({
   const queryLifecycleTrackerRef = useRef(new QueryLifecycleOperationTracker());
   // API-error turns intentionally skip Stop hooks. Keep a per-turn marker so
   // pane teammates can report that terminal failure to their leader promptly.
-  const teammateApiErrorRef = useRef(false);
+  const teammateApiErrorRef = useRef<false | Exclude<TeammateFailureKind, 'runtime'>>(false);
 
   // Remote session hook - manages WebSocket connection and message handling for --remote mode
   const remoteSession = useRemoteSession({
@@ -3124,7 +3124,18 @@ export function REPL({
         // A later successful retry clears the marker; an API error that ends
         // the turn remains set for the teammate failure report in onQuery's
         // finally block.
-        teammateApiErrorRef.current = newMessage.isApiErrorMessage === true;
+        if (newMessage.isApiErrorMessage === true) {
+          const content = newMessage.message?.content;
+          const firstText = Array.isArray(content)
+            ? content.find(block => block.type === 'text')
+            : undefined;
+          teammateApiErrorRef.current = classifyTeammateApiError(
+            newMessage.error,
+            firstText && 'text' in firstText ? firstText.text : undefined,
+          );
+        } else {
+          teammateApiErrorRef.current = false;
+        }
       }
       if (isCompactBoundaryMessage(newMessage)) {
         // Fullscreen: keep pre-compact messages for scrollback. query.ts
@@ -3590,7 +3601,7 @@ export function REPL({
       };
       const teammateFailureKind = modelTurnStarted
         ? teammateApiErrorRef.current
-          ? 'provider'
+          ? teammateApiErrorRef.current
           : didThrow || queryTerminal?.reason === 'model_error'
             ? 'runtime'
             : undefined
