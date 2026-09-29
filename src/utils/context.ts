@@ -286,6 +286,17 @@ export function getContextWindowForModel(
     return OPENAI_FALLBACK_CONTEXT_WINDOW
   }
 
+  // Native-1M Claude models (Opus 4.6+, Fable 5+, Sonnet 5+) have a 1M window
+  // on every request — no [1m] tag, beta header or entitlement needed. Without
+  // this, an untagged id (e.g. the plain `claude-opus-5-5` the "(default)" row
+  // can resolve to, or an id whose tag was stripped before autocompact) fell
+  // through to MODEL_CONTEXT_WINDOW_DEFAULT and compacted at ~200k. Placed
+  // before the capability lookup so a smaller cached max_input_tokens cannot
+  // cap it; the CLAUDE_CODE_DISABLE_1M_CONTEXT kill switch still wins.
+  if (!is1mContextDisabled() && isOneMillionNativeClaude(getCanonicalName(model))) {
+    return 1_000_000
+  }
+
   const cap = getModelCapability(model)
   if (cap?.max_input_tokens && cap.max_input_tokens >= 100_000) {
     if (

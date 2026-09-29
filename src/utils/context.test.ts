@@ -1304,3 +1304,71 @@ test('clearSessionContextWindowOverride resets state for session isolation', () 
   expect(getSessionContextWindowOverride('gpt-4o')).toBeUndefined()
   expect(getContextWindowForModel('gpt-4o')).not.toBe(256_000)
 })
+
+// --- Native-1M Claude models must not need the [1m] tag or beta header ---
+
+async function withOneMillionEnabled<T>(fn: () => T | Promise<T>): Promise<T> {
+  const original = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+  delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+  try {
+    return await fn()
+  } finally {
+    if (original === undefined) {
+      delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+    } else {
+      process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = original
+    }
+  }
+}
+
+test('native-1M Claude models resolve to 1M without [1m] tag or beta header', async () => {
+  await withOneMillionEnabled(() => {
+    for (const model of [
+      'claude-opus-5-5',
+      'claude-opus-5-5-20260101',
+      'claude-sonnet-5-5',
+      'claude-fable-5-1',
+      'claude-opus-4-8',
+      'claude-opus-4-6',
+    ]) {
+      expect(getContextWindowForModel(model)).toBe(1_000_000)
+      expect(getContextWindowForModel(model, [])).toBe(1_000_000)
+    }
+  })
+})
+
+test('native-1M Claude autocompact threshold sits near 1M, not 200k', async () => {
+  await withOneMillionEnabled(() => {
+    for (const model of ['claude-opus-5-5', 'claude-opus-5-5[1m]']) {
+      expect(getAutoCompactThreshold(model)).toBeGreaterThan(900_000)
+    }
+  })
+})
+
+test('Sonnet 4.x stays gated at 200k without tag, beta or entitlement', async () => {
+  await withOneMillionEnabled(() => {
+    expect(getContextWindowForModel('claude-sonnet-4-6')).toBe(200_000)
+    expect(getContextWindowForModel('claude-sonnet-4-5', [])).toBe(200_000)
+    expect(getContextWindowForModel('claude-sonnet-4-6[1m]')).toBe(1_000_000)
+  })
+})
+
+test('native-1M Claude honors CLAUDE_CODE_DISABLE_1M_CONTEXT, session and ant overrides', () => {
+  const original = process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+  process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1'
+  try {
+    expect(getContextWindowForModel('claude-opus-5-5')).toBe(200_000)
+    delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+    setSessionContextWindowOverride('claude-opus-5-5', 300_000)
+    expect(getContextWindowForModel('claude-opus-5-5')).toBe(300_000)
+    process.env.USER_TYPE = 'ant'
+    process.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = '150000'
+    expect(getContextWindowForModel('claude-opus-5-5')).toBe(150_000)
+  } finally {
+    if (original === undefined) {
+      delete process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT
+    } else {
+      process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = original
+    }
+  }
+})
