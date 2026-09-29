@@ -31,11 +31,13 @@ import {
 import {
   cancelFailedTeammateReap,
   hasPendingFailedTeammateReap,
+  scheduleFailedTeammateReap,
   resetFailedTeammateReapsForTesting,
   type ReaperTimers,
 } from '../../utils/swarm/failedTeammateReaper.js'
 import { TEAMMATE_GRACE_MS } from '../../utils/task/framework.js'
 import { getTaskPath, listTasks } from '../../utils/tasks.js'
+import { writeToMailbox } from '../../utils/teammateMailbox.js'
 import * as spawnMod from './spawnMultiAgent.js'
 
 /**
@@ -1589,4 +1591,82 @@ test('an already-gone teammate is not killed, and scheduling is idempotent', asy
   // Firing again is harmless (nothing pending).
   await reaper.fire()
   expect(kills).toEqual([])
+})
+
+test('scheduleFailedTeammateReap is idempotent per teammate (pending guard)', async () => {
+  const reaper = fakeReapClock()
+  let reaps = 0
+  const schedule = () =>
+    scheduleFailedTeammateReap({
+      teamName: 'team',
+      teammateName: 'idem',
+      reap: () => {
+        reaps++
+      },
+      timers: reaper.clock,
+    })
+  expect(schedule()).toBe(true)
+  expect(schedule()).toBe(false)
+  expect(reaper.timers).toHaveLength(1)
+  await reaper.fire()
+  expect(reaps).toBe(1)
+  // Once fired, the slot is free again.
+  expect(schedule()).toBe(true)
+})
+
+async function mailboxWriteWith(
+  text: string,
+  reapers: ReturnType<typeof fakeReapClock>,
+): Promise<{ reaps: number; pending: boolean }> {
+  acquireSharedMutationLock(LOCK_NAME)
+  const dir = seedDiskRoster([rosterMember('team-lead', '', '', undefined)])
+  try {
+    let reaps = 0
+    scheduleFailedTeammateReap({
+      teamName: 'team',
+      teammateName: 'worker',
+      reap: () => {
+        reaps++
+      },
+      timers: reapers.clock,
+    })
+    await writeToMailbox(
+      'worker',
+      { from: 'team-lead', text, timestamp: new Date().toISOString() },
+      'team',
+    )
+    await new Promise(r => setTimeout(r, 0))
+    return { reaps, pending: hasPendingFailedTeammateReap('team', 'worker') }
+  } finally {
+    releaseSharedMutationLock()
+    setClaudeConfigHomeDirForTesting(undefined)
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+test('a shutdown_request fires the pending reap immediately instead of cancelling it', async () => {
+  const result = await mailboxWriteWith(
+    JSON.stringify({
+      type: 'shutdown_request',
+      requestId: 'r1',
+      from: 'team-lead',
+      reason: 'dead',
+      timestamp: new Date().toISOString(),
+    }),
+    fakeReapClock(),
+  )
+  expect(result).toEqual({ reaps: 1, pending: false })
+})
+
+test('other protocol messages neither cancel nor fire the pending reap', async () => {
+  const result = await mailboxWriteWith(
+    JSON.stringify({ type: 'plan_approval_response', requestId: 'r', approved: true }),
+    fakeReapClock(),
+  )
+  expect(result).toEqual({ reaps: 0, pending: true })
+})
+
+test('a plain-text re-task cancels the pending reap', async () => {
+  const result = await mailboxWriteWith('please try again', fakeReapClock())
+  expect(result).toEqual({ reaps: 0, pending: false })
 })

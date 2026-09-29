@@ -22,7 +22,11 @@ const defaultTimers: ReaperTimers = {
   clearTimer: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
 }
 
-type Pending = { handle: unknown; timers: ReaperTimers }
+type Pending = {
+  handle: unknown
+  timers: ReaperTimers
+  run: () => void
+}
 
 const pending = new Map<string, Pending>()
 
@@ -46,7 +50,7 @@ export function scheduleFailedTeammateReap(options: {
     const key = reapKey(options.teamName, options.teammateName)
     if (pending.has(key)) return false
     const timers = options.timers ?? defaultTimers
-    const handle = timers.setTimer(() => {
+    const run = (): void => {
       pending.delete(key)
       void Promise.resolve()
         .then(options.reap)
@@ -55,9 +59,13 @@ export function scheduleFailedTeammateReap(options: {
             `[FailedTeammateReaper] reap of ${options.teammateName}@${options.teamName} failed: ${String(error)}`,
           )
         })
-    }, options.delayMs ?? FAILED_TEAMMATE_REAP_DELAY_MS)
+    }
+    const handle = timers.setTimer(
+      run,
+      options.delayMs ?? FAILED_TEAMMATE_REAP_DELAY_MS,
+    )
     ;(handle as { unref?: () => void } | undefined)?.unref?.()
-    pending.set(key, { handle, timers })
+    pending.set(key, { handle, timers, run })
     return true
   } catch (error) {
     logForDebugging(
@@ -82,6 +90,29 @@ export function cancelFailedTeammateReap(
   } catch (error) {
     logForDebugging(
       `[FailedTeammateReaper] cancel for ${teammateName}@${teamName} failed: ${String(error)}`,
+    )
+    return false
+  }
+}
+
+/**
+ * Run a pending reap now instead of waiting out the grace window — used when
+ * the lead asks a dead teammate to shut down. Returns true when a reap was
+ * pending. Never throws.
+ */
+export function fireFailedTeammateReapNow(
+  teamName: string,
+  teammateName: string,
+): boolean {
+  try {
+    const entry = pending.get(reapKey(teamName, teammateName))
+    if (!entry) return false
+    entry.timers.clearTimer(entry.handle)
+    entry.run()
+    return true
+  } catch (error) {
+    logForDebugging(
+      `[FailedTeammateReaper] immediate reap of ${teammateName}@${teamName} failed: ${String(error)}`,
     )
     return false
   }
