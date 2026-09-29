@@ -108,9 +108,20 @@ import {
   SUBAGENT_REJECT_MESSAGE_WITH_REASON_PREFIX,
   countActiveMessages,
 } from '../messages.js'
-import { getContextWindowForModel } from '../context.js'
+import {
+  getContextWindowForModel,
+  type ContextWindowRoute,
+} from '../context.js'
 import { getSdkBetas } from '../../bootstrap/state.js'
+import {
+  resolveAgentRunModelRouting,
+  type AgentRunModelRouting,
+} from '../../services/api/agentRouting.js'
+import { getAgentModel } from '../model/agent.js'
+import { getInitialSettings } from '../settings/settings.js'
 import type { ModelAlias } from '../model/aliases.js'
+import type { PermissionMode } from '../permissions/PermissionMode.js'
+import type { SettingsJson } from '../../utils/settings/types.js'
 import {
   applyPermissionUpdates,
   filterPermissionRequestHookUpdates,
@@ -687,6 +698,44 @@ export type InProcessRunnerResult = {
   error?: string
   /** Messages produced by the agent */
   messages: Message[]
+}
+
+/**
+ * Resolve the model and provider route an in-process teammate will actually
+ * run on, mirroring runAgent()'s own resolution (runAgent.ts calls
+ * resolveAgentRunModelRouting with the same inputs). The runner needs this
+ * before each turn so its history budget — message-count window scaling and
+ * the auto-compact threshold — uses the teammate's own window, not the lead's
+ * ambient env. A concrete cross-provider model (e.g. glm-5.3 via an agentModels
+ * route) resolves to a providerOverride whose baseURL is the route
+ * getContextWindowForModel must budget against.
+ */
+export function resolveInProcessTeammateRouting(args: {
+  agentDefinition: CustomAgentDefinition
+  agentName: string
+  subagentType: string | undefined
+  model: string | undefined
+  modelWasToolSpecified: boolean | undefined
+  parentModel: string
+  permissionMode: PermissionMode
+  settings: SettingsJson | null
+}): AgentRunModelRouting {
+  const resolvedAgentModel = getAgentModel(
+    args.agentDefinition.model,
+    args.parentModel,
+    args.modelWasToolSpecified ? args.model : undefined,
+    args.permissionMode,
+  )
+  return resolveAgentRunModelRouting({
+    resolvedAgentModel,
+    parentModel: args.parentModel,
+    toolSpecifiedModel: args.modelWasToolSpecified ? args.model : undefined,
+    agentName: args.agentName,
+    subagentType: args.subagentType ?? args.agentDefinition.agentType,
+    agentDefinitionModel: args.agentDefinition.model,
+    settings: args.settings,
+    permissionMode: args.permissionMode,
+  })
 }
 
 /**
@@ -2511,6 +2560,35 @@ export async function runInProcessTeammate(
       const userMessage = createUserMessage({ content: currentPrompt })
       const promptMessages: Message[] = [userMessage]
 
+      // Read current permission mode from task state (may have been cycled by
+      // leader via Shift+Tab), and resolve the model + provider route this
+      // teammate will actually run on (mirrors runAgent). Budget the
+      // teammate's own history against ITS window, not the leader's ambient env.
+      const currentAppState = toolUseContext.getAppState()
+      const currentTask = currentAppState.tasks[taskId]
+      const currentPermissionMode =
+        currentTask && currentTask.type === 'in_process_teammate'
+          ? currentTask.permissionMode
+          : 'default'
+      const iterationAgentDefinition = {
+        ...resolvedAgentDefinition,
+        permissionMode: currentPermissionMode,
+      }
+      const runRouting = resolveInProcessTeammateRouting({
+        agentDefinition: iterationAgentDefinition,
+        agentName: identity.agentName,
+        subagentType,
+        model,
+        modelWasToolSpecified,
+        parentModel: toolUseContext.options.mainLoopModel,
+        permissionMode: currentPermissionMode,
+        settings: getInitialSettings(),
+      })
+      const teammateModel = runRouting.mainLoopModel
+      const route: ContextWindowRoute | undefined = runRouting.providerOverride
+        ? { baseUrl: runRouting.providerOverride.baseURL }
+        : undefined
+
       // Check if compaction is needed before building context
       let contextMessages = allMessages
       const tokenCount = tokenCountWithEstimation(allMessages)
@@ -2535,8 +2613,10 @@ export async function runInProcessTeammate(
       // defaults were tuned for a 200k window, so a teammate on a larger one
       // would otherwise compact at a fraction of its budget.
       const activeMessageContextWindow = getContextWindowForModel(
-        toolUseContext.options.mainLoopModel,
+        teammateModel,
         getSdkBetas(),
+        undefined,
+        route,
       )
       const hasExplicitActiveMessageLimit =
         hasExplicitMessageCountThreshold || hasLegacyMessageCountThreshold
@@ -2552,9 +2632,7 @@ export async function runInProcessTeammate(
             },
           )
         : getMaxActiveMessagesHardCap(process.env, activeMessageContextWindow)
-      const tokenThreshold = getAutoCompactThreshold(
-        toolUseContext.options.mainLoopModel,
-      )
+      const tokenThreshold = getAutoCompactThreshold(teammateModel, route)
       const shouldCompactForTokens =
         isAutoCompactEnabled() && tokenCount > tokenThreshold
       // Count only what the provider receives — progress ticks and local-only
@@ -2631,18 +2709,6 @@ export async function runInProcessTeammate(
       allMessages.push(userMessage)
 
       const iterationMessages: Message[] = []
-
-      // Read current permission mode from task state (may have been cycled by leader via Shift+Tab)
-      const currentAppState = toolUseContext.getAppState()
-      const currentTask = currentAppState.tasks[taskId]
-      const currentPermissionMode =
-        currentTask && currentTask.type === 'in_process_teammate'
-          ? currentTask.permissionMode
-          : 'default'
-      const iterationAgentDefinition = {
-        ...resolvedAgentDefinition,
-        permissionMode: currentPermissionMode,
-      }
 
       // Track if this iteration was interrupted by work abort (not lifecycle abort)
       let workWasAborted = false

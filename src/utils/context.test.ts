@@ -13,6 +13,7 @@ import {
   modelSupports1M,
   clearSessionContextWindowOverride,
 } from './context.ts'
+import { scaleActiveMessageLimitToContextWindow } from './maxActiveMessages.js'
 
 test('cyber limits follow the serving saved profile and off restores active-route limits', () => {
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
@@ -1396,4 +1397,23 @@ test('cross-provider teammate route does not leak into an un-hinted lookup', () 
   // The route hint is per-call; a lookup without it keeps the ambient-env
   // resolution intact (still 200k here under the first-party-Anthropic lead).
   expect(getContextWindowForModel('glm-5.3')).toBe(200_000)
+})
+
+test('message-count limit scales with a cross-provider teammate route window', () => {
+  const zaiRoute = { baseUrl: 'https://api.z.ai/api/coding/paas/v4' }
+  // Under the 200k lead's ambient env the default 200-message limit stays
+  // unscaled — the gap that made leakcheck compact early on message count.
+  expect(
+    scaleActiveMessageLimitToContextWindow(
+      200,
+      getContextWindowForModel('glm-5.3'),
+    ),
+  ).toBe(200)
+  // The teammate's own 1M route scales the same default to 1000 messages.
+  expect(
+    scaleActiveMessageLimitToContextWindow(
+      200,
+      getContextWindowForModel('glm-5.3', [], undefined, zaiRoute),
+    ),
+  ).toBe(1000)
 })

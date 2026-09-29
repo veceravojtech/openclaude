@@ -744,6 +744,13 @@ async function* queryLoop(
     transition: undefined,
     agentStepLimit: normalizeAgentStepLimit(params.agentStepLimit),
   }
+  // A cross-provider providerOverride (in-process teammate on Z.AI/DeepSeek)
+  // is the route this agent actually talks to; message-count window scaling and
+  // the blocking/circuit-breaker checks must budget against that route's window,
+  // not the lead process's ambient env.
+  const route = params.toolUseContext.options.providerOverride
+    ? { baseUrl: params.toolUseContext.options.providerOverride.baseURL }
+    : undefined
   const budgetTracker = feature('TOKEN_BUDGET') ? createBudgetTracker() : null
 
   const updateAutoCompactTracking = (
@@ -1068,6 +1075,8 @@ async function* queryLoop(
     const activeMessageContextWindow = getContextWindowForModel(
       toolUseContext.options.mainLoopModel,
       getSdkBetas(),
+      undefined,
+      route,
     )
     const activeMessageHardCap = getMaxActiveMessagesHardCap(
       process.env,
@@ -1413,6 +1422,7 @@ async function* queryLoop(
       const { isAtBlockingLimit } = calculateTokenWarningState(
         tokenCountWithEstimation(messagesForQuery) - snipTokensFreed,
         toolUseContext.options.mainLoopModel,
+        route,
       )
       if (isAtBlockingLimit) {
         yield createAssistantAPIErrorMessage({
@@ -1465,6 +1475,7 @@ async function* queryLoop(
       const { isAboveAutoCompactThreshold } = calculateTokenWarningState(
         tokenUsage,
         model,
+        route,
       )
       const isAboveActiveMessageSafetyLimit =
         isAboveMaxActiveMessagesLimit(
@@ -1474,7 +1485,7 @@ async function* queryLoop(
       const isAboveBreakerThreshold =
         isAboveAutoCompactThreshold ||
         ((circuitBreakerActive === true || circuitBreakerTripped === true) &&
-          tokenUsage >= getAutoCompactThreshold(model)) ||
+          tokenUsage >= getAutoCompactThreshold(model, route)) ||
         isAboveActiveMessageSafetyLimit
       if (isAboveBreakerThreshold) {
         const nowMs = Date.now()
