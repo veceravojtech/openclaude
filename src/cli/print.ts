@@ -3154,6 +3154,10 @@ function runHeadlessStreaming(
               : requestedModel
           activeUserSpecifiedModel = model
           setMainLoopModelOverride(model)
+          // queryLoop resolves the request model from AppState, not from the
+          // override. Pin it session-only (mainLoopModelForSession does not
+          // trigger onChangeAppState's write to user settings).
+          setAppState(prev => ({ ...prev, mainLoopModelForSession: model }))
           notifySessionMetadataChanged({ model })
           injectModelSwitchBreadcrumbs(requestedModel, model)
 
@@ -3963,6 +3967,7 @@ function runHeadlessStreaming(
           const newModel = getMainLoopModel()
           if (newModel !== prevModel) {
             activeUserSpecifiedModel = newModel
+            setAppState(prev => ({ ...prev, mainLoopModelForSession: newModel }))
             const modelArg = incoming.model ? String(incoming.model) : 'default'
             notifySessionMetadataChanged({ model: newModel })
             injectModelSwitchBreadcrumbs(modelArg, newModel)
@@ -4159,6 +4164,10 @@ function runHeadlessStreaming(
                       model === 'default' ? getDefaultMainLoopModel() : model
                     activeUserSpecifiedModel = resolved
                     setMainLoopModelOverride(resolved)
+                    setAppState(prev => ({
+                      ...prev,
+                      mainLoopModelForSession: resolved ?? null,
+                    }))
                   },
                   onSetMaxThinkingTokens(maxTokens) {
                     if (maxTokens === null) {

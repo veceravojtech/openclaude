@@ -467,6 +467,26 @@ export function preferOneMillionContext(model: ModelName): ModelName {
 }
 
 /**
+ * The model setting a query turn should start from. AppState is authoritative
+ * (a provider switch or /model updates it mid-session), but a headless/SDK
+ * caller may leave both AppState fields null while the selection still lives in
+ * the tool-use context's options (--model, set_model). Falling straight to the
+ * account default there silently replaced the requested model with Opus.
+ */
+export function resolveQueryModelSetting(params: {
+  mainLoopModelForSession: ModelSetting
+  mainLoopModel: ModelSetting
+  optionsMainLoopModel?: string | null
+}): ModelName | ModelAlias {
+  return (
+    params.mainLoopModelForSession ??
+    params.mainLoopModel ??
+    (params.optionsMainLoopModel || undefined) ??
+    getDefaultMainLoopModelSetting()
+  )
+}
+
+/**
  * Get the model to use for runtime, depending on the runtime context.
  * @param params Subset of the runtime context to determine the model to use.
  * @returns The model to use

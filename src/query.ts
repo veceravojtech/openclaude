@@ -104,7 +104,7 @@ import {
 import { notifyCommandLifecycle } from './utils/commandLifecycle.js'
 import { headlessProfilerCheckpoint } from './utils/headlessProfiler.js'
 import {
-  getDefaultMainLoopModelSetting,
+  resolveQueryModelSetting,
   getProviderRequestModel,
   getRuntimeMainLoopModel,
   parseUserSpecifiedModel,
@@ -1282,10 +1282,11 @@ async function* queryLoop(
 
     const appState = toolUseContext.getAppState()
     const permissionMode = appState.toolPermissionContext.mode
-    const appStateMainLoopModel =
-      appState.mainLoopModelForSession ??
-      appState.mainLoopModel ??
-      getDefaultMainLoopModelSetting()
+    const appStateMainLoopModel = resolveQueryModelSetting({
+      mainLoopModelForSession: appState.mainLoopModelForSession,
+      mainLoopModel: appState.mainLoopModel,
+      optionsMainLoopModel: toolUseContext.options.mainLoopModel,
+    })
     let currentModel = getRuntimeMainLoopModel({
       permissionMode,
       mainLoopModel: parseUserSpecifiedModel(appStateMainLoopModel),

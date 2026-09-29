@@ -2545,6 +2545,11 @@ async function run(): Promise<CommanderCommand> {
           tools: mcpTools
         },
         toolPermissionContext,
+        // queryLoop resolves the request model from AppState, so the headless
+        // store must carry the --model / settings selection like the REPL's
+        // initialState does. Otherwise --model is silently dropped and the
+        // account default (Opus on Max) serves and bills the request.
+        mainLoopModel: initialMainLoopModel,
         effortValue: clampUltracodeEffort(parseEffortValue(options.effort) ?? getInitialEffortSetting(), effectiveModel ?? resolvedInitialModel),
         ...(isFastModeEnabled() && {
           fastMode: getInitialFastModeSetting(effectiveModel ?? null)
