@@ -1295,7 +1295,7 @@ function filterModelOptionsByAllowlist(options: ModelOption[]): ModelOption[] {
           opt.switchToProfileId !== undefined
             ? parseSwitchProfileValue(opt.value)?.model ?? opt.value
             : opt.value
-        return isModelAllowed(effectiveModel)
+        return isModelAllowed(effectiveModel, undefined, { explicitChoice: true })
       })
 
   // Select state uses option values as identity keys. If two entries share the

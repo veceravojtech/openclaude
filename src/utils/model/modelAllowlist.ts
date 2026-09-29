@@ -1,4 +1,4 @@
-import { isCyberModelAllowed } from './cyber.js'
+import { isCyberModelAllowed, type CyberModelCheckOptions } from './cyber.js'
 import { getSettings_DEPRECATED } from '../settings/settings.js'
 import { isModelAlias, isModelFamilyAlias } from './aliases.js'
 import { parseUserSpecifiedModel } from './model.js'
@@ -101,10 +101,10 @@ function familyHasSpecificEntries(
 export function isModelAllowed(
   model: string,
   cyberScope?: string,
-  options?: { allowEscalationModel?: boolean },
+  options?: { allowEscalationModel?: boolean } & CyberModelCheckOptions,
 ): boolean {
   const concreteModel = isModelAlias(model) ? parseUserSpecifiedModel(model) : resolveOverriddenModel(model)
-  if (!isCyberModelAllowed(concreteModel, cyberScope, options?.allowEscalationModel)) return false
+  if (!isCyberModelAllowed(concreteModel, cyberScope, options?.allowEscalationModel, options)) return false
   const settings = getSettings_DEPRECATED() || {}
   const { availableModels } = settings
   if (!availableModels) {

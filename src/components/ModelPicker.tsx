@@ -144,7 +144,7 @@ export function ModelPicker(t0) {
     : modelOptionsBase.filter(opt => opt.switchToProfileId === undefined);
   let t4;
   bb0: {
-    if (initial !== null && isModelAllowed(initial) && !modelOptions.some(opt => optionMatchesPickerValue(opt, initial))) {
+    if (initial !== null && isModelAllowed(initial, undefined, { explicitChoice: true }) && !modelOptions.some(opt => optionMatchesPickerValue(opt, initial))) {
       let t5;
       if ($[4] !== initial) {
         t5 = modelDisplayString(initial);
@@ -298,7 +298,7 @@ export function ModelPicker(t0) {
     t14 = function handleSelect(value_0) {
       const selectedValue = resolvePickerOptionValue(selectOptions, value_0) ?? value_0;
       const selectedModel = resolveOptionModel(selectedValue);
-      if (selectedValue !== NO_PREFERENCE && selectedModel && !isModelAllowed(selectedModel)) {
+      if (selectedValue !== NO_PREFERENCE && selectedModel && !isModelAllowed(selectedModel, undefined, { explicitChoice: true })) {
         onSelect(selectedValue === NO_PREFERENCE ? null : selectedValue, undefined);
         return;
       }

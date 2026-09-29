@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { getCyberMode } from '../../bootstrap/state.js'
+import { getCyberMode, setCyberExplicitLeadModel } from '../../bootstrap/state.js'
 import { isTeammate } from '../teammate.js'
+import { parseUserSpecifiedModel } from './model.js'
 
 const escalationContext = new AsyncLocalStorage<string>()
 export function withCyberScope<T>(scope: string, action: () => T): T {
@@ -47,13 +48,55 @@ export function cyberModelId(model: string): string | undefined {
   return undefined
 }
 
+export type CyberModelCheckOptions = {
+  /** The user is choosing this lead model right now (/model, picker, /provider, --model). */
+  explicitChoice?: boolean
+  /** The check guards the lead's own main-loop request, which may run the user's explicit choice. */
+  leadQuery?: boolean
+}
+
+function comparableModel(model: string): string {
+  return model.trim().toLowerCase().replace(/\[\d+m\]$/, '')
+}
+
+/**
+ * Whether `model` is the lead model the user explicitly chose while Cyber mode
+ * is on. Aliases are resolved and a context suffix (`[1m]`) is ignored, so
+ * `claude-opus-5-5` and `claude-opus-5-5[1m]` are the same choice.
+ */
+export function isExplicitCyberLeadModel(model: string): boolean {
+  const chosen = getCyberMode().explicitLeadModel
+  if (!chosen) return false
+  const target = comparableModel(model)
+  return comparableModel(chosen) === target || comparableModel(parseUserSpecifiedModel(chosen)) === target
+}
+
+/** Lead main-loop request sources; teammates and subagents never qualify. */
+export function isCyberLeadQuerySource(querySource: string | undefined): boolean {
+  return !isTeammate() && (querySource === 'repl_main_thread' || querySource === 'sdk')
+}
+
+/**
+ * Record a user-initiated lead model choice. Choosing null (default) or the
+ * Cyber lead model clears it, restoring the Cyber defaults.
+ */
+export function recordCyberLeadModelChoice(model: string | null | undefined): void {
+  if (!getCyberMode().enabled) return
+  const trimmed = model?.trim()
+  const clears = !trimmed || cyberModelId(trimmed) === CYBER_MODELS.lead
+  setCyberExplicitLeadModel(clears ? undefined : trimmed)
+}
+
 export function isCyberModelAllowed(
   model: string,
   scope: string | undefined = escalationContext.getStore(),
   allowEscalationModel = false,
+  options?: CyberModelCheckOptions,
 ): boolean {
   const state = getCyberMode()
   if (!state.enabled) return true
+  if (options?.explicitChoice) return true
+  if (options?.leadQuery && !isTeammate() && isExplicitCyberLeadModel(model)) return true
   const id = cyberModelId(model)
   if (id === undefined) return false
   if (id !== CYBER_MODELS.escalation) return true
@@ -64,9 +107,10 @@ export function assertCyberModelAllowed(
   model: string,
   scope?: string,
   allowEscalationModel = false,
+  options?: CyberModelCheckOptions,
 ): void {
-  if (!isCyberModelAllowed(model, scope, allowEscalationModel)) {
-    throw new Error(`Cyber mode blocks '${model}'. Allowed models: glm-5.3, claude-opus-4-6, deepseek-v4-pro; claude-opus-4-8 requires a scoped escalation.`)
+  if (!isCyberModelAllowed(model, scope, allowEscalationModel, options)) {
+    throw new Error(`Cyber mode blocks '${model}'. Allowed models: glm-5.3, claude-opus-4-6, deepseek-v4-pro; claude-opus-4-8 requires a scoped escalation. To use another model for the lead, choose it explicitly with /model.`)
   }
 }
 

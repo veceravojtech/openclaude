@@ -23,6 +23,7 @@ import {
   notifySessionMetadataChanged,
   type SessionExternalMetadata,
 } from '../utils/sessionState.js'
+import { recordCyberLeadModelChoice } from '../utils/model/cyber.js'
 import { updateSettingsForSource } from '../utils/settings/settings.js'
 import type { AppState } from './AppStateStore.js'
 
@@ -114,6 +115,7 @@ export function onChangeAppState({
     // Remove from settings
     updateSettingsForSource('userSettings', { model: undefined })
     setMainLoopModelOverride(null)
+    recordCyberLeadModelChoice(null)
   }
 
   // mainLoopModel: add it to settings?
@@ -124,6 +126,9 @@ export function onChangeAppState({
     // Save to settings
     updateSettingsForSource('userSettings', { model: newState.mainLoopModel })
     setMainLoopModelOverride(newState.mainLoopModel)
+    // /model, the picker and /provider all land here: in Cyber mode this is
+    // the user's explicit lead choice.
+    recordCyberLeadModelChoice(newState.mainLoopModel)
 
     // Keep active provider profiles in sync with /model choices so restarts
     // keep using the last selected model instead of the profile's old default.

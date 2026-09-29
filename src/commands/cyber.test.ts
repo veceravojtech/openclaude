@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { getCyberMode, setCyberModeEnabled } from '../bootstrap/state.js'
+import { getCyberMode, setCyberExplicitLeadModel, setCyberModeEnabled } from '../bootstrap/state.js'
 import type { LocalJSXCommandContext } from '../types/command.js'
 import { call } from './cyber.js'
 import { buildInheritedCliFlags, buildInheritedEnvVars } from '../utils/swarm/spawnUtils.js'
@@ -31,4 +31,14 @@ test('pane and profile-bound teammates inherit mode but not the lead model', () 
   expect(buildInheritedEnvVars({ OPENCLAUDE_TEAMMATE_PROFILE_ID: 'profile' })).toContain('OPENCLAUDE_CYBER_MODE=1')
   setCyberModeEnabled(false)
   expect(buildInheritedEnvVars()).toContain('OPENCLAUDE_CYBER_MODE=0')
+})
+
+test('status shows the explicit lead model and /cyber on resets it', async () => {
+  await call('on', context)
+  expect((await call('status', context))).toMatchObject({ value: expect.not.stringContaining('Explicit lead model') })
+  setCyberExplicitLeadModel('claude-opus-5-5[1m]')
+  expect((await call('status', context))).toMatchObject({ value: expect.stringContaining('Explicit lead model: claude-opus-5-5[1m]') })
+  // Re-running /cyber on while already enabled restores the Cyber defaults.
+  expect((await call('on', context))).toMatchObject({ value: expect.not.stringContaining('Explicit lead model') })
+  expect(getCyberMode().explicitLeadModel).toBeUndefined()
 })

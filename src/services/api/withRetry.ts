@@ -1,6 +1,6 @@
 import { isModelAllowed } from '../../utils/model/modelAllowlist.js'
 import { getCyberMode } from '../../bootstrap/state.js'
-import { assertCyberModelAllowed, cyberModelId, CYBER_MODELS, isCyberSpawnQuerySource } from '../../utils/model/cyber.js'
+import { assertCyberModelAllowed, cyberModelId, CYBER_MODELS, isCyberLeadQuerySource, isCyberSpawnQuerySource } from '../../utils/model/cyber.js'
 import type { QueryActivity } from '../../Tool.js'
 import { feature } from 'bun:bundle'
 import type Anthropic from '@anthropic-ai/sdk'
@@ -354,8 +354,8 @@ export async function* withRetry<T>(
           : undefined
       }
 
-      assertCyberModelAllowed(retryContext.model, undefined, isCyberSpawnQuerySource(options.querySource))
-      if (getCyberMode().enabled && !isModelAllowed(retryContext.model, undefined, { allowEscalationModel: isCyberSpawnQuerySource(options.querySource) })) {
+      assertCyberModelAllowed(retryContext.model, undefined, isCyberSpawnQuerySource(options.querySource), { leadQuery: isCyberLeadQuerySource(options.querySource) })
+      if (getCyberMode().enabled && !isModelAllowed(retryContext.model, undefined, { allowEscalationModel: isCyberSpawnQuerySource(options.querySource), leadQuery: isCyberLeadQuerySource(options.querySource) })) {
         throw new Error(`Cyber model '${retryContext.model}' is blocked by availableModels.`)
       }
       const result = await operation(client, attempt, retryContext)

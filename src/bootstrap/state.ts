@@ -42,6 +42,10 @@ export type ChannelEntry =
 export type CyberModeState = {
   enabled: boolean
   previousMainModel: ModelSetting | undefined
+  // Lead model the user explicitly chose (/model, picker, /provider, --model)
+  // while Cyber mode is on. Cleared by /cyber on and when the user returns to
+  // a Cyber/default model. Never applies to teammates or subagents.
+  explicitLeadModel?: string
   // Unlocks belong to individual request/agent IDs, never the whole session.
   escalationScopes: ReadonlyMap<string, string>
 }
@@ -969,6 +973,11 @@ export function setCyberModeEnabled(enabled: boolean): void {
     STATE.mainLoopModelOverride = STATE.cyberMode.previousMainModel
     STATE.cyberMode = { enabled, previousMainModel: undefined, escalationScopes: new Map() }
   }
+}
+
+export function setCyberExplicitLeadModel(model: string | undefined): void {
+  if (!STATE.cyberMode.enabled) return
+  STATE.cyberMode = { ...STATE.cyberMode, explicitLeadModel: model }
 }
 
 export function unlockCyberEscalation(scope: string, reason: string): void {

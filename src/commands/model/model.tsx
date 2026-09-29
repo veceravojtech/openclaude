@@ -71,6 +71,8 @@ import {
   isOpus1mMergeEnabled,
   renderDefaultModelSetting,
 } from '../../utils/model/model.js'
+import { getCyberMode } from '../../bootstrap/state.js'
+import { CYBER_MODELS, cyberModelId } from '../../utils/model/cyber.js'
 import { isModelAllowed } from '../../utils/model/modelAllowlist.js'
 import { validateModel } from '../../utils/model/validateModel.js'
 import { getLocalOpenAICompatibleProviderLabel } from '../../utils/providerDiscovery.js'
@@ -121,6 +123,13 @@ function renderModelLabel(model: string | null): string {
   return model === null ? `${rendered} (default)` : rendered
 }
 
+function getCyberExplicitModelNotice(model: string | null): string {
+  if (!model || !getCyberMode().enabled || cyberModelId(model) === CYBER_MODELS.lead) {
+    return ''
+  }
+  return `\nCyber mode: lead uses explicitly chosen ${model}; Cyber defaults unchanged for workers/escalation`
+}
+
 function haveSameModelOptions(left: ModelOption[], right: ModelOption[]): boolean {
   if (left.length !== right.length) {
     return false
@@ -144,7 +153,7 @@ function filterModelOptionsByAllowlist(options: ModelOption[]): ModelOption[] {
       return true
     }
     return typeof option.value === 'string'
-      ? isModelAllowed(option.value)
+      ? isModelAllowed(option.value, undefined, { explicitChoice: true })
       : true
   })
 }
@@ -363,7 +372,7 @@ function withInactiveProfileSwitchOptions(
       option.switchToProfileId !== undefined
         ? parseSwitchProfileValue(option.value)?.model ?? option.value
         : option.value
-    return isModelAllowed(target)
+    return isModelAllowed(target, undefined, { explicitChoice: true })
   })
   return additions.length > 0 ? [...options, ...additions] : options
 }
@@ -737,7 +746,7 @@ function ModelPickerWrapper({
     if (switchTarget) {
       // Apply the org allowlist to the decoded target model, not the composite
       // value, so a permitted cross-profile model is not wrongly rejected.
-      if (!isModelAllowed(switchTarget.model)) {
+      if (!isModelAllowed(switchTarget.model, undefined, { explicitChoice: true })) {
         onDone(
           `Model '${switchTarget.model}' is not available. Your organization restricts model selection.`,
           { display: 'system' },
@@ -819,11 +828,11 @@ function ModelPickerWrapper({
       ) {
         switchMessage += ' · Billed as extra usage'
       }
-      onDone(switchMessage)
+      onDone(switchMessage + getCyberExplicitModelNotice(switchTarget.model))
       return
     }
 
-    if (model && !isModelAllowed(model)) {
+    if (model && !isModelAllowed(model, undefined, { explicitChoice: true })) {
       onDone(
         `Model '${model}' is not available. Your organization restricts model selection.`,
         { display: 'system' },
@@ -884,7 +893,7 @@ function ModelPickerWrapper({
       message += ' · Fast mode OFF'
     }
 
-    onDone(message)
+    onDone(message + getCyberExplicitModelNotice(model))
   }
 
   async function refreshAvailableModels(manual: boolean): Promise<void> {
@@ -1066,7 +1075,7 @@ function SetModelAndClose({
 
   React.useEffect(() => {
     async function handleModelChange(): Promise<void> {
-      if (model && !isModelAllowed(model)) {
+      if (model && !isModelAllowed(model, undefined, { explicitChoice: true })) {
         onDone(
           `Model '${model}' is not available. Your organization restricts model selection.`,
           {
@@ -1114,7 +1123,7 @@ function SetModelAndClose({
       }
 
       try {
-        const { valid, error } = await validateModel(model)
+        const { valid, error } = await validateModel(model, { explicitChoice: true })
         if (valid) {
           setModel(model)
         } else {
@@ -1166,7 +1175,7 @@ function SetModelAndClose({
         message += ' · Fast mode OFF'
       }
 
-      onDone(message)
+      onDone(message + getCyberExplicitModelNotice(modelValue))
     }
 
     void handleModelChange()

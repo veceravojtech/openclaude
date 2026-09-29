@@ -1,6 +1,6 @@
 import type { Command } from '../commands.js'
 import type { LocalCommandCall } from '../types/command.js'
-import { getCyberMode, getMainLoopModelOverride, setCyberModeEnabled } from '../bootstrap/state.js'
+import { getCyberMode, getMainLoopModelOverride, setCyberExplicitLeadModel, setCyberModeEnabled } from '../bootstrap/state.js'
 import { isModelAllowed } from '../utils/model/modelAllowlist.js'
 import { getMainLoopModel } from '../utils/model/model.js'
 import { requestCyberEscalation } from '../services/api/cyberEscalation.js'
@@ -21,6 +21,8 @@ export const call: LocalCommandCall = async (args, context) => {
   if (action === 'on') {
     if (!isModelAllowed('glm-5.3')) return { type: 'text', value: 'Cannot enable cyber mode: glm-5.3 is blocked by availableModels.' }
     setCyberModeEnabled(true)
+    // /cyber on resets any explicit lead choice back to the Cyber default.
+    setCyberExplicitLeadModel(undefined)
     context.setAppState(prev => ({ ...prev, mainLoopModel: 'glm-5.3', mainLoopModelForSession: 'glm-5.3' }))
     if (!connected && !warnedMissingBinaryNinja) {
       warnedMissingBinaryNinja = true
@@ -34,7 +36,7 @@ export const call: LocalCommandCall = async (args, context) => {
   const mode = getCyberMode()
   return {
     type: 'text',
-    value: `Cyber mode: ${mode.enabled ? 'ON' : 'OFF'} (session only)\nLead / side calls: glm-5.3\nWorkers: easy → deepseek-v4-pro; hard → claude-opus-4-6\nReview: glm-5.3; fallback uses a different implementer family\nEscalation: claude-opus-4-8, scoped requests only (${mode.escalationScopes.size} active)\nBinary Ninja: ${connected ? 'connected' : 'not connected'}${warning}`,
+    value: `Cyber mode: ${mode.enabled ? 'ON' : 'OFF'} (session only)\nLead / side calls: glm-5.3\n${mode.enabled && mode.explicitLeadModel ? `Explicit lead model: ${mode.explicitLeadModel} (chosen by you; workers, side calls and escalation unchanged)\n` : ''}Workers: easy → deepseek-v4-pro; hard → claude-opus-4-6\nReview: glm-5.3; fallback uses a different implementer family\nEscalation: claude-opus-4-8, scoped requests only (${mode.escalationScopes.size} active)\nBinary Ninja: ${connected ? 'connected' : 'not connected'}${warning}`,
   }
 }
 

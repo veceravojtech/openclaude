@@ -199,7 +199,9 @@ export function getUserSpecifiedModelSetting(): ModelSetting | undefined {
   }
 
   // Ignore the user-specified model if it's not in the availableModels allowlist.
-  if (specifiedModel && !isModelAllowed(specifiedModel)) {
+  // In Cyber mode the lead's own explicit model choice is honored (the check
+  // itself ignores it for teammates).
+  if (specifiedModel && !isModelAllowed(specifiedModel, undefined, { leadQuery: true })) {
     return undefined
   }
 

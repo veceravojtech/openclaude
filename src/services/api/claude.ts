@@ -1,6 +1,6 @@
 import { findProviderProfileRouteForModel } from '../../utils/providerProfiles.js'
 import { getCyberMode, unlockCyberEscalation, clearCyberEscalation } from '../../bootstrap/state.js'
-import { assertCyberModelAllowed, CYBER_MODELS, isCyberSpawnQuerySource, withCyberScope } from '../../utils/model/cyber.js'
+import { assertCyberModelAllowed, CYBER_MODELS, isCyberLeadQuerySource, isCyberSpawnQuerySource, withCyberScope } from '../../utils/model/cyber.js'
 import type {
   BetaContentBlock,
   BetaContentBlockParam,
@@ -1234,7 +1234,7 @@ async function* queryModel(
   }
   systemPrompt = asSystemPrompt([...systemPrompt,
     'Cyber mode: prefer Binary Ninja MCP for binary analysis. Start with load_binary and analysis_progress; then use decompilation, xrefs, strings, types and renaming. Other tools remain available. Use CyberEscalate with a reason and work so far when uncertain.'])
-  assertCyberModelAllowed(options.requestModel ?? options.model, undefined, isCyberSpawnQuerySource(options.querySource))
+  assertCyberModelAllowed(options.requestModel ?? options.model, undefined, isCyberSpawnQuerySource(options.querySource), { leadQuery: isCyberLeadQuerySource(options.querySource) })
   let iterator = queryModelInner(messages, systemPrompt, thinkingConfig, tools, signal, options)
   let scope: string | undefined
   try {
