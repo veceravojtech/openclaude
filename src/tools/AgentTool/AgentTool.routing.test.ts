@@ -83,13 +83,13 @@ test('the full schema accepts provider_profile as a non-empty string', () => {
 test('normal subagent prompt metadata uses routed effective model', async () => {
   settingsForTest = {
     agentModels: {
-      'deepseek-grunt': {
+      'deepseek-flash': {
         base_url: 'https://api.deepseek.com/v1',
         api_key: 'sk-test',
       },
     },
     agentRouting: {
-      'general-purpose': 'deepseek-grunt',
+      'general-purpose': 'deepseek-flash',
     },
   }
 
@@ -106,10 +106,36 @@ test('normal subagent prompt metadata uses routed effective model', async () => 
     { requestId: 'req-1' } as never,
   )
 
-  expect(promptModels).toContain('deepseek-grunt')
+  expect(promptModels).toContain('deepseek-flash')
   expect(getRunAgentParams()?.override?.systemPrompt).toContain(
-    'enhanced-for:deepseek-grunt',
+    'enhanced-for:deepseek-flash',
   )
+})
+
+test('a routed subagent model the provider does not serve is refused before it runs', async () => {
+  settingsForTest = {
+    agentModels: {
+      'deepseek-grunt': {
+        base_url: 'https://api.deepseek.com/v1',
+        api_key: 'sk-test',
+      },
+    },
+    agentRouting: {
+      'general-purpose': 'deepseek-grunt',
+    },
+  }
+
+  const { AgentTool, getRunAgentParams } = await importAgentToolWithRoutingMocks()
+
+  await expect(
+    AgentTool.call(
+      { description: 'Inspect implementation', prompt: 'Find the bug' },
+      createToolUseContext('parent-model', [createAgentDefinition()]),
+      mock(async () => ({ behavior: 'allow' })) as never,
+      { requestId: 'req-2' } as never,
+    ),
+  ).rejects.toThrow(/deepseek-grunt.*provider 'deepseek'.*deepseek-v4-pro/s)
+  expect(getRunAgentParams()).toBeUndefined()
 })
 
 test('plan-mode one-shot agents cannot be forced into background execution', async () => {

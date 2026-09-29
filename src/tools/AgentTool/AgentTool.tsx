@@ -38,6 +38,7 @@ import { createUserMessage, extractTextContent, isSyntheticMessage, normalizeMes
 import { getAgentModel } from '../../utils/model/agent.js';
 import { chooseTeammateRoute, familyOfModel, formatDispatchSummary, hasNamedAgentRouting, readTeammateDispatchSettings, toDispatchRecord, type TeammateRouteDecision } from '../../services/api/smartRouting/teammate.js';
 import { isModelAllowed } from '../../utils/model/modelAllowlist.js';
+import { assertKnownSubagentModel, isTeammateModelAlias } from '../../utils/model/teammateModelMatrix.js';
 import { permissionModeSchema } from '../../utils/permissions/PermissionMode.js';
 import type { PermissionResult } from '../../utils/permissions/PermissionResult.js';
 import { filterDeniedAgents, getDenyRuleForAgent } from '../../utils/permissions/permissions.js';
@@ -1032,7 +1033,7 @@ export const AgentTool = buildTool({
       }
     }
     const resolvedAgentModel = getAgentModel(selectedAgent.model, toolUseContext.options.mainLoopModel, subagentModel, permissionMode);
-    const { mainLoopModel: effectiveAgentModel } = resolveAgentRunModelRouting({
+    const { mainLoopModel: effectiveAgentModel, providerOverride: subagentProviderOverride } = resolveAgentRunModelRouting({
       resolvedAgentModel,
       parentModel: toolUseContext.options.mainLoopModel,
       toolSpecifiedModel: subagentModel,
@@ -1042,6 +1043,23 @@ export const AgentTool = buildTool({
       settings: getInitialSettings(),
       permissionMode,
     });
+    {
+      // Known-model guard: a literal id (explicit param, frontmatter, or one
+      // agentRouting/agentModels substituted) must be one the serving provider
+      // is known to accept, else fail here with a clear error instead of a
+      // provider 400 mid-run. Pure aliases resolve to provider defaults and
+      // the inherited parent model is proven, so they are not re-judged.
+      const requestedSubagentModel = subagentModel ?? selectedAgent.model;
+      const literalRequested = requestedSubagentModel !== undefined && !isTeammateModelAlias(requestedSubagentModel);
+      if (literalRequested || subagentProviderOverride !== undefined || effectiveAgentModel !== resolvedAgentModel) {
+        assertKnownSubagentModel({
+          model: effectiveAgentModel,
+          ...(requestedSubagentModel !== undefined ? { requestedModel: requestedSubagentModel } : {}),
+          parentModel: toolUseContext.options.mainLoopModel,
+          ...(subagentProviderOverride ? { overrideBaseUrl: subagentProviderOverride.baseURL } : {})
+        });
+      }
+    }
     if (subagentDispatch) {
       // Separation check on the FINAL model — whatever resolved it (the
       // dispatcher, frontmatter, agentRouting, or the parent model inherited

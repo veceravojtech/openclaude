@@ -37,6 +37,7 @@ import type { ProviderProfile } from '../../../utils/config.js'
 import type { SettingsJson } from '../../../utils/settings/types.js'
 import {
   getAllowedTeammateEntries,
+  isKnownTeammateModel,
   normalizeTeammateModelId,
   resolveTeammateProviderRoute,
   TEAMMATE_MODEL_ALLOWLIST_WILDCARD,
@@ -738,16 +739,16 @@ export function pruneRouteCatalog<T extends { id: string }>(route: string, entri
 function allowedByTeammateAllowlist(
   route: string,
   id: string,
-  allowed: TeammateMatrixEntry[] | null,
+  allowed: TeammateMatrixEntry[],
   wildcard: boolean,
 ): boolean {
-  if (wildcard || allowed === null) return true
+  if (wildcard) return true
   const n = normalizeTeammateModelId(id)
   return allowed.some(a => a.route === route && normalizeTeammateModelId(a.id) === n)
 }
 
 type RouteContext = {
-  allowed: TeammateMatrixEntry[] | null
+  allowed: TeammateMatrixEntry[]
   wildcard: boolean
   leaderRoute: string
   anthropicAuth: boolean
@@ -802,6 +803,10 @@ function listCandidates(
     seen.add(key)
     if (ctx.excludeModels.has(key)) {
       excluded.push({ model: facts.id, reason: 'teammateDispatch.excludeModels' })
+      return
+    }
+    if (!isKnownTeammateModel(facts.id, route)) {
+      excluded.push({ model: facts.id, reason: `not a known model for provider '${route}'` })
       return
     }
     if (!allowedByTeammateAllowlist(route, facts.id, ctx.allowed, ctx.wildcard)) {
@@ -1314,9 +1319,13 @@ function tierFallbackOrder(tier: DispatchTier): DispatchTier[] {
 function allowedByAllowlist(
   family: DispatchFamily,
   entry: TeammateMatrixEntry,
-  allowed: TeammateMatrixEntry[] | null,
+  allowed: TeammateMatrixEntry[],
   wildcard: boolean,
 ): boolean {
+  // The tier fallback (used when the JEV preference service is down) must
+  // never pick a family the route cannot serve, whatever the allowlist says:
+  // '*' means "any known id", not "any id".
+  if (!isKnownTeammateModel(entry.id, entry.route)) return false
   if (family === 'gpt-5.6') {
     // Not in TEAMMATE_MODEL_MATRIX: checkTeammateModelAllowed would refuse it
     // under any allowlist other than the wildcard.

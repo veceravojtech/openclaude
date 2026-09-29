@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
+// Load the smartRouting module first: teammateModelMatrix reaches it through a
+// pre-existing import cycle, and entering the cycle from the matrix side leaves
+// DISPATCH_FAMILIES reading matrix constants before they are initialised.
+import '../../services/api/smartRouting/teammate.js'
 import { ensureIntegrationsLoaded } from '../../integrations/index.js'
 import { getCatalogEntriesForRoute } from '../../integrations/registry.js'
 import { LEGACY_PROVIDER_MODEL_CONFIGS } from './configs.js'
@@ -7,8 +11,11 @@ import {
   TEAMMATE_MODEL_FAMILY_KEYS,
   TEAMMATE_MODEL_MATRIX,
   _resetTeammateAllowlistWarningsForTesting,
+  assertKnownSubagentModel,
+  assertKnownTeammateModel,
   checkTeammateModelAllowed,
   getAllowedTeammateEntries,
+  isKnownTeammateModel,
   resolveTeammateProviderRoute,
   type TeammateMatrixEntry,
 } from './teammateModelMatrix.js'
@@ -237,9 +244,14 @@ describe('checkTeammateModelAllowed', () => {
     expect(check('gpt-99-fake', 'deepseek', ['glm-5.3'], true)).toBeNull()
   })
 
-  test('"*" disables the check', () => {
-    expect(getAllowedTeammateEntries(['*'])).toBeNull()
-    expect(check('gpt-99-fake', 'anthropic', ['*'])).toBeNull()
+  test('"*" means any known id, not any arbitrary id', () => {
+    expect(getAllowedTeammateEntries(['*'])).not.toBeNull()
+    // A typo is still refused even under '*'.
+    expect(check('gpt-99-fake', 'anthropic', ['*'])).toContain(
+      "Model 'gpt-99-fake' is not allowed",
+    )
+    // A known id passes under '*'.
+    expect(check('claude-sonnet-5-5', 'anthropic', ['*'])).toBeNull()
   })
 
   test('a custom allowlist of family keys restricts to those families', () => {
@@ -264,5 +276,120 @@ describe('checkTeammateModelAllowed', () => {
 
   test('an empty allowlist allows nothing', () => {
     expect(check('claude-opus-5-5', 'anthropic', [])).toContain('Allowed here: none.')
+  })
+})
+
+describe('assertKnownTeammateModel / isKnownTeammateModel', () => {
+  const known = (model: string, route: string) => isKnownTeammateModel(model, route)
+
+  test('a known id is admitted', () => {
+    expect(known('claude-sonnet-5-5', 'anthropic')).toBe(true)
+    expect(known('deepseek-v4-pro', 'deepseek')).toBe(true)
+    expect(known('deepseek-flash', 'deepseek')).toBe(true)
+    expect(known('glm-5.3', 'zai')).toBe(true)
+    expect(known('gpt-6-astra', 'codex')).toBe(true)
+  })
+
+  test('an alias resolves before the check', () => {
+    expect(known('sonnet', 'anthropic')).toBe(true)
+    expect(known('opus', 'anthropic')).toBe(true)
+    expect(known('inherit', 'deepseek')).toBe(true)
+    expect(known('codexplan', 'codex')).toBe(true)
+  })
+
+  test('the [1m] suffix is stripped', () => {
+    expect(known('claude-sonnet-5-5[1m]', 'anthropic')).toBe(true)
+    expect(known('deepseek-v4-pro[1m]', 'deepseek')).toBe(true)
+  })
+
+  test('case is ignored (uppercase GLM)', () => {
+    expect(known('GLM-5.2', 'zai')).toBe(true)
+    expect(known('GLM-4.5-Air', 'zai')).toBe(true)
+  })
+
+  test('the zai extra ids are known, not just the matrix families', () => {
+    expect(known('glm-5.2', 'zai')).toBe(true)
+    expect(known('glm-5.3-flashx', 'zai')).toBe(true)
+    expect(known('glm-4.6', 'zai')).toBe(true)
+  })
+
+  test('an unknown id is refused with a clear message', () => {
+    expect(known('gpt-99-fake', 'deepseek')).toBe(false)
+    expect(() => assertKnownTeammateModel('gpt-99-fake', 'deepseek')).toThrow(
+      /gpt-99-fake/,
+    )
+    expect(() => assertKnownTeammateModel('gpt-99-fake', 'deepseek')).toThrow(
+      /provider 'deepseek'/,
+    )
+    expect(() => assertKnownTeammateModel('gpt-99-fake', 'deepseek')).toThrow(
+      /deepseek-v4-pro/,
+    )
+  })
+
+  test('a typo is refused', () => {
+    expect(known('claude-sonnet-5-6', 'anthropic')).toBe(false)
+    expect(() => assertKnownTeammateModel('claude-sonnet-5-6', 'anthropic')).toThrow(
+      /claude-sonnet-5-6/,
+    )
+  })
+
+  test('a claude id on the DeepSeek route is refused', () => {
+    expect(known('claude-sonnet-5-5', 'deepseek')).toBe(false)
+    expect(() => assertKnownTeammateModel('claude-sonnet-5-5', 'deepseek')).toThrow(
+      /deepseek-v4-pro/,
+    )
+  })
+})
+
+describe('assertKnownSubagentModel', () => {
+  test('the parent\'s own model on its own provider is exempt', () => {
+    expect(() =>
+      assertKnownSubagentModel({ model: 'some-local-model', parentModel: 'some-local-model' }),
+    ).not.toThrow()
+  })
+
+  test('a known literal id passes, an unknown or mistyped one is refused', () => {
+    expect(() =>
+      assertKnownSubagentModel({ model: 'claude-sonnet-5-5', parentModel: 'claude-opus-5-5' }),
+    ).not.toThrow()
+    expect(() =>
+      assertKnownSubagentModel({
+        model: 'claude-sonnet-5-6',
+        requestedModel: 'claude-sonnet-5-6',
+        parentModel: 'claude-opus-5-5',
+      }),
+    ).toThrow(/claude-sonnet-5-6/)
+  })
+
+  test('a cross-provider override is judged on its own route', () => {
+    expect(() =>
+      assertKnownSubagentModel({
+        model: 'deepseek-v4-pro',
+        parentModel: 'claude-opus-5-5',
+        overrideBaseUrl: 'https://api.deepseek.com/v1',
+      }),
+    ).not.toThrow()
+    expect(() =>
+      assertKnownSubagentModel({
+        model: 'claude-sonnet-5-5',
+        parentModel: 'claude-opus-5-5',
+        overrideBaseUrl: 'https://api.deepseek.com/v1',
+      }),
+    ).toThrow(/provider 'deepseek'/)
+  })
+})
+
+describe('"*" allowlist is bounded by known ids', () => {
+  test('claude-sonnet-4-6 (configs.ts) is known for anthropic; gpt-99-fake is not', () => {
+    expect(isKnownTeammateModel('claude-sonnet-4-6', 'anthropic')).toBe(true)
+    expect(() => assertKnownTeammateModel('gpt-99-fake', 'anthropic')).toThrow()
+  })
+
+  test('an unset allowlist stays the narrower matrix; "*" widens to known ids only', () => {
+    const ids = (a: readonly string[] | undefined) =>
+      new Set(getAllowedTeammateEntries(a).map(e => `${e.route}:${e.id}`))
+    expect(ids(undefined).has('zai:glm-5.2')).toBe(false)
+    expect(ids(['*']).has('zai:glm-5.2')).toBe(true)
+    expect(ids(['*']).has('zai:glm-99')).toBe(false)
   })
 })

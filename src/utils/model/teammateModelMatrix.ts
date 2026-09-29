@@ -29,8 +29,9 @@ import {
   isCodexBaseUrl,
   shouldUseCodexTransport,
 } from '../../services/api/providerConfig.js'
-import { CLAUDE_FABLE_5_1_CONFIG,
+import { LEGACY_PROVIDER_MODEL_CONFIGS, CLAUDE_FABLE_5_1_CONFIG,
   CLAUDE_SONNET_5_5_CONFIG, CLAUDE_SONNET_5_CONFIG, CLAUDE_OPUS_5_5_CONFIG } from './configs.js'
+import { isModelAlias } from './aliases.js'
 
 /** One servable (route, model id) pair. */
 export type TeammateMatrixEntry = {
@@ -154,6 +155,157 @@ export function normalizeTeammateModelId(model: string): string {
   return (trimmed.split('?', 1)[0] ?? trimmed).toLowerCase()
 }
 
+/**
+ * Model ids known to be servable per route, on top of what TEAMMATE_MODEL_MATRIX
+ * already maps. Keyed by the descriptor route id the teammate will actually run
+ * on. Anthropic routes need no entry here: their claude-* ids come straight from
+ * the matrix (and configs.ts), including the bedrock/vertex/foundry variants.
+ *
+ * Measured 2026-09-29 against the live provider endpoints: DeepSeek /models
+ * returns exactly deepseek-v4-pro + deepseek-flash; Z.ai /models returns the
+ * eleven glm-* ids below (and is case-insensitive).
+ */
+const EXTRA_KNOWN_MODEL_IDS_BY_ROUTE: Readonly<Record<string, readonly string[]>> = {
+  deepseek: ['deepseek-v4-pro', 'deepseek-flash'],
+  zai: [
+    'glm-4.5',
+    'glm-4.5-air',
+    'glm-4.6',
+    'glm-4.7',
+    'glm-5',
+    'glm-5-turbo',
+    'glm-5.1',
+    'glm-5.2',
+    'glm-5.3',
+    'glm-5.3-flash',
+    'glm-5.3-flashx',
+  ],
+  // TODO(openai/codex): these ids are NOT live-verified — the Codex profile is
+  // OAuth with no /models endpoint, so they are carried on trust from the model
+  // descriptors rather than a measured endpoint list. Verify before relying on
+  // them as a hard guarantee.
+  codex: [
+    'gpt-6-astra',
+    'gpt-5.6-sol',
+    'gpt-5.6-terra',
+    'gpt-5.6-luna',
+    'gpt-5.5',
+    'gpt-5.5-mini',
+    'gpt-5.5-nano',
+    'gpt-5.4',
+    'gpt-5.4-mini',
+    'gpt-5.4-nano',
+    'gpt-5-mini',
+  ],
+  openai: [
+    'gpt-6-astra',
+    'gpt-5.6-sol',
+    'gpt-5.6-terra',
+    'gpt-5.6-luna',
+    'gpt-5.5',
+    'gpt-5.5-mini',
+    'gpt-5.5-nano',
+    'gpt-5.4',
+    'gpt-5.4-mini',
+    'gpt-5.4-nano',
+    'gpt-5-mini',
+  ],
+}
+
+/** The matrix families' entries only: what an unset allowlist admits. */
+function matrixEntries(): TeammateMatrixEntry[] {
+  return TEAMMATE_MODEL_FAMILY_KEYS.flatMap(
+    key => TEAMMATE_MODEL_MATRIX[key].entries as readonly TeammateMatrixEntry[],
+  )
+}
+
+/**
+ * Every known (route, id) pair: the matrix families, every claude-* id
+ * configs.ts maps for the Anthropic-shaped routes (firstParty → anthropic,
+ * bedrock, vertex, foundry), and the extra per-route ids above. "Known" is
+ * what `teammateModelAllowlist: ["*"]` means; the default allowlist is the
+ * narrower matrix.
+ */
+function allKnownEntries(): TeammateMatrixEntry[] {
+  const entries = matrixEntries()
+  for (const config of Object.values(LEGACY_PROVIDER_MODEL_CONFIGS)) {
+    entries.push(
+      { route: 'anthropic', id: config.firstParty },
+      { route: 'bedrock', id: config.bedrock },
+      { route: 'vertex', id: config.vertex },
+      { route: 'foundry', id: config.foundry },
+    )
+  }
+  for (const [route, ids] of Object.entries(EXTRA_KNOWN_MODEL_IDS_BY_ROUTE)) {
+    for (const id of ids) entries.push({ route, id })
+  }
+  return entries
+}
+
+/** The normalized, known model ids a route can serve. */
+function knownModelIdsForRoute(route: string): Set<string> {
+  const ids = new Set<string>()
+  for (const entry of allKnownEntries()) {
+    if (entry.route === route) ids.add(normalizeTeammateModelId(entry.id))
+  }
+  return ids
+}
+
+/** Codex aliases parseUserSpecifiedModel maps to real ids (see model.ts). */
+const CODEX_MODEL_ALIASES = new Set(['codexplan', 'codexspark'])
+
+/**
+ * A pure alias: 'inherit', a Claude alias (sonnet/opus/haiku/fable/best/
+ * opusplan, with or without [1m]) or a Codex alias. Aliases carry no wire id of
+ * their own — callers resolve them (parseUserSpecifiedModel / getAgentModel)
+ * BEFORE the known-id check, which is what actually judges the id that will
+ * reach the provider. This module cannot import model.ts to resolve them
+ * itself: that import cycles back through smartRouting/teammate.ts.
+ */
+export function isTeammateModelAlias(model: string): boolean {
+  const n = normalizeTeammateModelId(model)
+  return n === 'inherit' || isModelAlias(n) || CODEX_MODEL_ALIASES.has(n)
+}
+
+/**
+ * Whether `model` is a known id for `route`. Aliases are admitted as-is; the
+ * `[1m]` tag is stripped and case ignored. An id is known when the matrix or
+ * the per-route extra ids list it for exactly this route — a claude id on the
+ * DeepSeek route is NOT known.
+ */
+export function isKnownTeammateModel(model: string, route: string): boolean {
+  if (isTeammateModelAlias(model)) return true
+  return knownModelIdsForRoute(route).has(normalizeTeammateModelId(model))
+}
+
+/** The known (normalized) model ids a route can serve, sorted — for error text. */
+export function knownTeammateModelIds(route: string): string[] {
+  return [...knownModelIdsForRoute(route)].sort()
+}
+
+/**
+ * Throws unless `model` is a model id the serving route is known to accept.
+ * Runs before the allowlist check so `teammateModelAllowlist: ["*"]` can never
+ * admit an arbitrary id. `model` should already be alias-resolved by the
+ * caller; `requestedModel` is the raw user value, shown in the message.
+ */
+export function assertKnownTeammateModel(
+  model: string,
+  route: string,
+  requestedModel?: string,
+): void {
+  if (isKnownTeammateModel(model, route)) return
+  const known = knownTeammateModelIds(route)
+  const named =
+    requestedModel !== undefined &&
+    normalizeTeammateModelId(requestedModel) !== normalizeTeammateModelId(model)
+      ? `'${requestedModel.trim()}' (resolves to '${model.trim()}')`
+      : `'${model.trim()}'`
+  throw new Error(
+    `Model ${named} is not a known model for agents on provider '${route}'. Valid options here: ${known.length > 0 ? known.join(', ') : 'none known for this provider'} (or an alias such as sonnet/opus/haiku/inherit). Check for a typo, or pick a model this provider serves.`,
+  )
+}
+
 // ---------------------------------------------------------------------------
 // Provider identity
 // ---------------------------------------------------------------------------
@@ -227,6 +379,35 @@ export function resolveTeammateProviderRoute({
   return codexOr(route, model, baseUrl)
 }
 
+/**
+ * The known-id guard for an in-process subagent (the Agent tool without a
+ * team). `model` is the FINAL, alias-resolved id the subagent will run —
+ * after agentRouting / agentModels have been applied. Judged on the route it
+ * will actually use (`overrideBaseUrl` from a cross-provider agentModels
+ * route, else the leader's own provider). Exempt: the parent's own model on
+ * the parent's own provider (proven by the parent already running on it).
+ */
+export function assertKnownSubagentModel({
+  model,
+  requestedModel,
+  parentModel,
+  overrideBaseUrl,
+}: {
+  model: string
+  requestedModel?: string
+  parentModel: string
+  overrideBaseUrl?: string
+}): void {
+  if (
+    !overrideBaseUrl &&
+    normalizeTeammateModelId(model) === normalizeTeammateModelId(parentModel)
+  ) {
+    return
+  }
+  const route = resolveTeammateProviderRoute({ model, overrideBaseUrl })
+  assertKnownTeammateModel(model, route, requestedModel)
+}
+
 // ---------------------------------------------------------------------------
 // Allowlist + decision
 // ---------------------------------------------------------------------------
@@ -242,29 +423,27 @@ function isFamilyKey(key: string): key is TeammateModelFamilyKey {
   return Object.hasOwn(TEAMMATE_MODEL_MATRIX, key)
 }
 
-const ALL_MATRIX_IDS = new Set(
-  TEAMMATE_MODEL_FAMILY_KEYS.flatMap(key =>
-    TEAMMATE_MODEL_MATRIX[key].entries.map(entry =>
-      normalizeTeammateModelId(entry.id),
-    ),
-  ),
+const ALL_KNOWN_IDS = new Set(
+  allKnownEntries().map(entry => normalizeTeammateModelId(entry.id)),
 )
 
 /**
- * The matrix entries the allowlist admits. Unset → every family. An entry is
- * a family key (whole family) or an exact matrix id (that id on every route
- * that lists it). Anything else warns once and is ignored — never a crash.
- * Returns null for the `*` wildcard: the check is disabled.
+ * The known (route, id) pairs the allowlist admits. Unset → the matrix families. An
+ * entry is a family key (whole family) or an exact known id (that id on every
+ * route that lists it). Anything else warns once and is ignored — never a crash.
+ *
+ * The `*` wildcard means "any known id", NOT "anything goes": an id outside the
+ * matrix families and the per-route extra ids is still refused by
+ * checkTeammateModelAllowed / assertKnownTeammateModel.
  */
 export function getAllowedTeammateEntries(
   allowlist: readonly string[] | undefined,
-): TeammateMatrixEntry[] | null {
-  const all = TEAMMATE_MODEL_FAMILY_KEYS.flatMap(
-    key => TEAMMATE_MODEL_MATRIX[key].entries as readonly TeammateMatrixEntry[],
-  )
-  if (allowlist === undefined) return all
+): TeammateMatrixEntry[] {
+  const all = allKnownEntries()
+  // Unset → the matrix families. '*' → every KNOWN id (never arbitrary ones).
+  if (allowlist === undefined) return matrixEntries()
   if (allowlist.some(item => item.trim() === TEAMMATE_MODEL_ALLOWLIST_WILDCARD)) {
-    return null
+    return all
   }
   const allowed: TeammateMatrixEntry[] = []
   for (const raw of allowlist) {
@@ -274,7 +453,7 @@ export function getAllowedTeammateEntries(
       continue
     }
     const id = normalizeTeammateModelId(item)
-    if (ALL_MATRIX_IDS.has(id)) {
+    if (ALL_KNOWN_IDS.has(id)) {
       allowed.push(
         ...all.filter(entry => normalizeTeammateModelId(entry.id) === id),
       )
@@ -283,7 +462,7 @@ export function getAllowedTeammateEntries(
     if (!warnedUnknownEntries.has(item)) {
       warnedUnknownEntries.add(item)
       console.warn(
-        `[teammateModelAllowlist] Ignoring unknown entry "${item}": not a teammate model family (${TEAMMATE_MODEL_FAMILY_KEYS.join(', ')}) or a model id from one. Use "*" to allow any model.`,
+        `[teammateModelAllowlist] Ignoring unknown entry "${item}": not a teammate model family (${TEAMMATE_MODEL_FAMILY_KEYS.join(', ')}) or a model id from one. Use "*" to allow any known model.`,
       )
     }
   }
@@ -321,7 +500,6 @@ export function checkTeammateModelAllowed({
 }: TeammateModelCheckInput): string | null {
   if (isInheritingLeader) return null
   const allowed = getAllowedTeammateEntries(allowlist)
-  if (allowed === null) return null
 
   const model = normalizeTeammateModelId(resolvedModel)
   const onRoute = allowed.filter(entry => entry.route === providerRoute)
@@ -340,6 +518,16 @@ export function checkTeammateModelAllowed({
 
 /** Throwing wrapper around checkTeammateModelAllowed. */
 export function assertTeammateModelCheck(input: TeammateModelCheckInput): void {
+  if (input.isInheritingLeader) return
+  // The allowlist refusal comes first: it names the ids the CONFIGURED list
+  // admits on this route, which is the more actionable message. The known-id
+  // guard is the backstop that no allowlist ('*' included) can widen past what
+  // the serving route is known to accept.
   const refusal = checkTeammateModelAllowed(input)
   if (refusal) throw new Error(refusal)
+  assertKnownTeammateModel(
+    input.resolvedModel,
+    input.providerRoute,
+    input.requestedModel,
+  )
 }

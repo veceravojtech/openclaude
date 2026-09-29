@@ -434,12 +434,26 @@ test('an agentModels cross-provider route is judged on the route\'s provider', a
   expect(paneCommands).toHaveLength(1)
 })
 
-test('"*" in teammateModelAllowlist disables the check', async () => {
+test('"*" in teammateModelAllowlist means any KNOWN id, not any id', async () => {
   const spawnMultiAgent = await load({ settings: { teammateModelAllowlist: ['*'] } })
   await spawnMultiAgent.spawnTeammate(
-    { name: 'anything', prompt: 'work', team_name: 'matrix-team', model: 'gpt-99-fake' },
+    { name: 'known', prompt: 'work', team_name: 'matrix-team', model: 'claude-sonnet-4-6' },
     context(),
   )
+  expect(paneCommands).toHaveLength(1)
+  await expect(
+    spawnMultiAgent.spawnTeammate(
+      { name: 'anything', prompt: 'work', team_name: 'matrix-team', model: 'gpt-99-fake' },
+      context(),
+    ),
+  ).rejects.toThrow(/gpt-99-fake.*provider 'anthropic'/)
+  // A typo of a real id is refused too.
+  await expect(
+    spawnMultiAgent.spawnTeammate(
+      { name: 'typo', prompt: 'work', team_name: 'matrix-team', model: 'claude-sonnet-5-6' },
+      context(),
+    ),
+  ).rejects.toThrow(/claude-sonnet-5-6/)
   expect(paneCommands).toHaveLength(1)
 })
 

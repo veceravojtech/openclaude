@@ -315,6 +315,21 @@ describe('policy and candidates', () => {
     expect(decision.model).toBe('deepseek-flash')
   })
 
+  test('the tier fallback under "*" only picks ids the route serves', async () => {
+    setDeps({ leaderRoute: () => 'deepseek' })
+    const wild = settings({ teammateModelAllowlist: ['*'] })
+    for (const description of ['Research quick lookup', 'Implement the fix', 'Review the diff']) {
+      const decision = await chooseTeammateRoute({ description, settings: wild })
+      if (decision.model) expect(['deepseek-v4-pro', 'deepseek-flash']).toContain(decision.model)
+    }
+    // Catalog candidates the route cannot serve are excluded, with a reason.
+    const { candidates, excluded } = listSpawnableModels({ settings: wild })
+    for (const c of candidates) {
+      if (c.route === 'deepseek') expect(['deepseek-v4-pro', 'deepseek-flash']).toContain(c.id.toLowerCase())
+    }
+    expect(Array.isArray(excluded)).toBe(true)
+  })
+
   test('hard implement is bumped one tier deeper', async () => {
     const decision = await chooseTeammateRoute({
       description: 'Implement the fix',
