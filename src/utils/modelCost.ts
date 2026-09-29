@@ -20,6 +20,7 @@ import {
   CLAUDE_OPUS_5_CONFIG,
   CLAUDE_SONNET_4_5_CONFIG,
   CLAUDE_SONNET_4_6_CONFIG,
+  CLAUDE_SONNET_5_5_CONFIG,
   CLAUDE_SONNET_5_CONFIG,
   CLAUDE_SONNET_4_CONFIG,
 } from './model/configs.js'
@@ -161,6 +162,8 @@ export const MODEL_COSTS: Record<ModelShortName, ModelCosts> = {
   [firstPartyNameToCanonical(CLAUDE_FABLE_5_1_CONFIG.firstParty)]:
     COST_FABLE_51,
   [firstPartyNameToCanonical(CLAUDE_SONNET_5_CONFIG.firstParty)]:
+    COST_SONNET_5,
+  [firstPartyNameToCanonical(CLAUDE_SONNET_5_5_CONFIG.firstParty)]:
     COST_SONNET_5,
 }
 

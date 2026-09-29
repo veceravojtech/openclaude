@@ -7,6 +7,8 @@ const VERTEX_ENV_KEYS = [
   'VERTEX_REGION_CLAUDE_5_0_OPUS',
   'VERTEX_REGION_CLAUDE_5_5_OPUS',
   'VERTEX_REGION_CLAUDE_5_1_FABLE',
+  'VERTEX_REGION_CLAUDE_5_0_SONNET',
+  'VERTEX_REGION_CLAUDE_5_5_SONNET',
 ] as const
 
 const SAVED: Partial<Record<(typeof VERTEX_ENV_KEYS)[number], string>> = {}
@@ -65,4 +67,19 @@ test('claude-fable-5-1 is not shadowed by and does not shadow Opus rows', () => 
   expect(getVertexRegionForModel('claude-fable-5-1')).toBe('europe-west4')
   expect(getVertexRegionForModel('claude-opus-5-5')).toBe('europe-west1')
   expect(getVertexRegionForModel('claude-opus-5')).toBe('us-west4')
+})
+
+test('claude-sonnet-5-5 reads its own Vertex region override', () => {
+  process.env.VERTEX_REGION_CLAUDE_5_5_SONNET = 'europe-west3'
+  expect(getVertexRegionForModel('claude-sonnet-5-5')).toBe('europe-west3')
+})
+
+// Same startsWith shadowing regression as the Opus 5.5 row above: if the 5.5
+// row is ever moved below the 5.0 row, 'claude-sonnet-5-5'.startsWith
+// ('claude-sonnet-5') silently inherits the 5.0 region with no error.
+test('claude-sonnet-5-5 does not inherit the Sonnet 5.0 Vertex region', () => {
+  process.env.VERTEX_REGION_CLAUDE_5_0_SONNET = 'us-west4'
+  expect(getVertexRegionForModel('claude-sonnet-5-5')).not.toBe('us-west4')
+  expect(getVertexRegionForModel('claude-sonnet-5-5')).toBe('us-east5')
+  expect(getVertexRegionForModel('claude-sonnet-5')).toBe('us-west4')
 })

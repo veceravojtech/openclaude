@@ -357,7 +357,7 @@ export function getDefaultSonnetModel(): ModelName {
   if (!isFirstPartyAnthropicProvider()) {
     return getModelStrings().sonnet45
   }
-  return getModelStrings().sonnet50
+  return getModelStrings().sonnet55
 }
 
 // @[MODEL LAUNCH]: Update the default Haiku model (3P providers may lag so keep defaults unchanged).
@@ -714,14 +714,14 @@ export function getClaudeAiUserDefaultModelDescription(
     }
     return `${opusName} · Most capable for complex work${fastMode ? getOpus46PricingSuffix(true) : ''}`
   }
-  return 'Sonnet 5 · Best for everyday tasks'
+  return 'Sonnet 5.5 · Best for everyday tasks'
 }
 
 export function renderDefaultModelSetting(
   setting: ModelName | ModelAlias,
 ): string {
   if (setting === 'opusplan') {
-    return `${getDefaultOpusMarketingName()} in plan mode, else Sonnet 5`
+    return `${getDefaultOpusMarketingName()} in plan mode, else Sonnet 5.5`
   }
   return renderModelName(parseUserSpecifiedModel(setting))
 }
@@ -881,6 +881,10 @@ export function getPublicModelDisplayName(model: ModelName): string | null {
       return 'Opus 4.1'
     case getModelStrings().opus40:
       return 'Opus 4'
+    case getModelStrings().sonnet55 + '[1m]':
+      return 'Sonnet 5.5 (1M context)'
+    case getModelStrings().sonnet55:
+      return 'Sonnet 5.5'
     case getModelStrings().sonnet50 + '[1m]':
       return 'Sonnet 5 (1M context)'
     case getModelStrings().sonnet50:

@@ -216,7 +216,7 @@ function getCustomSonnetOption(): ModelOption | undefined {
 // with the new model's label and description. These appear in the /model picker.
 function getSonnet46Option(): ModelOption {
   const is3P = getAPIProvider() !== 'firstParty'
-  // First-party `sonnet` resolves to Sonnet 5 (1M-native, so no separate
+  // First-party `sonnet` resolves to Sonnet 5.5 (1M-native, so no separate
   // 1M row); 3P keeps the explicit Sonnet 4.6 id until its rollout.
   if (!is3P) {
     return SonnetOption
@@ -431,14 +431,14 @@ function getMergedOpus1MOption(fastMode = false): ModelOption {
   }
 }
 
-// First-party `sonnet` → Claude Sonnet 5. Its 1M window is native (no extra
+// First-party `sonnet` → Claude Sonnet 5.5. Its 1M window is native (no extra
 // usage needed), so there is no separate `sonnet[1m]` row on first-party.
 const SonnetOption: ModelOption = {
   value: 'sonnet',
   label: 'Sonnet',
-  description: `Sonnet 5 · Best for everyday tasks`,
+  description: `Sonnet 5.5 · Best for everyday tasks`,
   descriptionForModel:
-    'Sonnet 5 - best for everyday tasks, 1M context. Generally recommended for most coding tasks',
+    'Sonnet 5.5 - best for everyday tasks, 1M context. Generally recommended for most coding tasks',
 }
 
 const MaxHaiku45Option: ModelOption = {

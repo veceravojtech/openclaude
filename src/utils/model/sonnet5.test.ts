@@ -110,12 +110,13 @@ describe('Sonnet 5 ids and aliases', () => {
     )
   })
 
-  test('`sonnet` resolves to claude-sonnet-5; Sonnet 4.6 stays selectable by id', async () => {
+  test('`sonnet` resolves to claude-sonnet-5-5; Sonnet 5 and 4.6 stay selectable by id', async () => {
     const { parseUserSpecifiedModel, getDefaultSonnetModel } =
       await importModel()
-    expect(getDefaultSonnetModel()).toBe('claude-sonnet-5')
-    expect(parseUserSpecifiedModel('sonnet')).toBe('claude-sonnet-5')
-    expect(parseUserSpecifiedModel('sonnet[1m]')).toBe('claude-sonnet-5[1m]')
+    expect(getDefaultSonnetModel()).toBe('claude-sonnet-5-5')
+    expect(parseUserSpecifiedModel('sonnet')).toBe('claude-sonnet-5-5')
+    expect(parseUserSpecifiedModel('sonnet[1m]')).toBe('claude-sonnet-5-5[1m]')
+    expect(parseUserSpecifiedModel('claude-sonnet-5')).toBe('claude-sonnet-5')
     expect(parseUserSpecifiedModel('claude-sonnet-4-6')).toBe(
       'claude-sonnet-4-6',
     )
@@ -123,6 +124,7 @@ describe('Sonnet 5 ids and aliases', () => {
 
   test('display names', async () => {
     const { renderModelName, getPublicModelDisplayName } = await importModel()
+    expect(getPublicModelDisplayName('claude-sonnet-5-5')).toBe('Sonnet 5.5')
     expect(getPublicModelDisplayName('claude-sonnet-5')).toBe('Sonnet 5')
     expect(renderModelName('claude-sonnet-5[1m]')).toContain('Sonnet 5')
   })
@@ -133,6 +135,9 @@ describe('Sonnet 5 is 1M-native', () => {
     const { preferOneMillionContext } = await importModel('pro')
     expect(preferOneMillionContext('claude-sonnet-5')).toBe(
       'claude-sonnet-5[1m]',
+    )
+    expect(preferOneMillionContext('claude-sonnet-5-5')).toBe(
+      'claude-sonnet-5-5[1m]',
     )
     expect(preferOneMillionContext('claude-sonnet-4-6')).toBe(
       'claude-sonnet-4-6',

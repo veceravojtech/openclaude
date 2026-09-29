@@ -301,6 +301,24 @@ export const CLAUDE_SONNET_5_CONFIG = {
   xai: 'grok-4.6',
 } as const satisfies LegacyProviderModelConfig
 
+// Claude Sonnet 5.5. Bedrock uses the `us.` geo inference profile, mirroring
+// Sonnet 5 (no `-v1` suffix), pending AWS model-card verification.
+export const CLAUDE_SONNET_5_5_CONFIG = {
+  firstParty: 'claude-sonnet-5-5',
+  bedrock: 'us.anthropic.claude-sonnet-5-5',
+  vertex: 'claude-sonnet-5-5',
+  foundry: 'claude-sonnet-5-5',
+  openai: 'gpt-4o',
+  gemini: 'gemini-2.5-pro',
+  mistral: 'mistral-medium-latest',
+  github: 'github:copilot',
+  codex: 'gpt-5.6-sol',
+  'nvidia-nim': 'nvidia/llama-3.1-nemotron-70b-instruct',
+  minimax: 'MiniMax-M2.5',
+  'xiaomi-mimo': 'mimo-v2.5-pro',
+  xai: 'grok-4.6',
+} as const satisfies LegacyProviderModelConfig
+
 export const CLAUDE_SONNET_4_6_CONFIG = {
   firstParty: 'claude-sonnet-4-6',
   bedrock: 'us.anthropic.claude-sonnet-4-6',
@@ -327,6 +345,7 @@ export const LEGACY_PROVIDER_MODEL_CONFIGS = {
   sonnet45: CLAUDE_SONNET_4_5_CONFIG,
   sonnet46: CLAUDE_SONNET_4_6_CONFIG,
   sonnet50: CLAUDE_SONNET_5_CONFIG,
+  sonnet55: CLAUDE_SONNET_5_5_CONFIG,
   opus40: CLAUDE_OPUS_4_CONFIG,
   opus41: CLAUDE_OPUS_4_1_CONFIG,
   opus45: CLAUDE_OPUS_4_5_CONFIG,
