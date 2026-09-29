@@ -27,6 +27,12 @@ import { clearAgentDefinitionsCache } from '../../src/tools/AgentTool/loadAgents
 // for auth credentials. Provide a stub key so init() succeeds without network.
 const AUTH_KEY = 'ANTHROPIC_API_KEY'
 const DISABLE_BUILTIN_AGENTS_KEY = 'CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS'
+// query()/init() runs applyConfigEnvironmentVariables(), which applies the
+// machine's REAL active provider profile from global config into process.env
+// (CLAUDE_CODE_USE_OPENAI / OPENAI_BASE_URL / OPENAI_MODEL / ...). Nothing here
+// mocks that config, so restore the whole env afterwards or later suites (e.g.
+// modelOptions.crossProfile.test.ts) inherit a stale provider.
+let savedEnv: NodeJS.ProcessEnv = {}
 let savedApiKey: string | undefined
 let savedDisableBuiltinAgents: string | undefined
 let hadSavedMacro = false
@@ -34,6 +40,7 @@ let savedMacro: unknown
 
 beforeAll(async () => {
   await acquireSharedMutationLock('tests/sdk/query-lifecycle.test.ts')
+  savedEnv = { ...process.env }
   savedApiKey = process.env[AUTH_KEY]
   savedDisableBuiltinAgents = process.env[DISABLE_BUILTIN_AGENTS_KEY]
   hadSavedMacro = Object.hasOwn(globalThis, 'MACRO')
@@ -71,6 +78,10 @@ afterAll(() => {
       delete (globalThis as Record<string, unknown>).MACRO
     }
     clearAgentDefinitionsCache()
+    for (const key of Object.keys(process.env)) {
+      if (!(key in savedEnv)) delete process.env[key]
+    }
+    Object.assign(process.env, savedEnv)
   } finally {
     releaseSharedMutationLock()
   }
