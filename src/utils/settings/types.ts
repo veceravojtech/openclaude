@@ -971,7 +971,7 @@ export const SettingsSchema = lazySchema(() =>
                 .record(z.string(), z.array(z.string()))
                 .optional()
                 .describe(
-                  'Tier → ordered model-family list overrides (families: fable-5.1, opus-5.5, gpt-6, sonnet-5, deepseek-v4-pro, glm-5.3, gpt-5.6, deepseek-v4.1-flash). Unknown entries warn once and are ignored.',
+                  'Tier → ordered model-family list overrides (families: fable-5.1, opus-5.5, gpt-6, sonnet-5-5, sonnet-5, deepseek-v4-pro, glm-5.3, gpt-5.6, deepseek-v4.1-flash). Unknown entries warn once and are ignored.',
                 ),
             })
             .optional(),

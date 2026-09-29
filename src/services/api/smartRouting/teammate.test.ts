@@ -256,7 +256,7 @@ describe('JEV classification', () => {
     })
     const decision = await chooseTeammateRoute({ ...ambiguous, settings: settings() })
     expect(decision.role).toBe('implement')
-    expect(decision.model).toBe('claude-sonnet-5')
+    expect(decision.model).toBe('claude-sonnet-5-5')
     expect(decision.reason).toContain('jev error: boom')
   })
 
@@ -272,7 +272,7 @@ describe('JEV classification', () => {
     })
     expect(Date.now() - started).toBeLessThan(2000)
     expect(decision.reason).toContain('jev timeout')
-    expect(decision.model).toBe('claude-sonnet-5')
+    expect(decision.model).toBe('claude-sonnet-5-5')
   })
 
   test('jev.enabled=false never calls JEV', async () => {
@@ -300,7 +300,7 @@ describe('policy and candidates', () => {
     const review = await chooseTeammateRoute({ description: 'Review the diff', settings: settings() })
     expect([review.tier, review.family, review.model]).toEqual(['deep', 'fable-5.1', 'claude-fable-5-1'])
     const impl = await chooseTeammateRoute({ description: 'Implement the fix', settings: settings() })
-    expect([impl.tier, impl.family, impl.model]).toEqual(['standard', 'sonnet-5', 'claude-sonnet-5'])
+    expect([impl.tier, impl.family, impl.model]).toEqual(['standard', 'sonnet-5-5', 'claude-sonnet-5-5'])
   })
 
   test('fast tier on a DeepSeek leader picks the flash model', async () => {
@@ -558,6 +558,7 @@ describe('modes and helpers', () => {
 
   test('familyOfModel resolves ids, aliases and route variants', () => {
     expect(familyOfModel('claude-sonnet-5')).toBe('sonnet-5')
+    expect(familyOfModel('claude-sonnet-5-5')).toBe('sonnet-5-5')
     expect(familyOfModel('claude-opus-5-5[1m]')).toBe('opus-5.5')
     expect(familyOfModel('glm-5.3-flash')).toBe('glm-5.3')
     expect(familyOfModel('gpt-5.6-luna')).toBe('gpt-5.6')
@@ -790,6 +791,7 @@ describe('separation families are vendor model lines', () => {
     ['claude-opus-4-1@20250805', 'claude-opus'],
     ['claude-3-opus-20240229', 'claude-opus'],
     ['claude-sonnet-5', 'claude-sonnet'],
+    ['claude-sonnet-5-5', 'claude-sonnet'],
     ['claude-sonnet-4-6[1m]', 'claude-sonnet'],
     ['claude-3-5-sonnet-20241022', 'claude-sonnet'],
     ['eu.anthropic.claude-sonnet-4-5-20250929-v1:0', 'claude-sonnet'],

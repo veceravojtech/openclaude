@@ -723,6 +723,7 @@ async function setDispatchWorld(
   allowedModelsForTest = new Set([
     'allowed-model',
     'claude-sonnet-5',
+    'claude-sonnet-5-5',
     'claude-fable-5-1',
     'claude-opus-5-5',
   ])
@@ -758,15 +759,33 @@ test('dispatch: an unset model is chosen by role and reported', async () => {
     name: 'dev',
   })
   const config = getSpawnConfig(spawnTeammate)
-  expect(config.model).toBe('claude-sonnet-5')
+  expect(config.model).toBe('claude-sonnet-5-5')
   expect(config.modelWasToolSpecified).toBe(true)
   expect(config.dispatch).toMatchObject({
     role: 'implement',
-    family: 'sonnet-5',
+    family: 'sonnet-5-5',
     source: 'heuristic',
     mode: 'auto',
   })
-  expect(resultText(AgentTool, result.data)).toContain('dispatch: implement → sonnet-5')
+  expect(resultText(AgentTool, result.data)).toContain('dispatch: implement → sonnet-5-5')
+})
+
+test('dispatch: an explicit claude-sonnet-5-5 model is respected and its family recorded', async () => {
+  await setDispatchWorld([{ name: 'dev', role: 'implement', family: 'sonnet-5' }])
+  const { AgentTool, spawnTeammate } = await importAgentToolWithSpawnMock()
+  await callDispatchTool(AgentTool, {
+    description: 'Implement the second half',
+    prompt: 'Write the parser.',
+    name: 'dev2',
+    model: 'claude-sonnet-5-5',
+  })
+  const config = getSpawnConfig(spawnTeammate)
+  expect(config.model).toBe('claude-sonnet-5-5')
+  expect(config.dispatch).toMatchObject({
+    role: 'implement',
+    family: 'sonnet-5-5',
+    source: 'explicit',
+  })
 })
 
 test('dispatch: a reviewer after a sonnet-5 implementer never gets sonnet-5', async () => {

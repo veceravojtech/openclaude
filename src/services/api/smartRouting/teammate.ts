@@ -194,7 +194,7 @@ export const DEFAULT_TIER_FAMILIES: Readonly<
   Record<DispatchTier, readonly DispatchFamily[]>
 > = {
   deep: ['fable-5.1', 'opus-5.5', 'gpt-6'],
-  standard: ['sonnet-5', 'deepseek-v4-pro', 'glm-5.3', 'gpt-5.6'],
+  standard: ['sonnet-5-5', 'sonnet-5', 'deepseek-v4-pro', 'glm-5.3', 'gpt-5.6'],
   fast: ['deepseek-v4.1-flash', 'glm-5.3', 'gpt-5.6'],
 }
 
