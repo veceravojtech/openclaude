@@ -434,6 +434,16 @@ test('an agentModels cross-provider route is judged on the route\'s provider', a
   expect(paneCommands).toHaveLength(1)
 })
 
+test('codexspark resolves to gpt-5.3-codex-spark and is refused on first-party Anthropic', async () => {
+  const spawnMultiAgent = await load({})
+  await expect(
+    spawnMultiAgent.spawnTeammate(
+      { name: 'spark', prompt: 'work', team_name: 'matrix-team', model: 'codexspark' },
+      context(),
+    ),
+  ).rejects.toThrow(/'codexspark' \(resolves to 'gpt-5\.3-codex-spark'\).*provider 'anthropic'/s)
+})
+
 test('"*" in teammateModelAllowlist means any KNOWN id, not any id', async () => {
   const spawnMultiAgent = await load({ settings: { teammateModelAllowlist: ['*'] } })
   await spawnMultiAgent.spawnTeammate(

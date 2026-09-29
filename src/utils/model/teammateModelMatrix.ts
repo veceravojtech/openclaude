@@ -189,6 +189,7 @@ const EXTRA_KNOWN_MODEL_IDS_BY_ROUTE: Readonly<Record<string, readonly string[]>
     'gpt-5.6-sol',
     'gpt-5.6-terra',
     'gpt-5.6-luna',
+    'gpt-5.3-codex-spark', // what the codexspark alias resolves to
     'gpt-5.5',
     'gpt-5.5-mini',
     'gpt-5.5-nano',
@@ -202,6 +203,7 @@ const EXTRA_KNOWN_MODEL_IDS_BY_ROUTE: Readonly<Record<string, readonly string[]>
     'gpt-5.6-sol',
     'gpt-5.6-terra',
     'gpt-5.6-luna',
+    'gpt-5.3-codex-spark', // what the codexspark alias resolves to
     'gpt-5.5',
     'gpt-5.5-mini',
     'gpt-5.5-nano',
@@ -242,11 +244,26 @@ function allKnownEntries(): TeammateMatrixEntry[] {
   return entries
 }
 
-/** The normalized, known model ids a route can serve. */
+/**
+ * AWS geographic cross-region inference profile prefixes. `eu.anthropic.claude-…`
+ * serves the same model as `us.anthropic.claude-…`, so pinning a region for data
+ * residency must not turn a known model unknown. `global.` is deliberately NOT
+ * here: whether a model has a global profile is per-model (the catalog lists
+ * none for Fable 5.1), so a global id is known only when it is listed.
+ */
+const BEDROCK_REGION_PREFIX_RE = /^(?:us-gov|us|eu|apac|au|jp|ca)\.(?=anthropic\.)/
+
+/** The form two ids on `route` are compared in (region prefix dropped on bedrock). */
+function comparableModelId(route: string, model: string): string {
+  const id = normalizeTeammateModelId(model)
+  return route === 'bedrock' ? id.replace(BEDROCK_REGION_PREFIX_RE, '') : id
+}
+
+/** The comparable, known model ids a route can serve. */
 function knownModelIdsForRoute(route: string): Set<string> {
   const ids = new Set<string>()
   for (const entry of allKnownEntries()) {
-    if (entry.route === route) ids.add(normalizeTeammateModelId(entry.id))
+    if (entry.route === route) ids.add(comparableModelId(route, entry.id))
   }
   return ids
 }
@@ -275,12 +292,16 @@ export function isTeammateModelAlias(model: string): boolean {
  */
 export function isKnownTeammateModel(model: string, route: string): boolean {
   if (isTeammateModelAlias(model)) return true
-  return knownModelIdsForRoute(route).has(normalizeTeammateModelId(model))
+  return knownModelIdsForRoute(route).has(comparableModelId(route, model))
 }
 
-/** The known (normalized) model ids a route can serve, sorted — for error text. */
+/** The known model ids a route can serve (as declared, lower-cased), sorted — for error text. */
 export function knownTeammateModelIds(route: string): string[] {
-  return [...knownModelIdsForRoute(route)].sort()
+  const ids = new Set<string>()
+  for (const entry of allKnownEntries()) {
+    if (entry.route === route) ids.add(normalizeTeammateModelId(entry.id))
+  }
+  return [...ids].sort()
 }
 
 /**
@@ -501,9 +522,9 @@ export function checkTeammateModelAllowed({
   if (isInheritingLeader) return null
   const allowed = getAllowedTeammateEntries(allowlist)
 
-  const model = normalizeTeammateModelId(resolvedModel)
+  const model = comparableModelId(providerRoute, resolvedModel)
   const onRoute = allowed.filter(entry => entry.route === providerRoute)
-  if (onRoute.some(entry => normalizeTeammateModelId(entry.id) === model)) {
+  if (onRoute.some(entry => comparableModelId(providerRoute, entry.id) === model)) {
     return null
   }
   const here = [...new Set(onRoute.map(entry => entry.id))]
@@ -519,15 +540,24 @@ export function checkTeammateModelAllowed({
 /** Throwing wrapper around checkTeammateModelAllowed. */
 export function assertTeammateModelCheck(input: TeammateModelCheckInput): void {
   if (input.isInheritingLeader) return
-  // The allowlist refusal comes first: it names the ids the CONFIGURED list
-  // admits on this route, which is the more actionable message. The known-id
-  // guard is the backstop that no allowlist ('*' included) can widen past what
-  // the serving route is known to accept.
+  const known = () =>
+    assertKnownTeammateModel(
+      input.resolvedModel,
+      input.providerRoute,
+      input.requestedModel,
+    )
+  // Under '*' the allowlist admits every known id, so an id it refuses is not
+  // known at all and widening the allowlist cannot help: report the known-id
+  // error (naming valid options) instead of "configure teammateModelAllowlist".
+  if (
+    input.allowlist?.some(item => item.trim() === TEAMMATE_MODEL_ALLOWLIST_WILDCARD)
+  ) {
+    known()
+  }
+  // Otherwise the allowlist refusal comes first: it names the ids the
+  // CONFIGURED list admits on this route, the more actionable message. The
+  // known-id guard is the backstop no allowlist can widen past.
   const refusal = checkTeammateModelAllowed(input)
   if (refusal) throw new Error(refusal)
-  assertKnownTeammateModel(
-    input.resolvedModel,
-    input.providerRoute,
-    input.requestedModel,
-  )
+  known()
 }

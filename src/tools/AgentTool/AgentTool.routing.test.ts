@@ -179,6 +179,22 @@ test('a routed subagent model the provider does not serve is refused before it r
   expect(getRunAgentParams()).toBeUndefined()
 })
 
+test('a codex alias is judged by what it resolves to, like the pane path', async () => {
+  // First-party route (env pinned): codexspark -> gpt-5.3-codex-spark, which
+  // the anthropic route cannot serve. The pane/window path refuses it; the
+  // in-process subagent path must too, not admit it as a "pure alias".
+  const { AgentTool, getRunAgentParams } = await importAgentToolWithRoutingMocks()
+  await expect(
+    AgentTool.call(
+      { description: 'Inspect implementation', prompt: 'Find the bug', model: 'codexspark' },
+      createToolUseContext('parent-model', [createAgentDefinition()]),
+      mock(async () => ({ behavior: 'allow' })) as never,
+      { requestId: 'req-3' } as never,
+    ),
+  ).rejects.toThrow(/gpt-5\.3-codex-spark.*provider 'anthropic'/s)
+  expect(getRunAgentParams()).toBeUndefined()
+})
+
 test('plan-mode one-shot agents cannot be forced into background execution', async () => {
   const { AgentTool } = await importAgentToolWithRoutingMocks()
   const exploreAgent = {

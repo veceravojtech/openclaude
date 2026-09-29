@@ -13,6 +13,7 @@ import {
   _resetTeammateAllowlistWarningsForTesting,
   assertKnownSubagentModel,
   assertKnownTeammateModel,
+  assertTeammateModelCheck,
   checkTeammateModelAllowed,
   getAllowedTeammateEntries,
   isKnownTeammateModel,
@@ -431,5 +432,90 @@ describe('"*" allowlist is bounded by known ids', () => {
     expect(ids(undefined).has('zai:glm-5.2')).toBe(false)
     expect(ids(['*']).has('zai:glm-5.2')).toBe(true)
     expect(ids(['*']).has('zai:glm-99')).toBe(false)
+  })
+})
+
+describe('bedrock cross-region prefixes', () => {
+  const sonnet55 = 'anthropic.claude-sonnet-5-5'
+  test('every standard region prefix is known for an otherwise-known bedrock id', () => {
+    for (const prefix of ['us', 'eu', 'apac', 'au', 'jp', 'ca', 'us-gov']) {
+      expect(isKnownTeammateModel(`${prefix}.${sonnet55}`, 'bedrock')).toBe(true)
+    }
+    expect(isKnownTeammateModel(sonnet55, 'bedrock')).toBe(true)
+  })
+
+  test('global. is per-model, so it is known only when listed', () => {
+    expect(isKnownTeammateModel(`global.${sonnet55}`, 'bedrock')).toBe(false)
+  })
+
+  test('a region prefix does not make an unknown model known', () => {
+    expect(isKnownTeammateModel('eu.anthropic.claude-sonnet-5-6', 'bedrock')).toBe(false)
+    expect(() => assertKnownTeammateModel('apac.anthropic.claude-nope', 'bedrock')).toThrow(
+      /provider 'bedrock'/,
+    )
+  })
+
+  test('prefixes are only stripped on the bedrock route', () => {
+    expect(isKnownTeammateModel('eu.anthropic.claude-sonnet-5-5', 'anthropic')).toBe(false)
+    expect(isKnownTeammateModel('eu.anthropic.claude-sonnet-5-5', 'vertex')).toBe(false)
+  })
+
+  test('the allowlist check accepts a region-pinned bedrock id too', () => {
+    expect(() =>
+      assertTeammateModelCheck({
+        resolvedModel: 'eu.anthropic.claude-sonnet-5-5',
+        providerRoute: 'bedrock',
+        isInheritingLeader: false,
+        allowlist: undefined,
+      }),
+    ).not.toThrow()
+  })
+})
+
+describe('codex aliases agree across spawn paths', () => {
+  test('gpt-5.3-codex-spark (what codexspark resolves to) is known on codex, not on anthropic', () => {
+    expect(isKnownTeammateModel('gpt-5.3-codex-spark', 'codex')).toBe(true)
+    expect(isKnownTeammateModel('gpt-5.3-codex-spark', 'anthropic')).toBe(false)
+  })
+
+  test('the subagent guard judges it exactly like the teammate guard', () => {
+    const codexUrl = 'https://chatgpt.com/backend-api/codex'
+    expect(() =>
+      assertKnownSubagentModel({
+        model: 'gpt-5.3-codex-spark',
+        parentModel: 'claude-opus-5-5',
+        overrideBaseUrl: codexUrl,
+      }),
+    ).not.toThrow()
+  })
+})
+
+describe('"*" refusal message', () => {
+  test('an unknown id under "*" gets the known-id message, not "configure the allowlist"', () => {
+    let message = ''
+    try {
+      assertTeammateModelCheck({
+        resolvedModel: 'gpt-99-fake',
+        providerRoute: 'anthropic',
+        isInheritingLeader: false,
+        allowlist: ['*'],
+      })
+    } catch (error) {
+      message = (error as Error).message
+    }
+    expect(message).toContain("'gpt-99-fake'")
+    expect(message).toContain('Valid options here')
+    expect(message).not.toContain('Configure teammateModelAllowlist')
+  })
+
+  test('without "*" the allowlist message is unchanged', () => {
+    expect(() =>
+      assertTeammateModelCheck({
+        resolvedModel: 'gpt-99-fake',
+        providerRoute: 'anthropic',
+        isInheritingLeader: false,
+        allowlist: undefined,
+      }),
+    ).toThrow('Configure teammateModelAllowlist to change this.')
   })
 })

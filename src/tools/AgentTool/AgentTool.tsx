@@ -38,7 +38,7 @@ import { createUserMessage, extractTextContent, isSyntheticMessage, normalizeMes
 import { getAgentModel } from '../../utils/model/agent.js';
 import { chooseTeammateRoute, familyOfModel, formatDispatchSummary, hasNamedAgentRouting, readTeammateDispatchSettings, toDispatchRecord, type TeammateRouteDecision } from '../../services/api/smartRouting/teammate.js';
 import { isModelAllowed } from '../../utils/model/modelAllowlist.js';
-import { assertKnownSubagentModel, isTeammateModelAlias } from '../../utils/model/teammateModelMatrix.js';
+import { assertKnownSubagentModel } from '../../utils/model/teammateModelMatrix.js';
 import { permissionModeSchema } from '../../utils/permissions/PermissionMode.js';
 import type { PermissionResult } from '../../utils/permissions/PermissionResult.js';
 import { filterDeniedAgents, getDenyRuleForAgent } from '../../utils/permissions/permissions.js';
@@ -1044,21 +1044,20 @@ export const AgentTool = buildTool({
       permissionMode,
     });
     {
-      // Known-model guard: a literal id (explicit param, frontmatter, or one
-      // agentRouting/agentModels substituted) must be one the serving provider
-      // is known to accept, else fail here with a clear error instead of a
-      // provider 400 mid-run. Pure aliases resolve to provider defaults and
-      // the inherited parent model is proven, so they are not re-judged.
+      // Known-model guard on the FINAL model, however it was chosen (explicit
+      // param, frontmatter, alias, agentRouting/agentModels, inherited). Aliases
+      // are judged by what they resolve to — the same rule the pane/window
+      // path applies — so codexspark, opus etc. cannot pass on one path and be
+      // refused on the other. The parent's own model on its own provider is
+      // exempt inside the assertion, which covers 'inherit' and the
+      // haiku/sonnet-inherit-parent rule on non-Claude-native providers.
       const requestedSubagentModel = subagentModel ?? selectedAgent.model;
-      const literalRequested = requestedSubagentModel !== undefined && !isTeammateModelAlias(requestedSubagentModel);
-      if (literalRequested || subagentProviderOverride !== undefined || effectiveAgentModel !== resolvedAgentModel) {
-        assertKnownSubagentModel({
-          model: effectiveAgentModel,
-          ...(requestedSubagentModel !== undefined ? { requestedModel: requestedSubagentModel } : {}),
-          parentModel: toolUseContext.options.mainLoopModel,
-          ...(subagentProviderOverride ? { overrideBaseUrl: subagentProviderOverride.baseURL } : {})
-        });
-      }
+      assertKnownSubagentModel({
+        model: effectiveAgentModel,
+        ...(requestedSubagentModel !== undefined ? { requestedModel: requestedSubagentModel } : {}),
+        parentModel: toolUseContext.options.mainLoopModel,
+        ...(subagentProviderOverride ? { overrideBaseUrl: subagentProviderOverride.baseURL } : {})
+      });
     }
     if (subagentDispatch) {
       // Separation check on the FINAL model — whatever resolved it (the
