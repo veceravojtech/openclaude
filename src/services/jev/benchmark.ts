@@ -25,7 +25,9 @@
  * them, so a benchmark never leaves the dispatcher patched.
  */
 import { createHash } from 'crypto'
+import { getCyberMode, setCyberModeEnabled } from '../../bootstrap/state.js'
 import type { ProviderProfile } from '../../utils/config.js'
+import { CYBER_MODELS } from '../../utils/model/cyber.js'
 import type { SettingsJson } from '../../utils/settings/types.js'
 import {
   _setTeammateDispatchDepsForTesting,
@@ -93,6 +95,15 @@ export type ScenarioGold = {
   /** An agent type from the environment's definitions, or `default`. */
   agentType?: string | readonly string[]
   model?: ModelGold
+  /**
+   * The documented cyber-mode model for this task, checked instead of `model`
+   * when the benchmark runs in cyber mode. Cyber mode never consults JEV: it
+   * takes the keyword role and complexity onto a fixed policy (GLM 5.3 for
+   * review and verify, DeepSeek V4 Pro for easy work, Opus 4.6 for hard work;
+   * docs/cyber-mode.md), so this label says where the policy SHOULD send the
+   * task.
+   */
+  cyberModel?: ModelGold
 }
 
 export type BenchScenario = {
@@ -168,7 +179,7 @@ export function validateScenarios(scenarios: readonly BenchScenario[]): void {
     if (gold.needsLongContext !== undefined && typeof gold.needsLongContext !== 'boolean') {
       problems.push(`${at}: gold.needsLongContext must be a boolean`)
     }
-    for (const tier of asList(gold.model?.tier)) {
+    for (const tier of [...asList(gold.model?.tier), ...asList(gold.cyberModel?.tier)]) {
       if (!tiers.includes(tier)) problems.push(`${at}: unknown gold model tier "${tier}"`)
     }
   })
@@ -200,6 +211,11 @@ export type BenchEnvironment = {
   /** Carries teammateModelAllowlist and teammateDispatch (thresholds, timeout, policy). */
   settings: SettingsJson
   agentTypes: readonly AgentTypeOption[]
+  /**
+   * Run in cyber mode. The dispatcher then never asks JEV (it uses the keyword
+   * role and a fixed model policy), so only baseline mode makes sense.
+   */
+  cyber?: boolean
 }
 
 export type BenchMode = 'baseline' | 'live'
@@ -251,6 +267,10 @@ export type BenchConfig = {
   roleTiers: Record<TeammateRole, DispatchTier>
   withBaseline: boolean
   zeroDataRetention: boolean
+  /** The run was made in cyber mode: JEV was never consulted. */
+  cyber: boolean
+  /** The models the cyber policy chose from when the run was made (cyber runs only). */
+  cyberModels?: { lead: string; easy: string; worker: string }
 }
 
 export type BenchResults = {
@@ -434,6 +454,16 @@ function buildConfig(options: RunOptions, repeat: number): BenchConfig {
     roleTiers: { ...dispatch.roleTiers },
     withBaseline: Boolean(options.withBaseline),
     zeroDataRetention: Boolean(options.zeroDataRetention),
+    cyber: Boolean(environment.cyber),
+    ...(environment.cyber
+      ? {
+          cyberModels: {
+            lead: CYBER_MODELS.lead,
+            easy: CYBER_MODELS.easy,
+            worker: CYBER_MODELS.worker,
+          },
+        }
+      : {}),
   }
 }
 
@@ -442,6 +472,27 @@ export async function runBenchmark(
   options: RunOptions,
 ): Promise<BenchResults> {
   validateScenarios(scenarios)
+  if (options.environment.cyber && options.mode === 'live') {
+    throw new Error(
+      'cyber mode never consults JEV, so a live run would measure nothing: use baseline mode or drop cyber',
+    )
+  }
+  // Cyber mode is process-global state, and it may already be on (the
+  // OPENCLAUDE_CYBER_MODE env var). Set it explicitly for the run either way,
+  // and put it back afterwards.
+  const cyberBefore = getCyberMode().enabled
+  setCyberModeEnabled(options.environment.cyber === true)
+  try {
+    return await runScenarios(scenarios, options)
+  } finally {
+    setCyberModeEnabled(cyberBefore)
+  }
+}
+
+async function runScenarios(
+  scenarios: readonly BenchScenario[],
+  options: RunOptions,
+): Promise<BenchResults> {
   const repeat = Math.max(1, Math.floor(options.repeat ?? 1))
   const live = options.mode === 'live'
   const evaluate: EvaluateFn =

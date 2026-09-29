@@ -20,7 +20,19 @@ import {
   type BenchResults,
   type BenchRun,
   type BenchScenario,
+  type ModelGold,
 } from './benchmark.js'
+
+/**
+ * The model gold that applies to a run: the scenario's `model` label normally,
+ * its `cyberModel` label (where the cyber policy should send it) in cyber mode.
+ */
+export function modelGoldOf(
+  scenario: BenchScenario,
+  config: Pick<BenchResults['config'], 'cyber'>,
+): ModelGold | undefined {
+  return config.cyber ? scenario.gold?.cyberModel : scenario.gold?.model
+}
 
 // ---------------------------------------------------------------------------
 // Small statistics
@@ -163,7 +175,7 @@ function collectSamples(
       correct = gold.length > 0 ? gold.includes(answer.choice) : undefined
     } else {
       correct = evaluateModelGold(
-        scenario.gold?.model,
+        modelGoldOf(scenario, results.config),
         index.get(scenario.id)?.get(answer.choice),
         results.config.tierFamilies,
       )
@@ -306,6 +318,11 @@ export type BenchSummary = {
     model: Rate
     family: Rate
   } | null
+  /**
+   * Runs where the dispatcher raised instead of deciding. In cyber mode that is
+   * a real outcome ("no available model"), so it is reported, not hidden.
+   */
+  errors: Array<{ id: string; message: string }>
   rows: ScenarioRow[]
 }
 
@@ -429,12 +446,13 @@ export function summarize(
       roleFinalN += 1
       if (goldRoles.includes(run.decision.role)) roleFinalHit += 1
     }
-    if (scenario.gold.model) {
+    const modelGold = modelGoldOf(scenario, config)
+    if (modelGold) {
       modelFinalN += 1
       const chosen = run.decision.model
         ? index.get(scenario.id)?.get(run.decision.model)
         : undefined
-      if (evaluateModelGold(scenario.gold.model, chosen, config.tierFamilies) === true) {
+      if (evaluateModelGold(modelGold, chosen, config.tierFamilies) === true) {
         modelFinalHit += 1
       }
     }
@@ -546,8 +564,9 @@ export function summarize(
     const goldRoles = asList(scenario.gold?.role) as string[]
     const goldTypes = asList(scenario.gold?.agentType)
     const chosen = index.get(scenario.id)?.get(modelModal.value)
-    const modelOk = scenario.gold?.model
-      ? evaluateModelGold(scenario.gold.model, chosen, config.tierFamilies)
+    const rowModelGold = modelGoldOf(scenario, config)
+    const modelOk = rowModelGold
+      ? evaluateModelGold(rowModelGold, chosen, config.tierFamilies)
       : undefined
     const roleOk = goldRoles.length > 0 ? goldRoles.includes(roleModal.value) : undefined
     // Only JEV chooses an agent type; a baseline run always yields `default`,
@@ -649,6 +668,7 @@ export function summarize(
             unstable,
           },
     baseline,
+    errors: results.runs.flatMap(r => (r.error ? [{ id: r.scenarioId, message: r.error }] : [])),
     rows,
   }
 }

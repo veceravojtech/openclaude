@@ -31,11 +31,16 @@ import {
   BENCH_PROFILE_NAMES,
   buildBenchEnvironment,
   DEFAULT_BENCH_PROFILES,
-  SEED_SCENARIOS,
   type BenchProfileName,
 } from '../src/services/jev/benchmarkFixtures.js'
 import { formatReport } from '../src/services/jev/benchmarkReport.js'
 import * as jevClient from '../src/services/jev/client.js'
+import {
+  DEFAULT_SCENARIO_SET,
+  resolveScenarioSets,
+  SCENARIO_SET_NAMES,
+  SCENARIO_SETS,
+} from '../src/services/jev/scenarios/index.js'
 
 export const USAGE = `Usage: bun run bench:jev [options]
 
@@ -48,11 +53,14 @@ Modes
   --baseline            with --live: also run one JEV-off pass and report agreement
 
 Scenarios
-  --scenarios <file>    JSON: an array of scenarios, or { "scenarios": [...] }
-                        (default: the built-in seed set; see --list)
-  --id <id>             only this scenario (repeatable)
+  --set <names>         built-in sets, comma list or repeated: ${SCENARIO_SET_NAMES.join(', ')}, or all
+                        (default ${DEFAULT_SCENARIO_SET})
+  --scenarios <file>    your own instead: JSON array of scenarios, or { "scenarios": [...] }
+  --id <id>             only this scenario (repeatable). Without --set it is looked up in every set.
   --tag <tag>           only scenarios with this tag (repeatable)
   --list                list the selected scenarios and exit
+  --list-sets           list the built-in sets and exit
+  --show-request <id>   print the exact request JEV would receive for one scenario and exit
   --repeat <n>          runs per scenario (default 1; use 3+ live to measure stability)
   --max-calls <n>       refuse a live run needing more JEV calls than this (default 300)
 
@@ -62,6 +70,8 @@ Environment (synthetic; nothing is read from your config)
                         (default ${DEFAULT_BENCH_PROFILES.join(',')}; fireworks adds ~280 models)
   --leader-route <r>    leader route (default anthropic)
   --no-anthropic        simulate an unauthenticated Anthropic route
+  --cyber               run as \`/cyber on\`: JEV is never consulted; the keyword role goes onto the
+                        fixed model policy. Defaults --allowlist to *. Not combinable with --live.
   --min-p <x>           Rule A minimum probability (default ${jevClient.RULE_A_MIN_P})
   --min-margin <x>      Rule A margin over the runner-up (default ${jevClient.RULE_A_MIN_MARGIN})
   --timeout-ms <n>      JEV timeout per call (default 3000)
@@ -79,16 +89,20 @@ Output
 export type CliOptions = {
   live: boolean
   baseline: boolean
+  sets: string[]
   scenariosFile?: string
   ids: string[]
   tags: string[]
   list: boolean
+  listSets: boolean
+  showRequest?: string
   repeat: number
   maxCalls: number
-  allowlist: 'default' | '*' | string[]
+  allowlist?: 'default' | '*' | string[]
   profiles: BenchProfileName[]
   leaderRoute?: string
   noAnthropic: boolean
+  cyber: boolean
   minP?: number
   minMargin?: number
   timeoutMs?: number
@@ -104,11 +118,13 @@ export type CliOptions = {
 export type ParseResult = { options: CliOptions } | { error: string }
 
 const VALUE_FLAGS = new Set([
-  '--scenarios', '--id', '--tag', '--repeat', '--max-calls', '--allowlist', '--profiles',
-  '--leader-route', '--min-p', '--min-margin', '--timeout-ms', '--out', '--export', '--report',
+  '--set', '--scenarios', '--id', '--tag', '--show-request', '--repeat', '--max-calls',
+  '--allowlist', '--profiles', '--leader-route', '--min-p', '--min-margin', '--timeout-ms',
+  '--out', '--export', '--report',
 ])
 const BOOLEAN_FLAGS = new Set([
-  '--live', '--baseline', '--list', '--no-anthropic', '--zdr', '--verbose', '--json', '--help',
+  '--live', '--baseline', '--list', '--list-sets', '--no-anthropic', '--cyber', '--zdr',
+  '--verbose', '--json', '--help',
 ])
 
 function toInt(flag: string, raw: string): number | string {
@@ -127,14 +143,16 @@ export function parseArgs(argv: readonly string[]): ParseResult {
   const options: CliOptions = {
     live: false,
     baseline: false,
+    sets: [],
     ids: [],
     tags: [],
     list: false,
+    listSets: false,
     repeat: 1,
     maxCalls: 300,
-    allowlist: 'default',
     profiles: [...DEFAULT_BENCH_PROFILES],
     noAnthropic: false,
+    cyber: false,
     zdr: false,
     verbose: false,
     json: false,
@@ -149,7 +167,9 @@ export function parseArgs(argv: readonly string[]): ParseResult {
       if (flag === '--live') options.live = true
       else if (flag === '--baseline') options.baseline = true
       else if (flag === '--list') options.list = true
+      else if (flag === '--list-sets') options.listSets = true
       else if (flag === '--no-anthropic') options.noAnthropic = true
+      else if (flag === '--cyber') options.cyber = true
       else if (flag === '--zdr') options.zdr = true
       else if (flag === '--verbose') options.verbose = true
       else if (flag === '--json') options.json = true
@@ -162,7 +182,17 @@ export function parseArgs(argv: readonly string[]): ParseResult {
       return { error: `${flag} needs a value` }
     }
     switch (flag) {
+      case '--set': {
+        const names = value.split(',').map(v => v.trim()).filter(Boolean)
+        const bad = names.find(n => n !== 'all' && !SCENARIO_SET_NAMES.includes(n))
+        if (names.length === 0 || bad) {
+          return { error: `unknown scenario set "${bad ?? value}" (sets: ${[...SCENARIO_SET_NAMES, 'all'].join(', ')})` }
+        }
+        options.sets.push(...names)
+        break
+      }
       case '--scenarios': options.scenariosFile = value; break
+      case '--show-request': options.showRequest = value; break
       case '--id': options.ids.push(value); break
       case '--tag': options.tags.push(value); break
       case '--out': options.out = value; break
@@ -209,6 +239,9 @@ export function parseArgs(argv: readonly string[]): ParseResult {
   if (options.baseline && !options.live) return { error: '--baseline only applies together with --live' }
   if (options.zdr && !options.live) return { error: '--zdr only applies together with --live' }
   if (options.reportFile && options.live) return { error: '--report re-analyses a saved file and cannot be combined with --live' }
+  if (options.cyber && options.live) return { error: '--cyber never consults JEV, so it cannot be combined with --live' }
+  if (options.cyber && options.showRequest) return { error: '--show-request needs a JEV request, and cyber mode builds none' }
+  if (options.scenariosFile && options.sets.length > 0) return { error: 'use either --scenarios or --set, not both' }
   return { options }
 }
 
@@ -231,7 +264,21 @@ export function selectScenarios(
 
 export type Io = { out: (line: string) => void; err: (line: string) => void }
 
+/** An id that exists, but in a set `--set` left out, gets told which set it is in. */
+function checkIdsAreInChosenSets(ids: readonly string[], chosen: readonly BenchScenario[]): void {
+  const inChosen = new Set(chosen.map(s => s.id))
+  for (const id of ids) {
+    if (inChosen.has(id)) continue
+    const home = Object.entries(SCENARIO_SETS).find(([, set]) => set.some(s => s.id === id))?.[0]
+    if (home) throw new Error(`scenario "${id}" is in the "${home}" set, which --set did not select`)
+  }
+}
+
 function listScenarios(scenarios: readonly BenchScenario[]): string {
+  const setOf = new Map<string, string>()
+  for (const [name, set] of Object.entries(SCENARIO_SETS)) {
+    for (const s of set) if (!setOf.has(s.id)) setOf.set(s.id, name)
+  }
   const rows = scenarios.map(s => {
     const role = [s.gold?.role].flat().filter(Boolean).join('|') || '-'
     const extra = [
@@ -239,11 +286,24 @@ function listScenarios(scenarios: readonly BenchScenario[]): string {
       s.subagentType ? `type=${s.subagentType}` : '',
       s.spawnPath === 'subagent' ? 'subagent' : '',
     ].filter(Boolean).join(' ')
-    return [s.id, role, s.gold ? 'gold' : 'no-gold', (s.tags ?? []).join(','), extra]
+    return [s.id, setOf.get(s.id) ?? 'custom', role, s.gold ? 'gold' : 'no-gold', (s.tags ?? []).join(','), extra]
   })
-  const widths = [0, 1, 2, 3].map(c => Math.max(...rows.map(r => r[c]!.length)))
+  const widths = [0, 1, 2, 3, 4].map(c => Math.max(...rows.map(r => r[c]!.length)))
   return rows
-    .map(r => r.map((cell, c) => (c < 4 ? cell.padEnd(widths[c]!) : cell)).join('  ').trimEnd())
+    .map(r => r.map((cell, c) => (c < 5 ? cell.padEnd(widths[c]!) : cell)).join('  ').trimEnd())
+    .join('\n')
+}
+
+function listSets(): string {
+  const rows = Object.entries(SCENARIO_SETS).map(([name, set]) => [
+    name,
+    String(set.length),
+    `${set.filter(s => s.gold).length} labelled`,
+  ])
+  rows.push(['all', String(resolveScenarioSets(['all']).length), ''])
+  const widths = [0, 1].map(c => Math.max(...rows.map(r => r[c]!.length)))
+  return rows
+    .map(r => `${r[0]!.padEnd(widths[0]!)}  ${r[1]!.padStart(widths[1]!)}  ${r[2]}`.trimEnd())
     .join('\n')
 }
 
@@ -261,6 +321,10 @@ export async function main(
     io.out(USAGE)
     return 0
   }
+  if (options.listSets) {
+    io.out(listSets())
+    return 0
+  }
 
   const finish = (results: BenchResults): number => {
     const summary = summarize(results)
@@ -273,6 +337,9 @@ export async function main(
       const examples = buildTrainingExamples(results)
       writeFileSync(options.exportFile, trainingExamplesToJsonl(examples))
       io.err(`wrote ${examples.length} training example(s) to ${options.exportFile}`)
+      if (results.config.cyber) {
+        io.err('bench:jev: cyber mode builds no JEV request, so there is nothing to export from this run')
+      }
     }
     return 0
   }
@@ -287,9 +354,39 @@ export async function main(
       return finish(json)
     }
 
-    const all = options.scenariosFile
+    const custom = options.scenariosFile
       ? parseScenarioFile(JSON.parse(readFileSync(options.scenariosFile, 'utf8')))
-      : [...SEED_SCENARIOS]
+      : undefined
+    // Naming ids without naming sets means "wherever they are", not "in the default set".
+    const chosenSets =
+      options.sets.length > 0 ? options.sets : options.ids.length > 0 ? ['all'] : [DEFAULT_SCENARIO_SET]
+    const all = custom ?? resolveScenarioSets(chosenSets)
+    if (!custom && options.sets.length > 0) checkIdsAreInChosenSets(options.ids, all)
+
+    if (options.showRequest) {
+      // One scenario, looked up across every set, in a normal (non-cyber) baseline run:
+      // the request is built before JEV would be called, so nothing is sent.
+      const pool = custom ?? resolveScenarioSets(['all'])
+      const [scenario] = selectScenarios(pool, [options.showRequest], [])
+      const results = await runBenchmark([scenario!], {
+        mode: 'baseline',
+        environment: buildBenchEnvironment({
+          allowlist: options.allowlist,
+          leaderRoute: options.leaderRoute,
+          anthropicAuth: !options.noAnthropic,
+          profiles: options.profiles,
+        }),
+      })
+      const key = results.runs[0]?.requestKey
+      const request = key ? results.requests[key] : undefined
+      if (!request) {
+        io.err(`bench:jev: the dispatcher built no JEV request for "${options.showRequest}"`)
+        return 1
+      }
+      io.out(JSON.stringify(request, null, 2))
+      return 0
+    }
+
     const scenarios = selectScenarios(all, options.ids, options.tags)
     if (options.list) {
       io.out(listScenarios(scenarios))
@@ -321,6 +418,7 @@ export async function main(
       minP: options.minP,
       minMargin: options.minMargin,
       timeoutMs: options.timeoutMs,
+      cyber: options.cyber,
     })
 
     const controller = new AbortController()

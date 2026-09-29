@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SEED_SCENARIOS } from '../src/services/jev/benchmarkFixtures.js'
+import { allScenarios, SCENARIO_SET_NAMES, SCENARIO_SETS } from '../src/services/jev/scenarios/index.js'
 import { main, parseArgs, selectScenarios, USAGE, type CliOptions } from './bench-jev.js'
 
 function ok(argv: string[]): CliOptions {
@@ -21,9 +22,11 @@ describe('parseArgs', () => {
   test('defaults are a free offline baseline run', () => {
     const o = ok([])
     expect(o).toMatchObject({
-      live: false, baseline: false, repeat: 1, maxCalls: 300, allowlist: 'default',
-      noAnthropic: false, zdr: false, verbose: false, json: false, help: false, list: false,
+      live: false, baseline: false, repeat: 1, maxCalls: 300, sets: [], cyber: false,
+      noAnthropic: false, zdr: false, verbose: false, json: false, help: false, list: false, listSets: false,
     })
+    // Left unset so `--cyber` can default it to "*" while a plain run keeps the matrix families.
+    expect(o.allowlist).toBeUndefined()
     expect(o.profiles).toEqual(['deepseek', 'zai', 'codex'])
     expect(o.ids).toEqual([])
   })
@@ -47,6 +50,35 @@ describe('parseArgs', () => {
     expect(ok(['--allowlist', 'opus-5.5, glm-5.3']).allowlist).toEqual(['opus-5.5', 'glm-5.3'])
     expect(ok(['--profiles', 'none']).profiles).toEqual([])
     expect(ok(['--profiles', 'zai,fireworks']).profiles).toEqual(['zai', 'fireworks'])
+  })
+
+  test('--set is a comma list, repeats, and accepts "all"', () => {
+    expect(ok(['--set', 'vision,coding']).sets).toEqual(['vision', 'coding'])
+    expect(ok(['--set=vision', '--set', 'all']).sets).toEqual(['vision', 'all'])
+    expect(ok(['--set', ' vision , ']).sets).toEqual(['vision'])
+  })
+
+  test('--set rejects an unknown name and lists the known ones', () => {
+    const message = err(['--set', 'vision,nope'])
+    expect(message).toContain('unknown scenario set "nope"')
+    for (const name of [...SCENARIO_SET_NAMES, 'all']) expect(message).toContain(name)
+    expect(err(['--set', ','])).toContain('unknown scenario set')
+  })
+
+  test('--show-request and --list-sets', () => {
+    expect(ok(['--show-request', 're-patch-diff']).showRequest).toBe('re-patch-diff')
+    expect(err(['--show-request'])).toContain('--show-request needs a value')
+    expect(ok(['--list-sets']).listSets).toBe(true)
+  })
+
+  test('--cyber cannot be combined with what needs JEV', () => {
+    expect(ok(['--cyber']).cyber).toBe(true)
+    expect(err(['--cyber', '--live'])).toContain('cannot be combined with --live')
+    expect(err(['--cyber', '--show-request', 'x'])).toContain('cyber mode builds none')
+  })
+
+  test('--scenarios and --set are alternatives', () => {
+    expect(err(['--scenarios', 'a.json', '--set', 'vision'])).toContain('either --scenarios or --set')
   })
 
   test('live-only flags need --live', () => {
@@ -128,6 +160,84 @@ describe('main', () => {
     expect(lines.every(l => l.startsWith('cu-'))).toBe(true)
   })
 
+  test('--list-sets shows every set with its size, and the total', async () => {
+    const r = await run(['--list-sets'])
+    expect(r.code).toBe(0)
+    const rows = r.out.split('\n').map(l => l.trim().split(/\s+/))
+    expect(rows.map(row => row[0])).toEqual([...SCENARIO_SET_NAMES, 'all'])
+    for (const name of SCENARIO_SET_NAMES) {
+      expect(rows.find(row => row[0] === name)![1]).toBe(String(SCENARIO_SETS[name]!.length))
+    }
+    expect(rows.find(row => row[0] === 'all')![1]).toBe(String(allScenarios().length))
+  })
+
+  test('--set picks a built-in set and --list names the set of each scenario', async () => {
+    const r = await run(['--list', '--set', 'vision'])
+    expect(r.code).toBe(0)
+    const lines = r.out.split('\n')
+    expect(lines).toHaveLength(SCENARIO_SETS.vision!.length)
+    expect(lines.every(l => l.startsWith('vis-') && l.split(/\s+/)[1] === 'vision')).toBe(true)
+    const both = await run(['--list', '--set', 'vision,computer-use'])
+    expect(both.out.split('\n')).toHaveLength(SCENARIO_SETS.vision!.length + SCENARIO_SETS['computer-use']!.length)
+    const all = await run(['--list', '--set', 'all'])
+    expect(all.out.split('\n')).toHaveLength(allScenarios().length)
+  })
+
+  test('--id without --set is looked up in every set', async () => {
+    const r = await run(['--list', '--id', 're-patch-diff', '--id', 'impl-trivial-typo'])
+    expect(r.code).toBe(0)
+    expect(r.out.split('\n').map(l => l.split(/\s+/)[0])).toEqual(['impl-trivial-typo', 're-patch-diff'])
+  })
+
+  test('--id with a --set that leaves its set out says which set it is in', async () => {
+    const r = await run(['--list', '--set', 'coding', '--id', 're-patch-diff'])
+    expect(r.code).toBe(1)
+    expect(r.err).toContain('scenario "re-patch-diff" is in the "reverse-engineering" set, which --set did not select')
+  })
+
+  test('--show-request prints the request JEV would get, without a key or a call', async () => {
+    delete process.env.AI_GATEWAY_API_KEY
+    const r = await run(['--show-request', 're-firmware-update-check'])
+    expect(r.code).toBe(0)
+    const request = JSON.parse(r.out)
+    expect(Object.keys(request.questions).sort()).toEqual([
+      'agent_type', 'complexity', 'model', 'needs_long_context', 'role',
+    ])
+    expect(request.state.prompt).toContain('firmware')
+    // The domain agent types are offered to JEV.
+    expect(Object.keys(request.questions.agent_type.criteria)).toContain('binary-analyst')
+    const unknown = await run(['--show-request', 'nope'])
+    expect(unknown.code).toBe(1)
+    expect(unknown.err).toContain('no scenario with id "nope"')
+  })
+
+  test('--cyber runs the policy offline, says so, and has nothing to export', async () => {
+    const resultsFile = join(dir, 'cyber.json')
+    const trainFile = join(dir, 'cyber.jsonl')
+    const r = await run(['--set', 'reverse-engineering', '--cyber', '--out', resultsFile, '--export', trainFile])
+    expect(r.code).toBe(0)
+    expect(r.out).toContain('cyber mode: JEV is never consulted')
+    expect(r.out).toContain('Cyber-policy decisions vs gold')
+    expect(r.err).toContain('wrote 0 training example(s)')
+    expect(r.err).toContain('cyber mode builds no JEV request')
+    const saved = JSON.parse(readFileSync(resultsFile, 'utf8'))
+    expect(saved.config.cyber).toBe(true)
+    expect(saved.config.allowlist).toEqual(['*'])
+    expect(saved.runs).toHaveLength(SCENARIO_SETS['reverse-engineering']!.length)
+    expect(saved.runs.every((run: { requestKey?: string }) => run.requestKey === undefined)).toBe(true)
+    // Re-analysing the saved file reports it as a cyber run too.
+    const again = await run(['--report', resultsFile])
+    expect(again.out).toContain('cyber mode: JEV is never consulted')
+  })
+
+  test('--cyber honours an explicit --allowlist', async () => {
+    const r = await run(['--set', 'reverse-engineering', '--cyber', '--allowlist', 'opus-5.5', '--json'])
+    expect(r.code).toBe(0)
+    // No policy model is on the list: every run raises and is reported, none crashes the tool.
+    const summary = JSON.parse(r.out)
+    expect(summary.errors).toHaveLength(SCENARIO_SETS['reverse-engineering']!.length)
+  })
+
   test('a baseline run reports, writes results and training data, and --report re-reads them', async () => {
     const resultsFile = join(dir, 'results.json')
     const trainFile = join(dir, 'train.jsonl')
@@ -204,5 +314,12 @@ describe('main', () => {
     expect(r.err).toContain('--max-calls is 10')
     // No LIVE banner: the refusal came first.
     expect(r.err).not.toContain('LIVE')
+  })
+
+  test('--live over every set counts the calls of every set', async () => {
+    process.env.AI_GATEWAY_API_KEY = 'test-key-not-real'
+    const r = await run(['--live', '--set', 'all', '--repeat', '3'])
+    expect(r.code).toBe(2)
+    expect(r.err).toContain(`needs ${allScenarios().length * 3} JEV calls`)
   })
 })

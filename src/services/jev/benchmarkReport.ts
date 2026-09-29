@@ -124,7 +124,13 @@ export function formatReport(
   out.push(
     summary.mode === 'live'
       ? `  ${config.jevModel} via ${config.endpoint} · Rule A minP=${summary.thresholds.minP} minMargin=${summary.thresholds.minMargin} · timeout ${config.timeoutMs} ms${config.zeroDataRetention ? ' · zero data retention' : ''}`
-      : '  JEV was not called: role from the keyword heuristic, model from the tier table',
+      : config.cyber
+        ? `  cyber mode: JEV is never consulted; keyword role and complexity go onto a fixed model policy${
+            config.cyberModels
+              ? ` (${config.cyberModels.lead} review/verify · ${config.cyberModels.easy} easy · ${config.cyberModels.worker} hard)`
+              : ''
+          }`
+        : '  JEV was not called: role from the keyword heuristic, model from the tier table',
   )
   out.push(
     `  leader route ${config.leaderRoute} · profiles ${config.profiles.join(', ') || '(none)'} · allowlist ${config.allowlist.length > 0 ? config.allowlist.join(',') : '(default: matrix families)'}`,
@@ -177,10 +183,26 @@ export function formatReport(
     if (misses.length > 0) out.push(`role confusion (gold→JEV): ${misses.join(' · ')}`)
   }
 
-  out.push(section(summary.mode === 'live' ? 'Final decisions vs gold' : 'Baseline decisions vs gold (heuristic + tier table)'))
+  out.push(
+    section(
+      summary.mode === 'live'
+        ? 'Final decisions vs gold'
+        : config.cyber
+          ? 'Cyber-policy decisions vs gold (keyword role + fixed model policy)'
+          : 'Baseline decisions vs gold (heuristic + tier table)',
+    ),
+  )
   out.push(`final role correct    ${ratio(summary.role.finalAccuracy)}`)
   out.push(`final model ok        ${ratio(summary.model.finalOk)}`)
   if (summary.mode === 'live') out.push(`final agent type ok   ${ratio(summary.agentType.finalAccuracy)}`)
+
+  if (summary.errors.length > 0) {
+    out.push(section(`Runs that raised instead of deciding (${summary.errors.length})`))
+    for (const e of summary.errors.slice(0, 8)) {
+      out.push(`${e.id}: ${e.message.length > 150 ? `${e.message.slice(0, 150)}…` : e.message}`)
+    }
+    if (summary.errors.length > 8) out.push(`… and ${summary.errors.length - 8} more`)
+  }
 
   out.push(section('What gets chosen (final decisions)'))
   for (const role of Object.keys(summary.choices.byRole).sort()) {

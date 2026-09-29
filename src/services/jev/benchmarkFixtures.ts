@@ -111,6 +111,47 @@ export const DEFAULT_BENCH_AGENT_TYPES: readonly AgentTypeOption[] = [
     ],
   },
   {
+    agentType: 'binary-analyst',
+    source: 'project',
+    whenToUse:
+      'Reverse engineers binaries and firmware with Binary Ninja: loads a binary, decompiles functions, follows cross-references and strings, recovers types and reports findings. Does not modify the target.',
+    tools: [
+      'Read',
+      'Grep',
+      'Glob',
+      'Bash',
+      'mcp__binaryninja__load_binary',
+      'mcp__binaryninja__decompile_function',
+    ],
+  },
+  {
+    agentType: 'data-analyst',
+    source: 'project',
+    whenToUse:
+      'Analyses data files, logs and query results: computes statistics, finds anomalies and writes a short report with the numbers.',
+    tools: ['Read', 'Grep', 'Glob', 'Bash', 'Write'],
+  },
+  {
+    agentType: 'devops',
+    source: 'project',
+    whenToUse:
+      'Changes build and deployment configuration: Dockerfiles, CI pipelines, Kubernetes manifests and Terraform. Edits files and runs the tooling.',
+  },
+  {
+    agentType: 'tech-writer',
+    source: 'project',
+    whenToUse:
+      'Writes and edits documentation: READMEs, API references, guides, translations and changelogs. Edits markdown files only.',
+    tools: ['Read', 'Grep', 'Glob', 'Edit', 'Write'],
+  },
+  {
+    agentType: 'security-auditor',
+    source: 'project',
+    whenToUse:
+      'Audits code and configuration for vulnerabilities and unsafe patterns; reports findings ranked by severity without editing.',
+    tools: ['Read', 'Grep', 'Glob', 'Bash'],
+  },
+  {
     agentType: 'general-purpose',
     source: 'built-in',
     whenToUse:
@@ -147,10 +188,16 @@ export type EnvironmentOptions = {
   minP?: number
   minMargin?: number
   timeoutMs?: number
+  /**
+   * Cyber mode: the dispatcher never asks JEV and routes onto a fixed model
+   * policy. Its models (GLM 5.3, Opus 4.6, DeepSeek V4 Pro) are outside the
+   * default matrix, so the allowlist defaults to `*` here.
+   */
+  cyber?: boolean
 }
 
 export function buildBenchEnvironment(options: EnvironmentOptions = {}): BenchEnvironment {
-  const allowlist = options.allowlist ?? 'default'
+  const allowlist = options.allowlist ?? (options.cyber ? '*' : 'default')
   const jev: Record<string, unknown> = { enabled: true }
   if (options.minP !== undefined) jev.minP = options.minP
   if (options.minMargin !== undefined) jev.minMargin = options.minMargin
@@ -167,6 +214,7 @@ export function buildBenchEnvironment(options: EnvironmentOptions = {}): BenchEn
     profiles: (options.profiles ?? DEFAULT_BENCH_PROFILES).map(name => PROFILES[name]),
     settings,
     agentTypes: options.agentTypes ?? DEFAULT_BENCH_AGENT_TYPES,
+    ...(options.cyber ? { cyber: true } : {}),
   }
 }
 
@@ -180,6 +228,8 @@ const DEV = 'dev'
 const VERIFIER = 'verifier'
 const REVIEWER = 'code-reviewer'
 const BROWSER = 'browser-tester'
+const TECH_WRITER = 'tech-writer'
+const SECURITY = 'security-auditor'
 
 export const SEED_SCENARIOS: readonly BenchScenario[] = [
   // ---- research --------------------------------------------------------
@@ -213,7 +263,7 @@ export const SEED_SCENARIOS: readonly BenchScenario[] = [
   },
   {
     id: 'research-hard-transcripts',
-    tags: ['research', 'long-context'],
+    tags: ['research', 'hard', 'long-context'],
     description: 'Survey every reader and writer of the session transcript format',
     prompt:
       'Survey the whole repository for every place the session transcript (jsonl) format is read, written or migrated — roughly 150 files across src/utils, src/cli and src/tools — and produce an impact report for changing the message schema. Do not modify files.',
@@ -322,7 +372,7 @@ export const SEED_SCENARIOS: readonly BenchScenario[] = [
       role: 'implement',
       complexity: 'trivial',
       needsLongContext: false,
-      agentType: DEV,
+      agentType: [TECH_WRITER, DEV],
       model: { tier: ['fast', 'standard'] },
     },
   },
@@ -410,7 +460,7 @@ export const SEED_SCENARIOS: readonly BenchScenario[] = [
       role: 'review',
       complexity: 'hard',
       needsLongContext: false,
-      agentType: REVIEWER,
+      agentType: [SECURITY, REVIEWER],
       model: { tier: 'deep' },
     },
   },
@@ -424,7 +474,7 @@ export const SEED_SCENARIOS: readonly BenchScenario[] = [
       role: 'review',
       complexity: 'moderate',
       needsLongContext: false,
-      agentType: [REVIEWER, 'default'],
+      agentType: [REVIEWER, TECH_WRITER, 'default'],
       model: { tier: 'deep' },
     },
   },

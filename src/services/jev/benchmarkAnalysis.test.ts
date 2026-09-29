@@ -199,7 +199,7 @@ const HAND: BenchResults = {
     minP: 0.75, minMargin: 0.15, timeoutMs: 3000, allowlist: [], leaderRoute: 'anthropic',
     profiles: [], agentTypes: ['code-reviewer', 'dev'],
     tierFamilies: { deep: ['opus-5.5'], standard: ['sonnet-5-5'], fast: ['deepseek-v4.1-flash'] },
-    roleTiers: { ...DEFAULT_ROLE_TIERS }, withBaseline: true, zeroDataRetention: false,
+    roleTiers: { ...DEFAULT_ROLE_TIERS }, withBaseline: true, zeroDataRetention: false, cyber: false,
   },
   scenarios: [S1, S2, S3],
   candidates: { s1: [OPUS, SONNET, FLASH], s2: [OPUS, SONNET, FLASH], s3: [OPUS, SONNET, FLASH] },
