@@ -38,9 +38,19 @@ let savedDisableBuiltinAgents: string | undefined
 let hadSavedMacro = false
 let savedMacro: unknown
 
+// query()/init() reads OPENCLAUDE_TEAMMATE_PROFILE_ID and binds to that provider
+// profile (applySessionBoundProviderProfileFromEnv), which throws "The bound
+// provider profile is unavailable in this child process" when the test's in-memory
+// config has no such profile. Clear the route env before query() so these tests do
+// not depend on how the process was launched (teammates run bound to a profile).
+const ROUTE_ENV_KEYS = ['OPENCLAUDE_TEAMMATE_PROFILE_ID'] as const
+
 beforeAll(async () => {
   await acquireSharedMutationLock('tests/sdk/query-lifecycle.test.ts')
   savedEnv = { ...process.env }
+  for (const key of ROUTE_ENV_KEYS) {
+    delete process.env[key]
+  }
   savedApiKey = process.env[AUTH_KEY]
   savedDisableBuiltinAgents = process.env[DISABLE_BUILTIN_AGENTS_KEY]
   hadSavedMacro = Object.hasOwn(globalThis, 'MACRO')

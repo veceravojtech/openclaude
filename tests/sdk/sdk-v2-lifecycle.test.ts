@@ -47,6 +47,29 @@ let originalSessionProjectDir: string | null
 let originalCwd: string
 let originalOriginalCwd: string
 
+// query()/init() reads OPENCLAUDE_TEAMMATE_PROFILE_ID and binds to that provider
+// profile (applySessionBoundProviderProfileFromEnv), which throws "The bound
+// provider profile is unavailable in this child process" when the test's in-memory
+// config has no such profile. Clear and restore the route env so these tests do not
+// depend on how the process was launched (teammates run bound to a profile).
+const ROUTE_ENV_KEYS = ['OPENCLAUDE_TEAMMATE_PROFILE_ID'] as const
+const savedRouteEnv: Partial<Record<(typeof ROUTE_ENV_KEYS)[number], string>> = {}
+
+function clearRouteEnv(): void {
+  for (const key of ROUTE_ENV_KEYS) {
+    savedRouteEnv[key] = process.env[key]
+    delete process.env[key]
+  }
+}
+
+function restoreRouteEnv(): void {
+  for (const key of ROUTE_ENV_KEYS) {
+    const saved = savedRouteEnv[key]
+    if (saved === undefined) delete process.env[key]
+    else process.env[key] = saved
+  }
+}
+
 // Collect temp dirs for cleanup
 const tempDirs: string[] = []
 
@@ -58,6 +81,7 @@ beforeAll(async () => {
   await acquireSharedMutationLock('sdk-v2-lifecycle')
   savedApiKey = process.env[AUTH_KEY]
   savedDisableBuiltinAgents = process.env[DISABLE_BUILTIN_AGENTS_KEY]
+  clearRouteEnv()
   hadSavedMacro = Object.hasOwn(globalThis, 'MACRO')
   savedMacro = (globalThis as Record<string, unknown>).MACRO
   if (!savedApiKey) process.env[AUTH_KEY] = 'sk-test-v2-lifecycle-stub'
@@ -87,6 +111,7 @@ afterAll(() => {
     } else {
       delete (globalThis as Record<string, unknown>).MACRO
     }
+    restoreRouteEnv()
     clearAgentDefinitionsCache()
   } finally {
     releaseSharedMutationLock()

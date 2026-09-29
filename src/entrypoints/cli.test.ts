@@ -117,6 +117,39 @@ function clearRuntimeMocks() {
   }
 }
 
+// cli.tsx main() reads OPENCLAUDE_TEAMMATE_PROFILE_ID directly and, when set,
+// binds to that provider profile in-process; applySessionBoundProviderProfileFromEnv
+// then throws "The bound provider profile is unavailable in this child process"
+// because the test's in-memory config has no such profile. The same env also leaks
+// into the `node dist/cli.mjs` child the --yolo test spawns. Pin the route env to
+// "none" for the whole file so these tests depend on their fixtures, not on how the
+// process was launched (teammates run bound to DeepSeek/Z.ai/Codex).
+const ROUTE_ENV_KEYS = ['OPENCLAUDE_TEAMMATE_PROFILE_ID'] as const
+const savedRouteEnv: Partial<Record<(typeof ROUTE_ENV_KEYS)[number], string>> = {}
+
+function clearRouteEnv(): void {
+  for (const key of ROUTE_ENV_KEYS) {
+    savedRouteEnv[key] = process.env[key]
+    delete process.env[key]
+  }
+}
+
+function restoreRouteEnv(): void {
+  for (const key of ROUTE_ENV_KEYS) {
+    const saved = savedRouteEnv[key]
+    if (saved === undefined) delete process.env[key]
+    else process.env[key] = saved
+  }
+}
+
+beforeAll(() => {
+  clearRouteEnv()
+})
+
+afterAll(() => {
+  restoreRouteEnv()
+})
+
 describe('cli.tsx — NODE_OPTIONS --max-old-space-size (issue #402)', () => {
   const originalNodeOptions = process.env.NODE_OPTIONS
 
