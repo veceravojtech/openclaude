@@ -9,7 +9,9 @@ import {
 } from '../../bootstrap/state.js'
 import { isModelAllowed } from './modelAllowlist.js'
 import { setSessionSettingsCache, resetSettingsCache } from '../settings/settingsCache.js'
-import { cyberModelId, isCyberModelAllowed, withCyberScope } from './cyber.js'
+import { assertCyberModelAllowed, cyberModelId, isCyberModelAllowed, withCyberScope } from './cyber.js'
+
+const isSpawnAllowed = (model: string) => isModelAllowed(model, undefined, { allowEscalationModel: true })
 
 const previous = getMainLoopModelOverride()
 afterEach(() => {
@@ -65,5 +67,26 @@ describe('cyber policy', () => {
     expect(isCyberModelAllowed('claude-opus-4-8')).toBe(false)
     clearCyberEscalation('request-a')
     expect(isCyberModelAllowed('claude-opus-4-8', 'request-a')).toBe(false)
+  })
+
+  test('a direct spawn may pin the escalation model without a scope', () => {
+    setCyberModeEnabled(true)
+    // Spawn allowance admits the escalation model, but nothing else.
+    expect(isCyberModelAllowed('claude-opus-4-8', undefined, true)).toBe(true)
+    expect(isSpawnAllowed('claude-opus-4-8')).toBe(true)
+    expect(isSpawnAllowed('claude-opus-4-6')).toBe(true)
+    expect(() => assertCyberModelAllowed('claude-opus-4-8', undefined, true)).not.toThrow()
+    // The main-loop check (no scope, no spawn allowance) still blocks it.
+    expect(isCyberModelAllowed('claude-opus-4-8')).toBe(false)
+    expect(() => assertCyberModelAllowed('claude-opus-4-8')).toThrow()
+    // Non-cyber models stay blocked even with the spawn allowance.
+    expect(isCyberModelAllowed('claude-opus-5-5', undefined, true)).toBe(false)
+    expect(isSpawnAllowed('claude-opus-5-5')).toBe(false)
+  })
+
+  test('spawn allowance is inert when Cyber mode is off', () => {
+    setCyberModeEnabled(false)
+    expect(isSpawnAllowed('claude-opus-4-8')).toBe(true)
+    expect(isSpawnAllowed('claude-opus-5-5')).toBe(true)
   })
 })

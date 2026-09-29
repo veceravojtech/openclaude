@@ -182,6 +182,16 @@ describe('cyber role routing', () => {
     expect((await chooseTeammateRoute({ ...input, prior, description: 'Implement a one-line fix' })).model).toBe(prior.model)
     await expect(chooseTeammateRoute({ ...input, explicitModel: 'sonnet' })).rejects.toThrow('Cyber mode')
   })
+  test('respects an explicit escalation model as a direct spawn', async () => {
+    const decision = await chooseTeammateRoute({ ...input, explicitModel: 'claude-opus-4-8', description: 'Implement a fix' })
+    expect(decision.model).toBe('claude-opus-4-8')
+    expect(decision.source).toBe('explicit')
+  })
+  test('still refuses an escalation reviewer in the implementer family', async () => {
+    members = [{ name: 'worker', model: 'claude-opus-4-6', dispatch: { role: 'implement' } } as TeamMemberLike]
+    const decision = await chooseTeammateRoute({ ...input, explicitModel: 'claude-opus-4-8', subagent_type: 'verification' })
+    expect(decision.refusal).toBeDefined()
+  })
 })
 
 const settings = (extra: SettingsJson = {}): SettingsJson => extra

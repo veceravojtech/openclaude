@@ -394,7 +394,7 @@ export async function* runAgent({
       effectiveModel,
       providerOverride !== undefined,
     ) &&
-    !isModelAllowed(effectiveModel)
+    !isModelAllowed(effectiveModel, undefined, { allowEscalationModel: true })
   ) {
     throw new Error(
       `Model '${effectiveModel}' is not available. Your organization restricts model selection.`,

@@ -98,9 +98,13 @@ function familyHasSpecificEntries(
  * 2. Version prefixes ("opus-4-5", "claude-opus-4-5") — any build of that version
  * 3. Full model IDs ("claude-opus-4-5-20251101") — exact match only
  */
-export function isModelAllowed(model: string, cyberScope?: string): boolean {
+export function isModelAllowed(
+  model: string,
+  cyberScope?: string,
+  options?: { allowEscalationModel?: boolean },
+): boolean {
   const concreteModel = isModelAlias(model) ? parseUserSpecifiedModel(model) : resolveOverriddenModel(model)
-  if (!isCyberModelAllowed(concreteModel, cyberScope)) return false
+  if (!isCyberModelAllowed(concreteModel, cyberScope, options?.allowEscalationModel)) return false
   const settings = getSettings_DEPRECATED() || {}
   const { availableModels } = settings
   if (!availableModels) {

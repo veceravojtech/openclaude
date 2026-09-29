@@ -181,7 +181,7 @@ function assertToolSpecifiedModelAllowed(
   effectiveModel: string,
 ): void {
   if (
-    isModelAllowed(effectiveModel) ||
+    isModelAllowed(effectiveModel, undefined, { allowEscalationModel: true }) ||
     (!getCyberMode().enabled && isModelAllowed(requestedModel))
   ) {
     return

@@ -595,7 +595,7 @@ export const AgentTool = buildTool({
             settings
           })
         : null;
-      if (routedTeammateProvider && !isModelAllowed(routedTeammateProvider.model)) {
+      if (routedTeammateProvider && !isModelAllowed(routedTeammateProvider.model, undefined, { allowEscalationModel: true })) {
         throw new Error(`Model '${routedTeammateProvider.model}' is not available. Your organization restricts model selection.`);
       }
       // A model-only agentRouting route (no cross-provider creds) is dropped by the
@@ -617,7 +617,7 @@ export const AgentTool = buildTool({
       if (
         routedTeammateModelOnly &&
         routedTeammateModelOnly !== toolUseContext.options.mainLoopModel &&
-        !isModelAllowed(routedTeammateModelOnly)
+        !isModelAllowed(routedTeammateModelOnly, undefined, { allowEscalationModel: true })
       ) {
         throw new Error(`Model '${routedTeammateModelOnly}' is not available. Your organization restricts model selection.`);
       }
@@ -667,7 +667,7 @@ export const AgentTool = buildTool({
         }
       }
       const boundModel = providerProfileEnv?.OPENCLAUDE_TEAMMATE_MODEL;
-      if (boundModel && !isModelAllowed(boundModel)) {
+      if (boundModel && !isModelAllowed(boundModel, undefined, { allowEscalationModel: true })) {
         throw new Error(`Model '${boundModel}' is not available. Your organization restricts model selection.`);
       }
       // What the teammate will actually run (for the separation rule and the

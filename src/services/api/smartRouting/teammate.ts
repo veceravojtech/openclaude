@@ -1454,18 +1454,39 @@ function chooseCyberTeammateRoute(
   const members = input.teamName ? deps.readTeamMembers(input.teamName).filter(m => m.name !== input.name) : []
   const excluded = review ? collectExcludedFamilies(members, input.leaderModel) : []
   const excludedFamilies = new Set(excluded.map(e => e.family))
+  const explicit = input.explicitModel ?? input.prior?.model
+  const explicitCyberId = explicit ? cyberModelId(explicit) : undefined
   const ids = review
     ? [CYBER_MODELS.lead, CYBER_MODELS.worker, CYBER_MODELS.easy]
     : complexity === 'hard' || tier === 'deep'
       ? [CYBER_MODELS.worker, CYBER_MODELS.easy]
       : [CYBER_MODELS.easy, CYBER_MODELS.worker]
   const listing = listCandidates(buildRouteContext(input, deps), deps)
+
+  // A direct spawn may pin the escalation model (claude-opus-4-8) with no
+  // active scoped escalation. Respect it, enforcing only the reviewer/
+  // implementer separation rule.
+  if (explicit && explicitCyberId === CYBER_MODELS.escalation) {
+    const family = familyOfModel(explicit)
+    const sep = separationFamilyOf(explicit)
+    const refusal = SEPARATED_ROLES.has(role) && sep && excludedFamilies.has(sep)
+      ? `Refusing to spawn ${role} teammate${input.name ? ` '${input.name}'` : ''} on '${explicit}' (${sep}): ${excluded.filter(e => e.family === sep).map(e => `'${e.by}'`).join(', ')} implemented with ${sep} in team '${input.teamName}'. A ${role} teammate must use a different model family than the implementer.`
+      : undefined
+    return {
+      role, tier, complexity, model: explicit,
+      ...(family ? { family } : {}),
+      source: 'explicit', mode: 'auto',
+      reason: `cyber ${role}: explicit escalation`,
+      excluded, excludedModels: listing.excluded,
+      ...(refusal ? { refusal } : {}),
+    }
+  }
+
   const candidates = listing.candidates.filter(candidate => {
     const id = cyberModelId(candidate.id)
     return id !== undefined && ids.some(allowed => allowed === id) &&
       !hardRuleViolation(candidate, role, excludedFamilies)
   })
-  const explicit = input.explicitModel ?? input.prior?.model
   const chosen = explicit
     ? candidates.find(candidate => candidate.id === explicit || cyberModelId(candidate.id) === cyberModelId(explicit))
     : ids.flatMap(id => candidates.filter(candidate => cyberModelId(candidate.id) === id))[0]

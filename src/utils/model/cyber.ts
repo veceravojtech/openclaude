@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { getCyberMode } from '../../bootstrap/state.js'
+import { isTeammate } from '../teammate.js'
 
 const escalationContext = new AsyncLocalStorage<string>()
 export function withCyberScope<T>(scope: string, action: () => T): T {
@@ -46,16 +47,36 @@ export function cyberModelId(model: string): string | undefined {
   return undefined
 }
 
-export function isCyberModelAllowed(model: string, scope: string | undefined = escalationContext.getStore()): boolean {
+export function isCyberModelAllowed(
+  model: string,
+  scope: string | undefined = escalationContext.getStore(),
+  allowEscalationModel = false,
+): boolean {
   const state = getCyberMode()
   if (!state.enabled) return true
   const id = cyberModelId(model)
-  return id !== undefined && (id !== CYBER_MODELS.escalation ||
-    (scope !== undefined && state.escalationScopes.has(scope)))
+  if (id === undefined) return false
+  if (id !== CYBER_MODELS.escalation) return true
+  return allowEscalationModel || (scope !== undefined && state.escalationScopes.has(scope))
 }
 
-export function assertCyberModelAllowed(model: string, scope?: string): void {
-  if (!isCyberModelAllowed(model, scope)) {
+export function assertCyberModelAllowed(
+  model: string,
+  scope?: string,
+  allowEscalationModel = false,
+): void {
+  if (!isCyberModelAllowed(model, scope, allowEscalationModel)) {
     throw new Error(`Cyber mode blocks '${model}'. Allowed models: glm-5.3, claude-opus-4-6, deepseek-v4-pro; claude-opus-4-8 requires a scoped escalation.`)
   }
+}
+
+/**
+ * Whether the escalation model may run outside a scoped escalation because the
+ * query belongs to a directly-spawned agent (a teammate or subagent), not the
+ * leader's own main loop. The spawn path vets the model; this mirrors that
+ * allowance into the agent's own API calls so a direct spawn is not blocked on
+ * its first request.
+ */
+export function isCyberSpawnQuerySource(querySource: string | undefined): boolean {
+  return isTeammate() || (typeof querySource === 'string' && querySource.startsWith('agent:'))
 }
