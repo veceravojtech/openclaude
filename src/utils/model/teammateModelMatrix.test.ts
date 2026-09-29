@@ -341,7 +341,47 @@ describe('assertKnownTeammateModel / isKnownTeammateModel', () => {
   })
 })
 
+// Route comes from the ambient env when no override is given, so pin it.
+const ROUTE_ENV_KEYS = [
+  'ANTHROPIC_BASE_URL',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_GEMINI',
+  'CLAUDE_CODE_USE_GITHUB',
+  'CLAUDE_CODE_USE_MISTRAL',
+  'CLAUDE_CODE_USE_OPENAI',
+  'CLAUDE_CODE_USE_VERTEX',
+  'MIMO_API_KEY',
+  'MINIMAX_API_KEY',
+  'NVIDIA_NIM',
+  'OPENAI_API_BASE',
+  'OPENAI_BASE_URL',
+  'OPENAI_MODEL',
+  'OPENCLAUDE_TEAMMATE_PROFILE_ID',
+] as const
+const savedRouteEnv: Partial<Record<(typeof ROUTE_ENV_KEYS)[number], string>> = {}
+
+/** Pin the provider route to first-party Anthropic: a test must not inherit the
+ *  ambient provider (teammates run bound to DeepSeek/Codex/etc.). */
+function clearRouteEnv(): void {
+  for (const key of ROUTE_ENV_KEYS) {
+    savedRouteEnv[key] = process.env[key]
+    delete process.env[key]
+  }
+}
+
+function restoreRouteEnv(): void {
+  for (const key of ROUTE_ENV_KEYS) {
+    const saved = savedRouteEnv[key]
+    if (saved === undefined) delete process.env[key]
+    else process.env[key] = saved
+  }
+}
+
 describe('assertKnownSubagentModel', () => {
+  beforeEach(clearRouteEnv)
+  afterEach(restoreRouteEnv)
+
   test('the parent\'s own model on its own provider is exempt', () => {
     expect(() =>
       assertKnownSubagentModel({ model: 'some-local-model', parentModel: 'some-local-model' }),
