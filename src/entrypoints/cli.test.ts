@@ -1076,11 +1076,17 @@ describe('Node 24 premature exit regression (issue #1678)', () => {
         });
       `)
 
-      proc = Bun.spawn(['node', scriptPath], { stdout: 'pipe' })
+      proc = Bun.spawn(['node', scriptPath], {
+        stdout: 'pipe',
+        stderr: 'pipe',
+        env: { ...process.env },
+      })
       const reader = proc.stdout.getReader()
+      const stderrReader = proc.stderr.getReader()
 
       let gotOutput = false
       let evaluationEndedPrematurely = false
+      let stderrText = ''
 
       async function readStdout() {
         while (true) {
@@ -1095,16 +1101,35 @@ describe('Node 24 premature exit regression (issue #1678)', () => {
         }
       }
 
+      async function readStderr() {
+        while (true) {
+          const { done, value } = await stderrReader.read()
+          if (done) break
+          stderrText += new TextDecoder().decode(value)
+        }
+      }
+
       // Start reading without awaiting it yet
       const readPromise = readStdout()
+      const stderrPromise = readStderr()
 
-      // Wait until we get startup output or detect premature evaluation end
+      // Wait until we get startup output, detect premature evaluation end, or the
+      // child exits on its own (a crash should fail fast instead of waiting out the
+      // full 5s poll).
       const start = Date.now()
-      while (!gotOutput && !evaluationEndedPrematurely && Date.now() - start < 5000) {
+      while (
+        !gotOutput &&
+        !evaluationEndedPrematurely &&
+        proc.exitCode === null &&
+        Date.now() - start < 5000
+      ) {
         await new Promise(r => setTimeout(r, 10))
       }
 
-      expect(gotOutput).toBe(true)
+      expect(
+        gotOutput,
+        `CLI child produced no startup output before exiting (exit code ${proc.exitCode}). stderr:\n${stderrText.trim()}`,
+      ).toBe(true)
 
       // The critical regression window: wait 500ms *after* output.
       // With void main(), Node 24 will exit during the subsequent async imports because the event loop empties,
