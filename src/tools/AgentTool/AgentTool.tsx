@@ -1351,6 +1351,13 @@ export const AgentTool = buildTool({
       // orphan that teammate's own background agents; only the in-process ALS
       // context has a reader for the id it hands out.
       const spawnerAgentId = isInProcessTeammate() ? getAgentId() : undefined;
+      // Delegation-parent: the stable teammate id that owns this helper for
+      // delegated-activity accounting. Unlike parentAgentId (completion-notice
+      // routing, gated on isInProcessTeammate), this is gated on getAgentId()
+      // alone — it resolves for BOTH in-process teammates (ALS) and pane/tmux
+      // teammates (dynamicTeamContext), whose main-thread turn otherwise has no
+      // toolUseContext.agentId to link the helper by.
+      const delegationParentId = getAgentId();
       const agentBackgroundTask = registerAsyncAgent({
         agentId: asyncAgentId,
         description,
@@ -1361,7 +1368,8 @@ export const AgentTool = buildTool({
         // survive when the user presses ESC to cancel the main thread.
         // They are killed explicitly via chat:killAgents.
         toolUseId: toolUseContext.toolUseId,
-        parentAgentId: spawnerAgentId ? asAgentId(spawnerAgentId) : toolUseContext.agentId
+        parentAgentId: spawnerAgentId ? asAgentId(spawnerAgentId) : toolUseContext.agentId,
+        delegationParentId: delegationParentId ? asAgentId(delegationParentId) : undefined
       });
 
       // Register name → agentId for SendMessage routing. Post-registerAsyncAgent

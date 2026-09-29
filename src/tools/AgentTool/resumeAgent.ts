@@ -259,6 +259,7 @@ export async function resumeAgentBackground({
   // thread all leave this undefined so the notification still reaches the
   // context that actually drains it.
   const spawnerAgentId = isInProcessTeammate() ? getAgentId() : undefined
+  const delegationParentId = getAgentId()
   const agentBackgroundTask = registerAsyncAgent({
     agentId,
     description: uiDescription,
@@ -270,6 +271,9 @@ export async function resumeAgentBackground({
     parentAgentId: spawnerAgentId
       ? asAgentId(spawnerAgentId)
       : toolUseContext.agentId,
+    delegationParentId: delegationParentId
+      ? asAgentId(delegationParentId)
+      : undefined,
   })
 
   const metadata = {

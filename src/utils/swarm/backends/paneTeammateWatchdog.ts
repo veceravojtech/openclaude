@@ -68,12 +68,16 @@ import {
  * unreachable still sees completions and still arms the no-progress failure.
  *
  * SUCCESS is reported too: the idle notification that disarms the failure
- * watchdog also transitions the task to completed and enqueues the
- * task-notification, so a healthy pane teammate's task stops saying 'running'
- * the moment its first turn ends. `idleReason: 'parked'` (account-wide usage
- * limit) is proof of life, not completion: the failure deadlines stand down
- * while the teammate waits out the window, because a parked teammate is
- * alive and resumable.
+ * watchdog also delivers the first turn's result to the lead (an
+ * `enqueueAgentNotification` 'completed' task-notification) exactly once.
+ * A healthy `idleReason: 'available'`/`'interrupted'` from a living pane marks
+ * the task idle but does NOT terminal-complete it — the pane is alive and
+ * resumable, so the row stays 'running' and addressable for follow-ups; it
+ * only reaches terminal on a confirmed dead pane (the ghost sweep) or an
+ * approved shutdown (killInProcessTeammate's abort). `idleReason: 'parked'`
+ * (account-wide usage limit) is proof of life, not completion: the failure
+ * deadlines stand down while the teammate waits out the window, because a
+ * parked teammate is alive and resumable.
  *
  * All boundaries are injectable for tests: clock, mailbox, team file, pane
  * probe and timers.
@@ -930,11 +934,10 @@ export function armPaneTeammateWatchdog({
           if (transitionTerminal('failed', reason)) {
             emit('failed', reason)
           }
-        } else {
-          // 'available' and 'interrupted' both mean the turn is over and the
-          // teammate is back at its prompt — the one-shot task is done. The
-          // fromWatchdogFailure option is what lets this WIN over a watchdog
-          // failure that fired on a merely-slow child.
+        } else if (watchingLateCompletion) {
+          // A merely-slow child was failed spuriously; its late completion
+          // wins. The fromWatchdogFailure option lets the failed → completed
+          // rewrite re-arm `notified` so the completion is emitted.
           if (
             transitionTerminal('completed', undefined, {
               fromWatchdogFailure: true,
@@ -942,6 +945,20 @@ export function armPaneTeammateWatchdog({
           ) {
             emit('completed', undefined, latestIdle.summary)
           }
+        } else {
+          // 'available' and 'interrupted' from a living pane mean the turn is
+          // over and the teammate is idle at its prompt — alive and resumable,
+          // NOT finished-for-good. Deliver the turn result to the lead exactly
+          // once (emit sets `notified`), but keep the task running so the pane
+          // stays addressable for follow-ups. The task only reaches terminal
+          // via a confirmed dead pane (ghost sweep) or an approved shutdown
+          // (killInProcessTeammate's abort, which disposes this watchdog).
+          updateTaskState(taskId, setAppState, task => ({
+            ...task,
+            isIdle: true,
+            delegatedActivity: latestIdle!.delegatedActivity,
+          }))
+          emit('completed', undefined, latestIdle.summary)
         }
         dispose()
         return

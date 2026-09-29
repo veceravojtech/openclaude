@@ -156,6 +156,11 @@ export type LocalAgentTaskState = TaskStateBase & {
   // therefore receive its completion notification. undefined for main-thread
   // spawns, which keep addressing the coordinator exactly as before.
   parentAgentId?: AgentId;
+  // The stable teammate id that delegated this helper, for delegated-activity
+  // accounting. Unlike parentAgentId (completion-notice routing), this is set
+  // from getAgentId() alone, which resolves for BOTH in-process teammates and
+  // pane/tmux teammates (whose main-thread turn has no toolUseContext.agentId).
+  delegationParentId?: AgentId;
 };
 export function isLocalAgentTask(task: unknown): task is LocalAgentTaskState {
   return typeof task === 'object' && task !== null && 'type' in task && task.type === 'local_agent';
@@ -565,7 +570,8 @@ export function registerAsyncAgent({
   parentAbortController,
   toolUseId,
   resumeCount = 0,
-  parentAgentId
+  parentAgentId,
+  delegationParentId
 }: {
   agentId: string;
   description: string;
@@ -580,6 +586,10 @@ export function registerAsyncAgent({
   /** The spawner whose context should receive the completion notification.
    *  Omit for a main-thread spawn — the coordinator keeps receiving it. */
   parentAgentId?: AgentId;
+  /** The stable teammate id that delegated this helper, for delegated-activity
+   *  accounting. Set from getAgentId(), which resolves for both in-process and
+   *  pane teammates. */
+  delegationParentId?: AgentId;
 }): LocalAgentTaskState {
   void initTaskOutputAsSymlink(agentId, getAgentTranscriptPath(asAgentId(agentId)));
 
@@ -609,7 +619,8 @@ export function registerAsyncAgent({
     retain: false,
     diskLoaded: false,
     resumeCount,
-    parentAgentId
+    parentAgentId,
+    delegationParentId
   };
 
   // Register cleanup handler

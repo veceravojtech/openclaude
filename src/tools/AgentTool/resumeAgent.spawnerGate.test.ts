@@ -219,6 +219,12 @@ describe('the spawner stamp is gated on the in-process context, not on any id', 
     await resume(context)
 
     expect(registeredTask(context, AGENT_ID)?.parentAgentId).toBeUndefined()
+    // …but the delegated-activity link IS stamped: getAgentId() resolves the
+    // pane teammate's stable id via dynamicTeamContext, so its helper counts as
+    // its descendant even though the completion notice stays unaddressed.
+    expect(registeredTask(context, AGENT_ID)?.delegationParentId).toBe(
+      asAgentId(PANE_AGENT_ID),
+    )
 
     const commands = notify(context)
     expect(commands).toHaveLength(1)
@@ -249,6 +255,10 @@ describe('the spawner stamp is gated on the in-process context, not on any id', 
     expect(registeredTask(context, AGENT_ID)?.parentAgentId).toBe(
       IN_PROCESS_AGENT_ID,
     )
+    // The delegated-activity link is stamped alongside it, from the same id.
+    expect(registeredTask(context, AGENT_ID)?.delegationParentId).toBe(
+      IN_PROCESS_AGENT_ID,
+    )
     expect(notify(context)[0]!.agentId).toBe(IN_PROCESS_AGENT_ID)
   })
 
@@ -259,6 +269,7 @@ describe('the spawner stamp is gated on the in-process context, not on any id', 
     await resume(context)
 
     expect(registeredTask(context, AGENT_ID)?.parentAgentId).toBeUndefined()
+    expect(registeredTask(context, AGENT_ID)?.delegationParentId).toBeUndefined()
     expect(notify(context)[0]!.agentId).toBeUndefined()
   })
 
@@ -279,6 +290,12 @@ describe('the spawner stamp is gated on the in-process context, not on any id', 
     // gets its own turn id.
     expect(source).toContain(
       'parentAgentId: spawnerAgentId ? asAgentId(spawnerAgentId) : toolUseContext.agentId',
+    )
+    // The delegated-activity link is gated on getAgentId() alone, so it is
+    // stamped for pane teammates too — not just in-process ones.
+    expect(source).toContain('const delegationParentId = getAgentId();')
+    expect(source).toContain(
+      'delegationParentId: delegationParentId ? asAgentId(delegationParentId) : undefined',
     )
   })
 })

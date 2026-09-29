@@ -111,7 +111,42 @@ test('delegated waiting does not complete or timeout, then quiet completes', asy
   expect(world.notifications()).toHaveLength(0)
   world.mailbox.push(idleNotification('worker', world.nowMs, 'available'))
   await handle.scan()
-  expect(world.state.tasks[world.taskId()!]!.status).toBe('completed')
+  // The quiet transition marks the living pane idle but keeps it running —
+  // the pane is alive and resumable, not finished-for-good.
+  expect(world.state.tasks[world.taskId()!]!.status).toBe('running')
+  expect(world.state.tasks[world.taskId()!]!.isIdle).toBe(true)
+  expect(world.notifications()).toHaveLength(1)
+  expect(world.notifications()[0]).toContain('<status>completed</status>')
+})
+
+test('an available notice leaves a living pane idle and resumable, delivering the result exactly once', async () => {
+  const world = makeWorld()
+  registerTeammate(world)
+  worldToDispose.push(...world.handles)
+
+  world.teamFile.members[1]!.isActive = true
+  world.mailbox.push(
+    idleNotification('worker', world.nowMs, 'available', 'first turn done'),
+  )
+  await world.handles[0]!.scan()
+
+  // Not terminal: the pane is alive at its prompt and addressable.
+  expect(taskStatus(world)).toBe('running')
+  const task = world.state.tasks[world.taskId()!] as Record<string, unknown>
+  expect(task.isIdle).toBe(true)
+
+  // The first-turn result reached the lead exactly once.
+  const notifications = world.notifications()
+  expect(notifications.length).toBe(1)
+  expect(notifications[0]).toContain('<status>completed</status>')
+  expect(notifications[0]).toContain('first turn done')
+
+  // A re-scan (watchdog now disarmed) neither fails nor re-notifies.
+  world.nowMs += PROGRESS_TIMEOUT_MS * 2
+  world.probes = ['alive']
+  await world.handles[0]!.scan()
+  expect(taskStatus(world)).toBe('running')
+  expect(world.notifications().length).toBe(1)
 })
 
 test('delegated waiting still detects a dead pane', async () => {
@@ -360,17 +395,21 @@ test('a healthy child disarms the watchdog and reports success', async () => {
   )
   await world.handles[0]!.scan()
 
-  expect(taskStatus(world)).toBe('completed')
+  // The healthy child reports success, but stays running/idle — resumable.
+  expect(taskStatus(world)).toBe('running')
+  const task = world.state.tasks[world.taskId()!] as Record<string, unknown>
+  expect(task.isIdle).toBe(true)
   const notifications = world.notifications()
   expect(notifications.length).toBe(1)
   expect(notifications[0]).toContain('<status>completed</status>')
   expect(notifications[0]).toContain('found the bug')
 
-  // Deadlines expiring afterwards must not flip a completed task to failed.
+  // The watchdog disarms after the first result; a later deadline can neither
+  // fail an idle teammate nor flip it terminal.
   world.nowMs += PROGRESS_TIMEOUT_MS * 3
   world.probes = ['dead']
   await world.handles[0]!.scan()
-  expect(taskStatus(world)).toBe('completed')
+  expect(taskStatus(world)).toBe('running')
   expect(world.notifications().length).toBe(1)
 })
 
@@ -424,7 +463,10 @@ test('a parked (usage-limited) child is proof of life, not failure, and later co
     idleNotification('worker', world.nowMs, 'available', 'done after reset'),
   )
   await world.handles[0]!.scan()
-  expect(taskStatus(world)).toBe('completed')
+  expect(taskStatus(world)).toBe('running')
+  expect(
+    (world.state.tasks[world.taskId()!] as Record<string, unknown>).isIdle,
+  ).toBe(true)
   expect(world.notifications().length).toBe(1)
   expect(world.notifications()[0]).toContain('<status>completed</status>')
 })
@@ -483,7 +525,10 @@ test('a signal that arrives during an unknown deferral completes instead of fail
   )
   world.nowMs += UNKNOWN_RETRY_DELAY_MS
   await world.handles[0]!.scan()
-  expect(taskStatus(world)).toBe('completed')
+  expect(taskStatus(world)).toBe('running')
+  expect(
+    (world.state.tasks[world.taskId()!] as Record<string, unknown>).isIdle,
+  ).toBe(true)
   expect(world.notifications().length).toBe(1)
 })
 

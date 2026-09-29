@@ -61,3 +61,20 @@ test('recursive local-agent forks and cycles are bounded', () => {
   }))
   expect(result.activeDescendants).toEqual(['second'])
 })
+
+test('a helper linked only by delegationParentId is counted as a descendant', () => {
+  // The pane-teammate case: the helper's parentAgentId is undefined (a pane
+  // teammate's main-thread turn has no toolUseContext.agentId), so the stable
+  // delegationParentId is the only ownership link.
+  const result = resolveDelegatedActivity('worker@team', tasks({
+    helper: { type: 'local_agent', agentId: 'helper', delegationParentId: 'worker@team', status: 'running' },
+  }))
+  expect(result).toEqual({ status: 'working', activeDescendants: ['helper'], unknownDescendants: [] })
+})
+
+test('delegationParentId wins over a divergent parentAgentId', () => {
+  const result = resolveDelegatedActivity('worker@team', tasks({
+    helper: { type: 'local_agent', agentId: 'helper', delegationParentId: 'worker@team', parentAgentId: 'someone@else', status: 'running' },
+  }))
+  expect(result.activeDescendants).toEqual(['helper'])
+})

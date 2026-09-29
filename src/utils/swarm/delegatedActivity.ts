@@ -47,7 +47,8 @@ export function resolveDelegatedActivity(
     if (task.type !== 'local_agent' && task.type !== 'in_process_teammate') continue
     const id = task.type === 'local_agent' ? task.agentId : task.identity.agentId
     if (task.type === 'local_agent') {
-      if (task.parentAgentId) add(task.parentAgentId, id)
+      const delegationParent = task.delegationParentId ?? task.parentAgentId
+      if (delegationParent) add(delegationParent, id)
       labels.set(id, id)
     } else {
       labels.set(id, `${task.identity.agentName}@${task.identity.teamName}`)
@@ -108,7 +109,10 @@ export function readDelegatedActivity(
       if (task.type === 'in_process_teammate' && team && task.identity.teamName === team.name) {
         members.set(task.identity.agentId, task.identity.agentName)
       }
-      if (task.type === 'local_agent' && task.parentAgentId === agentId) {
+      if (
+        task.type === 'local_agent' &&
+        (task.delegationParentId ?? task.parentAgentId) === agentId
+      ) {
         members.set(task.agentId, task.agentId)
       }
     }

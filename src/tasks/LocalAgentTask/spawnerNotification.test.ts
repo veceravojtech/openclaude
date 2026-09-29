@@ -199,6 +199,25 @@ describe('registerAsyncAgent records the spawner', () => {
     ).toBe(TEAMMATE_AGENT_ID)
   })
 
+  test('delegationParentId is stored on the task state', () => {
+    const store = makeStore()
+
+    const task = registerAsyncAgent({
+      agentId: TASK_ID,
+      description: DESCRIPTION,
+      prompt: 'count them',
+      selectedAgent,
+      setAppState: store.setAppState,
+      delegationParentId: TEAMMATE_AGENT_ID,
+    })
+
+    expect(task.delegationParentId).toBe(TEAMMATE_AGENT_ID)
+    expect(
+      (store.getState().tasks[TASK_ID] as LocalAgentTaskState)
+        .delegationParentId,
+    ).toBe(TEAMMATE_AGENT_ID)
+  })
+
   test('omitting it leaves the task unaddressed, as a main-thread spawn is', () => {
     // AgentTool passes toolUseContext.agentId, which is undefined on the main
     // thread — so the coordinator keeps receiving its own agents' results.
