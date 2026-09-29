@@ -163,4 +163,133 @@ describe('token refresh persists through the non-reentrant credential lock', () 
     expect(store.claudeAiOauth?.accessToken).toBe('stale-access')
     expect(store.claudeAiOauthAccounts).toBeUndefined()
   })
+
+  // A fake token endpoint with the property that bit the teammate burst: the
+  // refresh token ROTATES on use, and presenting one that was already spent
+  // gets the request refused as revoked.
+  function rotatingEndpoint() {
+    const state = { validRefresh: 'stale-refresh', calls: 0, rejected: 0 }
+    const refreshOAuthToken = async (refreshToken: string) => {
+      state.calls++
+      const n = state.calls
+      await new Promise(resolve => setTimeout(resolve, 60))
+      if (refreshToken !== state.validRefresh) {
+        state.rejected++
+        throw new Error('OAuth access token has been revoked.')
+      }
+      state.validRefresh = `rotated-refresh-${n}`
+      return {
+        ...freshTokens(),
+        accessToken: `rotated-access-${n}`,
+        refreshToken: state.validRefresh,
+      }
+    }
+    return { state, refreshOAuthToken }
+  }
+
+  const PROCESSES = 8
+
+  test('a burst of processes on an expired token refreshes exactly once', async () => {
+    mockStorage()
+    const endpoint = rotatingEndpoint()
+    mock.module('../services/oauth/client.js', () => ({
+      ...realOAuthClient,
+      refreshOAuthToken: endpoint.refreshOAuthToken,
+    }))
+
+    // Each fresh import is its own module instance, so the in-process dedup
+    // (`pendingRefreshCheck`) and the memoized token cache are NOT shared —
+    // the only thing they have in common is the disk and its lock, exactly
+    // like N `openclaude --agent-id ...` processes.
+    const procs = await Promise.all(
+      Array.from({ length: PROCESSES }, () => importAuthFresh()),
+    )
+    await Promise.all(procs.map(p => p.checkAndRefreshOAuthTokenIfNeeded()))
+
+    expect(endpoint.state.calls).toBe(1)
+    expect(endpoint.state.rejected).toBe(0)
+    expect(store.claudeAiOauth?.accessToken).toBe('rotated-access-1')
+    expect(store.claudeAiOauth?.refreshToken).toBe('rotated-refresh-1')
+    for (const p of procs) {
+      expect(p.getClaudeAIOAuthTokens()?.accessToken).toBe('rotated-access-1')
+    }
+  }, 30_000)
+
+  test('a burst of forced 401 recoveries refreshes once and all report a usable token', async () => {
+    mockStorage()
+    const endpoint = rotatingEndpoint()
+    mock.module('../services/oauth/client.js', () => ({
+      ...realOAuthClient,
+      refreshOAuthToken: endpoint.refreshOAuthToken,
+    }))
+
+    const procs = await Promise.all(
+      Array.from({ length: PROCESSES }, () => importAuthFresh()),
+    )
+    // Every process was rejected with the same stale access token. The losers
+    // find the winner's token on disk after the lock; that must read as
+    // "recovered" (true), not as a dead grant (false) — withRetry stops the
+    // request on false.
+    const results = await Promise.all(
+      procs.map(p => p.handleOAuth401Error('stale-access')),
+    )
+
+    expect(results).toEqual(Array(PROCESSES).fill(true))
+    expect(endpoint.state.calls).toBe(1)
+    expect(endpoint.state.rejected).toBe(0)
+    expect(store.claudeAiOauth?.accessToken).toBe('rotated-access-1')
+  }, 30_000)
+
+  test('a forced refresh replaces a locally-valid token the server rejected', async () => {
+    mockStorage()
+    store = { claudeAiOauth: { ...freshTokens(), accessToken: 'server-rejected' } }
+    const endpoint = rotatingEndpoint()
+    endpoint.state.validRefresh = 'fresh-refresh'
+    mock.module('../services/oauth/client.js', () => ({
+      ...realOAuthClient,
+      refreshOAuthToken: endpoint.refreshOAuthToken,
+    }))
+
+    const { handleOAuth401Error } = await importAuthFresh()
+
+    expect(await handleOAuth401Error('server-rejected')).toBe(true)
+    expect(endpoint.state.calls).toBe(1)
+    expect(store.claudeAiOauth?.accessToken).toBe('rotated-access-1')
+  })
+
+  test('a revoked refresh re-reads the disk and adopts a token a sibling wrote meanwhile', async () => {
+    mockStorage()
+    let calls = 0
+    mock.module('../services/oauth/client.js', () => ({
+      ...realOAuthClient,
+      refreshOAuthToken: async () => {
+        calls++
+        // A writer that does not take our lock lands its token while our
+        // request is in flight; our own request is then refused.
+        store = { claudeAiOauth: freshTokens() }
+        throw new Error('OAuth access token has been revoked.')
+      },
+    }))
+
+    const { checkAndRefreshOAuthTokenIfNeeded } = await importAuthFresh()
+
+    expect(await checkAndRefreshOAuthTokenIfNeeded()).toBe(true)
+    expect(calls).toBe(1)
+    expect(store.claudeAiOauth?.accessToken).toBe('fresh-access')
+  })
+
+  test('a revoked refresh with nothing new on disk reports failure and keeps the store', async () => {
+    mockStorage()
+    mock.module('../services/oauth/client.js', () => ({
+      ...realOAuthClient,
+      refreshOAuthToken: async () => {
+        throw new Error('OAuth access token has been revoked.')
+      },
+    }))
+
+    const { checkAndRefreshOAuthTokenIfNeeded } = await importAuthFresh()
+
+    expect(await checkAndRefreshOAuthTokenIfNeeded()).toBe(false)
+    expect(store.claudeAiOauth?.accessToken).toBe('stale-access')
+  })
 })

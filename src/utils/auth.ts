@@ -1527,7 +1527,7 @@ async function handleOAuth401ErrorImpl(
   }
 
   // Same token that failed - force refresh, bypassing local expiration check
-  return checkAndRefreshOAuthTokenIfNeeded(0, true)
+  return checkAndRefreshOAuthTokenIfNeeded(0, true, failedAccessToken)
 }
 
 /**
@@ -1561,6 +1561,7 @@ let pendingRefreshCheck: Promise<boolean> | null = null
 export function checkAndRefreshOAuthTokenIfNeeded(
   retryCount = 0,
   force = false,
+  failedAccessToken?: string,
 ): Promise<boolean> {
   // Deduplicate concurrent non-retry, non-force calls
   if (retryCount === 0 && !force) {
@@ -1575,14 +1576,50 @@ export function checkAndRefreshOAuthTokenIfNeeded(
     return pendingRefreshCheck
   }
 
-  return checkAndRefreshOAuthTokenIfNeededImpl(retryCount, force)
+  return checkAndRefreshOAuthTokenIfNeededImpl(
+    retryCount,
+    force,
+    failedAccessToken,
+  )
 }
+
+/**
+ * How long a process queues for the refresh lock before it gives up on it.
+ *
+ * The holder's refresh is a network call (up to 15s) plus an optional profile
+ * fetch, and a burst of teammates all lands on the lock at the same instant.
+ * A loser that gives up early carries on with the expired token, and the
+ * server rejects it — this must outlast one full refresh.
+ */
+const REFRESH_LOCK_WAIT = {
+  retries: 40,
+  minTimeout: 100,
+  maxTimeout: 1000,
+  randomize: true,
+} as const
 
 async function checkAndRefreshOAuthTokenIfNeededImpl(
   retryCount: number,
   force: boolean,
+  failedAccessToken?: string,
 ): Promise<boolean> {
   const MAX_RETRIES = 5
+
+  // Does `t` still need replacing? Normally that is the local expiry check. On
+  // a forced refresh the server has told us the token it was sent is bad, so a
+  // token that DIFFERS from the rejected one is a sibling's fresh work (use it)
+  // and one that is the same is bad no matter what its expiry says.
+  const needsRefresh = (t: OAuthTokens | null): boolean => {
+    if (!t?.refreshToken) return false
+    if (force && failedAccessToken !== undefined) {
+      return t.accessToken === failedAccessToken
+    }
+    return isOAuthTokenExpired(t.expiresAt)
+  }
+  // What "somebody else already refreshed" reports: nothing to do (false) for
+  // an opportunistic check, but a usable token (true) for a forced one — the
+  // 401 handler treats false as a dead grant and stops the request.
+  const raceResolvedResult = force && failedAccessToken !== undefined
 
   await invalidateOAuthCacheIfDiskChanged()
 
@@ -1608,11 +1645,8 @@ async function checkAndRefreshOAuthTokenIfNeededImpl(
   getClaudeAIOAuthTokens.cache?.clear?.()
   clearKeychainCache()
   const freshTokens = await getClaudeAIOAuthTokensAsync()
-  if (
-    !freshTokens?.refreshToken ||
-    !isOAuthTokenExpired(freshTokens.expiresAt)
-  ) {
-    return false
+  if (!needsRefresh(freshTokens)) {
+    return raceResolvedResult && !!freshTokens?.refreshToken
   }
 
   // Tokens are still expired, try to acquire lock and refresh
@@ -1622,7 +1656,7 @@ async function checkAndRefreshOAuthTokenIfNeededImpl(
   let release
   try {
     logEvent('tengu_oauth_token_refresh_lock_acquiring', {})
-    release = await lockfile.lock(claudeDir)
+    release = await lockfile.lock(claudeDir, { retries: REFRESH_LOCK_WAIT })
     logEvent('tengu_oauth_token_refresh_lock_acquired', {})
   } catch (err) {
     if ((err as { code?: string }).code === 'ELOCKED') {
@@ -1633,12 +1667,21 @@ async function checkAndRefreshOAuthTokenIfNeededImpl(
         })
         // Wait a bit before retrying
         await sleep(1000 + Math.random() * 1000)
-        return checkAndRefreshOAuthTokenIfNeededImpl(retryCount + 1, force)
+        return checkAndRefreshOAuthTokenIfNeededImpl(
+          retryCount + 1,
+          force,
+          failedAccessToken,
+        )
       }
       logEvent('tengu_oauth_token_refresh_lock_retry_limit_reached', {
         maxRetries: MAX_RETRIES,
       })
-      return false
+      // The holder may well have finished while we queued: look at the disk
+      // once more before reporting that we have nothing usable.
+      getClaudeAIOAuthTokens.cache?.clear?.()
+      clearKeychainCache()
+      const afterWait = await getClaudeAIOAuthTokensAsync()
+      return raceResolvedResult && !!afterWait && !needsRefresh(afterWait)
     }
     logError(err)
     logEvent('tengu_oauth_token_refresh_lock_error', {
@@ -1649,16 +1692,15 @@ async function checkAndRefreshOAuthTokenIfNeededImpl(
     return false
   }
   try {
-    // Check one more time after acquiring lock
+    // Check one more time after acquiring lock: a sibling that held it before
+    // us has already rotated the refresh token, and presenting the old one
+    // again is exactly what gets the whole grant revoked.
     getClaudeAIOAuthTokens.cache?.clear?.()
     clearKeychainCache()
     const lockedTokens = await getClaudeAIOAuthTokensAsync()
-    if (
-      !lockedTokens?.refreshToken ||
-      !isOAuthTokenExpired(lockedTokens.expiresAt)
-    ) {
+    if (!lockedTokens?.refreshToken || !needsRefresh(lockedTokens)) {
       logEvent('tengu_oauth_token_refresh_race_resolved', {})
-      return false
+      return raceResolvedResult && !!lockedTokens?.refreshToken
     }
 
     logEvent('tengu_oauth_token_refresh_starting', {})
@@ -1707,8 +1749,21 @@ async function checkAndRefreshOAuthTokenIfNeededImpl(
 
     getClaudeAIOAuthTokens.cache?.clear?.()
     clearKeychainCache()
+    // A refresh rejected as revoked/reused usually means something outside our
+    // lock (an older build, a login in another terminal) rotated the token
+    // after we read it. Whatever is on disk NOW is the truth: if it is a token
+    // we can use, or a different refresh token than the one we just burned,
+    // take it instead of giving up.
     const currentTokens = await getClaudeAIOAuthTokensAsync()
-    if (currentTokens && !isOAuthTokenExpired(currentTokens.expiresAt)) {
+    if (
+      currentTokens?.refreshToken &&
+      !isOAuthTokenExpired(currentTokens.expiresAt) &&
+      !(
+        force &&
+        failedAccessToken !== undefined &&
+        currentTokens.accessToken === failedAccessToken
+      )
+    ) {
       logEvent('tengu_oauth_token_refresh_race_recovered', {})
       return true
     }

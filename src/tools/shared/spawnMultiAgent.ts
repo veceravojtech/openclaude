@@ -22,6 +22,7 @@ import { isInBundledMode } from '../../utils/bundledMode.js'
 import { getGlobalConfig } from '../../utils/config.js'
 import { getProviderProfiles } from '../../utils/providerProfiles.js'
 import { getCwd } from '../../utils/cwd.js'
+import { checkAndRefreshOAuthTokenIfNeeded } from '../../utils/auth.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { errorMessage } from '../../utils/errors.js'
 import { execFileNoThrow } from '../../utils/execFileNoThrow.js'
@@ -1573,6 +1574,17 @@ async function handleSpawn(
     // (fixes banner and other UI that would otherwise show tmux attach commands).
     markInProcessFallback()
     return handleSpawnInProcess(input, context)
+  }
+
+  // Pane teammates are separate processes that each read the OAuth token from
+  // disk. Refresh it once here, in the lead, so they start with a valid one
+  // instead of all racing to rotate the same expired refresh token.
+  try {
+    await checkAndRefreshOAuthTokenIfNeeded()
+  } catch (error) {
+    logForDebugging(
+      `[handleSpawn] pre-spawn OAuth refresh failed: ${errorMessage(error)}`,
+    )
   }
 
   // Backend is available (and now cached) - proceed with pane spawning.
