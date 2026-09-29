@@ -330,6 +330,20 @@ describe('policy and candidates', () => {
     expect(Array.isArray(excluded)).toBe(true)
   })
 
+  test('the dispatcher on an open (ollama) route still picks only known matrix ids', async () => {
+    setDeps({ leaderRoute: () => 'ollama' })
+    for (const settingsValue of [settings(), settings({ teammateModelAllowlist: ['*'] })]) {
+      for (const description of ['Research quick lookup', 'Implement the fix', 'Review the diff']) {
+        const decision = await chooseTeammateRoute({ description, settings: settingsValue })
+        if (decision.model) expect(decision.model).toBe('deepseek-v4-pro:cloud')
+      }
+      const { candidates } = listSpawnableModels({ settings: settingsValue })
+      for (const c of candidates) {
+        if (c.route === 'ollama') expect(c.id).toBe('deepseek-v4-pro:cloud')
+      }
+    }
+  })
+
   test('hard implement is bumped one tier deeper', async () => {
     const decision = await chooseTeammateRoute({
       description: 'Implement the fix',

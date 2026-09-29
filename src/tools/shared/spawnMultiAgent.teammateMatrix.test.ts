@@ -419,6 +419,28 @@ test('Codex route via a provider_profile binding', async () => {
   ).rejects.toThrow("on provider 'codex'")
 })
 
+test('an explicit unknown model on an open (custom) agentModels route is accepted; on DeepSeek it is refused', async () => {
+  const settings = {
+    agentModels: {
+      local: { model: 'my-local-model:7b', base_url: 'http://localhost:9999/v1', api_key: 'sk-local' },
+      dschat: { model: 'deepseek-chat', base_url: 'https://api.deepseek.com/v1', api_key: 'sk-ds' },
+    },
+  }
+  const spawnMultiAgent = await load({ settings })
+  await spawnMultiAgent.spawnTeammate(
+    { name: 'local', prompt: 'work', team_name: 'matrix-team', model: 'local' },
+    context(),
+  )
+  expect(paneCommands).toHaveLength(1)
+  await expect(
+    spawnMultiAgent.spawnTeammate(
+      { name: 'dschat', prompt: 'work', team_name: 'matrix-team', model: 'dschat' },
+      context(),
+    ),
+  ).rejects.toThrow(/deepseek-chat.*provider 'deepseek'/s)
+  expect(paneCommands).toHaveLength(1)
+})
+
 test('an agentModels cross-provider route is judged on the route\'s provider', async () => {
   const settings = {
     agentModels: {

@@ -17,6 +17,7 @@ import {
   checkTeammateModelAllowed,
   getAllowedTeammateEntries,
   isKnownTeammateModel,
+  isStrictKnownIdRoute,
   resolveTeammateProviderRoute,
   type TeammateMatrixEntry,
 } from './teammateModelMatrix.js'
@@ -210,7 +211,12 @@ describe('checkTeammateModelAllowed', () => {
 
   test('DeepSeek V4.1 Flash is served by DeepSeek and Fireworks', () => {
     expect(check('accounts/fireworks/models/deepseek-v4p1-flash', 'fireworks')).toBeNull()
-    expect(check('deepseek-flash', 'fireworks')).toContain("on provider 'fireworks'")
+    // Fireworks is an open route: any explicit id passes the default allowlist,
+    // but a specific list still narrows it to that list's Fireworks ids.
+    expect(check('deepseek-flash', 'fireworks')).toBeNull()
+    expect(check('deepseek-flash', 'fireworks', ['deepseek-flash'])).toContain(
+      "on provider 'fireworks'",
+    )
   })
 
   test('a custom allowlist mixing family keys and exact ids', () => {
@@ -236,8 +242,10 @@ describe('checkTeammateModelAllowed', () => {
     expect(check('deepseek-flash', 'deepseek')).toBeNull()
   })
 
-  test('an unknown route lists nothing allowed', () => {
-    expect(check('my-local-model', 'lmstudio')).toContain('Allowed here: none.')
+  test('an open route with a specific allowlist lists nothing allowed', () => {
+    // No allowlist: open routes accept any explicit id (see strict vs open).
+    expect(check('my-local-model', 'lmstudio')).toBeNull()
+    expect(check('my-local-model', 'lmstudio', ['glm-5.3'])).toContain('Allowed here: none.')
   })
 
   test('the inherit-leader exception always passes', () => {
@@ -517,5 +525,66 @@ describe('"*" refusal message', () => {
         allowlist: undefined,
       }),
     ).toThrow('Configure teammateModelAllowlist to change this.')
+  })
+})
+
+describe('strict vs open routes (explicit ids)', () => {
+  const OPEN = ['custom', 'unknown-fallback', 'ollama', 'lmstudio', 'llama-cpp', 'vllm']
+  const STRICT = ['anthropic', 'bedrock', 'vertex', 'foundry', 'deepseek', 'zai', 'codex', 'openai']
+  const check = (model: string, route: string, allowlist?: string[]) => {
+    try {
+      assertTeammateModelCheck({
+        resolvedModel: model,
+        providerRoute: route,
+        isInheritingLeader: false,
+        allowlist,
+      })
+      return null
+    } catch (error) {
+      return (error as Error).message
+    }
+  }
+
+  test('the strict set is exactly the routes we have a list for', () => {
+    for (const route of STRICT) expect(isStrictKnownIdRoute(route)).toBe(true)
+    for (const route of OPEN) expect(isStrictKnownIdRoute(route)).toBe(false)
+  })
+
+  test('an explicit unknown id is accepted on custom, ollama and unknown-fallback', () => {
+    for (const route of OPEN) {
+      expect(check('my-local-model:7b', route)).toBeNull()
+      expect(check('my-local-model:7b', route, ['*'])).toBeNull()
+      expect(() => assertKnownTeammateModel('my-local-model:7b', route)).not.toThrow()
+    }
+  })
+
+  test('the same id is refused on deepseek, zai and anthropic', () => {
+    for (const route of ['deepseek', 'zai', 'anthropic']) {
+      expect(check('my-local-model:7b', route)).not.toBeNull()
+      expect(check('my-local-model:7b', route, ['*'])).toContain("provider '" + route + "'")
+    }
+  })
+
+  test('deepseek-chat through a DeepSeek profile is refused, with the valid ids named', () => {
+    const message = check('deepseek-chat', 'deepseek')
+    expect(message).toContain("'deepseek-chat'")
+    expect(message).toContain('deepseek-v4-pro')
+    expect(check('deepseek-chat', 'deepseek', ['*'])).toContain('Valid options here')
+  })
+
+  test('a specific allowlist still applies on an open route', () => {
+    expect(check('my-local-model:7b', 'ollama', ['deepseek-flash'])).toContain(
+      'Configure teammateModelAllowlist',
+    )
+  })
+
+  test('the matrix entry for ollama stays known for dispatch, without limiting Ollama', () => {
+    expect(isKnownTeammateModel('deepseek-v4-pro:cloud', 'ollama')).toBe(true)
+    expect(isKnownTeammateModel('my-local-model:7b', 'ollama')).toBe(false)
+    expect(check('my-local-model:7b', 'ollama')).toBeNull()
+  })
+
+  test('the refusal message never claims a strict route has nothing known', () => {
+    expect(check('nope', 'zai')).not.toContain('none known')
   })
 })

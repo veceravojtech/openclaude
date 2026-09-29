@@ -214,6 +214,32 @@ const EXTRA_KNOWN_MODEL_IDS_BY_ROUTE: Readonly<Record<string, readonly string[]>
   ],
 }
 
+/**
+ * Routes where an EXPLICIT model id must be a known one (the known-id check
+ * applies): the first-party/cloud Claude routes, and the providers whose model
+ * list we have (DeepSeek and Z.ai measured live; Codex/OpenAI carried on trust,
+ * see the TODO above). Every other route — custom, unknown-fallback, and the
+ * local ones (ollama, lmstudio, llama.cpp, vllm, …) — is OPEN: the user runs
+ * whatever models they run, we have no authoritative list, so any explicit id
+ * is accepted. The dispatcher's own automatic choice ignores this set and still
+ * picks only ids the matrix/known data lists for the route.
+ */
+const STRICT_KNOWN_ID_ROUTES: ReadonlySet<string> = new Set([
+  'anthropic',
+  'bedrock',
+  'vertex',
+  'foundry',
+  'deepseek',
+  'zai',
+  'codex',
+  'openai',
+])
+
+/** Whether an explicit model id on `route` must be a known id. */
+export function isStrictKnownIdRoute(route: string): boolean {
+  return STRICT_KNOWN_ID_ROUTES.has(route)
+}
+
 /** The matrix families' entries only: what an unset allowlist admits. */
 function matrixEntries(): TeammateMatrixEntry[] {
   return TEAMMATE_MODEL_FAMILY_KEYS.flatMap(
@@ -306,7 +332,8 @@ export function knownTeammateModelIds(route: string): string[] {
 
 /**
  * Throws unless `model` is a model id the serving route is known to accept.
- * Runs before the allowlist check so `teammateModelAllowlist: ["*"]` can never
+ * Only STRICT routes are checked; open routes (custom, local, …) accept any
+ * explicit id. Runs before the allowlist check so `teammateModelAllowlist: ["*"]` can never
  * admit an arbitrary id. `model` should already be alias-resolved by the
  * caller; `requestedModel` is the raw user value, shown in the message.
  */
@@ -315,6 +342,7 @@ export function assertKnownTeammateModel(
   route: string,
   requestedModel?: string,
 ): void {
+  if (!isStrictKnownIdRoute(route)) return
   if (isKnownTeammateModel(model, route)) return
   const known = knownTeammateModelIds(route)
   const named =
@@ -323,7 +351,7 @@ export function assertKnownTeammateModel(
       ? `'${requestedModel.trim()}' (resolves to '${model.trim()}')`
       : `'${model.trim()}'`
   throw new Error(
-    `Model ${named} is not a known model for agents on provider '${route}'. Valid options here: ${known.length > 0 ? known.join(', ') : 'none known for this provider'} (or an alias such as sonnet/opus/haiku/inherit). Check for a typo, or pick a model this provider serves.`,
+    `Model ${named} is not a known model for agents on provider '${route}'. Valid options here: ${known.join(', ')} (or an alias such as sonnet/opus/haiku/inherit). Check for a typo, or pick a model this provider serves.`,
   )
 }
 
@@ -520,6 +548,16 @@ export function checkTeammateModelAllowed({
   allowlist,
 }: TeammateModelCheckInput): string | null {
   if (isInheritingLeader) return null
+  // Open routes (custom, local, …) have no authoritative model list: with the
+  // default or '*' allowlist any explicit id passes. A specific list the user
+  // wrote still applies below.
+  if (
+    !isStrictKnownIdRoute(providerRoute) &&
+    (allowlist === undefined ||
+      allowlist.some(item => item.trim() === TEAMMATE_MODEL_ALLOWLIST_WILDCARD))
+  ) {
+    return null
+  }
   const allowed = getAllowedTeammateEntries(allowlist)
 
   const model = comparableModelId(providerRoute, resolvedModel)
