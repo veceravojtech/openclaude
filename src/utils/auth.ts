@@ -1612,7 +1612,9 @@ async function checkAndRefreshOAuthTokenIfNeededImpl(
   const needsRefresh = (t: OAuthTokens | null): boolean => {
     if (!t?.refreshToken) return false
     if (force && failedAccessToken !== undefined) {
-      return t.accessToken === failedAccessToken
+      return (
+        t.accessToken === failedAccessToken || isOAuthTokenExpired(t.expiresAt)
+      )
     }
     return isOAuthTokenExpired(t.expiresAt)
   }

@@ -257,6 +257,72 @@ describe('token refresh persists through the non-reentrant credential lock', () 
     expect(store.claudeAiOauth?.accessToken).toBe('rotated-access-1')
   })
 
+  test('a forced refresh refreshes a different-but-expired token instead of adopting it', async () => {
+    mockStorage()
+    store = {
+      claudeAiOauth: {
+        ...expiredTokens(),
+        accessToken: 'different-expired-access',
+      },
+    }
+    const endpoint = rotatingEndpoint()
+    mock.module('../services/oauth/client.js', () => ({
+      ...realOAuthClient,
+      refreshOAuthToken: endpoint.refreshOAuthToken,
+    }))
+
+    const { checkAndRefreshOAuthTokenIfNeeded } = await importAuthFresh()
+
+    // The disk token differs from the rejected one, so the force branch would
+    // otherwise adopt it — but it is also expired, so it must be refreshed.
+    expect(
+      await checkAndRefreshOAuthTokenIfNeeded(0, true, 'server-rejected'),
+    ).toBe(true)
+    expect(endpoint.state.calls).toBe(1)
+    expect(endpoint.state.rejected).toBe(0)
+    expect(store.claudeAiOauth?.accessToken).toBe('rotated-access-1')
+    expect(store.claudeAiOauth?.refreshToken).toBe('rotated-refresh-1')
+  })
+
+  test('a forced refresh still adopts a different unexpired token without a network call', async () => {
+    mockStorage()
+    store = {
+      claudeAiOauth: { ...freshTokens(), accessToken: 'different-fresh-access' },
+    }
+    const endpoint = rotatingEndpoint()
+    endpoint.state.validRefresh = 'fresh-refresh'
+    mock.module('../services/oauth/client.js', () => ({
+      ...realOAuthClient,
+      refreshOAuthToken: endpoint.refreshOAuthToken,
+    }))
+
+    const { checkAndRefreshOAuthTokenIfNeeded } = await importAuthFresh()
+
+    expect(
+      await checkAndRefreshOAuthTokenIfNeeded(0, true, 'server-rejected'),
+    ).toBe(true)
+    expect(endpoint.state.calls).toBe(0)
+    expect(store.claudeAiOauth?.accessToken).toBe('different-fresh-access')
+  })
+
+  test('a forced refresh rejected as revoked does not adopt the same rejected token', async () => {
+    mockStorage()
+    store = {
+      claudeAiOauth: { ...freshTokens(), accessToken: 'server-rejected' },
+    }
+    mock.module('../services/oauth/client.js', () => ({
+      ...realOAuthClient,
+      refreshOAuthToken: async () => {
+        throw new Error('OAuth access token has been revoked.')
+      },
+    }))
+
+    const { handleOAuth401Error } = await importAuthFresh()
+
+    expect(await handleOAuth401Error('server-rejected')).toBe(false)
+    expect(store.claudeAiOauth?.accessToken).toBe('server-rejected')
+  })
+
   test('a revoked refresh re-reads the disk and adopts a token a sibling wrote meanwhile', async () => {
     mockStorage()
     let calls = 0
