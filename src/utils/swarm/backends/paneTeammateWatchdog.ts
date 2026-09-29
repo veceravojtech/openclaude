@@ -17,6 +17,10 @@ import {
   recordMemberTmuxSocket,
   removeTeammateFromTeamFile,
 } from '../teamHelpers.js'
+import {
+  scheduleFailedTeammateReap,
+  type ReaperTimers,
+} from '../failedTeammateReaper.js'
 import { retireTeammateFromLeaderView } from '../teammateRetirement.js'
 import { unassignTeammateTasks } from '../../tasks.js'
 import { getBackendByType } from './registry.js'
@@ -228,6 +232,19 @@ export type PaneTeammateWatchdogDeps = {
     teamName: string,
     member: { agentId: string; name: string },
   ) => Promise<string>
+  /** Grace before a self-reported failed teammate is auto-killed (default 3000). */
+  failedReapDelayMs?: number
+  /** Injectable clock for the auto-kill timer. */
+  reapTimers?: ReaperTimers
+  /**
+   * Kill the failed teammate's pane and drop it from the roster. Defaults to
+   * killInProcessTeammateAndCascade, which closes the pane on its recorded
+   * socket and removes the member only once the pane is confirmed dead.
+   */
+  killFailedTeammate?: (
+    taskId: string,
+    setAppState: SetAppState,
+  ) => Promise<boolean>
   /** null disables the interval — tests drive scan() manually. */
   scanIntervalMs?: number | null
   firstContactTimeoutMs?: number
@@ -793,6 +810,48 @@ export function armPaneTeammateWatchdog({
     })
   }
 
+  /**
+   * Auto-kill after a self-reported failed turn: close the pane and drop the
+   * roster member so nothing lingers. Cancelled by any new mailbox write to
+   * the teammate; re-checked at fire time so a resumed or already-gone
+   * teammate is left alone. Never throws.
+   */
+  function scheduleFailedReap(): void {
+    scheduleFailedTeammateReap({
+      teamName,
+      teammateName,
+      delayMs: deps?.failedReapDelayMs,
+      timers: deps?.reapTimers,
+      reap: async () => {
+        let stillFailed = false
+        updateTaskState(taskId, setAppState, task => {
+          stillFailed = task.status === 'failed'
+          return task
+        })
+        if (!stillFailed) return
+        const member = (await readTeamFile(teamName))?.members?.find(
+          m => m.name === teammateName,
+        )
+        // Gone already, or resumed (turn-start write flips isActive).
+        if (!member || member.isActive === true) return
+        const kill =
+          deps?.killFailedTeammate ??
+          (async (id: string, set: SetAppState) => {
+            const { killInProcessTeammateAndCascade } = await import(
+              '../spawnInProcess.js'
+            )
+            return killInProcessTeammateAndCascade(id, set, {
+              source: 'failed_teammate_auto_reap',
+            })
+          })
+        const killed = await kill(taskId, setAppState)
+        logForDebugging(
+          `[PaneWatchdog] auto-reaped failed teammate ${teammateName} (killed=${killed})`,
+        )
+      },
+    })
+  }
+
   function noProgressError(elapsedMs: number, liveness: PaneLiveness): string {
     const seconds = Math.round(elapsedMs / 1000)
     if (liveness === 'alive') {
@@ -933,6 +992,9 @@ export function armPaneTeammateWatchdog({
             latestIdle.failureReason ?? 'Teammate reported a failed turn'
           if (transitionTerminal('failed', reason)) {
             emit('failed', reason)
+            // Explicit self-reported failure only (never the deadline path,
+            // where a slow child's late completion must still win).
+            scheduleFailedReap()
           }
         } else if (watchingLateCompletion) {
           // A merely-slow child was failed spuriously; its late completion

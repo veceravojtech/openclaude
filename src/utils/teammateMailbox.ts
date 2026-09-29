@@ -24,6 +24,7 @@ import { lazySchema } from './lazySchema.js'
 import * as lockfile from './lockfile.js'
 import { logError } from './log.js'
 import { jsonParse, jsonStringify } from './slowOperations.js'
+import { cancelFailedTeammateReap } from './swarm/failedTeammateReaper.js'
 import type { BackendType } from './swarm/backends/types.js'
 import { TEAM_LEAD_NAME } from './swarm/constants.js'
 import { sanitizePathComponent } from './tasks.js'
@@ -137,6 +138,14 @@ export async function writeToMailbox(
   message: Omit<TeammateMessage, 'read'>,
   teamName?: string,
 ): Promise<void> {
+  // New work for a teammate that self-reported a failure cancels its pending
+  // auto-kill: the message is a re-task. (The teammate's own idle
+  // notification goes to the lead's inbox, so it never lands here.)
+  cancelFailedTeammateReap(
+    teamName || getTeamName() || 'default',
+    recipientName,
+  )
+
   await ensureInboxDir(teamName)
 
   const inboxPath = getInboxPath(recipientName, teamName)

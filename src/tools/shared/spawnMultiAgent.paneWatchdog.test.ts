@@ -28,6 +28,12 @@ import {
   getTeamFilePath,
   readTeamFileAsync,
 } from '../../utils/swarm/teamHelpers.js'
+import {
+  cancelFailedTeammateReap,
+  hasPendingFailedTeammateReap,
+  resetFailedTeammateReapsForTesting,
+  type ReaperTimers,
+} from '../../utils/swarm/failedTeammateReaper.js'
 import { TEAMMATE_GRACE_MS } from '../../utils/task/framework.js'
 import { getTaskPath, listTasks } from '../../utils/tasks.js'
 import * as spawnMod from './spawnMultiAgent.js'
@@ -293,6 +299,7 @@ afterEach(() => {
   // The team sweeper is a module-level singleton keyed by team; without this a
   // later test would inherit the previous test's sweeper (and its deps).
   getTeamSweeper('team')?.dispose()
+  resetFailedTeammateReapsForTesting()
 })
 
 const worldToDispose: PaneTeammateWatchdogHandle[] = []
@@ -1468,4 +1475,118 @@ test('a team file with no leadSessionId is neither swept nor backfilled', async 
     setClaudeConfigHomeDirForTesting(undefined)
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+
+// ---------------------------------------------------------------------------
+// Auto-kill of a teammate that self-reports a failed turn.
+// ---------------------------------------------------------------------------
+
+function fakeReapClock() {
+  const timers: Array<{ fn: () => void; ms: number; cleared: boolean }> = []
+  const clock: ReaperTimers = {
+    setTimer: (fn, ms) => {
+      const t = { fn, ms, cleared: false }
+      timers.push(t)
+      return t
+    },
+    clearTimer: h => {
+      ;(h as { cleared: boolean }).cleared = true
+    },
+  }
+  return {
+    clock,
+    timers,
+    fire: async () => {
+      for (const t of timers) if (!t.cleared) t.fn()
+      await new Promise(r => setTimeout(r, 0))
+    },
+  }
+}
+
+function reapWorld() {
+  const world = makeWorld()
+  const reaper = fakeReapClock()
+  const kills: string[] = []
+  registerTeammate(world, 'worker', {
+    ...watchdogDeps(world),
+    reapTimers: reaper.clock,
+    killFailedTeammate: async taskId => {
+      kills.push(taskId)
+      // What killInProcessTeammateAndCascade does: pane closed, member removed.
+      world.teamFile.members = world.teamFile.members.filter(
+        m => m.name !== 'worker',
+      )
+      return true
+    },
+  })
+  worldToDispose.push(...world.handles)
+  return { world, reaper, kills }
+}
+
+test('an explicit failed turn schedules a 3s kill that removes the roster entry', async () => {
+  const { world, reaper, kills } = reapWorld()
+  world.mailbox.push(
+    idleNotification('worker', world.nowMs, 'failed', undefined, 'provider 400'),
+  )
+  await world.handles[0]!.scan()
+
+  // Armed with the 3000 ms default, but nothing killed before it fires.
+  expect(reaper.timers).toHaveLength(1)
+  expect(reaper.timers[0]!.ms).toBe(3000)
+  expect(kills).toEqual([])
+  expect(world.teamFile.members.map(m => m.name)).toContain('worker')
+
+  await reaper.fire()
+  expect(kills).toEqual([world.taskId()!])
+  expect(world.teamFile.members.map(m => m.name)).toEqual(['team-lead'])
+})
+
+test('a deadline failure does not auto-kill', async () => {
+  const { world, reaper, kills } = reapWorld()
+  world.probes = ['alive']
+  world.nowMs += FIRST_CONTACT_TIMEOUT_MS + 1
+  await world.handles[0]!.scan()
+  expect(taskStatus(world)).toBe('failed')
+  expect(reaper.timers).toHaveLength(0)
+  await reaper.fire()
+  expect(kills).toEqual([])
+})
+
+test('a message to the failed teammate cancels the pending kill', async () => {
+  const { world, reaper, kills } = reapWorld()
+  world.mailbox.push(idleNotification('worker', world.nowMs, 'failed', undefined, 'x'))
+  await world.handles[0]!.scan()
+  expect(hasPendingFailedTeammateReap('team', 'worker')).toBe(true)
+
+  expect(cancelFailedTeammateReap('team', 'worker')).toBe(true)
+  await reaper.fire()
+  expect(kills).toEqual([])
+  expect(hasPendingFailedTeammateReap('team', 'worker')).toBe(false)
+})
+
+test('a teammate that resumed (isActive) before the timer fires is left alone', async () => {
+  const { world, reaper, kills } = reapWorld()
+  world.mailbox.push(idleNotification('worker', world.nowMs, 'failed', undefined, 'x'))
+  await world.handles[0]!.scan()
+  world.teamFile.members[1]!.isActive = true
+  await reaper.fire()
+  expect(kills).toEqual([])
+})
+
+test('an already-gone teammate is not killed, and scheduling is idempotent', async () => {
+  const { world, reaper, kills } = reapWorld()
+  world.mailbox.push(idleNotification('worker', world.nowMs, 'failed', undefined, 'x'))
+  await world.handles[0]!.scan()
+  // A second failed report while pending does not arm a second timer.
+  world.mailbox.push(idleNotification('worker', world.nowMs + 1, 'failed', undefined, 'y'))
+  await world.handles[0]!.scan()
+  expect(reaper.timers.filter(t => !t.cleared)).toHaveLength(1)
+
+  world.teamFile.members = world.teamFile.members.filter(m => m.name !== 'worker')
+  await reaper.fire()
+  expect(kills).toEqual([])
+  // Firing again is harmless (nothing pending).
+  await reaper.fire()
+  expect(kills).toEqual([])
 })
