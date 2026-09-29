@@ -237,7 +237,7 @@ test('deepseek-v4-flash uses DeepSeek direct API max output cap on api.deepseek.
   expect(getMaxOutputTokensForModel('deepseek-v4-flash')).toBe(393_216)
 })
 
-test('deepseek-v4-pro uses the gateway-safe output cap by default', () => {
+test('deepseek-v4-pro uses the descriptor output cap by default', () => {
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
   delete process.env.OPENAI_MODEL
@@ -382,7 +382,7 @@ test('deepseek-v4-pro uses DeepSeek direct API max output cap on api.deepseek.co
   expect(getMaxOutputTokensForModel('deepseek-v4-pro')).toBe(393_216)
 })
 
-test('deepseek-v4-pro keeps gateway routes on the lower output cap', () => {
+test('deepseek-v4-pro on OpenRouter inherits the descriptor output cap', () => {
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   process.env.OPENAI_BASE_URL = 'https://openrouter.ai/api/v1'
   delete process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS
@@ -659,10 +659,10 @@ test('NVIDIA NIM DeepSeek V4 Pro uses NIM route catalog metadata', () => {
 
   expect(getContextWindowForModel('deepseek-ai/deepseek-v4-pro')).toBe(1_048_576)
   expect(getModelMaxOutputTokens('deepseek-ai/deepseek-v4-pro')).toEqual({
-    default: 393_216,
-    upperLimit: 393_216,
+    default: 65_536,
+    upperLimit: 65_536,
   })
-  expect(getMaxOutputTokensForModel('deepseek-ai/deepseek-v4-pro')).toBe(393_216)
+  expect(getMaxOutputTokensForModel('deepseek-ai/deepseek-v4-pro')).toBe(65_536)
 })
 
 test('OpenAI-compatible custom model limits honor documented env overrides', () => {

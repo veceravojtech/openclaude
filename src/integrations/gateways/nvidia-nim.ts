@@ -97,6 +97,8 @@ export default defineGateway({
         apiName: 'deepseek-ai/deepseek-v4-pro',
         label: 'DeepSeek V4 Pro',
         modelDescriptorId: 'deepseek-v4-pro',
+        // Unverified gateway limit; conservative. The descriptor allows 393,216.
+        maxOutputTokens: 65_536,
       },
     ],
   },
