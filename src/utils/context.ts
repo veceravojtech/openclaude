@@ -185,20 +185,25 @@ function getAppliedActiveProfileProvider(
   return activeProfile.provider
 }
 
-export function shouldUseIntegrationRuntimeLimits(
-  processEnv: NodeJS.ProcessEnv = process.env,
+function shouldUseIntegrationRuntimeLimitsForRoute(
+  routeId: string | null,
 ): boolean {
-  const routeId = resolveActiveRouteIdFromEnv(processEnv, {
-    activeProfileProvider: getAppliedActiveProfileProvider(processEnv),
-  })
   const transportKind = routeId ? getTransportKindForRoute(routeId) : null
-
   return (
     transportKind === 'openai-compatible' ||
     transportKind === 'anthropic-proxy' ||
     transportKind === 'local' ||
     transportKind === 'gemini-native'
   )
+}
+
+export function shouldUseIntegrationRuntimeLimits(
+  processEnv: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const routeId = resolveActiveRouteIdFromEnv(processEnv, {
+    activeProfileProvider: getAppliedActiveProfileProvider(processEnv),
+  })
+  return shouldUseIntegrationRuntimeLimitsForRoute(routeId)
 }
 
 /**
@@ -237,10 +242,18 @@ function getCyberRequestRuntimeLimits(model: string) {
   })
 }
 
+/**
+ * Route hint for context-window resolution: the provider base URL a request
+ * actually goes to. When present (a cross-provider providerOverride), the
+ * window is resolved from that route instead of the ambient process env.
+ */
+export type ContextWindowRoute = { baseUrl?: string }
+
 export function getContextWindowForModel(
   model: string,
   betas?: string[],
   runtimeLimits?: { contextWindow?: number },
+  route?: ContextWindowRoute,
 ): number {
   // Allow override via environment variable (internal-only)
   // This takes precedence over all other context window resolution, including 1M detection,
@@ -274,9 +287,24 @@ export function getContextWindowForModel(
   // context (8k minus output reservation) became negative (issue #635).
   const cyberLimits = runtimeLimits === undefined ? getCyberRequestRuntimeLimits(model) : undefined
   runtimeLimits ??= cyberLimits
-  if (runtimeLimits?.contextWindow !== undefined || cyberLimits !== undefined || shouldUseIntegrationRuntimeLimits()) {
+  // A per-agent providerOverride (in-process teammate on a cross-provider
+  // route) carries its own base URL. Resolve the context window from THAT
+  // route, not the lead's ambient env: without this an in-process teammate on
+  // glm-5.3 / deepseek-v4-pro (1M-native) fell through to the 200k default
+  // and auto-compacted far below its real window while the status line read 1M.
+  const routeIdFromBaseUrl = route?.baseUrl
+    ? resolveRouteIdFromBaseUrl(route.baseUrl)
+    : null
+  if (
+    runtimeLimits?.contextWindow !== undefined ||
+    cyberLimits !== undefined ||
+    shouldUseIntegrationRuntimeLimits() ||
+    shouldUseIntegrationRuntimeLimitsForRoute(routeIdFromBaseUrl)
+  ) {
     const resolvedRuntimeLimits = runtimeLimits ?? resolveModelRuntimeLimits({
       model,
+      ...(route?.baseUrl !== undefined ? { baseUrl: route.baseUrl } : {}),
+      ...(routeIdFromBaseUrl !== null ? { resolvedRouteId: routeIdFromBaseUrl } : {}),
       activeProfileProvider: getAppliedActiveProfileProvider(),
     })
     if (resolvedRuntimeLimits.contextWindow !== undefined) {

@@ -1372,3 +1372,28 @@ test('native-1M Claude honors CLAUDE_CODE_DISABLE_1M_CONTEXT, session and ant ov
     }
   }
 })
+
+// --- Cross-provider teammate routes resolve context from the provider, not the ambient env ---
+
+test('cross-provider teammate route resolves the window from its own base URL, not the lead env', () => {
+  // The lead runs first-party Anthropic, so an un-hinted lookup for a GLM model
+  // falls through to the 200k default — the exact mismatch that made auto-compact
+  // fire far below the model's real window while the status line read 1M.
+  expect(getContextWindowForModel('glm-5.3')).toBe(200_000)
+  expect(getContextWindowForModel('deepseek-v4-pro')).toBe(200_000)
+
+  // The teammate's real route is the Z.AI Coding Plan / DeepSeek profile.
+  const zaiRoute = { baseUrl: 'https://api.z.ai/api/coding/paas/v4' }
+  expect(getContextWindowForModel('glm-5.3', [], undefined, zaiRoute)).toBe(1_000_000)
+  expect(getAutoCompactThreshold('glm-5.3', zaiRoute)).toBeGreaterThan(900_000)
+
+  const deepseekRoute = { baseUrl: 'https://api.deepseek.com/v1' }
+  expect(getContextWindowForModel('deepseek-v4-pro', [], undefined, deepseekRoute)).toBe(1_048_576)
+  expect(getAutoCompactThreshold('deepseek-v4-pro', deepseekRoute)).toBeGreaterThan(900_000)
+})
+
+test('cross-provider teammate route does not leak into an un-hinted lookup', () => {
+  // The route hint is per-call; a lookup without it keeps the ambient-env
+  // resolution intact (still 200k here under the first-party-Anthropic lead).
+  expect(getContextWindowForModel('glm-5.3')).toBe(200_000)
+})

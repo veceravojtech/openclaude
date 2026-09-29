@@ -5,7 +5,10 @@ import type { QuerySource } from '../../constants/querySource.js'
 import type { ToolUseContext } from '../../Tool.js'
 import type { CompactForceReason, Message } from '../../types/message.js'
 import { getGlobalConfig } from '../../utils/config.js'
-import { getContextWindowForModel } from '../../utils/context.js'
+import {
+  getContextWindowForModel,
+  type ContextWindowRoute,
+} from '../../utils/context.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
 import { hasExactErrorMessage } from '../../utils/errors.js'
@@ -38,6 +41,7 @@ const MAX_OUTPUT_TOKENS_FOR_SUMMARY = 20_000
 export function getEffectiveContextWindowSize(
   model: string,
   runtimeLimits?: { contextWindow?: number; maxOutputTokens?: number },
+  route?: ContextWindowRoute,
 ): number {
   const reservedTokensForSummary = Math.min(
     runtimeLimits?.maxOutputTokens ?? getMaxOutputTokensForModel(model),
@@ -47,6 +51,7 @@ export function getEffectiveContextWindowSize(
     model,
     getSdkBetas(),
     runtimeLimits,
+    route,
   )
 
   const autoCompactWindow = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
@@ -194,8 +199,15 @@ export function resolveAutoCompactCircuitBreakerState(args: {
   }
 }
 
-export function getAutoCompactThreshold(model: string): number {
-  const effectiveContextWindow = getEffectiveContextWindowSize(model)
+export function getAutoCompactThreshold(
+  model: string,
+  route?: ContextWindowRoute,
+): number {
+  const effectiveContextWindow = getEffectiveContextWindowSize(
+    model,
+    undefined,
+    route,
+  )
 
   // Increase the buffer gradually between the old 13k and new 30k values.
   // This keeps the threshold monotonic and preserves the 20k warning/error
@@ -229,6 +241,7 @@ export function getAutoCompactThreshold(model: string): number {
 export function calculateTokenWarningState(
   tokenUsage: number,
   model: string,
+  route?: ContextWindowRoute,
 ): {
   percentLeft: number
   isAboveWarningThreshold: boolean
@@ -236,16 +249,16 @@ export function calculateTokenWarningState(
   isAboveAutoCompactThreshold: boolean
   isAtBlockingLimit: boolean
 } {
-  const autoCompactThreshold = getAutoCompactThreshold(model)
+  const autoCompactThreshold = getAutoCompactThreshold(model, route)
   const threshold = isAutoCompactEnabled()
     ? autoCompactThreshold
-    : getEffectiveContextWindowSize(model)
+    : getEffectiveContextWindowSize(model, undefined, route)
 
   // Use the raw context window (without output reservation) for the percentage
   // display, so users see remaining context relative to the model's full capacity.
   // The threshold (which subtracts buffer) should only affect when we warn/compact,
   // not what percentage we display.
-  const rawContextWindow = getContextWindowForModel(model, getSdkBetas())
+  const rawContextWindow = getContextWindowForModel(model, getSdkBetas(), undefined, route)
   const percentLeft = Math.max(
     0,
     Math.round(((rawContextWindow - tokenUsage) / rawContextWindow) * 100),
@@ -260,7 +273,7 @@ export function calculateTokenWarningState(
   const isAboveAutoCompactThreshold =
     isAutoCompactEnabled() && tokenUsage >= autoCompactThreshold
 
-  const actualContextWindow = getEffectiveContextWindowSize(model)
+  const actualContextWindow = getEffectiveContextWindowSize(model, undefined, route)
   const defaultBlockingLimit =
     actualContextWindow - MANUAL_COMPACT_BUFFER_TOKENS
 
@@ -310,6 +323,7 @@ export async function shouldAutoCompact(
   // context-collapse guards. Only message-count and provider-overflow also
   // bypass a user-disabled auto-compact setting.
   forceReason?: AutoCompactTrackingState['forceReason'],
+  route?: ContextWindowRoute,
 ): Promise<boolean> {
   // Recursion guards. session_memory and compact are forked agents that
   // would deadlock.
@@ -392,8 +406,8 @@ export async function shouldAutoCompact(
   }
 
   const tokenCount = tokenCountWithEstimation(messages) - snipTokensFreed
-  const threshold = getAutoCompactThreshold(model)
-  const effectiveWindow = getEffectiveContextWindowSize(model)
+  const threshold = getAutoCompactThreshold(model, route)
+  const effectiveWindow = getEffectiveContextWindowSize(model, undefined, route)
 
   logForDebugging(
     `autocompact: tokens=${tokenCount} threshold=${threshold} effectiveWindow=${effectiveWindow}${snipTokensFreed > 0 ? ` snipFreed=${snipTokensFreed}` : ''}`,
@@ -402,6 +416,7 @@ export async function shouldAutoCompact(
   const { isAboveAutoCompactThreshold } = calculateTokenWarningState(
     tokenCount,
     model,
+    route,
   )
 
   return isAboveAutoCompactThreshold
@@ -424,6 +439,13 @@ export async function autoCompactIfNeeded(
   circuitBreakerTripped?: boolean
 }> {
   const model = toolUseContext.options.mainLoopModel
+  // A cross-provider providerOverride (in-process teammate on Z.AI/DeepSeek/etc.)
+  // is the route this agent actually talks to; compaction must budget against
+  // that route's window, not the lead process's ambient env.
+  const route: ContextWindowRoute | undefined =
+    toolUseContext.options.providerOverride
+      ? { baseUrl: toolUseContext.options.providerOverride.baseURL }
+      : undefined
   // Force compaction if a pressure/count signal set forceReason.
   // Intentionally consume the caller-owned flag in place so the same tracking
   // object cannot force multiple compaction cycles in one query loop pass.
@@ -442,6 +464,7 @@ export async function autoCompactIfNeeded(
     querySource,
     snipTokensFreed,
     forcedBy,
+    route,
   )
 
   if (!shouldCompact) {
@@ -483,7 +506,7 @@ export async function autoCompactIfNeeded(
         }
       : tracking
 
-  const contextWindow = getContextWindowForModel(model, getSdkBetas())
+  const contextWindow = getContextWindowForModel(model, getSdkBetas(), undefined, route)
 
   const partitioned = partitionContext(messages, {
     contextWindow,
@@ -523,7 +546,7 @@ export async function autoCompactIfNeeded(
     isRecompactionInChain: effectiveTracking?.compacted === true,
     turnsSincePreviousCompact: effectiveTracking?.turnCounter ?? -1,
     previousCompactTurnId: effectiveTracking?.turnId,
-    autoCompactThreshold: getAutoCompactThreshold(model),
+    autoCompactThreshold: getAutoCompactThreshold(model, route),
     querySource,
     // Carries through to compactMetadata.forceReason on the boundary, so a
     // compaction that skipped the token check says so in the transcript.
