@@ -51,6 +51,11 @@ export type SubagentContext = {
    *  Reset to false on each spawn/resume; flipped true by
    *  consumeInvokingRequestId() on the first terminal API event. */
   invocationEmitted?: boolean
+  /** Provider route this agent's requests actually go to (a cross-provider
+   *  providerOverride). Set by runAgent after resolving routing; read by the
+   *  context-window / output-limit resolvers so they budget against the
+   *  agent's own route instead of the lead's ambient env. */
+  route?: { baseUrl?: string }
 }
 
 /**
@@ -82,6 +87,8 @@ export type TeammateAgentContext = {
   invocationKind?: 'spawn' | 'resume'
   /** Mutable flag: see SubagentContext.invocationEmitted. */
   invocationEmitted?: boolean
+  /** See SubagentContext.route. */
+  route?: { baseUrl?: string }
 }
 
 /**
@@ -99,6 +106,15 @@ const agentContextStorage = new AsyncLocalStorage<AgentContext>()
  */
 export function getAgentContext(): AgentContext | undefined {
   return agentContextStorage.getStore()
+}
+
+/**
+ * The provider route the current agent (subagent or in-process teammate) is
+ * actually routed to, if any. Undefined on the main thread and for agents with
+ * no cross-provider override.
+ */
+export function getAgentRoute(): { baseUrl?: string } | undefined {
+  return getAgentContext()?.route
 }
 
 /**

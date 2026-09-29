@@ -20,6 +20,7 @@ import { getCanonicalName } from './model/model.js'
 import { getModelCapability } from './model/modelCapabilities.js'
 import { resolveAntModel } from './model/antModels.js'
 import { getActiveProviderProfile } from './providerProfiles.js'
+import { getAgentRoute } from './agentContext.js'
 
 // Model context window size (200k tokens for all models right now)
 export const MODEL_CONTEXT_WINDOW_DEFAULT = 200_000
@@ -255,6 +256,12 @@ export function getContextWindowForModel(
   runtimeLimits?: { contextWindow?: number },
   route?: ContextWindowRoute,
 ): number {
+  // When no explicit route is passed, fall back to the current agent's
+  // provider route (set by runAgent for cross-provider subagents/teammates).
+  // This keeps window resolution correct without threading the route through
+  // every caller; the lead's main thread has no agent context and is unchanged.
+  route ??= getAgentRoute()
+
   // Allow override via environment variable (internal-only)
   // This takes precedence over all other context window resolution, including 1M detection,
   // so users can cap the effective context window for local decisions (auto-compact, etc.)
@@ -402,12 +409,20 @@ export function calculateContextPercentages(
 /**
  * Returns the model's default and upper limit for max output tokens.
  */
-export function getModelMaxOutputTokens(model: string): {
+export function getModelMaxOutputTokens(
+  model: string,
+  route?: ContextWindowRoute,
+): {
   default: number
   upperLimit: number
 } {
   let defaultTokens: number
   let upperLimit: number
+
+  // Fall back to the current agent's provider route, same as
+  // getContextWindowForModel, so an in-process GLM/DeepSeek teammate gets its
+  // own route's output limits rather than the Claude 32k/64k ladder.
+  route ??= getAgentRoute()
 
   if (process.env.USER_TYPE === 'ant') {
     const antModel = resolveAntModel(model.toLowerCase())
@@ -420,9 +435,18 @@ export function getModelMaxOutputTokens(model: string): {
 
   // OpenAI-compatible provider — use known output limits to avoid 400 errors
   const cyberLimits = getCyberRequestRuntimeLimits(model)
-  if (cyberLimits !== undefined || shouldUseIntegrationRuntimeLimits()) {
+  const routeIdFromBaseUrl = route?.baseUrl
+    ? resolveRouteIdFromBaseUrl(route.baseUrl)
+    : null
+  if (
+    cyberLimits !== undefined ||
+    shouldUseIntegrationRuntimeLimits() ||
+    shouldUseIntegrationRuntimeLimitsForRoute(routeIdFromBaseUrl)
+  ) {
     const runtimeLimits = cyberLimits ?? resolveModelRuntimeLimits({
       model,
+      ...(route?.baseUrl !== undefined ? { baseUrl: route.baseUrl } : {}),
+      ...(routeIdFromBaseUrl !== null ? { resolvedRouteId: routeIdFromBaseUrl } : {}),
       activeProfileProvider: getAppliedActiveProfileProvider(),
     })
     if (runtimeLimits.maxOutputTokens !== undefined) {

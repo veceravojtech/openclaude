@@ -14,6 +14,7 @@ import {
   clearSessionContextWindowOverride,
 } from './context.ts'
 import { scaleActiveMessageLimitToContextWindow } from './maxActiveMessages.js'
+import { runWithAgentContext } from './agentContext.js'
 
 test('cyber limits follow the serving saved profile and off restores active-route limits', () => {
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
@@ -1416,4 +1417,35 @@ test('message-count limit scales with a cross-provider teammate route window', (
       getContextWindowForModel('glm-5.3', [], undefined, zaiRoute),
     ),
   ).toBe(1000)
+})
+
+test('agent context route drives window, threshold, message cap and output clamp', () => {
+  const zaiRoute = { baseUrl: 'https://api.z.ai/api/coding/paas/v4' }
+
+  // Lead (no agent context): the ambient env resolves the 200k default.
+  expect(getContextWindowForModel('glm-5.3')).toBe(200_000)
+
+  runWithAgentContext(
+    { agentId: 'teammate', agentType: 'subagent', route: zaiRoute },
+    () => {
+      // Window + token threshold + blocking limit all follow the 1M route.
+      expect(getContextWindowForModel('glm-5.3')).toBe(1_000_000)
+      expect(getAutoCompactThreshold('glm-5.3')).toBeGreaterThan(900_000)
+      // Message cap scales off the route's window, not the 200k default.
+      expect(
+        scaleActiveMessageLimitToContextWindow(
+          200,
+          getContextWindowForModel('glm-5.3'),
+        ),
+      ).toBe(1000)
+      // Output clamp follows the route (131_072), not Claude's 32k/64k ladder.
+      expect(getModelMaxOutputTokens('glm-5.3')).toEqual({
+        default: 131_072,
+        upperLimit: 131_072,
+      })
+    },
+  )
+
+  // And the lead is unaffected once the agent context exits.
+  expect(getContextWindowForModel('glm-5.3')).toBe(200_000)
 })

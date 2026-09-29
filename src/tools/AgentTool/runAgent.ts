@@ -61,6 +61,7 @@ import { getAgentModel } from '../../utils/model/agent.js'
 import { isModelAllowed } from '../../utils/model/modelAllowlist.js'
 import { resolveAgentRunModelRouting, shouldEnforceModelAllowlist } from '../../services/api/agentRouting.js'
 import { getInitialSettings } from '../../utils/settings/settings.js'
+import { getAgentContext } from '../../utils/agentContext.js'
 import {
   clearAgentTranscriptSubdir,
   recordSidechainTranscript,
@@ -372,6 +373,20 @@ export async function* runAgent({
       settings,
       permissionMode,
     })
+
+  // Publish the resolved route into the ambient agent context so the
+  // context-window / output-limit resolvers (getContextWindowForModel,
+  // getMaxOutputTokensForModel, getEffectiveContextWindowSize, …) read this
+  // agent's own route instead of the lead's process env — without threading it
+  // through every call site. The store is the mutable object the caller set up
+  // with runWithAgentContext; mutating it here is visible to all downstream
+  // calls in this async chain. No-op on the main thread / without an override.
+  const agentContext = getAgentContext()
+  if (agentContext) {
+    agentContext.route = providerOverride
+      ? { baseUrl: providerOverride.baseURL }
+      : undefined
+  }
 
   if (
     shouldEnforceModelAllowlist(
