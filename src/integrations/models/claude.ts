@@ -178,7 +178,7 @@ export default [
       supportsReasoning: false,
       supportsPreciseTokenCount: false,
     },
-    contextWindow: 144_000,
-    maxOutputTokens: 8192,
+    contextWindow: 200_000,
+    maxOutputTokens: 64_000,
   }),
 ]

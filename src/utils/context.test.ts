@@ -244,10 +244,10 @@ test('deepseek-v4-pro uses the gateway-safe output cap by default', () => {
 
   expect(getContextWindowForModel('deepseek-v4-pro')).toBe(1_048_576)
   expect(getModelMaxOutputTokens('deepseek-v4-pro')).toEqual({
-    default: 65_536,
-    upperLimit: 65_536,
+    default: 393_216,
+    upperLimit: 393_216,
   })
-  expect(getMaxOutputTokensForModel('deepseek-v4-pro')).toBe(65_536)
+  expect(getMaxOutputTokensForModel('deepseek-v4-pro')).toBe(393_216)
 })
 
 test('Ollama deepseek-v4-pro cloud variant uses DeepSeek V4 Pro runtime limits', () => {
@@ -389,10 +389,10 @@ test('deepseek-v4-pro keeps gateway routes on the lower output cap', () => {
   delete process.env.OPENAI_MODEL
 
   expect(getModelMaxOutputTokens('deepseek-v4-pro')).toEqual({
-    default: 65_536,
-    upperLimit: 65_536,
+    default: 393_216,
+    upperLimit: 393_216,
   })
-  expect(getMaxOutputTokensForModel('deepseek-v4-pro')).toBe(65_536)
+  expect(getMaxOutputTokensForModel('deepseek-v4-pro')).toBe(393_216)
 })
 
 test('deepseek legacy aliases keep their documented provider caps', () => {
@@ -411,7 +411,7 @@ test('deepseek-v4-pro clamps oversized max output overrides to the provider limi
   process.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = '500000'
   delete process.env.OPENAI_MODEL
 
-  expect(getMaxOutputTokensForModel('deepseek-v4-pro')).toBe(65_536)
+  expect(getMaxOutputTokensForModel('deepseek-v4-pro')).toBe(393_216)
 })
 
 test('deepseek-v4-flash clamps oversized max output overrides to the provider limit', () => {
@@ -659,10 +659,10 @@ test('NVIDIA NIM DeepSeek V4 Pro uses NIM route catalog metadata', () => {
 
   expect(getContextWindowForModel('deepseek-ai/deepseek-v4-pro')).toBe(1_048_576)
   expect(getModelMaxOutputTokens('deepseek-ai/deepseek-v4-pro')).toEqual({
-    default: 65_536,
-    upperLimit: 65_536,
+    default: 393_216,
+    upperLimit: 393_216,
   })
-  expect(getMaxOutputTokensForModel('deepseek-ai/deepseek-v4-pro')).toBe(65_536)
+  expect(getMaxOutputTokensForModel('deepseek-ai/deepseek-v4-pro')).toBe(393_216)
 })
 
 test('OpenAI-compatible custom model limits honor documented env overrides', () => {
