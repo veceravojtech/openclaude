@@ -165,6 +165,22 @@ export type PaneBackend = {
   ): Promise<PanePresence>
 
   /**
+   * The last `lines` lines of the pane's visible output, on an explicitly
+   * named socket — the failure detail reported when a teammate dies without
+   * reporting. Resolves `null` whenever nothing trustworthy can be read: the
+   * pane is gone, the server is unreachable, the command failed, or no socket
+   * is recorded (pane ids repeat across tmux servers, so capturing on a guessed
+   * socket could return another pane's text). Never throws.
+   *
+   * Optional: a backend that cannot capture output omits it.
+   */
+  capturePaneTail?(
+    paneId: PaneId,
+    lines: number,
+    socketName?: string,
+  ): Promise<string | null>
+
+  /**
    * Kills a pane on an explicitly named socket (tmux `-L <socketName>`).
    *
    * The socket-aware sibling of {@link killPane}, for callers that know the

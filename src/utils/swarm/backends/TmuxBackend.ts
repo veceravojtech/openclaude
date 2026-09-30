@@ -505,6 +505,48 @@ export class TmuxBackend implements PaneBackend {
   }
 
   /**
+   * The last `lines` lines of the pane (`capture-pane -p -S -<lines>`) on the
+   * pane's recorded socket, trailing blank lines dropped. `null` when there is
+   * no recorded socket (a guessed server could hold a different pane with the
+   * same id), when the pane is gone or tmux fails, and on any thrown error.
+   */
+  async capturePaneTail(
+    paneId: PaneId,
+    lines: number,
+    socketName?: string,
+  ): Promise<string | null> {
+    if (!socketName) {
+      return null
+    }
+    try {
+      const tailLines = Math.max(1, Math.floor(lines))
+      const result = await runTmuxInSocket(socketName, [
+        'capture-pane',
+        '-p',
+        '-t',
+        paneId,
+        '-S',
+        `-${tailLines}`,
+      ])
+      if (result.code !== 0) {
+        logForDebugging(
+          `[TmuxBackend] capturePaneTail(${paneId}) failed (exit ${result.code}): ${result.stderr}`,
+        )
+        return null
+      }
+      // -S counts back from the top of the visible screen, so the reply can
+      // exceed `lines`; keep the last `lines` non-trailing-blank lines.
+      const captured = result.stdout.replace(/\s+$/, '').split('\n')
+      return captured.slice(-tailLines).join('\n')
+    } catch (error) {
+      logForDebugging(
+        `[TmuxBackend] capturePaneTail(${paneId}) threw: ${String(error)}`,
+      )
+      return null
+    }
+  }
+
+  /**
    * Whether the named socket answers `list-panes` — i.e. a server is actually
    * running on it. This is the positive-server-identity check an empty
    * `pane_id` reply requires before it may be read as death.

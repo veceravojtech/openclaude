@@ -11,6 +11,8 @@ import type { AppState } from '../../state/AppState.js'
 import {
   ensureTeamSweeper,
   getTeamSweeper,
+  PANE_FAILURE_TAIL_LINES,
+  PANE_GONE_LINE,
   type PaneTeammateWatchdogDeps,
   type PaneTeammateWatchdogHandle,
   type TeamSweeperHandle,
@@ -73,6 +75,10 @@ type World = {
    */
   memberPresence: Map<string, PanePresence>
   memberPresenceCalls: string[]
+  /** What the injected pane capture answers (null: pane gone/unreadable). */
+  paneTail: string | null
+  /** Every unassign the watchdog's failure path asked for. */
+  unassignCalls: Array<{ teamName: string; agentId: string; name: string }>
   nowMs: number
   handles: PaneTeammateWatchdogHandle[]
   taskId: () => string | undefined
@@ -200,6 +206,8 @@ function makeWorld(teammateName = 'worker'): World {
     probeCalls: 0,
     memberPresence: new Map(),
     memberPresenceCalls: [],
+    paneTail: null,
+    unassignCalls: [],
     nowMs: 1_000_000,
     handles: [],
     taskId: () => Object.keys(world.state.tasks)[0],
@@ -238,6 +246,12 @@ function watchdogDeps(world: World): PaneTeammateWatchdogDeps {
     // touching the real /tmp/tmux-$UID directory.
     discoverReachableSockets: async () => ['default'],
     recordMemberSocket: () => true,
+    // Hermetic failure path: no real tmux capture, no real tasks dir.
+    capturePaneTail: async () => world.paneTail,
+    unassignMemberTasks: async (teamName, member) => {
+      world.unassignCalls.push({ teamName, ...member })
+      return ''
+    },
     scanIntervalMs: null,
     firstContactTimeoutMs: FIRST_CONTACT_TIMEOUT_MS,
     progressTimeoutMs: PROGRESS_TIMEOUT_MS,
@@ -355,6 +369,137 @@ test('a booted child that goes silent — the incident — fails with a no-progr
   )
   expect(world.notifications().length).toBe(1)
   expect(world.notifications()[0]).toContain('<status>failed</status>')
+})
+
+/** An idle notification carrying the teammate's last text (item 2's field). */
+function idleWithText(
+  from: string,
+  nowMs: number,
+  idleReason: 'waiting_for_children' | 'parked',
+  lastAssistantText: string,
+): PaneWatchdogMailboxMessage {
+  const timestamp = new Date(nowMs).toISOString()
+  return {
+    from,
+    text: JSON.stringify({
+      type: 'idle_notification',
+      from,
+      timestamp,
+      idleReason,
+      lastAssistantText,
+    }),
+    timestamp,
+  }
+}
+
+function resultOf(notification: string): string | undefined {
+  return notification.match(/<result>([\s\S]*)<\/result>/)?.[1]
+}
+
+test("a watchdog failure's <result> carries the teammate's last text and the pane tail", async () => {
+  const world = makeWorld()
+  registerTeammate(world)
+  worldToDispose.push(...world.handles)
+
+  world.paneTail = 'Running tests...\nError: provider 400\n$ '
+  world.mailbox.push(
+    idleWithText('worker', world.nowMs, 'waiting_for_children', 'LAST: halfway through the fix'),
+  )
+  world.probes = ['dead']
+  await world.handles[0]!.scan()
+
+  expect(taskStatus(world)).toBe('failed')
+  const notifications = world.notifications()
+  expect(notifications.length).toBe(1)
+  expect(notifications[0]).toContain('<status>failed</status>')
+  const result = resultOf(notifications[0]!)
+  expect(result).toBe(
+    [
+      'Pane exited while waiting for descendants',
+      'Last assistant text:\nLAST: halfway through the fix',
+      `Last ~${PANE_FAILURE_TAIL_LINES} lines of the pane:\nRunning tests...\nError: provider 400\n$ `,
+    ].join('\n\n'),
+  )
+})
+
+test('a deadline failure on a gone pane still notifies, saying no output could be captured', async () => {
+  const world = makeWorld()
+  registerTeammate(world)
+  worldToDispose.push(...world.handles)
+
+  world.paneTail = null
+  world.probes = ['dead']
+  world.nowMs += FIRST_CONTACT_TIMEOUT_MS + 1
+  await world.handles[0]!.scan()
+
+  expect(taskStatus(world)).toBe('failed')
+  const notifications = world.notifications()
+  expect(notifications.length).toBe(1)
+  expect(resultOf(notifications[0]!)).toBe(
+    `Pane exited without completing\n\n${PANE_GONE_LINE}`,
+  )
+})
+
+test('a pane capture that throws is reported as gone, never thrown out of the scan', async () => {
+  const world = makeWorld()
+  registerTeammate(world, 'worker', {
+    ...watchdogDeps(world),
+    capturePaneTail: async () => {
+      throw new Error('tmux exploded')
+    },
+  })
+  worldToDispose.push(...world.handles)
+
+  world.probes = ['dead']
+  world.nowMs += FIRST_CONTACT_TIMEOUT_MS + 1
+  await world.handles[0]!.scan()
+
+  expect(taskStatus(world)).toBe('failed')
+  const notifications = world.notifications()
+  expect(notifications.length).toBe(1)
+  expect(resultOf(notifications[0]!)).toContain(PANE_GONE_LINE)
+})
+
+test("a watchdog failure unassigns the teammate's tasks, once", async () => {
+  const world = makeWorld()
+  registerTeammate(world)
+  worldToDispose.push(...world.handles)
+
+  world.teamFile.members[1]!.isActive = true
+  await world.handles[0]!.scan()
+  expect(world.unassignCalls).toEqual([])
+
+  world.probes = ['alive']
+  world.nowMs += PROGRESS_TIMEOUT_MS + 1
+  await world.handles[0]!.scan()
+  expect(taskStatus(world)).toBe('failed')
+  // No agentId on this roster row: the name is the owner key it falls back to.
+  expect(world.unassignCalls).toEqual([
+    { teamName: 'team', agentId: 'worker', name: 'worker' },
+  ])
+
+  // Later scans (still watching for a late completion) do not repeat it.
+  world.nowMs += PROGRESS_TIMEOUT_MS
+  await world.handles[0]!.scan()
+  expect(world.unassignCalls.length).toBe(1)
+})
+
+test('a failure whose unassign throws still notifies the lead', async () => {
+  const world = makeWorld()
+  registerTeammate(world, 'worker', {
+    ...watchdogDeps(world),
+    unassignMemberTasks: async () => {
+      throw new Error('tasks dir locked')
+    },
+  })
+  worldToDispose.push(...world.handles)
+
+  world.probes = ['dead']
+  world.nowMs += FIRST_CONTACT_TIMEOUT_MS + 1
+  await world.handles[0]!.scan()
+
+  expect(taskStatus(world)).toBe('failed')
+  expect(world.notifications().length).toBe(1)
 })
 
 test('a late real completion after a watchdog failure wins — the task self-corrects to completed', async () => {
@@ -744,6 +889,8 @@ function makeSweepWorld(extraDeps: PaneTeammateWatchdogDeps = {}): World {
   registerTeammate(world, 'worker', {
     ...watchdogDeps(world),
     readTeamFile: () => readTeamFileAsync('team'),
+    // The sweep tests assert the REAL unassign against the temp tasks dir.
+    unassignMemberTasks: undefined,
     ...extraDeps,
   })
   // The watchdog handle goes into worldToDispose (its own dispose), but the

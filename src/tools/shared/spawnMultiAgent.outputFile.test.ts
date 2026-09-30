@@ -105,6 +105,8 @@ function deps(world: World): PaneTeammateWatchdogDeps {
     probeMemberPanePresence: async () => 'present',
     discoverReachableSockets: async () => ['default'],
     recordMemberSocket: () => true,
+    capturePaneTail: async () => 'last pane line',
+    unassignMemberTasks: async () => '',
     scanIntervalMs: null,
     firstContactTimeoutMs: 60_000,
     progressTimeoutMs: 600_000,
@@ -225,6 +227,27 @@ test('a self-reported pane failure writes its report to <output-file> too', asyn
   expect(capture.seen[0]!.value).toContain('<status>failed</status>')
   expect(outputFileOf(capture.seen[0]!.value)).toBe(getTaskOutputPath(taskId))
   expect(capture.seen[0]!.fileAtEnqueue).toBe('Could not fix the flaky test.\n')
+})
+
+test('a watchdog deadline failure writes its failure report to <output-file> before the lead is notified', async () => {
+  const world = makeWorld()
+  const { taskId, handle } = register(world)
+  await _clearOutputsForTest()
+
+  const capture = captureAtEnqueue()
+  world.nowMs += 600_001
+  await handle.scan()
+  capture.stop()
+
+  expect(capture.seen).toHaveLength(1)
+  const { value, fileAtEnqueue } = capture.seen[0]!
+  expect(value).toContain('<status>failed</status>')
+  expect(outputFileOf(value)).toBe(getTaskOutputPath(taskId))
+  const result = value.match(/<result>([\s\S]*)<\/result>/)?.[1]
+  expect(result).toContain('Teammate emitted no lifecycle signal within 600s')
+  expect(result).toContain('Last ~40 lines of the pane:\nlast pane line')
+  // The same failure text is on disk the moment the lead sees it.
+  expect(fileAtEnqueue).toBe(`${result}\n`)
 })
 
 test('eviction keeps the file, so the path advertised after it still reads', async () => {

@@ -17,6 +17,7 @@ import {
   type IdleNotificationMessage,
   isIdleNotification,
   isTeammateStartupNotification,
+  truncateTeammateReport,
 } from '../../teammateMailbox.js'
 import { TEAM_LEAD_NAME } from '../constants.js'
 import {
@@ -185,6 +186,58 @@ export function paneTurnResult(
   return parts.length > 0 ? parts.join('\n\n') : undefined
 }
 
+/** How many trailing pane lines a watchdog failure reports. */
+export const PANE_FAILURE_TAIL_LINES = 40
+
+/**
+ * Per-section caps for a watchdog failure `<result>`: the teammate's last text
+ * and the pane tail each get at most this many characters, so the pair plus
+ * the reason stays within TEAMMATE_REPORT_MAX_CHARS and neither can crowd the
+ * other out.
+ */
+const PANE_FAILURE_SECTION_MAX_CHARS = 3_500
+
+/** The line reported when no pane output could be read. */
+export const PANE_GONE_LINE =
+  'Pane is gone or unreadable; no output could be captured.'
+
+/** Keep the END of a pane tail — its most recent lines matter most. */
+function keepTail(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text
+  let start = text.length - maxChars
+  // Never split a surrogate pair.
+  const first = text.charCodeAt(start)
+  if (first >= 0xdc00 && first <= 0xdfff) start++
+  return `[truncated: ${start} earlier chars]\n${text.slice(start)}`
+}
+
+/**
+ * The `<result>` of a task the watchdog failed (deadline, or a pane that
+ * exited without reporting): the reason, the teammate's last text from its
+ * latest idle notification when there is one (same formatting as a
+ * completion), and the last ~40 lines of the pane — or a line saying none
+ * could be captured. Bounded by TEAMMATE_REPORT_MAX_CHARS.
+ */
+export function paneFailureResult(
+  reason: string,
+  latestIdle: IdleNotificationMessage | null | undefined,
+  paneTail: string | null,
+): string {
+  const parts = [reason]
+  const lastText = latestIdle ? paneTurnResult(latestIdle) : undefined
+  if (lastText) {
+    parts.push(
+      `Last assistant text:\n${truncateTeammateReport(lastText, PANE_FAILURE_SECTION_MAX_CHARS)}`,
+    )
+  }
+  parts.push(
+    paneTail === null
+      ? PANE_GONE_LINE
+      : `Last ~${PANE_FAILURE_TAIL_LINES} lines of the pane:\n${keepTail(paneTail, PANE_FAILURE_SECTION_MAX_CHARS)}`,
+  )
+  return truncateTeammateReport(parts.join('\n\n'))
+}
+
 /** Mailbox message shape the watchdog needs. Subset of TeammateMessage. */
 export type PaneWatchdogMailboxMessage = {
   from: string
@@ -254,6 +307,11 @@ export type PaneTeammateWatchdogDeps = {
     teamName: string,
     member: { agentId: string; name: string },
   ) => Promise<string>
+  /**
+   * The last `lines` lines of this watchdog's pane, or null when none can be
+   * read. Defaults to the backend's `capturePaneTail` on the recorded socket.
+   */
+  capturePaneTail?: (lines: number) => Promise<string | null>
   /** Grace before a self-reported failed teammate is auto-killed (default 3000). */
   failedReapDelayMs?: number
   /** Injectable clock for the auto-kill timer. */
@@ -482,6 +540,25 @@ async function sweepRosterOnce(
   }
 }
 
+/**
+ * Put a retired or failed teammate's open tasks back on the board. Shared by
+ * the ghost sweep and the watchdog's failure path. Idempotent: only
+ * unresolved tasks the teammate still owns are touched, so a second call
+ * finds nothing to change.
+ */
+async function defaultUnassignMemberTasks(
+  team: string,
+  member: { agentId: string; name: string },
+): Promise<string> {
+  const { notificationMessage } = await unassignTeammateTasks(
+    team,
+    member.agentId,
+    member.name,
+    'shutdown',
+  )
+  return notificationMessage
+}
+
 export type TeamSweeperHandle = {
   scan(): Promise<void>
   dispose(): void
@@ -550,16 +627,7 @@ export function ensureTeamSweeper({
     ((team: string, member: { agentId: string }) =>
       removeTeammateFromTeamFile(team, member))
   const unassignMemberTasks =
-    deps?.unassignMemberTasks ??
-    (async (team: string, member: { agentId: string; name: string }) => {
-      const { notificationMessage } = await unassignTeammateTasks(
-        team,
-        member.agentId,
-        member.name,
-        'shutdown',
-      )
-      return notificationMessage
-    })
+    deps?.unassignMemberTasks ?? defaultUnassignMemberTasks
   const scanInterval =
     deps?.scanIntervalMs === undefined
       ? PANE_TEAMMATE_WATCHDOG_SCAN_INTERVAL_MS
@@ -707,6 +775,16 @@ export function armPaneTeammateWatchdog({
     })
   const probePane =
     deps?.probePane ?? (() => probeMemberPane(backendType, paneId, tmuxSocket))
+  const capturePaneTail =
+    deps?.capturePaneTail ??
+    (async (lines: number) => {
+      if (!isPaneBackend(backendType)) return null
+      const backend = getBackendByType(backendType)
+      if (!backend?.capturePaneTail) return null
+      return backend.capturePaneTail(paneId, lines, tmuxSocket)
+    })
+  const unassignMemberTasks =
+    deps?.unassignMemberTasks ?? defaultUnassignMemberTasks
   const firstContactTimeoutMs =
     deps?.firstContactTimeoutMs ??
     envPositiveInt(PANE_TEAMMATE_FIRST_CONTACT_TIMEOUT_ENV) ??
@@ -742,6 +820,9 @@ export function armPaneTeammateWatchdog({
   // the task went terminal by another hand (killed): that is not ours to
   // revisit.
   let watchdogFailedTask = false
+  // The teammate's most recent idle notification, whatever its reason: a
+  // failure report carries its last text.
+  let lastIdleSeen: IdleNotificationMessage | null = null
   // Count of probes that answered 'unknown' at an expired deadline. The first
   // unknown defers for free; maxUnknownRetries then bound the re-probes.
   let unknownProbes = 0
@@ -896,21 +977,57 @@ export function armPaneTeammateWatchdog({
     return `Teammate emitted no lifecycle signal within ${seconds}s`
   }
 
+  /** The pane tail, or null when it cannot be read. Never throws. */
+  async function readPaneTail(): Promise<string | null> {
+    try {
+      return await capturePaneTail(PANE_FAILURE_TAIL_LINES)
+    } catch (error) {
+      logForDebugging(
+        `[PaneWatchdog] could not capture ${teammateName}'s pane: ${String(error)}`,
+      )
+      return null
+    }
+  }
+
   /**
-   * Fail the task, notify the lead once, disarm. The error text lands on the
-   * task state AND in the notification summary — transitionTerminal is what
-   * writes the state, emit is what reaches the lead's conversation.
+   * Put the failed teammate's open tasks back on the board, as the ghost
+   * sweep does for a retired one. Best-effort: logged, never thrown, so the
+   * failure notification still goes out.
    */
-  function failTask(error: string): void {
-    if (transitionTerminal('failed', error)) {
-      watchdogFailedTask = true
-      // No report on a deadline failure: emit enqueues synchronously.
-      void emit('failed', error)
-      // Do NOT dispose: a merely-slow child was failed spuriously, and its
-      // late idle notification must still be able to complete the task.
+  async function unassignFailedTeammateTasks(): Promise<void> {
+    try {
+      const agentId =
+        (await readTeamFile(teamName))?.members?.find(
+          m => m.name === teammateName,
+        )?.agentId ?? teammateName
+      await unassignMemberTasks(teamName, { agentId, name: teammateName })
+    } catch (error) {
+      logForDebugging(
+        `[PaneWatchdog] could not unassign ${teammateName}'s tasks: ${String(error)}`,
+      )
+    }
+  }
+
+  /**
+   * Fail the task, notify the lead once. The error text lands on the task
+   * state AND in the notification summary — transitionTerminal is what
+   * writes the state, emit is what reaches the lead's conversation. The
+   * `<result>` (also appended to the output file) carries the teammate's last
+   * text and the pane's last lines, and the teammate's tasks are unassigned.
+   */
+  async function failTask(error: string): Promise<void> {
+    if (!transitionTerminal('failed', error)) {
+      dispose()
       return
     }
-    dispose()
+    // Set before any await: an overlapping scan then only watches for a late
+    // completion and can never fail (or append) a second time.
+    watchdogFailedTask = true
+    const result = paneFailureResult(error, lastIdleSeen, await readPaneTail())
+    await unassignFailedTeammateTasks()
+    await emit('failed', error, result)
+    // Do NOT dispose: a merely-slow child was failed spuriously, and its
+    // late idle notification must still be able to complete the task.
   }
 
   async function scan(): Promise<void> {
@@ -979,6 +1096,7 @@ export function armPaneTeammateWatchdog({
           latestIdle = idle
         }
       }
+      if (latestIdle) lastIdleSeen = latestIdle
       if (latestIdle?.idleReason === 'waiting_for_children') {
         const key = JSON.stringify(latestIdle)
         const member = (await readTeamFile(teamName))?.members?.find(m => m.name === teammateName)
@@ -1007,7 +1125,9 @@ export function armPaneTeammateWatchdog({
           }))
           const liveness = await probePane()
           if (disposed) return
-          if (liveness === 'dead') failTask('Pane exited while waiting for descendants')
+          if (liveness === 'dead') {
+            await failTask('Pane exited while waiting for descendants')
+          }
           return
         }
         if (latestIdle.idleReason === 'parked') {
@@ -1120,14 +1240,14 @@ export function armPaneTeammateWatchdog({
         )
         return
       }
-      failTask(noProgressError(elapsed, 'unknown'))
+      await failTask(noProgressError(elapsed, 'unknown'))
       return
     }
     if (liveness === 'dead') {
-      failTask('Pane exited without completing')
+      await failTask('Pane exited without completing')
       return
     }
-    failTask(noProgressError(elapsed, 'alive'))
+    await failTask(noProgressError(elapsed, 'alive'))
   }
 
   signal?.addEventListener('abort', () => dispose(), { once: true })

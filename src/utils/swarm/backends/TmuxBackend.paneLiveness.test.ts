@@ -178,3 +178,10 @@ test('a probe with no recorded socket fails open as unknown', async () => {
     backend.isPaneAliveOnSocket('%1', undefined),
   ).resolves.toBe('unknown')
 })
+
+test('a pane capture with no recorded socket answers null without shelling out', async () => {
+  // Pane ids repeat across tmux servers: capturing on a guessed socket could
+  // return another pane's output, so no socket means nothing is captured.
+  const backend = new TmuxBackend()
+  await expect(backend.capturePaneTail('%1', 40, undefined)).resolves.toBeNull()
+})
