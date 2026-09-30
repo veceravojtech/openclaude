@@ -1,6 +1,11 @@
 import type { SetAppState } from '../../../Task.js'
 import { getSessionId } from '../../../bootstrap/state.js'
 import { enqueueAgentNotification } from '../../../tasks/LocalAgentTask/LocalAgentTask.js'
+import {
+  appendTaskOutput,
+  evictTaskOutput,
+  flushTaskOutput,
+} from '../../task/diskOutput.js'
 import { logForDebugging } from '../../debug.js'
 import {
   TEAMMATE_GRACE_MS,
@@ -811,11 +816,22 @@ export function armPaneTeammateWatchdog({
     return transitioned
   }
 
-  function emit(
+  /**
+   * Notify the lead. A final report is first appended to the task's output
+   * file (created at registration) and flushed, so the <output-file> the
+   * notification names already holds it. Without a report nothing is awaited
+   * and the notification is enqueued synchronously.
+   */
+  async function emit(
     status: 'completed' | 'failed',
     error?: string,
     finalMessage?: string,
-  ): void {
+  ): Promise<void> {
+    if (finalMessage) {
+      appendTaskOutput(taskId, `${finalMessage}\n`)
+      await flushTaskOutput(taskId)
+      void evictTaskOutput(taskId)
+    }
     enqueueAgentNotification({
       taskId,
       description,
@@ -888,7 +904,8 @@ export function armPaneTeammateWatchdog({
   function failTask(error: string): void {
     if (transitionTerminal('failed', error)) {
       watchdogFailedTask = true
-      emit('failed', error)
+      // No report on a deadline failure: emit enqueues synchronously.
+      void emit('failed', error)
       // Do NOT dispose: a merely-slow child was failed spuriously, and its
       // late idle notification must still be able to complete the task.
       return
@@ -1004,11 +1021,14 @@ export function armPaneTeammateWatchdog({
           return
         }
         parked = false
+        // Disarm before emitting: emit awaits the output-file flush, and an
+        // interval scan overlapping it must not append the report again.
+        dispose()
         if (latestIdle.idleReason === 'failed') {
           const reason =
             latestIdle.failureReason ?? 'Teammate reported a failed turn'
           if (transitionTerminal('failed', reason)) {
-            emit('failed', reason, paneTurnResult(latestIdle))
+            await emit('failed', reason, paneTurnResult(latestIdle))
             // Explicit self-reported failure only (never the deadline path,
             // where a slow child's late completion must still win).
             scheduleFailedReap()
@@ -1022,7 +1042,7 @@ export function armPaneTeammateWatchdog({
               fromWatchdogFailure: true,
             })
           ) {
-            emit('completed', undefined, paneTurnResult(latestIdle))
+            await emit('completed', undefined, paneTurnResult(latestIdle))
           }
         } else {
           // 'available' and 'interrupted' from a living pane mean the turn is
@@ -1037,9 +1057,8 @@ export function armPaneTeammateWatchdog({
             isIdle: true,
             delegatedActivity: latestIdle!.delegatedActivity,
           }))
-          emit('completed', undefined, paneTurnResult(latestIdle))
+          await emit('completed', undefined, paneTurnResult(latestIdle))
         }
-        dispose()
         return
       }
       for (const message of qualifying) {

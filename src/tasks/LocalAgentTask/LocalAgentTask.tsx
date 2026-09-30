@@ -18,7 +18,7 @@ import { getToolSearchOrReadInfo } from '../../utils/collapseReadSearch.js';
 import { enqueuePendingNotification } from '../../utils/messageQueueManager.js';
 import { getAgentTranscriptPath } from '../../utils/sessionStorage.js';
 import { requestAbort } from '../../utils/interruptionTrace.js';
-import { evictTaskOutput, getTaskOutputPath, initTaskOutputAsSymlink } from '../../utils/task/diskOutput.js';
+import { evictTaskOutput, getTaskOutputPath, initTaskOutputAsSymlink, taskOutputExists } from '../../utils/task/diskOutput.js';
 import { PANEL_GRACE_MS, registerTask, updateTaskState } from '../../utils/task/framework.js';
 import { isRetainedOrWithinGrace } from '../../utils/task/retention.js';
 import { emitTaskProgress } from '../../utils/task/sdkProgress.js';
@@ -311,7 +311,9 @@ export function enqueueAgentNotification({
   abortSpeculation(setAppState);
   const completedSummary = resumeCount > 0 ? `Agent "${description}" completed a resumed run (resume #${resumeCount})` : `Agent "${description}" completed`;
   const summary = status === 'completed' ? completedSummary : status === 'failed' ? `Agent "${description}" failed: ${error || 'Unknown error'}` : `Agent "${description}" was stopped`;
-  const outputPath = getTaskOutputPath(taskId);
+  // Advertise the output file only when something is at that path: a lead
+  // told to read a file that was never created has nowhere to go.
+  const outputFileLine = taskOutputExists(taskId) ? `\n<${OUTPUT_FILE_TAG}>${getTaskOutputPath(taskId)}</${OUTPUT_FILE_TAG}>` : '';
   const toolUseIdLine = toolUseId ? `\n<${TOOL_USE_ID_TAG}>${toolUseId}</${TOOL_USE_ID_TAG}>` : '';
   const resultSection = finalMessage ? `\n<result>${finalMessage}</result>` : '';
   const usageSection = usage ? `\n<usage><total_tokens>${usage.totalTokens}</total_tokens><tool_uses>${usage.toolUses}</tool_uses><duration_ms>${usage.durationMs}</duration_ms></usage>` : '';
@@ -324,8 +326,7 @@ export function enqueueAgentNotification({
   // prompt — an original run's block stays byte-identical.
   const resumedPromptLine = resumeCount > 0 && resumedPrompt ? `\n<${RESUMED_PROMPT_TAG}>${resumedPrompt}</${RESUMED_PROMPT_TAG}>` : '';
   const message = `<${TASK_NOTIFICATION_TAG}>
-<${TASK_ID_TAG}>${taskId}</${TASK_ID_TAG}>${toolUseIdLine}
-<${OUTPUT_FILE_TAG}>${outputPath}</${OUTPUT_FILE_TAG}>
+<${TASK_ID_TAG}>${taskId}</${TASK_ID_TAG}>${toolUseIdLine}${outputFileLine}
 <${STATUS_TAG}>${status}</${STATUS_TAG}>${resumedLine}${resumedPromptLine}
 <${SUMMARY_TAG}>${summary}</${SUMMARY_TAG}>${resultSection}${usageSection}${worktreeSection}
 </${TASK_NOTIFICATION_TAG}>`;

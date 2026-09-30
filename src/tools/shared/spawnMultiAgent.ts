@@ -96,6 +96,7 @@ import {
   sendCommandToPane,
 } from '../../utils/swarm/teammateLayoutManager.js'
 import { getHardcodedTeammateModelFallback } from '../../utils/swarm/teammateModel.js'
+import { initTaskOutput } from '../../utils/task/diskOutput.js'
 import { registerTask } from '../../utils/task/framework.js'
 import { writeToMailbox } from '../../utils/teammateMailbox.js'
 import type { CustomAgentDefinition } from '../AgentTool/loadAgentsDir.js'
@@ -1259,6 +1260,15 @@ export function registerOutOfProcessTeammateTask(
   }
 
   registerTask(taskState, setAppState)
+
+  // Create the output file the completion's <output-file> points to; the
+  // watchdog appends the final report to it. Best-effort: a spawn never fails
+  // on it, and the notification omits a path that does not exist.
+  void initTaskOutput(taskId).catch(error => {
+    logForDebugging(
+      `[spawnMultiAgent] could not create output file for ${sanitizedName}: ${errorMessage(error)}`,
+    )
+  })
 
   // Arm the first-contact / absence-of-progress watchdog beside the task
   // registration: pane teammates have no runner to transition this task, and

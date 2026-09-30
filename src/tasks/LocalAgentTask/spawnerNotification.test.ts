@@ -9,6 +9,7 @@ import {
   resetCommandQueue,
 } from '../../utils/messageQueueManager.js'
 import { getTaskOutputPath } from '../../utils/task/diskOutput.js'
+import { withTaskOutputFile } from './testOutputFile.js'
 import type { LocalAgentTaskState } from './LocalAgentTask.js'
 import {
   enqueueAgentNotification,
@@ -145,29 +146,36 @@ describe('background-agent completion is addressed to its spawner', () => {
     expect(String(killed[0]!.value)).toContain('<status>killed</status>')
   })
 
-  test('the stamp is metadata only — the notification XML is untouched', () => {
-    // The envelope format is a non-goal of this change: an addressed
-    // notification must read byte-identically to an unaddressed one.
-    const addressed = notify(
-      agentTask({ parentAgentId: TEAMMATE_AGENT_ID }),
-      { finalMessage: '17' },
-    )
-    resetCommandQueue()
-    const unaddressed = notify(agentTask(), { finalMessage: '17' })
+  test('the stamp is metadata only — the notification XML is untouched', async () => {
+    // <output-file> is advertised only when the file exists; a registered
+    // agent always has one (its transcript symlink), so give it one here.
+    const restoreOutputDir = await withTaskOutputFile(TASK_ID)
+    try {
+      // The envelope format is a non-goal of this change: an addressed
+      // notification must read byte-identically to an unaddressed one.
+      const addressed = notify(
+        agentTask({ parentAgentId: TEAMMATE_AGENT_ID }),
+        { finalMessage: '17' },
+      )
+      resetCommandQueue()
+      const unaddressed = notify(agentTask(), { finalMessage: '17' })
 
-    expect(String(addressed[0]!.value)).toBe(String(unaddressed[0]!.value))
-    // …and still matches the block captured from the pre-change build.
-    expect(String(addressed[0]!.value)).toBe(
-      `<task-notification>
+      expect(String(addressed[0]!.value)).toBe(String(unaddressed[0]!.value))
+      // …and still matches the block captured from the pre-change build.
+      expect(String(addressed[0]!.value)).toBe(
+        `<task-notification>
 <task-id>${TASK_ID}</task-id>
 <output-file>${getTaskOutputPath(TASK_ID)}</output-file>
 <status>completed</status>
 <summary>Agent "${DESCRIPTION}" completed</summary>
 <result>17</result>
 </task-notification>`,
-    )
-    // The addressing lives beside the payload, not inside it.
-    expect(String(addressed[0]!.value)).not.toContain(TEAMMATE_AGENT_ID)
+      )
+      // The addressing lives beside the payload, not inside it.
+      expect(String(addressed[0]!.value)).not.toContain(TEAMMATE_AGENT_ID)
+    } finally {
+      await restoreOutputDir()
+    }
   })
 })
 

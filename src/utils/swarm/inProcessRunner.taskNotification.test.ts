@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { existsSync, readFileSync } from 'fs'
+import { mkdtemp, rm } from 'fs/promises'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import type { AppState } from '../../state/AppState.js'
 import { getDefaultAppState } from '../../state/AppStateStore.js'
 import type { InProcessTeammateTaskState } from '../../tasks/InProcessTeammateTask/types.js'
@@ -12,7 +16,10 @@ import {
   enqueuePendingNotification,
   getCommandQueueSnapshot,
   resetCommandQueue,
+  subscribeToCommandQueue,
 } from '../messageQueueManager.js'
+import { getClaudeTempDir } from '../permissions/filesystem.js'
+import * as diskOutput from '../task/diskOutput.js'
 import type { Task } from '../tasks.js'
 import type { TeammateMessage } from '../teammateMailbox.js'
 import { spawnInProcessTeammate } from './spawnInProcess.js'
@@ -654,4 +661,75 @@ test('a teammate that already sent its report to the lead is not repeated', asyn
   expect(completion).toContain('<status>completed</status>')
   expect(completion).toContain('delivered to the lead by SendMessage')
   expect(completion).not.toContain('all green')
+})
+
+test("the in-process completion writes the final report to <output-file> before the lead is notified", async () => {
+  // Private task-output dir. The runner sees a spread copy of diskOutput (the
+  // mock above), the spawn path the real module: both derive the same path
+  // from the env, so reset both memos.
+  const originalTmpDir = process.env.CLAUDE_CODE_TMPDIR
+  const root = await mkdtemp(join(tmpdir(), 'openclaude-inproc-output-file-'))
+  const resetDirs = () => {
+    getClaudeTempDir.cache?.clear?.()
+    diskOutput._resetTaskOutputDirForTest()
+    actualDiskOutput?._resetTaskOutputDirForTest()
+  }
+  process.env.CLAUDE_CODE_TMPDIR = root
+  try {
+    const harness = await importRunnerWithMocks()
+    resetDirs()
+    const started = await startIdleTeammate(harness)
+    await diskOutput._clearOutputsForTest()
+    const outputPath = diskOutput.getTaskOutputPath(started.taskId)
+    // Spawn created the file the notification will name.
+    expect(existsSync(outputPath)).toBe(true)
+    expect(readFileSync(outputPath, 'utf8')).toBe('')
+
+    await waitFor(
+      () => idleNotificationCount(harness.leadMailbox) === 1,
+      'initial idle notification',
+    )
+    harness.nextTurn.messages = [
+      assistantMessage([{ type: 'text', text: 'FINAL: counted 7 call sites.' }]),
+    ]
+    enqueuePendingNotification({
+      value: notificationText('agent-abc', 'Agent "x" completed'),
+      mode: 'task-notification',
+      agentId: WORKER_AGENT_ID,
+    })
+    await waitFor(
+      () => idleNotificationCount(harness.leadMailbox) === 2,
+      'post-turn idle notification',
+    )
+
+    // What the file holds at the instant the completion is enqueued.
+    let fileAtEnqueue: string | null | undefined
+    const stop = subscribeToCommandQueue(() => {
+      if (fileAtEnqueue !== undefined || !ownCompletion(started.taskId)) return
+      fileAtEnqueue = existsSync(outputPath)
+        ? readFileSync(outputPath, 'utf8')
+        : null
+    })
+    try {
+      await stopTeammate(started)
+    } finally {
+      stop()
+    }
+
+    const completion = ownCompletion(started.taskId)
+    expect(completion).toContain('<result>FINAL: counted 7 call sites.</result>')
+    expect(completion).toContain(`<output-file>${outputPath}</output-file>`)
+    expect(fileAtEnqueue).toBe('FINAL: counted 7 call sites.\n')
+    // Eviction (real, not the mock) is memory-only: the file stays readable.
+    await actualDiskOutput!.evictTaskOutput(started.taskId)
+    await diskOutput.evictTaskOutput(started.taskId)
+    expect(readFileSync(outputPath, 'utf8')).toBe('FINAL: counted 7 call sites.\n')
+  } finally {
+    await diskOutput._clearOutputsForTest()
+    await actualDiskOutput?._clearOutputsForTest()
+    if (originalTmpDir === undefined) delete process.env.CLAUDE_CODE_TMPDIR
+    else process.env.CLAUDE_CODE_TMPDIR = originalTmpDir
+    resetDirs()
+    await rm(root, { recursive: true, force: true })
+  }
 })

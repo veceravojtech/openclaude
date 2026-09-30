@@ -77,7 +77,11 @@ import {
   createAssistantAPIErrorMessage,
   createUserMessage,
 } from '../../utils/messages.js'
-import { evictTaskOutput } from '../../utils/task/diskOutput.js'
+import {
+  appendTaskOutput,
+  evictTaskOutput,
+  flushTaskOutput,
+} from '../../utils/task/diskOutput.js'
 import { TEAMMATE_GRACE_MS } from '../../utils/task/framework.js'
 import { tokenCountWithEstimation } from '../../utils/tokens.js'
 import { createAbortController } from '../abortController.js'
@@ -3110,6 +3114,14 @@ export async function runInProcessTeammate(
       },
       setAppState,
     )
+    const finalMessage = formatTeammateReportResult(lastTurnReport)
+    if (!alreadyTerminal && notifyMainThread && finalMessage) {
+      // The same report as <result>, written to the file <output-file> names
+      // (created at spawn) and flushed before the notification goes out, so
+      // the path is readable the moment the lead sees it.
+      appendTaskOutput(taskId, `${finalMessage}\n`)
+      await flushTaskOutput(taskId)
+    }
     void evictTaskOutput(taskId)
     if (!alreadyTerminal && notifyMainThread) {
       // The XML notification carries <status>, so print.ts emits the SDK
@@ -3118,7 +3130,7 @@ export async function runInProcessTeammate(
         taskId,
         description,
         status: 'completed',
-        finalMessage: formatTeammateReportResult(lastTurnReport),
+        finalMessage,
         setAppState,
         toolUseId,
       })

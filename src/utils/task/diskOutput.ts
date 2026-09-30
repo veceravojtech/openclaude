@@ -1,4 +1,4 @@
-import { constants as fsConstants } from 'fs'
+import { constants as fsConstants, lstatSync } from 'fs'
 import {
   type FileHandle,
   mkdir,
@@ -369,6 +369,22 @@ export async function getTaskOutputSize(taskId: string): Promise<number> {
     }
     logError(e)
     return 0
+  }
+}
+
+/**
+ * Whether anything exists at a task's output path. A symlink counts even if
+ * its target is not written yet (an agent's transcript link), so this is
+ * true for every path some init/append actually created. Sync on purpose:
+ * the notification builders that advertise the path are synchronous.
+ */
+export function taskOutputExists(taskId: string): boolean {
+  try {
+    // eslint-disable-next-line custom-rules/no-sync-fs -- one lstat on the sync notification path
+    lstatSync(getTaskOutputPath(taskId))
+    return true
+  } catch {
+    return false
   }
 }
 

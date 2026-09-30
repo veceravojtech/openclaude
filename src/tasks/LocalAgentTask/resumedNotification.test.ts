@@ -8,6 +8,7 @@ import {
   resetCommandQueue,
 } from '../../utils/messageQueueManager.js'
 import { getTaskOutputPath } from '../../utils/task/diskOutput.js'
+import { withTaskOutputFile } from './testOutputFile.js'
 import { registerTask } from '../../utils/task/framework.js'
 import type { LocalAgentTaskState } from './LocalAgentTask.js'
 import { enqueueAgentNotification, registerAsyncAgent } from './LocalAgentTask.js'
@@ -341,22 +342,29 @@ describe('resumed-run provenance (<resumed-prompt>)', () => {
     expect(messages[0]!).toContain(`<resumed-prompt>${raw}</resumed-prompt>`)
   })
 
-  test('an original run emits no <resumed-prompt> and stays byte-identical', () => {
-    const { messages } = notify(agentTask({ prompt: 'audit it' }), {
-      finalMessage: '15',
-    })
+  test('an original run emits no <resumed-prompt> and stays byte-identical', async () => {
+    // <output-file> is advertised only when the file exists; a registered
+    // agent always has one (its transcript symlink), so give it one here.
+    const restoreOutputDir = await withTaskOutputFile(TASK_ID)
+    try {
+      const { messages } = notify(agentTask({ prompt: 'audit it' }), {
+        finalMessage: '15',
+      })
 
-    expect(messages[0]!).not.toContain('<resumed-prompt')
-    // Pinned against the block captured from the pre-change build.
-    expect(messages[0]!).toBe(
-      `<task-notification>
+      expect(messages[0]!).not.toContain('<resumed-prompt')
+      // Pinned against the block captured from the pre-change build.
+      expect(messages[0]!).toBe(
+        `<task-notification>
 <task-id>${TASK_ID}</task-id>
 <output-file>${getTaskOutputPath(TASK_ID)}</output-file>
 <status>completed</status>
 <summary>Agent "${DESCRIPTION}" completed</summary>
 <result>15</result>
 </task-notification>`,
-    )
+      )
+    } finally {
+      await restoreOutputDir()
+    }
   })
 
   test('resumeCount 0 with a prompt still emits no <resumed-prompt>', () => {

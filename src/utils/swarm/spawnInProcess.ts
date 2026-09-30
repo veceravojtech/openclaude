@@ -39,7 +39,7 @@ import {
   requestAbort,
 } from '../interruptionTrace.js'
 import { emitTaskTerminatedSdk } from '../sdkEventQueue.js'
-import { evictTaskOutput } from '../task/diskOutput.js'
+import { evictTaskOutput, initTaskOutput } from '../task/diskOutput.js'
 import { registerTask, TEAMMATE_GRACE_MS } from '../task/framework.js'
 import { createTeammateContext } from '../teammateContext.js'
 import {
@@ -292,6 +292,15 @@ export async function spawnInProcessTeammate(
 
     // Register task in AppState
     registerTask(taskState, setAppState)
+
+    // Create the output file the completion's <output-file> points to; the
+    // runner's completion tail appends the final report to it. Best-effort: a
+    // spawn never fails on it, and the notification omits a missing path.
+    void initTaskOutput(taskId).catch(error => {
+      logForDebugging(
+        `[spawnInProcessTeammate] could not create output file for ${agentId}: ${errorMessage(error)}`,
+      )
+    })
 
     logForDebugging(
       `[spawnInProcessTeammate] Registered ${agentId} in AppState`,
