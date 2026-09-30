@@ -194,9 +194,14 @@ export const TaskUpdateTool = buildTool({
         'A task being cancelled cannot be given an owner or new dependencies in the same update',
       )
     }
-    if (status === 'completed' && existingTask.status === 'cancelled') {
+    if (
+      existingTask.status === 'cancelled' &&
+      status !== undefined &&
+      status !== 'cancelled' &&
+      status !== 'deleted'
+    ) {
       return fail(
-        `Task #${taskId} is cancelled and cannot be marked completed. Create a new task for the work instead.`,
+        `Task #${taskId} is cancelled and cannot be moved to '${status}'. Cancelled is final: create a new task for the work instead.`,
       )
     }
 

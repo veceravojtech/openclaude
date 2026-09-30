@@ -407,12 +407,18 @@ async function updateTaskUnsafe(
     return null
   }
   const updated: Task = { ...existing, ...updates, id: taskId }
-  // A cancelled task was never done. Completing it would sidestep both the
-  // cancel semantics (its dependents were already released or re-pointed)
-  // and the verification gate, so the transition is refused outright.
-  if (existing.status === 'cancelled' && updated.status === 'completed') {
+  // 'cancelled' is terminal and cancelTask is the only way in. Leaving it
+  // would revive work whose dependents were already released or re-pointed
+  // (and cancelled → completed would sidestep the verification gate);
+  // entering it here would skip cancelTask's dependency rewrite.
+  if (existing.status === 'cancelled' && updated.status !== 'cancelled') {
     throw new TaskTransitionError(
-      `Task #${taskId} is cancelled and cannot be marked completed. Create a new task for the work instead.`,
+      `Task #${taskId} is cancelled and cannot be moved to '${updated.status}'. Cancelled is final: create a new task for the work instead.`,
+    )
+  }
+  if (existing.status !== 'cancelled' && updated.status === 'cancelled') {
+    throw new TaskTransitionError(
+      `Task #${taskId} can only be cancelled through cancelTask (TaskUpdate status 'cancelled'), which also updates the tasks that depend on it.`,
     )
   }
   // Authoritative verification gate: checked against the task as read under
@@ -458,7 +464,57 @@ export async function updateTask(
   }
 }
 
+/**
+ * Runs `fn` holding the task-list lock and then every task file's lock, taken
+ * in sorted id order. Multi-task mutations (cancelTask, deleteTask) use this
+ * so they serialize with each other through the list lock and with
+ * single-task updateTask calls through the per-file locks. Always list lock
+ * first, then task locks in sorted order, so two holders cannot deadlock.
+ * Task files that vanish before their lock is taken are skipped.
+ */
+async function withTaskListAndTaskLocks<T>(
+  taskListId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const lockPath = await ensureTaskListLockFile(taskListId)
+  let releaseList: (() => Promise<void>) | undefined
+  const taskReleases: Array<() => Promise<void>> = []
+  try {
+    releaseList = await lockfile.lock(lockPath, LOCK_OPTIONS)
+    const ids = (await listTasks(taskListId)).map(t => t.id).sort()
+    for (const id of ids) {
+      try {
+        taskReleases.push(
+          await lockfile.lock(getTaskPath(taskListId, id), LOCK_OPTIONS),
+        )
+      } catch (e) {
+        if (getErrnoCode(e) !== 'ENOENT') throw e
+      }
+    }
+    return await fn()
+  } finally {
+    for (const release of taskReleases.reverse()) {
+      await release().catch(() => {})
+    }
+    await releaseList?.()
+  }
+}
+
 export async function deleteTask(
+  taskListId: string,
+  taskId: string,
+): Promise<boolean> {
+  try {
+    return await withTaskListAndTaskLocks(taskListId, () =>
+      deleteTaskLocked(taskListId, taskId),
+    )
+  } catch {
+    return false
+  }
+}
+
+// Caller holds the list lock and every task lock (withTaskListAndTaskLocks).
+async function deleteTaskLocked(
   taskListId: string,
   taskId: string,
 ): Promise<boolean> {
@@ -494,7 +550,8 @@ export async function deleteTask(
         newBlocks.length !== task.blocks.length ||
         newBlockedBy.length !== task.blockedBy.length
       ) {
-        await updateTask(taskListId, task.id, {
+        // Already holding this task's lock — use the unsafe variant.
+        await updateTaskUnsafe(taskListId, task.id, {
           blocks: newBlocks,
           blockedBy: newBlockedBy,
         })
@@ -509,7 +566,8 @@ export async function deleteTask(
 }
 
 /**
- * Thrown when a status transition is not allowed (e.g. cancelled → completed).
+ * Thrown when a status transition is not allowed: anything out of
+ * 'cancelled', or into 'cancelled' other than through cancelTask.
  */
 export class TaskTransitionError extends Error {
   constructor(message: string) {
@@ -582,175 +640,196 @@ function blocksPathExists(
  *   `X.blocks`, so dependents stay blocked until X completes. The old task
  *   records `supersededBy: X`.
  *
+ * If the cancelled task has `metadata.requiresVerification: true`, the
+ * replacement inherits the flag (but not `verifiedBy`).
+ *
  * Runs under the task-list lock plus every task file's lock. Everything is
- * validated before anything is written; a validation failure throws
+ * validated before anything is written: a validation failure throws
  * TaskCancelError and leaves every task file untouched. New contents are
- * staged in temp files first and then renamed into place, so an I/O error
- * while staging also writes nothing.
+ * staged in temp files and then renamed into place one by one, so a crash
+ * or I/O error during the renames can still leave some files updated.
  */
 export async function cancelTask(
   taskListId: string,
   taskId: string,
   options: CancelTaskOptions = {},
 ): Promise<Task> {
+  return withTaskListAndTaskLocks(taskListId, () =>
+    cancelTaskLocked(taskListId, taskId, options),
+  )
+}
+
+// Caller holds the list lock and every task lock (withTaskListAndTaskLocks).
+// Writes files directly (not through updateTaskUnsafe), since that guard
+// refuses any transition into 'cancelled'.
+async function cancelTaskLocked(
+  taskListId: string,
+  taskId: string,
+  options: CancelTaskOptions,
+): Promise<Task> {
   const { supersededBy } = options
-  const lockPath = await ensureTaskListLockFile(taskListId)
 
-  let releaseList: (() => Promise<void>) | undefined
-  const taskReleases: Array<() => Promise<void>> = []
-  try {
-    releaseList = await lockfile.lock(lockPath, LOCK_OPTIONS)
-
-    // Take every task file's lock (sorted, always after the list lock) so a
-    // concurrent single-task updateTask cannot interleave with our rewrite of
-    // blocks/blockedBy. Files that vanish meanwhile are simply skipped.
-    const initial = await listTasks(taskListId)
-    const ids = initial.map(t => t.id).sort()
-    for (const id of ids) {
-      try {
-        taskReleases.push(
-          await lockfile.lock(getTaskPath(taskListId, id), LOCK_OPTIONS),
-        )
-      } catch (e) {
-        if (getErrnoCode(e) !== 'ENOENT') throw e
-      }
-    }
-
-    // Re-read under the locks: this is the state we validate and rewrite.
-    const tasks = new Map(
-      (await listTasks(taskListId)).map(t => [t.id, t] as const),
+  // Re-read under the locks: this is the state we validate and rewrite.
+  const tasks = new Map(
+    (await listTasks(taskListId)).map(t => [t.id, t] as const),
+  )
+  const task = tasks.get(taskId)
+  if (!task) {
+    throw new TaskCancelError(`Task #${taskId} not found`)
+  }
+  if (task.status === 'cancelled') {
+    throw new TaskCancelError(`Task #${taskId} is already cancelled`)
+  }
+  if (task.status === 'completed') {
+    throw new TaskCancelError(
+      `Task #${taskId} is already completed and cannot be cancelled`,
     )
-    const task = tasks.get(taskId)
-    if (!task) {
-      throw new TaskCancelError(`Task #${taskId} not found`)
-    }
-    if (task.status === 'cancelled') {
-      throw new TaskCancelError(`Task #${taskId} is already cancelled`)
-    }
-    if (task.status === 'completed') {
+  }
+
+  const next = new Map<string, Task>()
+  const current = (id: string): Task => next.get(id) ?? tasks.get(id)!
+
+  if (supersededBy !== undefined) {
+    if (supersededBy === taskId) {
       throw new TaskCancelError(
-        `Task #${taskId} is already completed and cannot be cancelled`,
+        `Task #${taskId} cannot be superseded by itself`,
       )
     }
-
-    const next = new Map<string, Task>()
-    const current = (id: string): Task => next.get(id) ?? tasks.get(id)!
-
-    if (supersededBy !== undefined) {
-      if (supersededBy === taskId) {
-        throw new TaskCancelError(
-          `Task #${taskId} cannot be superseded by itself`,
-        )
-      }
-      const replacement = tasks.get(supersededBy)
-      if (!replacement) {
-        throw new TaskCancelError(
-          `Cannot supersede task #${taskId}: replacement task #${supersededBy} not found`,
-        )
-      }
-      if (replacement.status === 'cancelled') {
-        throw new TaskCancelError(
-          `Cannot supersede task #${taskId}: replacement task #${supersededBy} is cancelled`,
-        )
-      }
+    const replacement = tasks.get(supersededBy)
+    if (!replacement) {
+      throw new TaskCancelError(
+        `Cannot supersede task #${taskId}: replacement task #${supersededBy} not found`,
+      )
     }
-
-    // Detach the cancelled task from every other task. With a replacement,
-    // its dependents wait on the replacement instead.
-    const dependents: string[] = []
-    for (const other of tasks.values()) {
-      if (other.id === taskId) continue
-      const waitsOnTask = other.blockedBy.includes(taskId)
-      const blocksTask = other.blocks.includes(taskId)
-      if (!waitsOnTask && !blocksTask) continue
-      let blockedBy = other.blockedBy.filter(id => id !== taskId)
-      if (waitsOnTask && supersededBy !== undefined) {
-        dependents.push(other.id)
-        blockedBy = uniq([...blockedBy, supersededBy])
-      }
-      next.set(other.id, {
-        ...other,
-        blocks: other.blocks.filter(id => id !== taskId),
-        blockedBy,
-      })
+    if (replacement.status === 'cancelled') {
+      throw new TaskCancelError(
+        `Cannot supersede task #${taskId}: replacement task #${supersededBy} is cancelled`,
+      )
     }
+  }
 
-    if (supersededBy !== undefined && dependents.length > 0) {
-      const replacement = current(supersededBy)
+  // Detach the cancelled task from every other task. An edge counts when
+  // either side records it (as in blocksPathExists): a dependent is any
+  // task listed in the cancelled task's `blocks` or listing it in its own
+  // `blockedBy`. With a replacement, dependents wait on it instead.
+  const dependents: string[] = []
+  for (const other of tasks.values()) {
+    if (other.id === taskId) continue
+    const waitsOnTask =
+      other.blockedBy.includes(taskId) || task.blocks.includes(other.id)
+    const blocksTask =
+      other.blocks.includes(taskId) || task.blockedBy.includes(other.id)
+    if (!waitsOnTask && !blocksTask) continue
+    let blockedBy = other.blockedBy.filter(id => id !== taskId)
+    if (waitsOnTask && supersededBy !== undefined) {
+      dependents.push(other.id)
+      blockedBy = uniq([...blockedBy, supersededBy])
+    }
+    next.set(other.id, {
+      ...other,
+      blocks: other.blocks.filter(id => id !== taskId),
+      blockedBy,
+    })
+  }
+
+  if (supersededBy !== undefined) {
+    const replacement = current(supersededBy)
+    const blocks = uniq([...replacement.blocks, ...dependents])
+    // The replacement inherits the verification requirement, so
+    // superseding cannot be used to drop the gate. verifiedBy is NOT
+    // copied: the replacement needs its own PASS verdict.
+    const inheritGate =
+      task.metadata?.requiresVerification === true &&
+      replacement.metadata?.requiresVerification !== true
+    if (dependents.length > 0 || inheritGate) {
       next.set(supersededBy, {
         ...replacement,
-        blocks: uniq([...replacement.blocks, ...dependents]),
+        blocks,
+        ...(inheritGate
+          ? {
+              metadata: {
+                ...(replacement.metadata ?? {}),
+                requiresVerification: true,
+              },
+            }
+          : {}),
       })
     }
+  }
 
-    const cancelled: Task = {
-      ...task,
-      status: 'cancelled',
-      owner: undefined,
-      blocks: [],
-      blockedBy: [],
-      ...(supersededBy !== undefined ? { supersededBy } : {}),
-    }
-    next.set(taskId, cancelled)
+  const cancelled: Task = {
+    ...task,
+    status: 'cancelled',
+    owner: undefined,
+    blocks: [],
+    blockedBy: [],
+    ...(supersededBy !== undefined ? { supersededBy } : {}),
+  }
+  next.set(taskId, cancelled)
 
-    // Cycle check on the resulting graph: the new edges are X → dependent,
-    // so a cycle exists iff X is reachable from some dependent (which also
-    // covers X being one of the dependents itself).
-    if (supersededBy !== undefined) {
-      const after = new Map(tasks)
-      for (const [id, t] of next) after.set(id, t)
-      after.delete(taskId)
-      // Drop the new edges and look for a path dependent ⇒ X among the rest.
-      const withoutNewEdges = new Map(after)
-      const replacement = after.get(supersededBy)!
-      withoutNewEdges.set(supersededBy, {
-        ...replacement,
-        blocks: replacement.blocks.filter(id => !dependents.includes(id)),
+  // Cycle check on the resulting graph: the new edges are X → dependent,
+  // so a cycle exists iff X is reachable from some dependent (which also
+  // covers X being one of the dependents itself).
+  if (supersededBy !== undefined) {
+    const after = new Map(tasks)
+    for (const [id, t] of next) after.set(id, t)
+    after.delete(taskId)
+    // Drop the new edges and look for a path dependent ⇒ X among the rest.
+    const withoutNewEdges = new Map(after)
+    const replacement = after.get(supersededBy)!
+    withoutNewEdges.set(supersededBy, {
+      ...replacement,
+      blocks: replacement.blocks.filter(id => !dependents.includes(id)),
+    })
+    for (const dependentId of dependents) {
+      const dependent = after.get(dependentId)!
+      withoutNewEdges.set(dependentId, {
+        ...dependent,
+        blockedBy: dependent.blockedBy.filter(id => id !== supersededBy),
       })
-      for (const dependentId of dependents) {
-        const dependent = after.get(dependentId)!
-        withoutNewEdges.set(dependentId, {
-          ...dependent,
-          blockedBy: dependent.blockedBy.filter(id => id !== supersededBy),
-        })
-      }
-      for (const dependentId of dependents) {
-        if (
-          dependentId === supersededBy ||
-          blocksPathExists(withoutNewEdges, dependentId, supersededBy)
-        ) {
-          throw new TaskCancelError(
-            `Cannot supersede task #${taskId} with #${supersededBy}: task #${dependentId} would then both wait on and block #${supersededBy} (dependency cycle)`,
-          )
-        }
+    }
+    for (const dependentId of dependents) {
+      if (
+        dependentId === supersededBy ||
+        blocksPathExists(withoutNewEdges, dependentId, supersededBy)
+      ) {
+        throw new TaskCancelError(
+          `Cannot supersede task #${taskId} with #${supersededBy}: task #${dependentId} would then both wait on and block #${supersededBy} (dependency cycle)`,
+        )
       }
     }
+  }
 
-    // Stage every write, then rename into place.
-    const staged: Array<{ tmp: string; path: string }> = []
+  // All validation is done. Stage every new file, then rename each into
+  // place. A failure while staging leaves the task files untouched. A crash
+  // or I/O error during the rename loop can leave some task files updated
+  // and others not (no journal); on an error, the not-yet-renamed temp
+  // files are removed.
+  const staged: Array<{ tmp: string; path: string }> = []
+  const removeTemps = (entries: Array<{ tmp: string }>) =>
+    Promise.all(entries.map(({ tmp }) => unlink(tmp).catch(() => {})))
+  try {
+    for (const [id, t] of next) {
+      const path = getTaskPath(taskListId, id)
+      const tmp = `${path}.${process.pid}.cancel-tmp`
+      await writeFile(tmp, jsonStringify(t, null, 2))
+      staged.push({ tmp, path })
+    }
+  } catch (e) {
+    await removeTemps(staged)
+    throw e
+  }
+  for (let i = 0; i < staged.length; i++) {
     try {
-      for (const [id, t] of next) {
-        const path = getTaskPath(taskListId, id)
-        const tmp = `${path}.${process.pid}.cancel-tmp`
-        await writeFile(tmp, jsonStringify(t, null, 2))
-        staged.push({ tmp, path })
-      }
+      await rename(staged[i]!.tmp, staged[i]!.path)
     } catch (e) {
-      await Promise.all(staged.map(({ tmp }) => unlink(tmp).catch(() => {})))
+      await removeTemps(staged.slice(i))
       throw e
     }
-    for (const { tmp, path } of staged) {
-      await rename(tmp, path)
-    }
-
-    notifyTasksUpdated()
-    return cancelled
-  } finally {
-    for (const release of taskReleases.reverse()) {
-      await release().catch(() => {})
-    }
-    await releaseList?.()
   }
+
+  notifyTasksUpdated()
+  return cancelled
 }
 
 export async function listTasks(taskListId: string): Promise<Task[]> {
@@ -1152,9 +1231,14 @@ export async function unassignTeammateTasks(
       (t.owner === teammateId || t.owner === teammateName),
   )
 
-  // Unassign each task and reset status to open
+  // Unassign each task and reset status to open. A task cancelled since the
+  // listing above is terminal and is left as it is.
   for (const task of unresolvedAssignedTasks) {
-    await updateTask(teamName, task.id, { owner: undefined, status: 'pending' })
+    try {
+      await updateTask(teamName, task.id, { owner: undefined, status: 'pending' })
+    } catch (e) {
+      if (!(e instanceof TaskTransitionError)) throw e
+    }
   }
 
   if (unresolvedAssignedTasks.length > 0) {
