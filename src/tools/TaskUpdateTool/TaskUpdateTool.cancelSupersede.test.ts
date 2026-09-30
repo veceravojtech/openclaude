@@ -127,7 +127,7 @@ function snapshotFiles(): Map<string, string> {
 }
 
 async function openBlockers(id: string): Promise<string[]> {
-  const result = await TaskListTool.call({} as never, makeContext() as never)
+  const result = await TaskListTool.call()
   const { tasks } = (result as { data: ListOutput }).data
   return tasks.find(t => t.id === id)!.blockedBy
 }
@@ -209,7 +209,7 @@ describe('supersede', () => {
     const x = await seed('new plan')
     await update({ taskId: a, status: 'cancelled', supersededBy: x })
 
-    const result = await TaskListTool.call({} as never, makeContext() as never)
+    const result = await TaskListTool.call()
     const block = TaskListTool.mapToolResultToToolResultBlockParam(
       (result as { data: ListOutput }).data,
       'tool-use-id',
