@@ -173,8 +173,9 @@ const TIMESTAMP_SLACK_MS = 1_000
 
 /**
  * The `<result>` of a pane teammate's task-notification, built from the idle
- * notification that ended the turn: the teammate's final text (or the short
- * "already delivered by SendMessage" line), followed by the peer-DM summary
+ * notification that ended the turn: the teammate's final text whenever there
+ * is one (else the short "already delivered by SendMessage" line), followed
+ * by the peer-DM summary
  * when the turn also messaged a peer. Undefined when the turn left neither.
  */
 export function paneTurnResult(

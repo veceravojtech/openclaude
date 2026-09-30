@@ -604,7 +604,7 @@ test("the completion tail sends a completed task-notification carrying the teamm
   ).toHaveLength(1)
 })
 
-test('a teammate that already sent its report to the lead is not repeated', async () => {
+test('an early progress DM to the lead never swallows the distinct final answer', async () => {
   const harness = await importRunnerWithMocks()
   const started = await startIdleTeammate(harness)
   await waitFor(
@@ -618,7 +618,7 @@ test('a teammate that already sent its report to the lead is not repeated', asyn
         type: 'tool_use',
         id: 'toolu-send',
         name: 'SendMessage',
-        input: { to: 'team-lead', summary: 'report', message: 'REPORT: all green.' },
+        input: { to: 'team-lead', summary: 'progress', message: 'Starting investigation' },
       },
     ]),
     {
@@ -641,7 +641,9 @@ test('a teammate that already sent its report to the lead is not repeated', asyn
         ],
       },
     },
-    assistantMessage([{ type: 'text', text: 'REPORT: all green. (sent)' }]),
+    assistantMessage([
+      { type: 'text', text: 'FINAL: the flake is a clock race in retry.ts' },
+    ]),
   ]
   enqueuePendingNotification({
     value: notificationText('agent-abc', 'Agent "x" completed'),
@@ -653,14 +655,19 @@ test('a teammate that already sent its report to the lead is not repeated', asyn
     'post-turn idle notification',
   )
   const idle = lastIdleNotification(harness.leadMailbox)
+  // The progress DM is only metadata; the final answer still rides along.
   expect(idle?.reportedToLead).toBe(true)
-  expect(idle?.lastAssistantText).toBeUndefined()
+  expect(idle?.lastAssistantText).toBe(
+    'FINAL: the flake is a clock race in retry.ts',
+  )
 
   await stopTeammate(started)
   const completion = ownCompletion(started.taskId)
   expect(completion).toContain('<status>completed</status>')
-  expect(completion).toContain('delivered to the lead by SendMessage')
-  expect(completion).not.toContain('all green')
+  expect(completion).toContain(
+    '<result>FINAL: the flake is a clock race in retry.ts',
+  )
+  expect(completion).not.toContain('delivered to the lead by SendMessage')
 })
 
 test("the in-process completion writes the final report to <output-file> before the lead is notified", async () => {

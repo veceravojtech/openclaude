@@ -28,6 +28,7 @@ import {
   evictTaskOutput,
   getTaskOutputPath,
 } from '../../utils/task/diskOutput.js'
+import { unescapeXml } from '../../utils/xml.js'
 import { registerOutOfProcessTeammateTask } from './spawnMultiAgent.js'
 
 // A pane teammate's <task-notification> names an <output-file>. It used to
@@ -247,7 +248,8 @@ test('a watchdog deadline failure writes its failure report to <output-file> bef
   expect(result).toContain('Teammate emitted no lifecycle signal within 600s')
   expect(result).toContain('Last ~40 lines of the pane:\nlast pane line')
   // The same failure text is on disk the moment the lead sees it.
-  expect(fileAtEnqueue).toBe(`${result}\n`)
+  // The file holds the raw text; <result> holds it XML-escaped.
+  expect(fileAtEnqueue).toBe(`${unescapeXml(result)}\n`)
 })
 
 test('eviction keeps the file, so the path advertised after it still reads', async () => {

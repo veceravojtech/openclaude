@@ -39,7 +39,13 @@ import {
 } from '../../utils/swarm/failedTeammateReaper.js'
 import { TEAMMATE_GRACE_MS } from '../../utils/task/framework.js'
 import { getTaskPath, listTasks } from '../../utils/tasks.js'
-import { writeToMailbox } from '../../utils/teammateMailbox.js'
+import type { Message } from '../../types/message.js'
+import {
+  createIdleNotification,
+  getTeammateTurnReport,
+  writeToMailbox,
+} from '../../utils/teammateMailbox.js'
+import { unescapeXml } from '../../utils/xml.js'
 import * as spawnMod from './spawnMultiAgent.js'
 
 /**
@@ -392,8 +398,10 @@ function idleWithText(
   }
 }
 
+/** The `<result>` text as a reader sees it (the builder XML-escapes it). */
 function resultOf(notification: string): string | undefined {
-  return notification.match(/<result>([\s\S]*)<\/result>/)?.[1]
+  const raw = notification.match(/<result>([\s\S]*)<\/result>/)?.[1]
+  return raw === undefined ? undefined : unescapeXml(raw)
 }
 
 test("a watchdog failure's <result> carries the teammate's last text and the pane tail", async () => {
@@ -607,7 +615,7 @@ test("the completion <result> carries the pane teammate's final text", async () 
   expect(result).toContain('[to peer] handed over the tests')
 })
 
-test('a pane teammate that already messaged its lead gets a short <result>, not the text again', async () => {
+test('a pane teammate that messaged its lead but left no final text gets the short <result>', async () => {
   const world = makeWorld()
   registerTeammate(world)
   worldToDispose.push(...world.handles)
@@ -623,6 +631,54 @@ test('a pane teammate that already messaged its lead gets a short <result>, not 
   expect(notifications[0]).toContain(
     '<result>Final report was delivered to the lead by SendMessage (not repeated here).</result>',
   )
+})
+
+test('an early progress DM to the lead never swallows the pane teammate\'s distinct final answer', async () => {
+  const world = makeWorld()
+  registerTeammate(world)
+  worldToDispose.push(...world.handles)
+
+  // The turn, as the child's Stop hook sees it: a progress DM to the lead
+  // that succeeded, then more work, then the real answer.
+  const at = new Date(world.nowMs).toISOString()
+  const turn = [
+    { type: 'user', uuid: 'u0', timestamp: at, message: { role: 'user', content: 'investigate the flake' } },
+    {
+      type: 'assistant', uuid: 'a0', timestamp: at,
+      message: { id: 'm0', role: 'assistant', content: [
+        { type: 'tool_use', id: 'p1', name: 'SendMessage', input: { to: 'team-lead', summary: 'progress', message: 'Starting investigation' } },
+      ] },
+    },
+    {
+      type: 'user', uuid: 'u1', timestamp: at,
+      message: { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'p1', content: [{ type: 'text', text: JSON.stringify({ success: true, message: 'sent' }) }] },
+      ] },
+    },
+    {
+      type: 'assistant', uuid: 'a1', timestamp: at,
+      message: { id: 'm1', role: 'assistant', content: [
+        { type: 'text', text: 'FINAL: the flake is a clock race in retry.ts' },
+      ] },
+    },
+  ] as unknown as Message[]
+  // Built exactly as teammateInit's Stop hook builds it.
+  const idle = createIdleNotification('worker', {
+    idleReason: 'available',
+    ...getTeammateTurnReport(turn, 'team-lead', 'team'),
+  })
+  expect(idle.reportedToLead).toBe(true)
+  expect(idle.lastAssistantText).toBe('FINAL: the flake is a clock race in retry.ts')
+
+  world.teamFile.members[1]!.isActive = true
+  world.mailbox.push({ from: 'worker', text: JSON.stringify(idle), timestamp: at })
+  await world.handles[0]!.scan()
+
+  const notifications = world.notifications()
+  expect(notifications.length).toBe(1)
+  const result = resultOf(notifications[0]!)
+  expect(result).toContain('FINAL: the flake is a clock race in retry.ts')
+  expect(result).not.toContain('delivered to the lead by SendMessage')
 })
 
 test('a child-reported provider failure fails immediately without waiting for the watchdog deadline', async () => {

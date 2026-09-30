@@ -6,6 +6,7 @@ import {
   getTeammateTurnReport,
   isIdleNotification,
   REPORTED_TO_LEAD_RESULT,
+  ALSO_MESSAGED_LEAD_NOTE,
   TEAMMATE_REPORT_MAX_CHARS,
   truncateTeammateReport,
 } from './teammateMailbox.js'
@@ -57,7 +58,7 @@ test('an idle notification with lastAssistantText round-trips through the mailbo
   expect(parsed).toMatchObject({ type: 'idle_notification', from: 'worker', idleReason: 'available' })
 })
 
-test('reportedToLead round-trips and suppresses the text', () => {
+test('reportedToLead round-trips as metadata and never suppresses the text', () => {
   const text = JSON.stringify(
     createIdleNotification('worker', {
       idleReason: 'available',
@@ -67,8 +68,8 @@ test('reportedToLead round-trips and suppresses the text', () => {
   )
   const parsed = isIdleNotification(text)
   expect(parsed?.reportedToLead).toBe(true)
-  expect(parsed?.lastAssistantText).toBeUndefined()
-  expect(text).not.toContain('The same report again.')
+  // A duplicate reaching the lead is acceptable; a lost report is not.
+  expect(parsed?.lastAssistantText).toBe('The same report again.')
 })
 
 test('a notification without a report carries neither field', () => {
@@ -115,7 +116,7 @@ test('the turn report takes the last assistant text of the latest turn only', ()
   expect(report).toEqual({ lastAssistantText: 'final report' })
 })
 
-test('dedupe: a successful plain-text SendMessage to the lead sets reportedToLead', () => {
+test('a successful plain-text SendMessage to the lead sets reportedToLead, and the text is still reported', () => {
   const messages = [
     user('task'),
     assistant([sendMessage('s1', 'team-lead', 'here is my report')]),
@@ -123,8 +124,14 @@ test('dedupe: a successful plain-text SendMessage to the lead sets reportedToLea
     assistant([{ type: 'text', text: 'Sent my report.' }]),
   ]
   const report = getTeammateTurnReport(messages)
-  expect(report.reportedToLead).toBe(true)
-  expect(formatTeammateReportResult(report)).toBe(REPORTED_TO_LEAD_RESULT)
+  expect(report).toEqual({ lastAssistantText: 'Sent my report.', reportedToLead: true })
+  expect(formatTeammateReportResult(report)).toBe(
+    `Sent my report.\n\n${ALSO_MESSAGED_LEAD_NOTE}`,
+  )
+  // Only with no final text at all does the "already delivered" line stand in.
+  expect(formatTeammateReportResult({ reportedToLead: true })).toBe(
+    REPORTED_TO_LEAD_RESULT,
+  )
   // A lead with a custom name is recognised too, bare and qualified.
   expect(
     getTeammateTurnReport(
@@ -154,4 +161,24 @@ test('dedupe does not fire for failed sends, peer DMs, structured messages or ea
   for (const messages of cases) {
     expect(getTeammateTurnReport(messages).reportedToLead).toBeUndefined()
   }
+})
+
+test('an early progress DM to the lead never swallows the distinct final answer', () => {
+  const messages = [
+    user('investigate the flake'),
+    assistant([sendMessage('p1', 'team-lead', 'Starting investigation')]),
+    result('p1', true),
+    assistant([{ type: 'text', text: 'working' }, { type: 'tool_use', id: 'b1', name: 'Bash', input: {} }]),
+    user([{ type: 'tool_result', tool_use_id: 'b1', content: 'ok' }]),
+    assistant([{ type: 'text', text: 'FINAL: the flake is a clock race in retry.ts' }]),
+  ]
+  const report = getTeammateTurnReport(messages)
+  expect(report.reportedToLead).toBe(true)
+  const parsed = isIdleNotification(
+    JSON.stringify(createIdleNotification('worker', { idleReason: 'available', ...report })),
+  )
+  expect(parsed?.lastAssistantText).toBe('FINAL: the flake is a clock race in retry.ts')
+  expect(formatTeammateReportResult(parsed)).toContain(
+    'FINAL: the flake is a clock race in retry.ts',
+  )
 })

@@ -1,4 +1,5 @@
 import { getSdkAgentProgressSummariesEnabled } from '../../bootstrap/state.js';
+import { escapeXml } from '../../utils/xml.js';
 import { OUTPUT_FILE_TAG, RESUMED_PROMPT_TAG, RESUMED_TAG, STATUS_TAG, SUMMARY_TAG, TASK_ID_TAG, TASK_NOTIFICATION_TAG, TOOL_USE_ID_TAG, WORKTREE_BRANCH_TAG, WORKTREE_PATH_TAG, WORKTREE_TAG } from '../../constants/xml.js';
 import { abortSpeculation } from '../../services/PromptSuggestion/speculation.js';
 import { recordDelegatedRunFinished } from '../../services/supervisor/delegationScore.js';
@@ -315,20 +316,24 @@ export function enqueueAgentNotification({
   // told to read a file that was never created has nowhere to go.
   const outputFileLine = taskOutputExists(taskId) ? `\n<${OUTPUT_FILE_TAG}>${getTaskOutputPath(taskId)}</${OUTPUT_FILE_TAG}>` : '';
   const toolUseIdLine = toolUseId ? `\n<${TOOL_USE_ID_TAG}>${toolUseId}</${TOOL_USE_ID_TAG}>` : '';
-  const resultSection = finalMessage ? `\n<result>${finalMessage}</result>` : '';
+  // Everything below that carries agent or teammate text is XML-escaped
+  // (`& < >`): a report containing `</result><status>completed</status>` or
+  // `</task-notification>` must never close its element early and plant a
+  // fake field. The ids, the output-file path and the numbers are ours.
+  const resultSection = finalMessage ? `\n<result>${escapeXml(finalMessage)}</result>` : '';
   const usageSection = usage ? `\n<usage><total_tokens>${usage.totalTokens}</total_tokens><tool_uses>${usage.toolUses}</tool_uses><duration_ms>${usage.durationMs}</duration_ms></usage>` : '';
-  const worktreeSection = worktreePath ? `\n<${WORKTREE_TAG}><${WORKTREE_PATH_TAG}>${worktreePath}</${WORKTREE_PATH_TAG}>${worktreeBranch ? `<${WORKTREE_BRANCH_TAG}>${worktreeBranch}</${WORKTREE_BRANCH_TAG}>` : ''}</${WORKTREE_TAG}>` : '';
+  const worktreeSection = worktreePath ? `\n<${WORKTREE_TAG}><${WORKTREE_PATH_TAG}>${escapeXml(worktreePath)}</${WORKTREE_PATH_TAG}>${worktreeBranch ? `<${WORKTREE_BRANCH_TAG}>${escapeXml(worktreeBranch)}</${WORKTREE_BRANCH_TAG}>` : ''}</${WORKTREE_TAG}>` : '';
   // Machine-readable twin of the summary wording, so a reader doesn't have to
   // parse prose to know this notification is a resumed run's, not a replay.
   const resumedLine = resumeCount > 0 ? `\n<${RESUMED_TAG}>${resumeCount}</${RESUMED_TAG}>` : '';
-  // What was asked on the resumed run. Emitted verbatim, matching the
-  // neighbouring <result> convention, and only when there is a resume and a
-  // prompt — an original run's block stays byte-identical.
-  const resumedPromptLine = resumeCount > 0 && resumedPrompt ? `\n<${RESUMED_PROMPT_TAG}>${resumedPrompt}</${RESUMED_PROMPT_TAG}>` : '';
+  // What was asked on the resumed run, escaped like the neighbouring <result>,
+  // and only when there is a resume and a prompt — an original run's block
+  // stays byte-identical.
+  const resumedPromptLine = resumeCount > 0 && resumedPrompt ? `\n<${RESUMED_PROMPT_TAG}>${escapeXml(resumedPrompt)}</${RESUMED_PROMPT_TAG}>` : '';
   const message = `<${TASK_NOTIFICATION_TAG}>
 <${TASK_ID_TAG}>${taskId}</${TASK_ID_TAG}>${toolUseIdLine}${outputFileLine}
 <${STATUS_TAG}>${status}</${STATUS_TAG}>${resumedLine}${resumedPromptLine}
-<${SUMMARY_TAG}>${summary}</${SUMMARY_TAG}>${resultSection}${usageSection}${worktreeSection}
+<${SUMMARY_TAG}>${escapeXml(summary)}</${SUMMARY_TAG}>${resultSection}${usageSection}${worktreeSection}
 </${TASK_NOTIFICATION_TAG}>`;
   // Supervision: work the supervisor delegated has landed. parentAgentId is
   // undefined exactly when the main thread spawned it — a teammate's own

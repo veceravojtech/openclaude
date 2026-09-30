@@ -807,8 +807,8 @@ async function sendMessageToLeader(
 
 /**
  * What one turn of this teammate leaves for its lead: the final assistant text,
- * or `reportedToLead` when the turn already delivered a plain-text SendMessage
- * to "team-lead" (see getTeammateTurnReport for the dedupe rule). Computed from
+ * plus `reportedToLead` (metadata only) when the turn also delivered a
+ * plain-text SendMessage to "team-lead" (see getTeammateTurnReport). Computed from
  * that turn's own messages only, so the flag resets with every new prompt.
  */
 function teammateTurnReport(
@@ -2180,9 +2180,9 @@ async function idleUntilNextPrompt(params: {
   )
 
   // The turn's final text rides on the idle notification below (capped, and
-  // replaced by `reportedToLead` when the teammate already sent its report
-  // with SendMessage), matching the pane teammates' Stop hook, so the lead
-  // gets the report even if the teammate never messaged it.
+  // kept even when the teammate also messaged the lead — a duplicate is
+  // acceptable, a lost report is not), matching the pane teammates' Stop hook,
+  // so the lead gets the report even if the teammate never messaged it.
 
   // Self-idle stays a scheduling fact; availability additionally includes the
   // recursive delegation tree. Refresh in the existing poll, never a timer.

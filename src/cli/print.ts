@@ -269,6 +269,7 @@ import {
 import { createModelSwitchBreadcrumbs } from 'src/utils/messages.js'
 import { collectContextData } from 'src/commands/context/context-noninteractive.js'
 import { LOCAL_COMMAND_STDOUT_TAG } from 'src/constants/xml.js'
+import { unescapeXml } from 'src/utils/xml.js'
 import {
   statusListeners,
   type ClaudeAILimits,
@@ -2282,7 +2283,9 @@ function runHeadlessStreaming(
                 tool_use_id: toolUseIdMatch?.[1],
                 status,
                 output_file: outputFileMatch?.[1] ?? '',
-                summary: summaryMatch?.[1] ?? '',
+                // Producers XML-escape the summary (LocalAgentTask,
+                // LocalShellTask); SDK consumers get the plain text.
+                summary: unescapeXml(summaryMatch?.[1] ?? ''),
                 usage:
                   totalTokensMatch && toolUsesMatch
                     ? {

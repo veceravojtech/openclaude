@@ -579,14 +579,15 @@ export type IdleNotificationMessage = {
   failureReason?: string
   /**
    * Text of the teammate's last assistant message of the turn, capped by
-   * {@link truncateTeammateReport}. Absent when the turn produced no text, or
-   * when `reportedToLead` is set (the lead already has the report). Optional,
-   * so older readers simply ignore it.
+   * {@link truncateTeammateReport}. Absent only when the turn produced no
+   * text — it is carried even when `reportedToLead` is set, because a message
+   * sent earlier in the turn need not be the report. Optional, so older
+   * readers simply ignore it.
    */
   lastAssistantText?: string
   /**
-   * The teammate delivered a plain-text SendMessage to its lead during this
-   * turn, so the report is in the lead's inbox already and is not repeated.
+   * Metadata only: the teammate delivered a plain-text SendMessage to its lead
+   * during this turn. It never suppresses `lastAssistantText`.
    */
   reportedToLead?: boolean
 }
@@ -641,13 +642,14 @@ export function createIdleNotification(
     completedTaskId: options?.completedTaskId,
     completedStatus: options?.completedStatus,
     failureReason: options?.failureReason,
-    // Dedupe: a report the lead already got by SendMessage is flagged, not
-    // repeated. Enforced here so no caller can send both.
-    ...(options?.reportedToLead
-      ? { reportedToLead: true }
-      : options?.lastAssistantText
-        ? { lastAssistantText: truncateTeammateReport(options.lastAssistantText) }
-        : {}),
+    // The final text is always carried: an earlier SendMessage to the lead
+    // (a progress note, say) is not proof the report arrived, and a duplicate
+    // report is harmless where a lost one is not. `reportedToLead` rides along
+    // as metadata only.
+    ...(options?.lastAssistantText
+      ? { lastAssistantText: truncateTeammateReport(options.lastAssistantText) }
+      : {}),
+    ...(options?.reportedToLead ? { reportedToLead: true } : {}),
   }
 }
 
@@ -657,23 +659,34 @@ export type TeammateTurnReport = {
   reportedToLead?: boolean
 }
 
-/** The `<result>` line used when the report already reached the lead by SendMessage. */
+/**
+ * The `<result>` line used when the turn left no final text but did message
+ * the lead by SendMessage.
+ */
 export const REPORTED_TO_LEAD_RESULT =
   'Final report was delivered to the lead by SendMessage (not repeated here).'
 
+/** Appended to the final text when the turn also messaged the lead. */
+export const ALSO_MESSAGED_LEAD_NOTE =
+  '(The teammate also messaged the lead during this turn.)'
+
 /**
  * The `<result>` text of a teammate's task-notification: the final text
- * (capped), or a short line when the report was already sent by message.
- * Undefined when there is nothing to report.
+ * (capped) whenever there is one — with a short note when the turn also
+ * messaged the lead — else the "already delivered" line when it only
+ * messaged the lead. Undefined when there is nothing to report. The text is
+ * never dropped for having messaged the lead: a duplicate is acceptable, a
+ * lost report is not.
  */
 export function formatTeammateReportResult(
   report: TeammateTurnReport | null | undefined,
 ): string | undefined {
   if (!report) return undefined
-  if (report.reportedToLead) return REPORTED_TO_LEAD_RESULT
-  return report.lastAssistantText
-    ? truncateTeammateReport(report.lastAssistantText)
-    : undefined
+  if (report.lastAssistantText) {
+    const text = truncateTeammateReport(report.lastAssistantText)
+    return report.reportedToLead ? `${text}\n\n${ALSO_MESSAGED_LEAD_NOTE}` : text
+  }
+  return report.reportedToLead ? REPORTED_TO_LEAD_RESULT : undefined
 }
 
 /**
@@ -1474,7 +1487,9 @@ function isSuccessfulSendMessageResult(content: unknown): boolean {
  *   with a plain-text `message` addressed to the lead (`leadName`, "team-lead",
  *   or `<lead>@<teamName>`, case-insensitive) AND its tool_result says
  *   `success: true`. Structured messages (shutdown_response etc.) and failed
- *   sends do not count. When set, the text is not repeated to the lead.
+ *   sends do not count. Metadata only: the text is still reported, since an
+ *   earlier message (a progress note) is not necessarily the report — a
+ *   duplicate reaching the lead is acceptable, a lost report is not.
  */
 export function getTeammateTurnReport(
   messages: Message[],

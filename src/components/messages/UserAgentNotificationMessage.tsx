@@ -4,6 +4,7 @@ import * as React from 'react';
 import { BLACK_CIRCLE } from '../../constants/figures.js';
 import { Box, Text, type TextProps } from '../../ink.js';
 import { extractTag } from '../../utils/messages.js';
+import { unescapeXml } from '../../utils/xml.js';
 type Props = {
   addMargin: boolean;
   param: TextBlockParam;
@@ -31,7 +32,8 @@ export function UserAgentNotificationMessage(t0) {
   } = t1;
   let t2;
   if ($[0] !== text) {
-    t2 = extractTag(text, "summary");
+    // Producers XML-escape the summary; show the plain text.
+    t2 = unescapeXml(extractTag(text, "summary"));
     $[0] = text;
     $[1] = t2;
   } else {
