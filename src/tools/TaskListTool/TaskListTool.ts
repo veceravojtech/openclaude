@@ -3,6 +3,7 @@ import { buildTool, type ToolDef } from '../../Tool.js'
 import { lazySchema } from '../../utils/lazySchema.js'
 import {
   getTaskListId,
+  isTaskResolved,
   isTodoV2Enabled,
   listTasks,
   TaskStatusSchema,
@@ -22,6 +23,7 @@ const outputSchema = lazySchema(() =>
         status: TaskStatusSchema(),
         owner: z.string().optional(),
         blockedBy: z.array(z.string()),
+        supersededBy: z.string().optional(),
       }),
     ),
   }),
@@ -69,9 +71,9 @@ export const TaskListTool = buildTool({
       t => !t.metadata?._internal,
     )
 
-    // Build a set of resolved task IDs for filtering
+    // Build a set of resolved (completed or cancelled) task IDs for filtering
     const resolvedTaskIds = new Set(
-      allTasks.filter(t => t.status === 'completed').map(t => t.id),
+      allTasks.filter(t => isTaskResolved(t.status)).map(t => t.id),
     )
 
     const tasks = allTasks.map(task => ({
@@ -80,6 +82,9 @@ export const TaskListTool = buildTool({
       status: task.status,
       owner: task.owner,
       blockedBy: task.blockedBy.filter(id => !resolvedTaskIds.has(id)),
+      ...(task.supersededBy !== undefined
+        ? { supersededBy: task.supersededBy }
+        : {}),
     }))
 
     return {
@@ -104,7 +109,10 @@ export const TaskListTool = buildTool({
         task.blockedBy.length > 0
           ? ` [blocked by ${task.blockedBy.map(id => `#${id}`).join(', ')}]`
           : ''
-      return `#${task.id} [${task.status}] ${task.subject}${owner}${blocked}`
+      const superseded = task.supersededBy
+        ? ` (superseded by #${task.supersededBy})`
+        : ''
+      return `#${task.id} [${task.status}] ${task.subject}${owner}${blocked}${superseded}`
     })
 
     return {

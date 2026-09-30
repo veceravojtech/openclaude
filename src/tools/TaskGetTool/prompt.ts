@@ -13,9 +13,10 @@ export const PROMPT = `Use this tool to retrieve a task by its ID from the task 
 Returns full task details:
 - **subject**: Task title
 - **description**: Detailed requirements and context
-- **status**: 'pending', 'in_progress', or 'completed'
+- **status**: 'pending', 'in_progress', 'completed', or 'cancelled'
 - **blocks**: Tasks waiting on this one to complete
 - **blockedBy**: Tasks that must complete before this one can start
+- **supersededBy**: For a cancelled task that was replaced, the ID of the replacement task
 
 ## Tips
 

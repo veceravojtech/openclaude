@@ -27,6 +27,7 @@ const outputSchema = lazySchema(() =>
         status: TaskStatusSchema(),
         blocks: z.array(z.string()),
         blockedBy: z.array(z.string()),
+        supersededBy: z.string().optional(),
       })
       .nullable(),
   }),
@@ -92,6 +93,9 @@ export const TaskGetTool = buildTool({
           status: task.status,
           blocks: task.blocks,
           blockedBy: task.blockedBy,
+          ...(task.supersededBy !== undefined
+            ? { supersededBy: task.supersededBy }
+            : {}),
         },
       },
     }
@@ -117,6 +121,9 @@ export const TaskGetTool = buildTool({
     }
     if (task.blocks.length > 0) {
       lines.push(`Blocks: ${task.blocks.map(id => `#${id}`).join(', ')}`)
+    }
+    if (task.supersededBy) {
+      lines.push(`Superseded by: #${task.supersededBy}`)
     }
 
     return {

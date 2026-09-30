@@ -6,7 +6,6 @@ export const PROMPT = `Use this tool to update a task in the task list.
 
 **Mark tasks as resolved:**
 - When you have completed the work described in a task
-- When a task is no longer needed or has been superseded
 - IMPORTANT: Always mark your assigned tasks as resolved when you finish them
 - After resolving, call TaskList to find your next task
 
@@ -19,9 +18,15 @@ export const PROMPT = `Use this tool to update a task in the task list.
   - You encountered unresolved errors
   - You couldn't find necessary files or dependencies
 
+**Cancel or supersede tasks (do NOT delete them):**
+- When a task is no longer needed, set status to \`cancelled\`. The task is kept for the record, its owner is cleared, and tasks that were waiting on it are unblocked.
+- When a task is replaced by another task, set status to \`cancelled\` with \`supersededBy\` set to the replacement task's ID. Tasks that were waiting on the old task now wait on the replacement instead, so they stay blocked until it completes.
+- The replacement must exist, must not be the task itself, must not be cancelled, and must not create a dependency cycle. Otherwise the update is rejected and nothing is changed.
+- Completed or already-cancelled tasks cannot be cancelled, and a cancelled task can never be marked completed.
+
 **Delete tasks:**
-- When a task is no longer relevant or was created in error
-- Setting status to \`deleted\` permanently removes the task
+- Only for a task that was created by mistake (a duplicate, a typo, the wrong list)
+- Setting status to \`deleted\` permanently removes the task and silently drops it from other tasks' dependencies, which can unblock them. For work that was dropped or replaced, cancel or supersede instead.
 
 **Update task details:**
 - When requirements change or become clearer
@@ -30,6 +35,7 @@ export const PROMPT = `Use this tool to update a task in the task list.
 ## Fields You Can Update
 
 - **status**: The task status (see Status Workflow below)
+- **supersededBy**: With \`status: "cancelled"\` only — the ID of the task that replaces this one
 - **subject**: Change the task title (imperative form, e.g., "Run tests")
 - **description**: Change the task description
 - **activeForm**: Present continuous form shown in spinner when in_progress (e.g., "Running tests")
@@ -42,7 +48,7 @@ export const PROMPT = `Use this tool to update a task in the task list.
 
 Status progresses: \`pending\` → \`in_progress\` → \`completed\`
 
-Use \`deleted\` to permanently remove a task.
+Use \`cancelled\` (optionally with \`supersededBy\`) for work that was dropped or replaced. Use \`deleted\` only to remove a task created by mistake.
 
 ## Verification-Gated Tasks
 
@@ -71,7 +77,17 @@ Mark task as completed after finishing work:
 {"taskId": "1", "status": "completed"}
 \`\`\`
 
-Delete a task:
+Cancel a task that is no longer needed:
+\`\`\`json
+{"taskId": "1", "status": "cancelled"}
+\`\`\`
+
+Supersede task 1 with task 4 (its dependents now wait on task 4):
+\`\`\`json
+{"taskId": "1", "status": "cancelled", "supersededBy": "4"}
+\`\`\`
+
+Delete a task created by mistake:
 \`\`\`json
 {"taskId": "1", "status": "deleted"}
 \`\`\`

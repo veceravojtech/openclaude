@@ -10,14 +10,17 @@ import {
 import { lazySchema } from '../../utils/lazySchema.js'
 import {
   blockTask,
+  cancelTask,
   deleteTask,
   getTask,
   getTaskListId,
   getTasksDir,
   isTodoV2Enabled,
   listTasks,
+  TaskCancelError,
   type TaskStatus,
   TaskStatusSchema,
+  TaskTransitionError,
   updateTask,
 } from '../../utils/tasks.js'
 import {
@@ -52,6 +55,12 @@ const inputSchema = lazySchema(() => {
     status: TaskUpdateStatusSchema.optional().describe(
       'New status for the task',
     ),
+    supersededBy: z
+      .string()
+      .optional()
+      .describe(
+        'Only with status "cancelled": the ID of the task that replaces this one. Tasks waiting on this task will wait on the replacement instead.',
+      ),
     addBlocks: z
       .array(z.string())
       .optional()
@@ -132,6 +141,7 @@ export const TaskUpdateTool = buildTool({
       description,
       activeForm,
       status,
+      supersededBy,
       owner,
       addBlocks,
       addBlockedBy,
@@ -160,7 +170,40 @@ export const TaskUpdateTool = buildTool({
       }
     }
 
+    const fail = (error: string) => ({
+      data: {
+        success: false,
+        taskId,
+        updatedFields: [] as string[],
+        error,
+      },
+    })
+
+    if (supersededBy !== undefined && status !== 'cancelled') {
+      return fail(
+        'supersededBy can only be set together with status "cancelled"',
+      )
+    }
+    if (
+      status === 'cancelled' &&
+      (owner !== undefined ||
+        (addBlocks?.length ?? 0) > 0 ||
+        (addBlockedBy?.length ?? 0) > 0)
+    ) {
+      return fail(
+        'A task being cancelled cannot be given an owner or new dependencies in the same update',
+      )
+    }
+    if (status === 'completed' && existingTask.status === 'cancelled') {
+      return fail(
+        `Task #${taskId} is cancelled and cannot be marked completed. Create a new task for the work instead.`,
+      )
+    }
+
     const updatedFields: string[] = []
+    // Set when this call cancelled the task via cancelTask (which writes the
+    // status itself, so it is not part of `updates`).
+    let cancelledTo: TaskStatus | undefined
 
     // Update basic fields if provided and different from current value
     const updates: {
@@ -231,8 +274,26 @@ export const TaskUpdateTool = buildTool({
         }
       }
 
-      // For regular status updates, validate and apply if different
-      if (status !== existingTask.status) {
+      // Cancel / supersede: a list-level operation that also rewrites the
+      // dependencies of other tasks, so it goes through cancelTask rather
+      // than a plain status write. It is not a completion, so neither the
+      // verification gate nor TaskCompleted hooks apply.
+      if (status === 'cancelled') {
+        try {
+          await cancelTask(taskListId, taskId, { supersededBy })
+        } catch (error) {
+          if (error instanceof TaskCancelError) {
+            return fail(error.message)
+          }
+          throw error
+        }
+        cancelledTo = 'cancelled'
+        updatedFields.push('status')
+        if (supersededBy !== undefined) {
+          updatedFields.push('supersededBy')
+        }
+      } else if (status !== existingTask.status) {
+        // For regular status updates, validate and apply if different
         // Verification gate (opt-in): a task flagged requiresVerification can
         // only complete when metadata.verifiedBy names a verifier whose
         // recorded verdict is PASS. This early check gives a fast answer
@@ -303,7 +364,10 @@ export const TaskUpdateTool = buildTool({
       } catch (error) {
         // The locked write re-checks the verification gate against the
         // current task, so a flag added since our read still blocks it.
-        if (error instanceof VerificationGateError) {
+        if (
+          error instanceof VerificationGateError ||
+          error instanceof TaskTransitionError
+        ) {
           return {
             data: {
               success: false,
@@ -382,11 +446,17 @@ export const TaskUpdateTool = buildTool({
       updates.status === 'completed'
     ) {
       const allTasks = await listTasks(taskListId)
-      const allDone = allTasks.every(t => t.status === 'completed')
+      // Cancelled tasks are closed but were never done: they do not block
+      // "all done", yet they neither count toward the 3+ threshold nor
+      // stand in for a verification step.
+      const completedTasks = allTasks.filter(t => t.status === 'completed')
+      const allDone = allTasks.every(
+        t => t.status === 'completed' || t.status === 'cancelled',
+      )
       if (
         allDone &&
-        allTasks.length >= 3 &&
-        !allTasks.some(t => /verif/i.test(t.subject))
+        completedTasks.length >= 3 &&
+        !completedTasks.some(t => /verif/i.test(t.subject))
       ) {
         verificationNudgeNeeded = true
       }
@@ -398,8 +468,11 @@ export const TaskUpdateTool = buildTool({
         taskId,
         updatedFields,
         statusChange:
-          updates.status !== undefined
-            ? { from: existingTask.status, to: updates.status }
+          (cancelledTo ?? updates.status) !== undefined
+            ? {
+                from: existingTask.status,
+                to: (cancelledTo ?? updates.status)!,
+              }
             : undefined,
         verificationNudgeNeeded,
       },

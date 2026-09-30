@@ -40,7 +40,7 @@ ${teammateUseCase}- After completing a task, to check for newly unblocked work o
 Returns a summary of each task:
 ${idDescription}
 - **subject**: Brief description of the task
-- **status**: 'pending', 'in_progress', or 'completed'
+- **status**: 'pending', 'in_progress', 'completed', or 'cancelled' (cancelled tasks are closed: never claimable, and shown with the replacement task when superseded)
 - **owner**: Agent ID if assigned, empty if available
 - **blockedBy**: List of open task IDs that must be resolved first (tasks with blockedBy cannot be claimed until dependencies resolve)
 
