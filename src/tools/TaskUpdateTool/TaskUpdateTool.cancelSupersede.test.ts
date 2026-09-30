@@ -237,6 +237,90 @@ describe('supersede', () => {
     expect(await openBlockers(b)).toEqual([])
   })
 
+  test('a gated task cannot be superseded by a completed, unverified task', async () => {
+    const a = await seed('gated old plan', {
+      metadata: { requiresVerification: true },
+    })
+    const x = await seed('already done, never verified', { status: 'completed' })
+    const b = await seed('downstream')
+    await link(a, b)
+    const before = snapshotFiles()
+
+    const data = await update({ taskId: a, status: 'cancelled', supersededBy: x })
+
+    expect(data.success).toBe(false)
+    expect(data.updatedFields).toEqual([])
+    expect(data.error).toMatch(
+      new RegExp(`#${a} requires verification and #${x} is already completed without passing it`),
+    )
+    expect(data.error).toMatch(/metadata\.verifiedBy is not set/)
+    expect(snapshotFiles()).toEqual(before)
+  })
+
+  test.each([
+    ['FAIL', /recorded verdict FAIL/],
+    ['NONE', /no verdict was recorded/],
+  ] as const)(
+    'a completed replacement whose verifiedBy has verdict %s is rejected',
+    async (verdict, pattern) => {
+      const a = await seed('gated old plan', {
+        metadata: { requiresVerification: true },
+      })
+      const x = await seed('done', {
+        status: 'completed',
+        metadata: { verifiedBy: VERIFIER },
+      })
+      if (verdict === 'FAIL') {
+        await recordVerdict({ agentId: VERIFIER, verdict: 'FAIL' }, LIST)
+      }
+      const before = snapshotFiles()
+
+      const data = await update({ taskId: a, status: 'cancelled', supersededBy: x })
+
+      expect(data.success).toBe(false)
+      expect(data.error).toMatch(pattern)
+      expect(snapshotFiles()).toEqual(before)
+    },
+  )
+
+  test('a gated task can be superseded by a completed task with a PASS verdict', async () => {
+    const a = await seed('gated old plan', {
+      metadata: { requiresVerification: true },
+    })
+    const x = await seed('done and verified', {
+      status: 'completed',
+      metadata: { verifiedBy: VERIFIER },
+    })
+    const b = await seed('downstream')
+    await link(a, b)
+    await recordVerdict({ agentId: VERIFIER, verdict: 'PASS' }, LIST)
+
+    const data = await update({ taskId: a, status: 'cancelled', supersededBy: x })
+
+    expect(data.success).toBe(true)
+    expect((await task(a)).status).toBe('cancelled')
+    expect((await task(x)).metadata).toEqual({
+      verifiedBy: VERIFIER,
+      requiresVerification: true,
+    })
+    // X is completed and verified, so the re-pointed dependent is free.
+    expect((await task(b)).blockedBy).toEqual([x])
+    expect(await openBlockers(b)).toEqual([])
+  })
+
+  test('an ungated task can still be superseded by a completed task', async () => {
+    const a = await seed('old plan')
+    const x = await seed('already done', { status: 'completed' })
+    const b = await seed('downstream')
+    await link(a, b)
+
+    const data = await update({ taskId: a, status: 'cancelled', supersededBy: x })
+
+    expect(data.success).toBe(true)
+    expect((await task(x)).metadata).toBeUndefined()
+    expect(await openBlockers(b)).toEqual([])
+  })
+
   test('a one-sided A.blocks → B edge is re-pointed too', async () => {
     const x = await seed('new plan')
     const b = await seed('downstream')

@@ -706,6 +706,25 @@ async function cancelTaskLocked(
         `Cannot supersede task #${taskId}: replacement task #${supersededBy} is cancelled`,
       )
     }
+    // The replacement inherits the verification requirement (below). The
+    // completion gate only runs on a transition INTO 'completed', so an
+    // already-completed replacement would never be checked: it must pass the
+    // gate now, on its current metadata, or superseding would skip it.
+    if (
+      task.metadata?.requiresVerification === true &&
+      replacement.status === 'completed'
+    ) {
+      const gateError = await checkVerificationGateIn(
+        getTasksDir(taskListId),
+        { requiresVerification: true },
+        replacement.metadata,
+      )
+      if (gateError) {
+        throw new TaskCancelError(
+          `Cannot supersede task #${taskId} with #${supersededBy}: #${taskId} requires verification and #${supersededBy} is already completed without passing it. ${gateError.replace(/^Cannot complete task: /, 'Verification check on the replacement: ')}`,
+        )
+      }
+    }
   }
 
   // Detach the cancelled task from every other task. An edge counts when
