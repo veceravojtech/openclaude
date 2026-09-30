@@ -64,7 +64,7 @@ import { spawnTeammate, generateUniqueTeammateName } from '../shared/spawnMultiA
 import { PROVIDER_PROFILE_IN_PROCESS_ERROR, resolveProviderProfileEnv } from './providerProfileBinding.js';
 import { getTeammateSpawnCapError, MAX_TEAMMATE_REPLICAS_CEILING } from './teammateReplicas.js';
 import { setAgentColor } from './agentColorManager.js';
-import { agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extractPartialResult, finalizeAgentTool, getLastToolUseName, runAsyncAgentLifecycle } from './agentToolUtils.js';
+import { agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extractPartialResult, finalizeAgentTool, getLastToolUseName, recordVerificationVerdictIfApplicable, runAsyncAgentLifecycle } from './agentToolUtils.js';
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
 import { buildForkedMessages, buildWorktreeNotice, FORK_AGENT, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
@@ -1641,6 +1641,7 @@ export const AgentTool = buildTool({
                       }
                     }
                     const agentResult = finalizeAgentTool(agentMessages, backgroundedTaskId, metadata);
+                    await recordVerificationVerdictIfApplicable(agentResult);
 
                     // Mark task completed FIRST so TaskOutput(block=true)
                     // unblocks immediately. classifyHandoffIfNeeded and
@@ -1931,6 +1932,7 @@ export const AgentTool = buildTool({
           logForDebugging(`Sync agent recovering from error with ${agentMessages.length} messages`);
         }
         const agentResult = finalizeAgentTool(agentMessages, syncAgentId, metadata);
+        await recordVerificationVerdictIfApplicable(agentResult);
         if (feature('TRANSCRIPT_CLASSIFIER')) {
           const currentAppState = toolUseContext.getAppState();
           const handoffWarning = await classifyHandoffIfNeeded({
@@ -2051,6 +2053,11 @@ The agent is now running and will receive instructions via mailbox.${spawnData.d
       const isolationFallbackText = worktreeData.worktreeIsolationFallback
         ? `\n${formatWorktreeIsolationFallbackResultText()}`
         : '';
+      // Verification runs: tell the caller what was recorded and how to cite
+      // it, so a requiresVerification task can be completed via verifiedBy.
+      const verdictText = data.verificationVerdict
+        ? `\nverificationVerdict: ${data.verificationVerdict} (recorded for this agentId; to complete a task with requiresVerification, set metadata.verifiedBy: '${data.agentId}' — only PASS allows completion)`
+        : '';
       // If the subagent completes with no content, the tool_result is just the
       // agentId/usage trailer below — a metadata-only block at the prompt tail.
       // Some models read that as "nothing to act on" and end their turn
@@ -2078,7 +2085,7 @@ The agent is now running and will receive instructions via mailbox.${spawnData.d
         type: 'tool_result',
         content: [...contentOrMarker, {
           type: 'text',
-          text: `agentId: ${data.agentId} (use SendMessage with to: '${data.agentId}' to continue this agent)${worktreeInfoText}${isolationFallbackText}
+          text: `agentId: ${data.agentId} (use SendMessage with to: '${data.agentId}' to continue this agent)${verdictText}${worktreeInfoText}${isolationFallbackText}
 <usage>total_tokens: ${data.totalTokens}
 tool_uses: ${data.totalToolUseCount}
 duration_ms: ${data.totalDurationMs}</usage>`

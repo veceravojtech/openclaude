@@ -56,8 +56,16 @@ import {
 import { emitTaskProgress as emitTaskProgressEvent } from '../../utils/task/sdkProgress.js'
 import { isInProcessTeammate } from '../../utils/teammateContext.js'
 import { getTokenCountFromUsage } from '../../utils/tokens.js'
+import {
+  parseVerdict,
+  recordVerdict,
+} from '../../utils/verificationVerdicts.js'
 import { EXIT_PLAN_MODE_V2_TOOL_NAME } from '../ExitPlanModeTool/constants.js'
-import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME } from './constants.js'
+import {
+  AGENT_TOOL_NAME,
+  LEGACY_AGENT_TOOL_NAME,
+  VERIFICATION_AGENT_TYPE,
+} from './constants.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
 export type ResolvedAgentTools = {
   hasWildcard: boolean
@@ -231,6 +239,11 @@ export const agentToolResultSchema = lazySchema(() =>
     // results verbatim without re-validation). Used to gate the sync
     // result trailer — one-shot built-ins skip the SendMessage hint.
     agentType: z.string().optional(),
+    // Set only for built-in verification runs: the verdict parsed from the
+    // final text and recorded for TaskUpdate's requiresVerification gate.
+    verificationVerdict: z
+      .enum(['PASS', 'FAIL', 'PARTIAL', 'MISSING'])
+      .optional(),
     content: z.array(z.object({ type: z.literal('text'), text: z.string() })),
     totalToolUseCount: z.number(),
     totalDurationMs: z.number(),
@@ -372,6 +385,34 @@ export function finalizeAgentTool(
     totalTokens,
     totalToolUseCount,
     usage: lastAssistantMessage.message.usage,
+  }
+}
+
+/**
+ * For a finished run of the built-in verification agent, parse the
+ * `VERDICT:` line from its final text and persist it under its agentId so a
+ * task flagged `requiresVerification` can cite it via `metadata.verifiedBy`.
+ * Sets `result.verificationVerdict` so the caller sees what was recorded.
+ *
+ * Never throws: a failure to record is logged and the Agent tool continues
+ * (the gate then reports "no verdict recorded", which fails closed).
+ */
+export async function recordVerificationVerdictIfApplicable(
+  result: AgentToolResult,
+): Promise<void> {
+  if (result.agentType !== VERIFICATION_AGENT_TYPE) return
+  try {
+    const verdict = parseVerdict(extractTextContent(result.content, '\n'))
+    result.verificationVerdict = verdict
+    await recordVerdict({ agentId: result.agentId, verdict })
+    logForDebugging(
+      `[verificationVerdicts] recorded ${verdict} for verifier ${result.agentId}`,
+    )
+  } catch (error) {
+    logForDebugging(
+      `[verificationVerdicts] failed to record verdict for ${result.agentId}: ${errorMessage(error)}`,
+      { level: 'error' },
+    )
   }
 }
 
@@ -614,6 +655,9 @@ export async function runAsyncAgentLifecycle({
     stopSummarization?.()
 
     const agentResult = finalizeAgentTool(agentMessages, taskId, metadata)
+    // Record before completion is signalled, so a caller woken by the
+    // completion can already cite this verifier in metadata.verifiedBy.
+    await recordVerificationVerdictIfApplicable(agentResult)
 
     // Mark task completed FIRST so TaskOutput(block=true) unblocks
     // immediately. classifyHandoffIfNeeded (API call) and getWorktreeResult
