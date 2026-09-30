@@ -13,9 +13,27 @@ import {
 // instead of a generic "Custom model" entry — including [1m]-tagged picks,
 // whose exact tagged value must be preserved on the option.
 
+/**
+ * Pristine namespaces through cache-busted specifiers nothing mocks.
+ * mock.restore() does not undo mock.module(), so without the afterEach
+ * restore below this file's ./providers.js stub (and the ./model.js copy bound
+ * to it) escaped into the rest of the sweep and reported getAPIProvider() as
+ * 'xai'/'codex' — UsageTool/report.accounts.test.ts then found no first-party
+ * account sections. Same fix as modelOptions.gateways.test.ts.
+ */
+let pristineProviders: Record<string, unknown> | undefined
+let pristineModel: Record<string, unknown> | undefined
+
+async function capturePristineModelModules(): Promise<void> {
+  const nonce = `codexRecoveryPristine=${Date.now()}-${Math.random()}`
+  pristineProviders ??= await import(`./providers.ts?${nonce}`)
+  pristineModel ??= await import(`./model.ts?${nonce}`)
+}
+
 async function importFreshModelOptionsModule(provider: string) {
   mock.restore()
   mock.module('./providers.js', () => ({
+    ...pristineProviders,
     getAPIProvider: () => provider,
     getAPIProviderForStatsig: () => provider,
     isFirstPartyAnthropicBaseUrl: () => false,
@@ -42,6 +60,7 @@ const originalEnv: Record<string, string | undefined> = {}
 
 beforeEach(async () => {
   await acquireEnvMutex()
+  await capturePristineModelModules()
   mock.restore()
   setSessionSettingsCache({ settings: {}, errors: [] })
   for (const key of ENV_KEYS) {
@@ -54,6 +73,12 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    if (pristineProviders) {
+      mock.module('./providers.js', () => ({ ...pristineProviders }))
+    }
+    if (pristineModel) {
+      mock.module('./model.js', () => ({ ...pristineModel }))
+    }
     resetSettingsCache()
     for (const key of ENV_KEYS) {
       const value = originalEnv[key]

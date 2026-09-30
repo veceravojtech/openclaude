@@ -8,6 +8,17 @@ import { acquireEnvMutex, releaseEnvMutex } from '../entrypoints/sdk/shared.js'
 import { resolveRouteCredentialValue } from '../integrations/routeMetadata.js'
 import type { ProviderProfile } from './config.js'
 
+// Snapshot of the real ./config.js exports, taken before this file's first
+// mock.module() call. mock.restore() does not undo mock.module(), and the
+// stub installed by importFreshProviderProfileModules() routes
+// saveGlobalConfig into this file's private mockConfigState and makes
+// getGlobalConfig return a fresh object per call; left in place it broke
+// later files that write and read back the global config (e.g.
+// state/onChangeAppState.expandedView.test.ts saw zero saves). afterEach puts
+// these real functions back. Spread, because mock.module() mutates the live
+// namespace in place.
+const pristineConfigModule = { ...(await import('./config.js')) }
+
 test('findProviderProfilesForModel returns all positive profile matches for ambiguity checks', async () => {
   const { findProviderProfilesForModel } = await import('./providerProfiles.js')
   const profiles: ProviderProfile[] = [
@@ -215,6 +226,7 @@ afterEach(() => {
     }
 
     mock.restore()
+    mock.module('./config.js', () => ({ ...pristineConfigModule }))
     globalThis.fetch = originalFetch
     mockConfigState = createMockConfigState()
     process.chdir(originalCwd)
