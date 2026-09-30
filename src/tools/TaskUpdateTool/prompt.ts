@@ -52,6 +52,8 @@ A task whose metadata has \`requiresVerification: true\` can only be marked \`co
 - Get the verifier agentId from the Agent tool result: a synchronous run ends with an \`agentId: <id>\` line followed by a \`verificationVerdict: <verdict>\` line; a background run returns its agentId at launch, and its completion notification carries the same id as the task-id.
 - FAIL, PARTIAL, a report with no VERDICT line, or an agentId with no recorded verdict all block completion. Fix the work, run a new verification, and cite the new verifier's agentId.
 - \`verifiedBy\` can be set in the same call that completes the task. The \`requiresVerification\` flag cannot be cleared in that call to skip the check.
+- Starting or resuming a verifier clears its earlier verdict; only a run that finishes records a new one. If the result says the verdict was NOT recorded, run the verification again.
+- This gate is a guardrail against mistakes, not a security boundary: the flag can still be removed in a separate, earlier update, one PASS can be cited for more than one task, and anything with file-write access could forge a record. Do not use it to work around a real verification.
 
 ## Staleness
 
