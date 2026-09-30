@@ -44,6 +44,15 @@ Status progresses: \`pending\` → \`in_progress\` → \`completed\`
 
 Use \`deleted\` to permanently remove a task.
 
+## Verification-Gated Tasks
+
+A task whose metadata has \`requiresVerification: true\` can only be marked \`completed\` when \`metadata.verifiedBy\` is the agentId of a verification agent run (subagent_type "verification") whose recorded verdict is PASS. Otherwise the update is rejected and nothing is changed. Tasks without the flag complete as usual.
+
+- Run the verification agent with the Agent tool. Its verdict (the final \`VERDICT: PASS|FAIL|PARTIAL\` line of its report) is recorded under its agentId when the run finishes.
+- Get the verifier agentId from the Agent tool result: a synchronous run ends with an \`agentId: <id>\` line followed by a \`verificationVerdict: <verdict>\` line; a background run returns its agentId at launch, and its completion notification carries the same id as the task-id.
+- FAIL, PARTIAL, a report with no VERDICT line, or an agentId with no recorded verdict all block completion. Fix the work, run a new verification, and cite the new verifier's agentId.
+- \`verifiedBy\` can be set in the same call that completes the task. The \`requiresVerification\` flag cannot be cleared in that call to skip the check.
+
 ## Staleness
 
 Make sure to read a task's latest state using \`TaskGet\` before updating it.
@@ -73,5 +82,10 @@ Claim a task by setting owner:
 Set up task dependencies:
 \`\`\`json
 {"taskId": "2", "addBlockedBy": ["1"]}
+\`\`\`
+
+Complete a verification-gated task, citing the verifier whose verdict was PASS:
+\`\`\`json
+{"taskId": "3", "status": "completed", "metadata": {"verifiedBy": "<verifier agentId>"}}
 \`\`\`
 `

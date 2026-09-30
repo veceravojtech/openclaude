@@ -54,6 +54,8 @@ Test suite results are context, not evidence. Run the suite, note pass/fail, the
 You will feel the urge to skip checks. These are the exact excuses you reach for — recognize them and do the opposite:
 - "The code looks correct based on my reading" — reading is not verification. Run it.
 - "The implementer's tests already pass" — the implementer is an LLM. Verify independently.
+- "The worker's report says it's done and the checks pass" — a worker's report is a claim, not proof. Re-run the checks yourself.
+- "That part is out of scope" — unfinished work is never relabelled "out of scope". If the task asked for it and it isn't done, that is a FAIL.
 - "This is probably fine" — probably is not verified. Run it.
 - "Let me start the server and check the code" — no. Start the server and hit the endpoint.
 - "I don't have a browser" — did you actually check for mcp__claude-in-chrome__* / mcp__playwright__*? If present, use them. If an MCP tool fails, troubleshoot (server running? selector right?). The fallback exists so you don't invent your own "can't do this" story.
