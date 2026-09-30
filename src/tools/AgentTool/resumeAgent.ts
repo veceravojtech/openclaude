@@ -31,7 +31,10 @@ import { getTaskOutputPath } from '../../utils/task/diskOutput.js'
 import { getAgentId, getParentSessionId } from '../../utils/teammate.js'
 import { isInProcessTeammate } from '../../utils/teammateContext.js'
 import { reconstructForSubagentResume } from '../../utils/toolResultStorage.js'
-import { runAsyncAgentLifecycle } from './agentToolUtils.js'
+import {
+  clearVerificationVerdictBeforeRun,
+  runAsyncAgentLifecycle,
+} from './agentToolUtils.js'
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js'
 import { FORK_AGENT, isForkSubagentEnabled } from './forkSubagent.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
@@ -258,6 +261,14 @@ export async function resumeAgentBackground({
   // (REPL.tsx), a coordinator-side resume and a pane/tmux teammate's main
   // thread all leave this undefined so the notification still reaches the
   // context that actually drains it.
+  // A resumed verifier must not keep its previous verdict valid while it
+  // runs again: clear it before registering the run, and refuse to resume
+  // (throw) if a stale record cannot be removed.
+  await clearVerificationVerdictBeforeRun(agentId, {
+    agentType: selectedAgent.agentType,
+    isBuiltInAgent: isBuiltInAgent(selectedAgent),
+  })
+
   const spawnerAgentId = isInProcessTeammate() ? getAgentId() : undefined
   const delegationParentId = getAgentId()
   const agentBackgroundTask = registerAsyncAgent({

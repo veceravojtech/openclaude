@@ -57,6 +57,7 @@ import { emitTaskProgress as emitTaskProgressEvent } from '../../utils/task/sdkP
 import { isInProcessTeammate } from '../../utils/teammateContext.js'
 import { getTokenCountFromUsage } from '../../utils/tokens.js'
 import {
+  clearVerdict,
   parseVerdict,
   recordVerdict,
 } from '../../utils/verificationVerdicts.js'
@@ -244,6 +245,10 @@ export const agentToolResultSchema = lazySchema(() =>
     verificationVerdict: z
       .enum(['PASS', 'FAIL', 'PARTIAL', 'MISSING'])
       .optional(),
+    // Whether verificationVerdict was actually persisted. False means the
+    // write failed and the gate will see no verdict for this agentId.
+    verificationVerdictRecorded: z.boolean().optional(),
+    verificationVerdictError: z.string().optional(),
     content: z.array(z.object({ type: z.literal('text'), text: z.string() })),
     totalToolUseCount: z.number(),
     totalDurationMs: z.number(),
@@ -389,31 +394,101 @@ export function finalizeAgentTool(
 }
 
 /**
- * For a finished run of the built-in verification agent, parse the
- * `VERDICT:` line from its final text and persist it under its agentId so a
- * task flagged `requiresVerification` can cite it via `metadata.verifiedBy`.
- * Sets `result.verificationVerdict` so the caller sees what was recorded.
+ * True only for the genuine built-in verification agent. Project, user,
+ * plugin, or SDK agents can override a built-in by name (loadAgentsDir), so
+ * the agentType alone must not be able to mint a verdict.
+ */
+export function isBuiltInVerificationRun(identity: {
+  agentType: string | undefined
+  isBuiltInAgent: boolean
+}): boolean {
+  return (
+    identity.agentType === VERIFICATION_AGENT_TYPE && identity.isBuiltInAgent
+  )
+}
+
+/**
+ * Called before a built-in verification run starts (fresh or resumed):
+ * deletes any verdict already on file for this agentId, so an old PASS can
+ * never outlive a newer run that fails, errors, or cannot record.
  *
- * Never throws: a failure to record is logged and the Agent tool continues
- * (the gate then reports "no verdict recorded", which fails closed).
+ * Throws when the old record exists but cannot be removed; the caller must
+ * then refuse to start the run rather than run with a stale verdict on file.
+ */
+export async function clearVerificationVerdictBeforeRun(
+  agentId: string,
+  identity: { agentType: string | undefined; isBuiltInAgent: boolean },
+): Promise<void> {
+  if (!isBuiltInVerificationRun(identity)) return
+  try {
+    await clearVerdict(agentId)
+  } catch (error) {
+    throw new Error(
+      `Cannot start verification agent ${agentId}: its previous verdict record could not be cleared (${errorMessage(error)}). Refusing to run while a possibly stale verdict is on file.`,
+    )
+  }
+}
+
+/**
+ * For a successfully finished run of the built-in verification agent, parse
+ * the `VERDICT:` line from its final text and persist it under its agentId so
+ * a task flagged `requiresVerification` can cite it via `metadata.verifiedBy`.
+ * Call it only on the success path (after finalizeAgentTool): aborted or
+ * errored runs record nothing, and since the record was cleared when the run
+ * started, the gate then reports "no verdict recorded".
+ *
+ * Sets `result.verificationVerdict` to the parsed verdict and
+ * `result.verificationVerdictRecorded` to whether it was persisted (with
+ * `verificationVerdictError` on failure), so the caller is told the truth.
+ *
+ * Never throws: a failure to record is logged and the Agent tool continues.
  */
 export async function recordVerificationVerdictIfApplicable(
   result: AgentToolResult,
+  identity: { isBuiltInAgent: boolean },
 ): Promise<void> {
-  if (result.agentType !== VERIFICATION_AGENT_TYPE) return
+  if (
+    !isBuiltInVerificationRun({
+      agentType: result.agentType,
+      isBuiltInAgent: identity.isBuiltInAgent,
+    })
+  ) {
+    return
+  }
   try {
     const verdict = parseVerdict(extractTextContent(result.content, '\n'))
     result.verificationVerdict = verdict
     await recordVerdict({ agentId: result.agentId, verdict })
+    result.verificationVerdictRecorded = true
     logForDebugging(
       `[verificationVerdicts] recorded ${verdict} for verifier ${result.agentId}`,
     )
   } catch (error) {
+    result.verificationVerdictRecorded = false
+    result.verificationVerdictError = errorMessage(error)
     logForDebugging(
       `[verificationVerdicts] failed to record verdict for ${result.agentId}: ${errorMessage(error)}`,
       { level: 'error' },
     )
+    // Belt and braces: the record was cleared when the run started, but make
+    // sure no older verdict survives a failed write either.
+    await clearVerdict(result.agentId).catch(() => {})
   }
+}
+
+/**
+ * One line describing a verification run's verdict for the caller: whether
+ * it was recorded and how to cite it, or that it was NOT recorded and why.
+ * Undefined for non-verification runs.
+ */
+export function formatVerificationVerdictLine(
+  result: AgentToolResult,
+): string | undefined {
+  if (!result.verificationVerdict) return undefined
+  if (result.verificationVerdictRecorded) {
+    return `verificationVerdict: ${result.verificationVerdict} (recorded for this agentId; to complete a task with requiresVerification, set metadata.verifiedBy: '${result.agentId}' — only PASS allows completion)`
+  }
+  return `verificationVerdict: ${result.verificationVerdict} (NOT recorded: ${result.verificationVerdictError ?? 'unknown error'}; this agentId cannot satisfy requiresVerification — run the verification again)`
 }
 
 /**
@@ -657,7 +732,7 @@ export async function runAsyncAgentLifecycle({
     const agentResult = finalizeAgentTool(agentMessages, taskId, metadata)
     // Record before completion is signalled, so a caller woken by the
     // completion can already cite this verifier in metadata.verifiedBy.
-    await recordVerificationVerdictIfApplicable(agentResult)
+    await recordVerificationVerdictIfApplicable(agentResult, metadata)
 
     // Mark task completed FIRST so TaskOutput(block=true) unblocks
     // immediately. classifyHandoffIfNeeded (API call) and getWorktreeResult
@@ -666,6 +741,10 @@ export async function runAsyncAgentLifecycle({
     completeAsyncAgent(agentResult, rootSetAppState)
 
     let finalMessage = extractTextContent(agentResult.content, '\n')
+    const verdictLine = formatVerificationVerdictLine(agentResult)
+    if (verdictLine) {
+      finalMessage = `${finalMessage}\n\n${verdictLine}`
+    }
 
     if (feature('TRANSCRIPT_CLASSIFIER')) {
       const handoffWarning = await classifyHandoffIfNeeded({

@@ -64,7 +64,7 @@ import { spawnTeammate, generateUniqueTeammateName } from '../shared/spawnMultiA
 import { PROVIDER_PROFILE_IN_PROCESS_ERROR, resolveProviderProfileEnv } from './providerProfileBinding.js';
 import { getTeammateSpawnCapError, MAX_TEAMMATE_REPLICAS_CEILING } from './teammateReplicas.js';
 import { setAgentColor } from './agentColorManager.js';
-import { agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extractPartialResult, finalizeAgentTool, getLastToolUseName, recordVerificationVerdictIfApplicable, runAsyncAgentLifecycle } from './agentToolUtils.js';
+import { type AgentToolResult, agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extractPartialResult, clearVerificationVerdictBeforeRun, finalizeAgentTool, formatVerificationVerdictLine, getLastToolUseName, recordVerificationVerdictIfApplicable, runAsyncAgentLifecycle } from './agentToolUtils.js';
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
 import { buildForkedMessages, buildWorktreeNotice, FORK_AGENT, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
@@ -1207,6 +1207,10 @@ export const AgentTool = buildTool({
 
     // Create a stable agent ID early so it can be used for worktree slug
     const earlyAgentId = createAgentId();
+    // A verifier's verdict on file must come from THIS run: clear any
+    // existing record before anything runs (throws, refusing to launch, if
+    // a stale record cannot be removed).
+    await clearVerificationVerdictBeforeRun(earlyAgentId, metadata);
 
     // Set up worktree isolation if requested
     let worktreeInfo: {
@@ -1550,6 +1554,7 @@ export const AgentTool = buildTool({
         // Track if an error occurred during iteration
         let syncAgentError: Error | undefined;
         let wasAborted = false;
+        let syncAgentResult: AgentToolResult | undefined;
         let worktreeResult: {
           worktreePath?: string;
           worktreeBranch?: string;
@@ -1641,7 +1646,7 @@ export const AgentTool = buildTool({
                       }
                     }
                     const agentResult = finalizeAgentTool(agentMessages, backgroundedTaskId, metadata);
-                    await recordVerificationVerdictIfApplicable(agentResult);
+                    await recordVerificationVerdictIfApplicable(agentResult, metadata);
 
                     // Mark task completed FIRST so TaskOutput(block=true)
                     // unblocks immediately. classifyHandoffIfNeeded and
@@ -1857,6 +1862,28 @@ export const AgentTool = buildTool({
           // closure owns a separate stop function (stopBackgroundedSummarization).
           stopForegroundSummarization?.();
 
+          // A verification run that finished successfully records its verdict
+          // HERE, before completion is signalled below (foreground unregister,
+          // SDK task_notification, worktree cleanup), so anything woken by
+          // that signal can already cite this verifier. Aborted, errored, or
+          // backgrounded runs record nothing on this path.
+          if (!wasBackgrounded && !wasAborted && !syncAgentError) {
+            const lastSyncMessage = agentMessages.findLast(_ => _.type !== 'system' && _.type !== 'progress');
+            const endedSynthetic = lastSyncMessage !== undefined && isSyntheticMessage(lastSyncMessage);
+            if (!endedSynthetic && agentMessages.some(msg => msg.type === 'assistant')) {
+              try {
+                syncAgentResult = finalizeAgentTool(agentMessages, syncAgentId, metadata);
+              } catch (error) {
+                // Leave it to the post-cleanup finalize below, which surfaces
+                // the same error exactly as before.
+                logForDebugging(`Early sync finalize failed: ${errorMessage(error)}`);
+              }
+              if (syncAgentResult) {
+                await recordVerificationVerdictIfApplicable(syncAgentResult, metadata);
+              }
+            }
+          }
+
           // Unregister foreground task if agent completed without being backgrounded
           if (foregroundTaskId) {
             unregisterAgentForeground(foregroundTaskId, rootSetAppState);
@@ -1931,8 +1958,10 @@ export const AgentTool = buildTool({
           // This allows the parent agent to see partial progress even after an error
           logForDebugging(`Sync agent recovering from error with ${agentMessages.length} messages`);
         }
-        const agentResult = finalizeAgentTool(agentMessages, syncAgentId, metadata);
-        await recordVerificationVerdictIfApplicable(agentResult);
+        // Normally finalized (and any verdict recorded) in the finally above.
+        // The error-recovery path finalizes here and records nothing: an
+        // errored verification run must not leave a verdict on file.
+        const agentResult = syncAgentResult ?? finalizeAgentTool(agentMessages, syncAgentId, metadata);
         if (feature('TRANSCRIPT_CLASSIFIER')) {
           const currentAppState = toolUseContext.getAppState();
           const handoffWarning = await classifyHandoffIfNeeded({
@@ -2055,9 +2084,9 @@ The agent is now running and will receive instructions via mailbox.${spawnData.d
         : '';
       // Verification runs: tell the caller what was recorded and how to cite
       // it, so a requiresVerification task can be completed via verifiedBy.
-      const verdictText = data.verificationVerdict
-        ? `\nverificationVerdict: ${data.verificationVerdict} (recorded for this agentId; to complete a task with requiresVerification, set metadata.verifiedBy: '${data.agentId}' — only PASS allows completion)`
-        : '';
+      // Says NOT recorded (and why) when the write failed.
+      const verdictLine = formatVerificationVerdictLine(data);
+      const verdictText = verdictLine ? `\n${verdictLine}` : '';
       // If the subagent completes with no content, the tool_result is just the
       // agentId/usage trailer below — a metadata-only block at the prompt tail.
       // Some models read that as "nothing to act on" and end their turn
