@@ -113,7 +113,7 @@ import { getActiveAgentsFromList, getAgentDefinitionsWithOverrides, isBuiltInAge
 import type { LogOption } from './types/logs.js';
 import type { Message as MessageType } from './types/message.js';
 import { assertMinVersion } from './utils/autoUpdater.js';
-import { setupClaudeInChrome, shouldAutoEnableClaudeInChrome, shouldEnableClaudeInChrome } from './utils/claudeInChrome/setup.js';
+import { setupClaudeInChrome, shouldAutoEnableClaudeInChrome, shouldEnableClaudeInChrome, waitForClaudeInChromeSetup } from './utils/claudeInChrome/setup.js';
 import { mergeClaudeInChromeStartupConfig, resolveClaudeInChromeStartupMode } from './utils/claudeInChrome/startup.js';
 import { getContextWindowForModel } from './utils/context.js';
 import { loadConversationForResume } from './utils/conversationRecovery.js';
@@ -156,6 +156,8 @@ import { registerMcpXaaIdpCommand } from 'src/commands/mcp/xaaIdpCommand.js';
 import { fetchClaudeAIMcpConfigsIfEligible } from 'src/services/mcp/claudeai.js';
 import { clearServerCache } from 'src/services/mcp/client.js';
 import { areMcpConfigsAllowedWithEnterpriseMcpConfig, dedupClaudeAiMcpServers, doesEnterpriseMcpConfigExist, filterMcpServersByPolicy, getClaudeCodeMcpConfigs, getMcpServerSignature, parseMcpConfig, parseMcpConfigFromFilePath } from 'src/services/mcp/config.js';
+import { getHeadlessMcpConfigWarnings } from 'src/services/mcp/headlessErrors.js';
+import type { PluginError } from 'src/types/plugin.js';
 import { excludeCommandsByServer, excludeResourcesByServer } from 'src/services/mcp/utils.js';
 import { isXaaEnabled } from 'src/services/mcp/xaaIdpLogin.js';
 import { getRelevantTips } from 'src/services/tips/tipRegistry.js';
@@ -263,8 +265,7 @@ function isBeingDebugged() {
   // Check if inspector is available and active (indicates debugging)
   try {
     // Dynamic import would be better but is async - use global object instead
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const inspector = (global as any).require('inspector');
+    const inspector = (global as unknown as { require: (s: string) => { url: () => string } }).require('inspector');
     const hasInspectorUrl = !!inspector.url();
     return hasInspectorUrl || hasInspectArg || hasInspectEnv;
   } catch {
@@ -1739,7 +1740,8 @@ async function run(): Promise<CommanderCommand> {
     // only explicit --mcp-config works. dynamicMcpConfig is spread onto
     // allMcpConfigs downstream so it survives this skip.
     const mcpConfigPromise = (strictMcpConfig || isBareMode() ? Promise.resolve({
-      servers: {} as Record<string, ScopedMcpServerConfig>
+      servers: {} as Record<string, ScopedMcpServerConfig>,
+      errors: [] as PluginError[]
     }) : getClaudeCodeMcpConfigs(dynamicMcpConfig)).then(result => {
       mcpConfigResolvedMs = Date.now() - mcpConfigStart;
       return result;
@@ -2299,8 +2301,16 @@ async function run(): Promise<CommanderCommand> {
     }
 
     const {
-      servers: existingMcpConfigs
+      servers: existingMcpConfigs,
+      errors: mcpConfigErrors = []
     } = await mcpConfigPromise;
+    // Headless (-p) has no MCP-error UI, so a fatal managed-mcp.json fail-closes
+    // every file-based source with no diagnostic — indistinguishable from an
+    // intentionally empty config. Surface those errors on stderr so scripted
+    // users see why nothing loaded. Interactive surfaces them via the MCP UI.
+    for (const line of getHeadlessMcpConfigWarnings(isNonInteractiveSession, mcpConfigErrors)) {
+      process.stderr.write(`${line}\n`);
+    }
     // CLI flag (--mcp-config) should override file-based configs, matching settings precedence
     const allMcpConfigs = {
       ...existingMcpConfigs,
@@ -2495,6 +2505,7 @@ async function run(): Promise<CommanderCommand> {
       await processSessionStartHooks('startup', {
         forceSyncExecution: true
       });
+      await waitForClaudeInChromeSetup();
       gracefulShutdownSync(0);
       return;
     }
@@ -4179,6 +4190,13 @@ async function run(): Promise<CommanderCommand> {
     global?: boolean;
   }) => {
     await runSkillsCommanderAction(({ skillsRemoveHandler }) => skillsRemoveHandler(name, options));
+  });
+  skillsCmd.command('verify').description('Check installed skills against the registry revocation list and, when eyebrow is installed, the lockfile').option('--registry <urlOrPath>', 'Registry JSON URL/path whose revocations.json to read').option('--lockfile <path>', 'eyebrow lockfile path (default: eyebrowlock.json)').option('--policy <path>', 'eyebrow policy file; adds --ci to the eyebrow run').action(async (options: {
+    registry?: string;
+    lockfile?: string;
+    policy?: string;
+  }) => {
+    await runSkillsCommanderAction(({ skillsVerifyHandler }) => skillsVerifyHandler(options));
   });
   if (feature('TRANSCRIPT_CLASSIFIER')) {
     // Skip when tengu_auto_mode_config.enabled === 'disabled' (circuit breaker).

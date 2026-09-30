@@ -61,6 +61,10 @@ export async function resumeAgentBackground({
 }): Promise<ResumeAgentResult> {
   const startTime = Date.now()
   const appState = toolUseContext.getAppState()
+  const permissionSessionState = {
+    appState,
+    rootAppState: toolUseContext.getRootAppState?.() ?? appState,
+  }
   // In-process teammates get a no-op setAppState; setAppStateForTasks
   // reaches the root store so task registration/progress/kill stay visible.
   const rootSetAppState =
@@ -224,6 +228,7 @@ export async function resumeAgentBackground({
     cwd: meta?.cwd,
     description: meta?.description,
     contentReplacementState: resumedReplacementState,
+    permissionSessionState,
   }
 
   // The resumed run re-registers under the SAME agentId, so its completion

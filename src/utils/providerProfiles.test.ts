@@ -88,6 +88,7 @@ async function importFreshProvidersModule() {
 
 const originalEnv = { ...process.env }
 const originalCwd = process.cwd()
+const originalFetch = globalThis.fetch
 
 const RESTORED_KEYS = [
   'OPENCLAUDE_TEAMMATE_PROFILE_ID',
@@ -149,6 +150,8 @@ const RESTORED_KEYS = [
   'ATLAS_CLOUD_API_KEY',
   'APISMART_API_KEY',
   'APISMART_MODEL',
+  'API_ROUTE_API_KEY',
+  'API_ROUTE_MODEL',
   'LLMTR_API_KEY',
   'CMD_API_KEY',
   'COMMANDCODE_API_KEY',
@@ -212,6 +215,7 @@ afterEach(() => {
     }
 
     mock.restore()
+    globalThis.fetch = originalFetch
     mockConfigState = createMockConfigState()
     process.chdir(originalCwd)
     if (testConfigDir) {
@@ -374,6 +378,17 @@ function buildConcentrateProfile(overrides: Partial<ProviderProfile> = {}): Prov
   })
 }
 
+function buildApiRouteProfile(overrides: Partial<ProviderProfile> = {}): ProviderProfile {
+  return buildProfile({
+    provider: 'api-route',
+    name: 'API Route',
+    baseUrl: 'https://global.api-route.com/v1',
+    model: 'claude-sonnet-4-6',
+    apiKey: 'api-route-test-key',
+    ...overrides,
+  })
+}
+
 function buildLlmtrProfile(overrides: Partial<ProviderProfile> = {}): ProviderProfile {
   return buildProfile({
     provider: 'llmtr',
@@ -420,7 +435,31 @@ function buildCloudflareProfile(overrides: Partial<ProviderProfile> = {}): Provi
   })
 }
 
+function buildOllamaProfile(
+  overrides: Partial<ProviderProfile> = {},
+): ProviderProfile {
+  return buildProfile({
+    provider: 'ollama',
+    name: 'Ollama',
+    baseUrl: 'https://models.example.com/v1',
+    model: 'deepseek-v4-flash:cloud',
+    apiKey: '',
+    ...overrides,
+  })
+}
+
 describe('applyProviderProfileToProcessEnv', () => {
+  test('marks a reverse-proxied Ollama profile for runtime discovery', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+
+    applyProviderProfileToProcessEnv(buildOllamaProfile())
+
+    expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
+    expect(process.env.OPENAI_BASE_URL).toBe('https://models.example.com/v1')
+    expect(process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID).toBe('ollama')
+  }, 20_000)
+
   test('LLMTR profile clears an ambient dedicated key so its saved key wins', async () => {
     const { applyProviderProfileToProcessEnv } =
       await importFreshProviderProfileModules()
@@ -445,6 +484,147 @@ describe('applyProviderProfileToProcessEnv', () => {
         processEnv: process.env,
       }),
     ).toBe('selected-new')
+  }, 20_000)
+
+  test('API Route saved profile mirrors its dedicated credential and route identity', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+
+    applyProviderProfileToProcessEnv(
+      buildProfile({
+        provider: 'api-route',
+        name: 'API Route',
+        baseUrl: 'https://global.api-route.com/v1',
+        model: 'saved-api-route-model',
+        apiKey: 'saved-api-route-key',
+      }),
+    )
+
+    expect(process.env.API_ROUTE_API_KEY).toBe('saved-api-route-key')
+    expect(process.env.API_ROUTE_MODEL).toBeUndefined()
+    expect(process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID).toBe('api-route')
+    expect(process.env.OPENAI_BASE_URL).toBe('https://global.api-route.com/v1')
+    expect(process.env.OPENAI_API_KEY).toBe('saved-api-route-key')
+    expect(process.env.OPENAI_MODEL).toBe('saved-api-route-model')
+    expect(
+      resolveRouteCredentialValue({
+        routeId: 'api-route',
+        baseUrl: process.env.OPENAI_BASE_URL,
+        processEnv: process.env,
+      }),
+    ).toBe('saved-api-route-key')
+  }, 20_000)
+
+  test('API Route saved profile clears competing dedicated env and uses its saved key/model', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+    process.env.API_ROUTE_API_KEY = 'ambient-api-route-key'
+    process.env.API_ROUTE_MODEL = 'ambient-api-route-model'
+
+    applyProviderProfileToProcessEnv(
+      buildProfile({
+        provider: 'api-route',
+        name: 'API Route',
+        baseUrl: 'https://global.api-route.com/v1',
+        model: 'saved-api-route-model',
+        apiKey: 'saved-api-route-key',
+      }),
+    )
+
+    expect(process.env.API_ROUTE_API_KEY).toBe('saved-api-route-key')
+    expect(process.env.API_ROUTE_MODEL).toBeUndefined()
+    expect(process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID).toBe('api-route')
+    expect(process.env.OPENAI_API_KEY).toBe('saved-api-route-key')
+    expect(process.env.OPENAI_MODEL).toBe('saved-api-route-model')
+    expect(
+      resolveRouteCredentialValue({
+        routeId: 'api-route',
+        baseUrl: process.env.OPENAI_BASE_URL,
+        processEnv: process.env,
+      }),
+    ).toBe('saved-api-route-key')
+  }, 20_000)
+
+  test('switching away from API Route clears dedicated route state', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+    process.env.API_ROUTE_API_KEY = 'ambient-api-route-key'
+    process.env.API_ROUTE_MODEL = 'ambient-api-route-model'
+
+    applyProviderProfileToProcessEnv(
+      buildProfile({
+        provider: 'anthropic',
+        name: 'Anthropic',
+        baseUrl: 'https://api.anthropic.com',
+        model: 'claude-sonnet-4-6',
+        apiKey: 'anthropic-key',
+      }),
+    )
+
+    expect(process.env.API_ROUTE_API_KEY).toBeUndefined()
+    expect(process.env.API_ROUTE_MODEL).toBeUndefined()
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+    expect(process.env.ANTHROPIC_API_KEY).toBe('anthropic-key')
+  }, 20_000)
+
+  test('API Route profile without a base URL uses the canonical endpoint and ambient key', async () => {
+    const { applyProviderProfileToProcessEnv } =
+      await importFreshProviderProfileModules()
+    process.env.API_ROUTE_API_KEY = 'ambient-api-route-key'
+
+    applyProviderProfileToProcessEnv(
+      buildApiRouteProfile({ baseUrl: undefined, apiKey: undefined }),
+    )
+
+    expect(process.env.OPENAI_BASE_URL).toBe('https://global.api-route.com/v1')
+    expect(process.env.OPENAI_API_KEY).toBe('ambient-api-route-key')
+    expect(process.env.API_ROUTE_API_KEY).toBe('ambient-api-route-key')
+    expect(process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID).toBe('api-route')
+  }, 20_000)
+
+  test('retargeted API Route profile withholds its dedicated credential and skips discovery', async () => {
+    const fetchMock = mock(() => Promise.resolve(new Response('{}')))
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    const { setActiveProviderProfile } = await importFreshProviderProfileModules()
+    const profile = buildApiRouteProfile({
+      id: 'api_route_proxy',
+      baseUrl: 'https://proxy.example/v1',
+    })
+    saveMockGlobalConfig(current => ({
+      ...current,
+      providerProfiles: [profile],
+    }))
+
+    setActiveProviderProfile(profile.id, { configDir: testConfigDir ?? undefined })
+    await Promise.resolve()
+
+    expect(process.env.OPENAI_API_KEY).toBeUndefined()
+    expect(process.env.API_ROUTE_API_KEY).toBeUndefined()
+    expect(process.env.CLAUDE_CODE_PROVIDER_ROUTE_ID).toBe('api-route')
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    const persisted = JSON.parse(
+      readFileSync(join(testConfigDir!, '.openclaude-profile.json'), 'utf8'),
+    )
+    expect(persisted.env).toEqual({
+      CLAUDE_CODE_PROVIDER_ROUTE_ID: 'api-route',
+      OPENAI_BASE_URL: 'https://proxy.example/v1',
+      OPENAI_MODEL: 'claude-sonnet-4-6',
+    })
+
+    const { buildStartupEnvFromProfile } = await import(
+      `./providerProfile.js?ts=${Date.now()}-${Math.random()}`
+    )
+    const startupEnv = await buildStartupEnvFromProfile({
+      persisted,
+      processEnv: {
+        API_ROUTE_API_KEY: 'ambient-api-route-key',
+        OPENAI_API_KEY: 'ambient-api-route-key',
+      },
+    })
+    expect(startupEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID).toBe('api-route')
+    expect(startupEnv.OPENAI_API_KEY).toBeUndefined()
+    expect(startupEnv.API_ROUTE_API_KEY).toBeUndefined()
   }, 20_000)
 
   test('keyless canonical LLMTR profile adopts its ambient dedicated key', async () => {
@@ -2216,24 +2396,37 @@ describe('applyProviderProfileToProcessEnv', () => {
     expect(getFreshAPIProvider()).not.toBe('xai')
   })
 
-  test('openai-compatible profile applies maxContextLength env override', async () => {
+  test('openai-compatible profile applies maxContextLength to every configured model', async () => {
     const { applyProviderProfileToProcessEnv } =
       await importFreshProviderProfileModules()
+    const { resolveModelRuntimeLimits } = await import(
+      '../integrations/runtimeMetadata.js'
+    )
 
     applyProviderProfileToProcessEnv(
       buildProfile({
         provider: 'custom',
         baseUrl: 'http://localhost:4000/v1',
-        model: 'gpt-4o',
+        model: 'local-large, local-small; local-reasoning',
         maxContextLength: 200_000,
       }),
     )
 
     expect(process.env.OPENAI_BASE_URL).toBe('http://localhost:4000/v1')
-    expect(process.env.OPENAI_MODEL).toBe('gpt-4o')
+    expect(process.env.OPENAI_MODEL).toBe('local-large')
     expect(process.env.CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS).toBe(
-      JSON.stringify({ 'gpt-4o': 200_000 }),
+      JSON.stringify({
+        'local-large': 200_000,
+        'local-small': 200_000,
+        'local-reasoning': 200_000,
+      }),
     )
+    expect(
+      resolveModelRuntimeLimits({
+        model: 'local-small',
+        processEnv: process.env,
+      }).contextWindow,
+    ).toBe(200_000)
   })
 
   test('openai-compatible profile switch clears previous same-model context override', async () => {
@@ -3054,34 +3247,87 @@ describe('applyActiveProviderProfileFromConfig', () => {
     expect(process.env.OPENAI_MODEL).toBe('gpt-4o')
   })
 
-  test('uses saved valid Hicap /model choice when rehydrating active profile', async () => {
-    const {
-      _setSavedModelOverrideForTesting,
-      applyActiveProviderProfileFromConfig,
-      getProviderProfiles,
-    } = await importFreshProviderProfileModules()
-    _setSavedModelOverrideForTesting('gpt-5.4')
-    const activeProfile = buildProfile({
-      id: 'saved_hicap',
-      provider: 'hicap',
-      baseUrl: 'https://api.hicap.ai/v1',
-      model: 'glm-5.2',
-    })
+  test.each(['', '?reasoning=high', '?thinking=disabled&reasoning=high'])(
+    'preserves context limits for configured and saved models across profile rehydration (%j)',
+    async query => {
+      const {
+        _setSavedModelOverrideForTesting,
+        applyActiveProviderProfileFromConfig,
+        getProviderProfiles,
+      } = await importFreshProviderProfileModules()
+      const { resolveModelRuntimeLimits } = await import(
+        '../integrations/runtimeMetadata.js'
+      )
+      const configuredModel = `gpt-5.2${query}`
+      const savedModel = `gpt-5.4${query}`
+      const modelList = `glm-5.2; ${configuredModel}`
+      _setSavedModelOverrideForTesting(savedModel)
+      const activeProfile = buildProfile({
+        id: 'saved_hicap',
+        provider: 'hicap',
+        baseUrl: 'https://api.hicap.ai/v1',
+        model: modelList,
+        maxContextLength: 200_000,
+      })
+      const config = {
+        providerProfiles: [activeProfile],
+        activeProviderProfileId: activeProfile.id,
+      } as any
+      const expectedContextWindows = JSON.stringify({
+        'glm-5.2': 200_000,
+        'gpt-5.2': 200_000,
+        'gpt-5.4': 200_000,
+      })
 
-    const applied = applyActiveProviderProfileFromConfig({
-      providerProfiles: [activeProfile],
-      activeProviderProfileId: activeProfile.id,
-    } as any)
+      const applied = applyActiveProviderProfileFromConfig(config)
 
-    expect(applied?.id).toBe(activeProfile.id)
-    expect(process.env.OPENAI_BASE_URL).toBe('https://api.hicap.ai/v1')
-    expect(process.env.OPENAI_MODEL).toBe('gpt-5.4')
-    const saved = getProviderProfiles({
-      providerProfiles: [activeProfile],
-      activeProviderProfileId: activeProfile.id,
-    } as any).find((profile: ProviderProfile) => profile.id === activeProfile.id)
-    expect(saved?.model).toBe('glm-5.2')
-  })
+      expect(applied?.id).toBe(activeProfile.id)
+      expect(process.env.OPENAI_BASE_URL).toBe('https://api.hicap.ai/v1')
+      const expectProfileContextLimits = () => {
+        expect(process.env.OPENAI_MODEL).toBe(savedModel)
+        for (const model of [
+          'glm-5.2',
+          'gpt-5.2',
+          'gpt-5.4',
+          configuredModel,
+          savedModel,
+        ]) {
+          expect(
+            resolveModelRuntimeLimits({ model, processEnv: process.env }).contextWindow,
+          ).toBe(200_000)
+        }
+        expect(process.env.CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS).toBe(
+          expectedContextWindows,
+        )
+        const saved = getProviderProfiles(config).find(
+          (profile: ProviderProfile) => profile.id === activeProfile.id,
+        )
+        expect(saved?.model).toBe(modelList)
+      }
+      expectProfileContextLimits()
+
+      expect(applyActiveProviderProfileFromConfig(config)?.id).toBe(activeProfile.id)
+      expectProfileContextLimits()
+
+      // Alignment must repair the old configured-only map, even though the
+      // effective model and all other profile-managed environment values match.
+      process.env.CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS = JSON.stringify({
+        'glm-5.2': 200_000,
+        'gpt-5.2': 200_000,
+      })
+      applyActiveProviderProfileFromConfig(config)
+      expectProfileContextLimits()
+
+      // Also repair a complete map written with the old raw query-bearing keys.
+      process.env.CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS = JSON.stringify({
+        'glm-5.2': 200_000,
+        [configuredModel]: 200_000,
+        [savedModel]: 200_000,
+      })
+      applyActiveProviderProfileFromConfig(config)
+      expectProfileContextLimits()
+    },
+  )
 
   test.each(['gpt-5.6-terra', 'gpt-6-astra'])('uses saved Codex /model choice %s when rehydrating the Codex OAuth profile', async model => {
     // Regression: the Codex OAuth profile is created with a single
@@ -3760,6 +4006,41 @@ describe('setActiveProviderProfile', () => {
     }
   })
 
+  test('persists the Ollama route marker for a reverse-proxied profile', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-'))
+    const configDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-config-'))
+    process.chdir(tempDir)
+    process.env.CLAUDE_CONFIG_DIR = configDir
+
+    try {
+      const { setActiveProviderProfile } =
+        await importFreshProviderProfileModules()
+      const ollamaProfile = buildOllamaProfile({ id: 'ollama_proxy_prof' })
+
+      saveMockGlobalConfig(current => ({
+        ...current,
+        providerProfiles: [ollamaProfile],
+      }))
+
+      const result = setActiveProviderProfile('ollama_proxy_prof', { configDir })
+      const persisted = JSON.parse(
+        readFileSync(join(configDir, '.openclaude-profile.json'), 'utf8'),
+      )
+
+      expect(result?.id).toBe('ollama_proxy_prof')
+      expect(persisted.profile).toBe('openai')
+      expect(persisted.env).toEqual({
+        OPENAI_BASE_URL: 'https://models.example.com/v1',
+        OPENAI_MODEL: 'deepseek-v4-flash:cloud',
+        CLAUDE_CODE_PROVIDER_ROUTE_ID: 'ollama',
+      })
+    } finally {
+      process.chdir(originalCwd)
+      rmSync(tempDir, { recursive: true, force: true })
+      rmSync(configDir, { recursive: true, force: true })
+    }
+  })
+
   test('persists primary model for keyed openai-compatible multi-model profiles', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-'))
     const configDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-config-'))
@@ -3774,9 +4055,10 @@ describe('setActiveProviderProfile', () => {
         name: 'DeepSeek',
         provider: 'openai',
         baseUrl: 'https://api.deepseek.com/v1',
-        model: 'deepseek-v4-flash, deepseek-v4-pro, deepseek-chat',
+        model: 'deepseek-v4-flash?thinking=disabled, deepseek-v4-pro?reasoning=high, deepseek-chat',
         apiKey: 'sk-deepseek-live',
         apiFormat: 'responses',
+        maxContextLength: 200_000,
       })
 
       saveMockGlobalConfig(current => ({
@@ -3796,12 +4078,57 @@ describe('setActiveProviderProfile', () => {
       expect(persisted.profile).toBe('openai')
       expect(persisted.env).toEqual({
         OPENAI_BASE_URL: 'https://api.deepseek.com/v1',
-        OPENAI_MODEL: 'deepseek-v4-flash',
+        OPENAI_MODEL: 'deepseek-v4-flash?thinking=disabled',
         OPENAI_API_KEY: 'sk-deepseek-live',
+        CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS: JSON.stringify({
+          'deepseek-v4-flash': 200_000,
+          'deepseek-v4-pro': 200_000,
+          'deepseek-chat': 200_000,
+        }),
       })
     } finally {
       process.chdir(originalCwd)
       rmSync(tempDir, { recursive: true, force: true })
+      rmSync(configDir, { recursive: true, force: true })
+    }
+  })
+
+  test('persists context window for every model in a keyless openai-compatible profile', async () => {
+    const configDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-config-'))
+
+    try {
+      const { setActiveProviderProfile } =
+        await importFreshProviderProfileModules()
+      const openaiProfile = buildProfile({
+        id: 'keyless_multi_model_prof',
+        provider: 'custom',
+        baseUrl: 'http://localhost:4000/v1',
+        model: 'model-a?reasoning=high; Model-B[1m]?thinking=disabled, model-c',
+        maxContextLength: 64_000,
+      })
+
+      saveMockGlobalConfig(current => ({
+        ...current,
+        providerProfiles: [openaiProfile],
+      }))
+
+      const result = setActiveProviderProfile('keyless_multi_model_prof', {
+        configDir,
+      })
+      const persisted = JSON.parse(
+        readFileSync(join(configDir, '.openclaude-profile.json'), 'utf8'),
+      )
+
+      expect(result?.id).toBe('keyless_multi_model_prof')
+      expect(persisted.env.OPENAI_MODEL).toBe('model-a?reasoning=high')
+      expect(persisted.env.CLAUDE_CODE_OPENAI_CONTEXT_WINDOWS).toBe(
+        JSON.stringify({
+          'model-a': 64_000,
+          'Model-B[1m]': 64_000,
+          'model-c': 64_000,
+        }),
+      )
+    } finally {
       rmSync(configDir, { recursive: true, force: true })
     }
   })
@@ -4214,6 +4541,60 @@ describe('setActiveProviderProfile', () => {
       expect(startupEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID).toBe('concentrate')
       expect(startupEnv.CONCENTRATE_API_KEY).toBeUndefined()
       expect(startupEnv.OPENAI_API_KEY).toBeUndefined()
+    } finally {
+      process.chdir(originalCwd)
+      rmSync(tempDir, { recursive: true, force: true })
+      rmSync(configDir, { recursive: true, force: true })
+    }
+  })
+
+  test('keyed canonical API Route profiles persist and restart with route identity', async () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-'))
+    const configDir = mkdtempSync(join(tmpdir(), 'openclaude-provider-config-'))
+    process.chdir(tempDir)
+    process.env.CLAUDE_CONFIG_DIR = configDir
+
+    try {
+      const { setActiveProviderProfile } =
+        await importFreshProviderProfileModules()
+      const apiRouteProfile = buildApiRouteProfile({
+        id: 'api_route_profile',
+      })
+      saveMockGlobalConfig(current => ({
+        ...current,
+        providerProfiles: [apiRouteProfile],
+      }))
+
+      setActiveProviderProfile(apiRouteProfile.id, { configDir })
+      const persisted = JSON.parse(
+        readFileSync(join(configDir, '.openclaude-profile.json'), 'utf8'),
+      )
+
+      expect(persisted.env).toMatchObject({
+        CLAUDE_CODE_PROVIDER_ROUTE_ID: 'api-route',
+        OPENAI_BASE_URL: 'https://global.api-route.com/v1',
+        OPENAI_API_KEY: 'api-route-test-key',
+        API_ROUTE_API_KEY: 'api-route-test-key',
+      })
+
+      const { buildStartupEnvFromProfile } = await import(
+        `./providerProfile.js?ts=${Date.now()}-${Math.random()}`
+      )
+      const startupEnv = await buildStartupEnvFromProfile({
+        persisted,
+        processEnv: {},
+      })
+
+      expect(startupEnv.CLAUDE_CODE_PROVIDER_ROUTE_ID).toBe('api-route')
+      expect(startupEnv.OPENAI_BASE_URL).toBe('https://global.api-route.com/v1')
+      expect(startupEnv.OPENAI_API_KEY).toBe('api-route-test-key')
+      expect(
+        resolveRouteCredentialValue({
+          routeId: 'api-route',
+          baseUrl: startupEnv.OPENAI_BASE_URL,
+          processEnv: startupEnv,
+        }),
+      ).toBe('api-route-test-key')
     } finally {
       process.chdir(originalCwd)
       rmSync(tempDir, { recursive: true, force: true })

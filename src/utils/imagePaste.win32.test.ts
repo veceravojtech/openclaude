@@ -2,29 +2,20 @@ import { afterEach, describe, expect, mock, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import * as actualExecaModule from 'execa'
+import * as actualExecFileModule from './execFileNoThrow.js'
+import * as actualImageResizerModule from './imageResizer.js'
 
 type ImagePasteModule = typeof import('./imagePaste.js')
-type ExecFileModule = typeof import('./execFileNoThrow.js')
-type ExecaModule = typeof import('execa')
-type ImageResizerModule = typeof import('./imageResizer.js')
 type ExecaCall = [string, ...unknown[]]
 
+const originalExecFileExports = { ...actualExecFileModule }
+const originalExecaExports = { ...actualExecaModule }
+const originalImageResizerExports = { ...actualImageResizerModule }
 const originalPlatform = process.platform
 const originalTemp = process.env.TEMP
 const originalClaudeCodeTmpdir = process.env.CLAUDE_CODE_TMPDIR
 
-// Captured at module scope, before any test installs a stub. These used to be
-// captured lazily inside restoreMocks(), i.e. from afterEach -- by which point
-// this file had already mocked './execFileNoThrow.js' down to a single export,
-// so the "actual" snapshot WAS that stub and the restore re-installed it for
-// the rest of the process. Later files then failed to import execFileNoThrow.
-const actualExecFileModule: ExecFileModule = {
-  ...(await import('./execFileNoThrow.js')),
-}
-const actualExecaModule: ExecaModule = { ...(await import('execa')) }
-const actualImageResizerModule: ImageResizerModule = {
-  ...(await import('./imageResizer.js')),
-}
 let tempDirs: string[] = []
 
 function setPlatform(platform: NodeJS.Platform): void {
@@ -33,10 +24,10 @@ function setPlatform(platform: NodeJS.Platform): void {
   })
 }
 
-async function restoreMocks(): Promise<void> {
-  mock.module('./execFileNoThrow.js', () => ({ ...actualExecFileModule }))
-  mock.module('execa', () => ({ ...actualExecaModule }))
-  mock.module('./imageResizer.js', () => ({ ...actualImageResizerModule }))
+function restoreMocks(): void {
+  mock.module('./execFileNoThrow.js', () => originalExecFileExports)
+  mock.module('execa', () => originalExecaExports)
+  mock.module('./imageResizer.js', () => originalImageResizerExports)
 }
 
 async function importImagePaste(): Promise<ImagePasteModule> {
@@ -72,6 +63,7 @@ describe('Windows clipboard image handling', () => {
       stderr: '',
     }))
     mock.module('./execFileNoThrow.js', () => ({
+      ...actualExecFileModule,
       execFileNoThrowWithCwd,
     }))
 
@@ -99,15 +91,17 @@ describe('Windows clipboard image handling', () => {
       stdout: 'False\r\n',
       stderr: '',
     }))
-    mock.module('execa', () => ({ execa }))
+    mock.module('execa', () => ({ ...actualExecaModule, execa }))
 
     const { getImageFromClipboard } = await importImagePaste()
 
     expect(await getImageFromClipboard()).toBeNull()
-    expect(execa).toHaveBeenCalledTimes(2)
+    expect(execa).toHaveBeenCalledTimes(3)
     const checkCall = execa.mock.calls[0] as unknown as ExecaCall | undefined
     expect(checkCall?.[0]).toContain('powershell -NoProfile -Command')
     expect(checkCall?.[0]).toContain('Clipboard]::ContainsImage()')
+    const deleteCall = execa.mock.calls[2] as unknown as ExecaCall | undefined
+    expect(deleteCall?.[0]).toContain('del /f')
   })
 
   test('getImageFromClipboard keeps Windows backslashes and escapes apostrophes in the save path', async () => {
@@ -128,7 +122,7 @@ describe('Windows clipboard image handling', () => {
       stdout: '',
       stderr: '',
     })
-    mock.module('execa', () => ({ execa }))
+    mock.module('execa', () => ({ ...actualExecaModule, execa }))
 
     const { getImageFromClipboard } = await importImagePaste()
 
@@ -175,7 +169,7 @@ describe('Windows clipboard image handling', () => {
         displayHeight: 1,
       },
     }))
-    mock.module('execa', () => ({ execa }))
+    mock.module('execa', () => ({ ...actualExecaModule, execa }))
     mock.module('./imageResizer.js', () => ({
       ...actualImageResizerModule,
       maybeResizeAndDownsampleImageBuffer,
@@ -205,6 +199,48 @@ describe('Windows clipboard image handling', () => {
     )
     const saveCall = execa.mock.calls[1] as unknown as ExecaCall | undefined
     expect(String(saveCall?.[0] ?? '')).toContain(screenshotPath)
+    const deleteCall = execa.mock.calls[2] as unknown as ExecaCall | undefined
+    expect(deleteCall?.[0]).toContain('del /f')
+  })
+
+  test('getImageFromClipboard does not hide ImageResizeError as a missing clipboard image', async () => {
+    setPlatform('win32')
+    const tempDir = mkdtempSync(join(tmpdir(), 'openclaude-image-paste-'))
+    tempDirs.push(tempDir)
+    process.env.CLAUDE_CODE_TMPDIR = tempDir
+    const screenshotPath = join(tempDir, 'claude_cli_latest_screenshot.png')
+    const imageBuffer = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    )
+    const execa = mock(async (command: string) => {
+      if (command.includes('Clipboard]::GetImage()')) {
+        writeFileSync(screenshotPath, imageBuffer)
+      }
+      return {
+        exitCode: 0,
+        stdout: 'False\r\n',
+        stderr: '',
+      }
+    })
+
+    const ImageResizeError = actualImageResizerModule.ImageResizeError
+    const maybeResizeAndDownsampleImageBuffer = mock(async () => {
+      throw new ImageResizeError(
+        'Unable to resize image — dimensions exceed the 8000x8000px API limit and image processing failed. Please resize the image to reduce its pixel dimensions.',
+      )
+    })
+    mock.module('execa', () => ({ ...actualExecaModule, execa }))
+    mock.module('./imageResizer.js', () => ({
+      ...actualImageResizerModule,
+      maybeResizeAndDownsampleImageBuffer,
+    }))
+
+    const { getImageFromClipboard } = await importImagePaste()
+    await expect(getImageFromClipboard()).rejects.toBeInstanceOf(
+      ImageResizeError,
+    )
+    expect(execa).toHaveBeenCalledTimes(3)
     const deleteCall = execa.mock.calls[2] as unknown as ExecaCall | undefined
     expect(deleteCall?.[0]).toContain('del /f')
   })

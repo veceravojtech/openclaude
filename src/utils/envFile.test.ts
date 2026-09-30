@@ -34,12 +34,16 @@ const CLEARED_ENV_KEYS = [
   'CONCENTRATE_MODEL',
   'APISMART_API_KEY',
   'APISMART_MODEL',
+  'API_ROUTE_API_KEY',
+  'API_ROUTE_MODEL',
   'OPENAI_API_KEYS',
   'OPENAI_API_KEY',
   'OPENAI_AZURE_STYLE',
   'OPENAI_BASE_URL',
   'OPENAI_MODEL',
   'OPENCLAUDE_OLLAMA_NUM_CTX',
+  'OLLAMA_API_KEY',
+  'OLLAMA_BASE_URL',
   'WEB_AUTH_HEADER',
   'WEB_AUTH_SCHEME',
   'WEB_BODY_TEMPLATE',
@@ -299,6 +303,49 @@ describe('loadEnvFile', () => {
     })
   })
 
+  it('loads documented API Route env-only provider setup values', () => {
+    const filePath = writeTempEnvFile([
+      'API_ROUTE_API_KEY=api-route-key',
+      'API_ROUTE_MODEL=claude-sonnet-4-6',
+    ].join('\n'))
+
+    const loaded = loadEnvFile(filePath)
+
+    expect(process.env.API_ROUTE_API_KEY).toBe('api-route-key')
+    expect(process.env.API_ROUTE_MODEL).toBe('claude-sonnet-4-6')
+    expect(loaded).toEqual({
+      API_ROUTE_API_KEY: 'api-route-key',
+      API_ROUTE_MODEL: 'claude-sonnet-4-6',
+    })
+  })
+
+  it('preserves existing API Route env values over provider env-file values', () => {
+    process.env.API_ROUTE_API_KEY = 'shell-api-route-key'
+    process.env.API_ROUTE_MODEL = 'shell-api-route-model'
+    const filePath = writeTempEnvFile([
+      'API_ROUTE_API_KEY=file-api-route-key',
+      'API_ROUTE_MODEL=file-api-route-model',
+    ].join('\n'))
+
+    const loaded = loadEnvFile(filePath)
+
+    expect(process.env.API_ROUTE_API_KEY).toBe('shell-api-route-key')
+    expect(process.env.API_ROUTE_MODEL).toBe('shell-api-route-model')
+    expect(loaded).toEqual({})
+  })
+
+  it('rejects API Route env files atomically when any variable is unsupported', () => {
+    const filePath = writeTempEnvFile([
+      'API_ROUTE_API_KEY=api-route-key',
+      'UNSAFE_API_ROUTE_SETTING=blocked',
+    ].join('\n'))
+
+    expect(() => loadEnvFile(filePath)).toThrow(
+      'Unsupported variable UNSAFE_API_ROUTE_SETTING in --provider-env-file',
+    )
+    expect(process.env.API_ROUTE_API_KEY).toBeUndefined()
+  })
+
   it('loads the dedicated LLMTR credential without selecting a route', () => {
     const filePath = writeTempEnvFile('LLMTR_API_KEY=llmtr-key')
 
@@ -387,6 +434,22 @@ describe('loadEnvFile', () => {
     expect(process.env.OPENCLAUDE_OLLAMA_NUM_CTX).toBe('32768')
     expect(loaded).toEqual({
       OPENCLAUDE_OLLAMA_NUM_CTX: '32768',
+    })
+  })
+
+  it('loads documented Ollama web search values', () => {
+    const filePath = writeTempEnvFile([
+      'OLLAMA_API_KEY=ollama-key',
+      'OLLAMA_BASE_URL=http://localhost:11434',
+      'WEB_SEARCH_PROVIDER=ollama',
+    ].join('\n'))
+
+    const loaded = loadEnvFile(filePath)
+
+    expect(loaded).toEqual({
+      OLLAMA_API_KEY: 'ollama-key',
+      OLLAMA_BASE_URL: 'http://localhost:11434',
+      WEB_SEARCH_PROVIDER: 'ollama',
     })
   })
 

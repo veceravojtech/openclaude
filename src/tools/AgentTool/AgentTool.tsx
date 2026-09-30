@@ -68,6 +68,7 @@ import { type AgentToolResult, agentToolResultSchema, classifyHandoffIfNeeded, e
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
 import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
 import { buildForkedMessages, buildWorktreeNotice, FORK_AGENT, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
+import { closeForegroundAgentForBackground, createForegroundAgentAbortController } from './foregroundAgentHandoff.js';
 import type { AgentDefinition } from './loadAgentsDir.js';
 import { filterAgentsByMcpRequirements, hasRequiredMcpServers, isBuiltInAgent } from './loadAgentsDir.js';
 import { getPrompt } from './prompt.js';
@@ -417,6 +418,10 @@ export const AgentTool = buildTool({
 
     // Get app state for permission mode and agent filtering
     const appState = toolUseContext.getAppState();
+    const permissionSessionState = {
+      appState,
+      rootAppState: toolUseContext.getRootAppState?.() ?? appState
+    };
     const permissionMode = appState.toolPermissionContext.mode;
     // In-process teammates get a no-op setAppState; setAppStateForTasks
     // reaches the root store so task registration/progress/kill stay visible.
@@ -1300,6 +1305,7 @@ export const AgentTool = buildTool({
       cwd,
       description,
       agentName: name,
+      permissionSessionState,
     };
 
     // Helper to wrap execution with a cwd override. Worktree wins if present;
@@ -1535,13 +1541,17 @@ export const AgentTool = buildTool({
         let stopForegroundSummarization: (() => void) | undefined;
         // const capture for sound type narrowing inside the callback below
         const summaryTaskId = foregroundTaskId;
+        const foregroundAbortController = foregroundTaskId ? createForegroundAgentAbortController(toolUseContext.abortController) : undefined;
 
         // Get async iterator for the agent
         const agentIterator = runAgent({
           ...runAgentParams,
           override: {
             ...runAgentParams.override,
-            agentId: syncAgentId
+            agentId: syncAgentId,
+            ...(foregroundAbortController && {
+              abortController: foregroundAbortController
+            })
           },
           onCacheSafeParams: summaryTaskId && getSdkAgentProgressSummariesEnabled() ? (params: CacheSafeParams) => {
             const {
@@ -1612,7 +1622,7 @@ export const AgentTool = buildTool({
                     // (releases MCP connections, session hooks, prompt cache tracking, etc.)
                     // Timeout prevents blocking if MCP server cleanup hangs.
                     // .catch() prevents unhandled rejection if timeout wins the race.
-                    await Promise.race([agentIterator.return(undefined).catch(() => {}), sleep(1000)]);
+                    await closeForegroundAgentForBackground(foregroundAbortController!, () => agentIterator.return(undefined));
                     // Initialize progress tracking from existing messages
                     const tracker = createProgressTracker();
                     const resolveActivity2 = createActivityDescriptionResolver(toolUseContext.options.tools);

@@ -451,7 +451,7 @@ export const SettingsSchema = lazySchema(() =>
         .int()
         .optional()
         .describe(
-          'Number of days to retain chat transcripts (default: 30). Setting to 0 disables session persistence entirely: no transcripts are written and existing transcripts are deleted at startup.',
+          'Number of days to retain local session artifacts, including chat transcripts and completed background-session metadata and logs (default: 30). Setting to 0 disables transcript persistence entirely and removes completed background-session artifacts after they finish.',
         ),
       env: EnvironmentVariablesSchema()
         .optional()
@@ -575,11 +575,11 @@ export const SettingsSchema = lazySchema(() =>
           'and feed errors back for self-repair.',
         ),
       worktree: z
-        .preprocess((val: any) => {
+        .preprocess((val: unknown) => {
           if (val && typeof val === 'object') {
-            const copy = { ...val }
+            const copy: Record<string, unknown> = { ...(val as Record<string, unknown>) }
             if ('enableGitLongPaths' in val && !('autoConfigureLongPaths' in val)) {
-              copy.autoConfigureLongPaths = val.enableGitLongPaths
+              copy.autoConfigureLongPaths = (val as Record<string, unknown>).enableGitLongPaths
             }
             return copy
           }

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { InterruptionCorrectionTracker } from '../utils/interruptionCorrection.js'
 import { QueryGuard } from '../utils/QueryGuard.js'
+import { tryStartQueryWithConfiguredIdleTimeout } from '../utils/queryGuardConfig.js'
 
 const source = readFileSync(join(import.meta.dirname, 'REPL.tsx'), 'utf8')
 
@@ -33,13 +34,97 @@ function getOnQueryImplBody(): string {
 }
 
 describe('REPL query lifecycle timeout logging', () => {
-  test('constructs QueryGuard with resolved hard max config', () => {
+  test('wires the executable timeout boundary into the production query start', () => {
     expect(source).toContain(
-      "import { getQueryGuardOptionsFromEnv } from '../utils/queryGuardConfig.js'",
+      "import { getQueryGuardOptionsFromEnv, tryStartQueryWithConfiguredIdleTimeout } from '../utils/queryGuardConfig.js'",
     )
+    // Teammate processes resolve both watchdogs as disabled at construction…
     expect(source).toContain(
       'getQueryGuardOptionsFromEnv(process.env, undefined, isTeammate())',
     )
+    expect(source).toContain(
+      'const startResult = tryStartQueryWithConfiguredIdleTimeout(queryGuard, {',
+    )
+    // …and the per-query /config idle-timeout refresh must not re-arm them.
+    expect(source).toContain(
+      '}, process.env, getGlobalConfig().queryIdleTimeoutMs, isTeammate());',
+    )
+  })
+
+  test('applies the resolved timeout before starting the query', () => {
+    const calls: string[] = []
+    const guard = {
+      setIdleTimeoutMs(timeoutMs: number) {
+        calls.push(`set:${timeoutMs}`)
+        return true
+      },
+      tryStart(metadata: { queryId: string; querySource: string }) {
+        calls.push(`start:${metadata.queryId}`)
+        return {
+          generation: 1,
+          context: {
+            ...metadata,
+            queryGeneration: 1,
+            startedAt: 1,
+          },
+        }
+      },
+    }
+
+    const result = tryStartQueryWithConfiguredIdleTimeout(
+      guard,
+      { queryId: 'query-1', querySource: 'repl_main_thread', startedAt: 1 },
+      {},
+      15 * 60 * 1000,
+    )
+
+    expect(result?.generation).toBe(1)
+    expect(calls).toEqual(['set:900000', 'start:query-1'])
+  })
+
+  test('reapplies a runtime environment timeout before starting the query', () => {
+    const calls: string[] = []
+    const guard = {
+      setIdleTimeoutMs(timeoutMs: number) {
+        calls.push(`set:${timeoutMs}`)
+        return true
+      },
+      tryStart() {
+        calls.push('start')
+        return null
+      },
+    }
+
+    tryStartQueryWithConfiguredIdleTimeout(
+      guard,
+      { queryId: 'query-2', querySource: 'repl_main_thread' },
+      { OPENCLAUDE_QUERY_IDLE_TIMEOUT_MS: '600000' },
+      15 * 60 * 1000,
+    )
+    expect(calls).toEqual(['set:600000', 'start'])
+  })
+
+  test('keeps a teammate idle watchdog disabled when starting a query', () => {
+    const calls: string[] = []
+    const guard = {
+      setIdleTimeoutMs(timeoutMs: number | null) {
+        calls.push(`set:${timeoutMs}`)
+        return true
+      },
+      tryStart() {
+        calls.push('start')
+        return null
+      },
+    }
+
+    tryStartQueryWithConfiguredIdleTimeout(
+      guard,
+      { queryId: 'query-3', querySource: 'repl_main_thread' },
+      {},
+      15 * 60 * 1000,
+      true,
+    )
+    expect(calls).toEqual(['set:null', 'start'])
   })
 
   test('clears interruption-correction state before resuming another session', () => {

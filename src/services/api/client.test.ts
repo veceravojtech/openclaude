@@ -1,3 +1,4 @@
+import Anthropic from '@anthropic-ai/sdk'
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import { acquireSharedMutationLock, releaseSharedMutationLock } from '../../test/sharedMutationLock.js'
 import {
@@ -80,9 +81,13 @@ const originalEnv = {
   MIMO_API_KEY: process.env.MIMO_API_KEY,
   VENICE_API_KEY: process.env.VENICE_API_KEY,
   FIREWORKS_API_KEY: process.env.FIREWORKS_API_KEY,
+  NEARAI_API_KEY: process.env.NEARAI_API_KEY,
+  CLINE_API_KEY: process.env.CLINE_API_KEY,
   LONGCAT_API_KEY: process.env.LONGCAT_API_KEY,
   AIMLAPI_API_KEY: process.env.AIMLAPI_API_KEY,
   APISMART_API_KEY: process.env.APISMART_API_KEY,
+  API_ROUTE_API_KEY: process.env.API_ROUTE_API_KEY,
+  API_ROUTE_MODEL: process.env.API_ROUTE_MODEL,
   CONCENTRATE_API_KEY: process.env.CONCENTRATE_API_KEY,
   CONCENTRATE_BASE_URL: process.env.CONCENTRATE_BASE_URL,
   CONCENTRATE_MODEL: process.env.CONCENTRATE_MODEL,
@@ -198,9 +203,13 @@ beforeEach(async () => {
   delete process.env.MIMO_API_KEY
   delete process.env.VENICE_API_KEY
   delete process.env.FIREWORKS_API_KEY
+  delete process.env.NEARAI_API_KEY
+  delete process.env.CLINE_API_KEY
   delete process.env.LONGCAT_API_KEY
   delete process.env.AIMLAPI_API_KEY
   delete process.env.APISMART_API_KEY
+  delete process.env.API_ROUTE_API_KEY
+  delete process.env.API_ROUTE_MODEL
   delete process.env.CONCENTRATE_API_KEY
   delete process.env.CONCENTRATE_BASE_URL
   delete process.env.CONCENTRATE_MODEL
@@ -261,9 +270,13 @@ afterEach(() => {
     restoreEnv('MIMO_API_KEY', originalEnv.MIMO_API_KEY)
     restoreEnv('VENICE_API_KEY', originalEnv.VENICE_API_KEY)
     restoreEnv('FIREWORKS_API_KEY', originalEnv.FIREWORKS_API_KEY)
+    restoreEnv('NEARAI_API_KEY', originalEnv.NEARAI_API_KEY)
+    restoreEnv('CLINE_API_KEY', originalEnv.CLINE_API_KEY)
     restoreEnv('LONGCAT_API_KEY', originalEnv.LONGCAT_API_KEY)
     restoreEnv('AIMLAPI_API_KEY', originalEnv.AIMLAPI_API_KEY)
     restoreEnv('APISMART_API_KEY', originalEnv.APISMART_API_KEY)
+    restoreEnv('API_ROUTE_API_KEY', originalEnv.API_ROUTE_API_KEY)
+    restoreEnv('API_ROUTE_MODEL', originalEnv.API_ROUTE_MODEL)
     restoreEnv('CONCENTRATE_API_KEY', originalEnv.CONCENTRATE_API_KEY)
     restoreEnv('CONCENTRATE_BASE_URL', originalEnv.CONCENTRATE_BASE_URL)
     restoreEnv('CONCENTRATE_MODEL', originalEnv.CONCENTRATE_MODEL)
@@ -387,6 +400,79 @@ test('first-party Anthropic requests execute the configured fetch wrapper withou
     model: 'claude-sonnet-4-6',
   })
   expect(capturedHeaders).toBeDefined()
+})
+
+test('native Anthropic client validates and clamps API_TIMEOUT_MS', async () => {
+  const originalApiTimeoutMs = process.env.API_TIMEOUT_MS
+  // Force the first-party native Anthropic constructor path. Every provider
+  // route-selection variable is cleared explicitly so an inherited value cannot
+  // divert getAnthropicClient into the shim and silently measure the wrong
+  // client's timeout. (The suite's afterEach restores all of these.)
+  delete process.env.CLAUDE_CODE_USE_OPENAI
+  delete process.env.CLAUDE_CODE_USE_BEDROCK
+  delete process.env.CLAUDE_CODE_USE_VERTEX
+  delete process.env.CLAUDE_CODE_USE_FOUNDRY
+  delete process.env.CLAUDE_CODE_USE_GITHUB
+  delete process.env.CLAUDE_CODE_USE_MISTRAL
+  delete process.env.CLAUDE_CODE_USE_GEMINI
+  delete process.env.GEMINI_API_KEY
+  delete process.env.GEMINI_MODEL
+  delete process.env.GEMINI_BASE_URL
+  delete process.env.GEMINI_AUTH_MODE
+  delete process.env.OPENAI_API_KEY
+  delete process.env.OPENAI_BASE_URL
+  delete process.env.OPENAI_API_BASE
+  delete process.env.OPENAI_MODEL
+  delete process.env.MINIMAX_API_KEY
+  delete process.env.XAI_API_KEY
+  delete process.env.MIMO_API_KEY
+  delete process.env.VENICE_API_KEY
+  delete process.env.FIREWORKS_API_KEY
+  delete process.env.NEARAI_API_KEY
+  delete process.env.CLINE_API_KEY
+  delete process.env.LONGCAT_API_KEY
+  delete process.env.AIMLAPI_API_KEY
+  delete process.env.APISMART_API_KEY
+  delete process.env.CONCENTRATE_API_KEY
+  delete process.env.NVIDIA_NIM
+  delete process.env.NVIDIA_API_KEY
+  delete process.env.ANTHROPIC_BASE_URL
+  delete process.env.ANTHROPIC_MODEL
+  process.env.ANTHROPIC_API_KEY = 'anthropic-test-key'
+
+  try {
+    const timeoutOf = async (): Promise<number> => {
+      const client = await getAnthropicClient({
+        apiKey: 'anthropic-test-key',
+        maxRetries: 0,
+        model: 'claude-sonnet-4-6',
+      })
+      // Guard the premise: only the native constructor exposes the SDK
+      // timeout. The OpenAI shim is returned as a cast object, so if a stray
+      // route-selection variable (or a future env-only route) diverts this
+      // call, fail here rather than silently reading undefined.
+      expect(client).toBeInstanceOf(Anthropic)
+      return (client as unknown as { timeout: number }).timeout
+    }
+
+    // A malformed or negative override must not poison the client with a NaN or
+    // negative timeout; it falls back to the 600s default.
+    for (const invalid of ['not-a-number', '-1', '0', '1.5', '']) {
+      process.env.API_TIMEOUT_MS = invalid
+      expect(await timeoutOf()).toBe(600_000)
+    }
+    // Unset also yields the default.
+    delete process.env.API_TIMEOUT_MS
+    expect(await timeoutOf()).toBe(600_000)
+    // A valid override is honored, and an oversized one is clamped below the
+    // 32-bit setTimeout ceiling instead of overflowing to a tiny delay.
+    process.env.API_TIMEOUT_MS = '45000'
+    expect(await timeoutOf()).toBe(45_000)
+    process.env.API_TIMEOUT_MS = '3000000000'
+    expect(await timeoutOf()).toBe(2_147_483_647)
+  } finally {
+    restoreEnv('API_TIMEOUT_MS', originalApiTimeoutMs)
+  }
 })
 
 test('routes a custom Anthropic endpoint with ANTHROPIC_AUTH_TOKEN without requiring an API key', async () => {
@@ -845,6 +931,206 @@ test('env-only ApiSmart setup withholds its key from a noncanonical same-host UR
   expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
   expect(process.env.OPENAI_BASE_URL).toBe('https://gw.apismart.ai/v1/models')
   expect(process.env.OPENAI_API_KEY).toBeUndefined()
+})
+
+test('routes env-only API Route requests through the OpenAI-compatible shim', async () => {
+  let capturedUrl: string | undefined
+  let capturedHeaders: Headers | undefined
+  let capturedBody: Record<string, unknown> | undefined
+
+  delete process.env.CLAUDE_CODE_USE_GEMINI
+  delete process.env.GEMINI_API_KEY
+  delete process.env.GEMINI_MODEL
+  delete process.env.GEMINI_BASE_URL
+  delete process.env.GEMINI_AUTH_MODE
+  process.env.API_ROUTE_API_KEY = 'api-route-test-key'
+  process.env.API_ROUTE_MODEL = 'claude-sonnet-4-6'
+  process.env.ANTHROPIC_CUSTOM_HEADERS = 'X-Proxy-Auth: ambient-proxy-secret'
+
+  globalThis.fetch = (async (input, init) => {
+    capturedUrl =
+      typeof input === 'string'
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url
+    capturedHeaders = new Headers(init?.headers)
+    capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+
+    return new Response(
+      JSON.stringify({
+        id: 'chatcmpl-api-route',
+        model: 'claude-sonnet-4-6',
+        choices: [
+          {
+            message: {
+              role: 'assistant',
+              content: 'api-route ok',
+            },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: {
+          prompt_tokens: 8,
+          completion_tokens: 3,
+          total_tokens: 11,
+        },
+      }),
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      },
+    )
+  }) as typeof fetch
+
+  const client = await getAnthropicClient({
+    maxRetries: 0,
+    model: 'claude-sonnet-4-6',
+  })
+  const response = await client.messages.create({
+    max_tokens: 64,
+    messages: [{ role: 'user', content: 'hello' }],
+    model: 'claude-sonnet-4-6',
+  })
+
+  expect(response.content[0]).toEqual({
+    type: 'text',
+    text: 'api-route ok',
+  })
+  expect(capturedUrl).toBe(
+    'https://global.api-route.com/v1/chat/completions',
+  )
+  expect(capturedHeaders?.get('authorization')).toBe(
+    'Bearer api-route-test-key',
+  )
+  expect(capturedHeaders?.get('x-proxy-auth')).toBeNull()
+  expect(capturedBody?.model).toBe('claude-sonnet-4-6')
+  expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
+  expect(process.env.OPENAI_BASE_URL).toBe('https://global.api-route.com/v1')
+  expect(process.env.OPENAI_API_KEY).toBe('api-route-test-key')
+  expect(process.env.OPENAI_MODEL).toBe('claude-sonnet-4-6')
+})
+
+test('env-only API Route setup prefers API_ROUTE_API_KEY over stale OPENAI_API_KEYS pool', async () => {
+  let capturedHeaders: Headers | undefined
+
+  delete process.env.CLAUDE_CODE_USE_GEMINI
+  delete process.env.GEMINI_API_KEY
+  delete process.env.GEMINI_MODEL
+  delete process.env.GEMINI_BASE_URL
+  delete process.env.GEMINI_AUTH_MODE
+  process.env.API_ROUTE_API_KEY = 'api-route-correct-key'
+  process.env.OPENAI_API_KEYS = 'stale-key-1,stale-key-2'
+  process.env.OPENAI_BASE_URL = 'https://global.api-route.com/v1'
+
+  globalThis.fetch = (async (_input, init) => {
+    capturedHeaders = new Headers(init?.headers)
+
+    return new Response(
+      JSON.stringify({
+        id: 'chatcmpl-api-route-precedence',
+        model: 'claude-sonnet-4-6',
+        choices: [
+          {
+            message: {
+              role: 'assistant',
+              content: 'api-route ok',
+            },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: {
+          prompt_tokens: 8,
+          completion_tokens: 3,
+          total_tokens: 11,
+        },
+      }),
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      },
+    )
+  }) as typeof fetch
+
+  const client = await getAnthropicClient({
+    maxRetries: 0,
+    model: 'claude-sonnet-4-6',
+  })
+  await client.messages.create({
+    max_tokens: 64,
+    messages: [{ role: 'user', content: 'hello' }],
+    model: 'claude-sonnet-4-6',
+  })
+
+  expect(capturedHeaders?.get('authorization')).toBe(
+    'Bearer api-route-correct-key',
+  )
+  expect(capturedHeaders?.get('authorization')).not.toContain('stale-key')
+  expect(process.env.OPENAI_API_KEYS).toBeUndefined()
+  expect(process.env.OPENAI_API_KEY).toBe('api-route-correct-key')
+})
+
+test('env-only API Route setup withholds its key from a noncanonical URL', async () => {
+  let capturedHeaders: Headers | undefined
+
+  delete process.env.CLAUDE_CODE_USE_GEMINI
+  delete process.env.GEMINI_API_KEY
+  delete process.env.GEMINI_MODEL
+  delete process.env.GEMINI_BASE_URL
+  delete process.env.GEMINI_AUTH_MODE
+  process.env.API_ROUTE_API_KEY = 'api-route-test-key'
+  process.env.OPENAI_BASE_URL = 'https://global.api-route.com/v1/models'
+  process.env.OPENAI_API_KEYS = 'ambient-key-pool-1,ambient-key-pool-2'
+
+  globalThis.fetch = (async (_input, init) => {
+    capturedHeaders = new Headers(init?.headers)
+
+    return new Response(
+      JSON.stringify({
+        id: 'chatcmpl-api-route-noncanonical',
+        model: 'claude-sonnet-4-6',
+        choices: [
+          {
+            message: {
+              role: 'assistant',
+              content: 'api-route noncanonical ok',
+            },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: {
+          prompt_tokens: 8,
+          completion_tokens: 3,
+          total_tokens: 11,
+        },
+      }),
+      {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      },
+    )
+  }) as typeof fetch
+
+  const client = await getAnthropicClient({
+    maxRetries: 0,
+    model: 'claude-sonnet-4-6',
+  })
+  await client.messages.create({
+    max_tokens: 64,
+    messages: [{ role: 'user', content: 'hello' }],
+    model: 'claude-sonnet-4-6',
+  })
+
+  expect(capturedHeaders?.get('authorization')).toBeNull()
+  expect(process.env.CLAUDE_CODE_USE_OPENAI).toBe('1')
+  expect(process.env.OPENAI_BASE_URL).toBe(
+    'https://global.api-route.com/v1/models',
+  )
+  expect(process.env.OPENAI_API_KEY).toBeUndefined()
+  expect(process.env.OPENAI_API_KEYS).toBeUndefined()
 })
 
 test('routes env-only Concentrate requests through the OpenAI-compatible shim', async () => {

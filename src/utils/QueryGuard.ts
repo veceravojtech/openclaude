@@ -156,8 +156,11 @@ export class QueryGuard {
   private _lastContext: QueryLifecycleContext | null = null
   private _getActiveOperations: (() => QueryActiveOperationSnapshot) | null =
     null
-  /** null = idle watchdog disabled (teammate processes). */
-  private readonly _idleTimeoutMs: number | null
+  /**
+   * null = idle watchdog disabled (teammate processes). Mutable between
+   * queries via setIdleTimeoutMs (the `/config` idle-timeout preference).
+   */
+  private _idleTimeoutMs: number | null
   /** null = hard-max watchdog disabled (teammate processes). */
   private readonly _hardMaxQueryMs: number | null
   private readonly _toolLeaseGraceMs: number
@@ -175,6 +178,22 @@ export class QueryGuard {
       0,
       positiveOrDefault(options.toolLeaseGraceMs, DEFAULT_TOOL_LEASE_GRACE_MS),
     )
+  }
+
+  /**
+   * Update the idle deadline for the next query. Active queries retain the
+   * timeout they started with so a concurrent submission cannot mutate them.
+   * `null` keeps (or puts) the idle watchdog DISABLED, matching the
+   * constructor's `idleTimeoutMs: null` — teammate processes pass it so a
+   * per-query preference refresh never re-enables their idle watchdog.
+   */
+  setIdleTimeoutMs(idleTimeoutMs: number | null | undefined): boolean {
+    if (this._status === 'running') return false
+    this._idleTimeoutMs =
+      idleTimeoutMs === null
+        ? null
+        : positiveOrDefault(idleTimeoutMs, DEFAULT_QUERY_IDLE_TIMEOUT_MS)
+    return true
   }
 
   /**
