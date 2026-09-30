@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -17,7 +17,9 @@ import {
   cancelTask,
   claimTask,
   createTask,
+  deleteTask,
   getTask,
+  getTaskPath,
   getTasksDir,
   listTasks,
   type Task,
@@ -204,6 +206,66 @@ describe('supersede', () => {
     expect((await claimTask(LIST, b, 'worker-2')).success).toBe(true)
   })
 
+  test('the replacement inherits the verification gate (but not verifiedBy)', async () => {
+    const a = await seed('gated old plan', {
+      metadata: { requiresVerification: true, verifiedBy: VERIFIER },
+    })
+    const x = await seed('unflagged new plan')
+    const b = await seed('downstream')
+    await link(a, b)
+    await recordVerdict({ agentId: VERIFIER, verdict: 'PASS' }, LIST)
+
+    expect(
+      (await update({ taskId: a, status: 'cancelled', supersededBy: x })).success,
+    ).toBe(true)
+    const replacement = await task(x)
+    expect(replacement.metadata).toEqual({ requiresVerification: true })
+    expect(replacement.blocks).toEqual([b])
+
+    // Without a verdict of its own, X cannot complete.
+    const blocked = await update({ taskId: x, status: 'completed' })
+    expect(blocked.success).toBe(false)
+    expect(blocked.error).toMatch(/metadata\.verifiedBy is not set/)
+    expect((await task(x)).status).toBe('pending')
+
+    const done = await update({
+      taskId: x,
+      status: 'completed',
+      metadata: { verifiedBy: VERIFIER },
+    })
+    expect(done.success).toBe(true)
+    expect(await openBlockers(b)).toEqual([])
+  })
+
+  test('a one-sided A.blocks → B edge is re-pointed too', async () => {
+    const x = await seed('new plan')
+    const b = await seed('downstream')
+    // Only A records the edge; B.blockedBy does not mention A.
+    const a = await seed('old plan', { blocks: [b] })
+
+    expect(
+      (await update({ taskId: a, status: 'cancelled', supersededBy: x })).success,
+    ).toBe(true)
+
+    expect((await task(b)).blockedBy).toEqual([x])
+    expect((await task(x)).blocks).toEqual([b])
+    expect(await openBlockers(b)).toEqual([x])
+    expect((await task(a)).blocks).toEqual([])
+  })
+
+  test('a one-sided B.blockedBy → A edge is stripped on plain cancel', async () => {
+    const a = await seed('old plan')
+    const pre = await seed('prerequisite')
+    // Only A records that it waits on pre; pre.blocks does not mention A.
+    const b = await seed('downstream', { blockedBy: [a] })
+    await updateTask(LIST, a, { blockedBy: [pre] })
+
+    expect((await update({ taskId: a, status: 'cancelled' })).success).toBe(true)
+
+    expect((await task(b)).blockedBy).toEqual([])
+    expect((await task(pre)).blocks).toEqual([])
+  })
+
   test('TaskList shows the replacement for a superseded task', async () => {
     const a = await seed('old plan')
     const x = await seed('new plan')
@@ -299,11 +361,10 @@ describe('cancelled tasks', () => {
   })
 
   test('are not open work for busy checks, agent status or unassign', async () => {
-    const a = await seed('dropped', { owner: 'worker-1' })
+    // Seed the cancelled task file directly (createTask writes it as given)
+    // so a stale owner survives: busy checks must still ignore it.
+    const a = await seed('dropped', { owner: 'worker-1', status: 'cancelled' })
     const b = await seed('next')
-    // Cancel via updateTask directly so the owner survives: busy checks must
-    // still ignore it even if a stale owner is left on a cancelled task.
-    await updateTask(LIST, a, { status: 'cancelled' })
 
     const claim = await claimTask(LIST, b, 'worker-1', { checkAgentBusy: true })
     expect(claim.success).toBe(true)
@@ -326,19 +387,43 @@ describe('cancelled tasks', () => {
     expect(snapshotFiles()).toEqual(before)
   })
 
-  test('cannot be moved to completed (TaskUpdate and updateTask)', async () => {
-    const a = await seed('dropped', { metadata: { requiresVerification: true } })
-    await update({ taskId: a, status: 'cancelled' })
+  test.each(['completed', 'pending', 'in_progress'] as const)(
+    'is terminal: cannot be moved to %s (TaskUpdate and updateTask)',
+    async target => {
+      const a = await seed('dropped', { metadata: { requiresVerification: true } })
+      await update({ taskId: a, status: 'cancelled' })
+      const before = snapshotFiles()
+
+      const data = await update({ taskId: a, status: target })
+      expect(data.success).toBe(false)
+      expect(data.error).toMatch(
+        new RegExp(`is cancelled and cannot be moved to '${target}'`),
+      )
+
+      await expect(
+        updateTask(LIST, a, { status: target }),
+      ).rejects.toBeInstanceOf(TaskTransitionError)
+      expect(snapshotFiles()).toEqual(before)
+    },
+  )
+
+  test('can only be entered through cancelTask, not updateTask', async () => {
+    const a = await seed('old plan', { owner: 'worker-1' })
+    const b = await seed('downstream')
+    await link(a, b)
     const before = snapshotFiles()
 
-    const data = await update({ taskId: a, status: 'completed' })
-    expect(data.success).toBe(false)
-    expect(data.error).toMatch(/is cancelled and cannot be marked completed/)
-
     await expect(
-      updateTask(LIST, a, { status: 'completed' }),
-    ).rejects.toBeInstanceOf(TaskTransitionError)
+      updateTask(LIST, a, { status: 'cancelled' }),
+    ).rejects.toThrow(/can only be cancelled through cancelTask/)
     expect(snapshotFiles()).toEqual(before)
+  })
+
+  test('non-status edits to a cancelled task still work', async () => {
+    const a = await seed('dropped', { status: 'cancelled' })
+    expect((await updateTask(LIST, a, { description: 'why' }))?.status).toBe(
+      'cancelled',
+    )
   })
 })
 
@@ -407,6 +492,34 @@ describe('cancel interactions', () => {
       expect(data.success).toBe(false)
     }
     expect(snapshotFiles()).toEqual(before)
+  })
+
+  test('a concurrent delete and cancel never resurrect the deleted task', async () => {
+    // Both take the list lock, so either order is serialized: delete first
+    // → cancel re-reads without B; cancel first → delete then removes B.
+    // Before the fix, cancel could re-read B, delete could unlink it, and
+    // cancel's rename brought it back.
+    for (let round = 0; round < 10; round++) {
+      const a = await seed(`old ${round}`)
+      const x = await seed(`new ${round}`)
+      const b = await seed(`downstream ${round}`)
+      await link(a, b)
+
+      const [deleted, cancelled] = await Promise.allSettled([
+        deleteTask(LIST, b),
+        cancelTask(LIST, a, { supersededBy: x }),
+      ])
+
+      expect(deleted).toEqual({ status: 'fulfilled', value: true })
+      expect(cancelled.status).toBe('fulfilled')
+      expect(await getTask(LIST, b)).toBeNull()
+      expect(existsSync(getTaskPath(LIST, b))).toBe(false)
+      expect((await task(x)).blocks).not.toContain(b)
+    }
+    // No temp files are left behind.
+    expect(
+      [...snapshotFiles().keys()].filter(name => name.includes('cancel-tmp')),
+    ).toEqual([])
   })
 
   test('delete still removes the task and strips it from dependents', async () => {
