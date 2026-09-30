@@ -3075,6 +3075,28 @@ export async function runInProcessTeammate(
     // so it keeps the old silent `notified: true` and relies on the idle
     // notification in the sub-lead's inbox.
     const notifyMainThread = getParentTeamName(identity.teamName) === undefined
+    const finalMessage = formatTeammateReportResult(lastTurnReport)
+    // The report is written to the file <output-file> names (created at
+    // spawn) and flushed BEFORE the task flips terminal, so the flip and the
+    // enqueue below happen in one synchronous step. Anything that waits on the
+    // status — a stop, a handoff's successor — can then never see a completed
+    // task whose notification is not queued yet (it used to land late, in
+    // whatever came next).
+    if (notifyMainThread && finalMessage) {
+      let stillRunning = false
+      updateTaskState(
+        taskId,
+        task => {
+          stillRunning = task.status === 'running'
+          return task
+        },
+        setAppState,
+      )
+      if (stillRunning) {
+        appendTaskOutput(taskId, `${finalMessage}\n`)
+        await flushTaskOutput(taskId)
+      }
+    }
     let alreadyTerminal = false
     let toolUseId: string | undefined
     let description = identity.agentName
@@ -3114,14 +3136,6 @@ export async function runInProcessTeammate(
       },
       setAppState,
     )
-    const finalMessage = formatTeammateReportResult(lastTurnReport)
-    if (!alreadyTerminal && notifyMainThread && finalMessage) {
-      // The same report as <result>, written to the file <output-file> names
-      // (created at spawn) and flushed before the notification goes out, so
-      // the path is readable the moment the lead sees it.
-      appendTaskOutput(taskId, `${finalMessage}\n`)
-      await flushTaskOutput(taskId)
-    }
     void evictTaskOutput(taskId)
     if (!alreadyTerminal && notifyMainThread) {
       // The XML notification carries <status>, so print.ts emits the SDK

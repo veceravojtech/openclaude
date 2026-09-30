@@ -740,3 +740,41 @@ test("the in-process completion writes the final report to <output-file> before 
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('the completion is queued in the same step the task turns completed, so a stop that waits on the status never misses it', async () => {
+  const harness = await importRunnerWithMocks()
+  const started = await startIdleTeammate(harness)
+  await waitFor(
+    () => idleNotificationCount(harness.leadMailbox) === 1,
+    'initial idle notification',
+  )
+  harness.nextTurn.messages = [
+    assistantMessage([{ type: 'text', text: 'FINAL: all done.' }]),
+  ]
+  enqueuePendingNotification({
+    value: notificationText('agent-abc', 'Agent "x" completed'),
+    mode: 'task-notification',
+    agentId: WORKER_AGENT_ID,
+  })
+  await waitFor(
+    () => idleNotificationCount(harness.leadMailbox) === 2,
+    'post-turn idle notification',
+  )
+
+  // What a status-waiting stop (the handoff tests' stopSuccessor) sees: the
+  // first moment the row reads completed, is the notification queued yet?
+  started.abortController.abort()
+  let queuedWhenCompleted: boolean | undefined
+  while (queuedWhenCompleted === undefined) {
+    if (started.getState().tasks[started.taskId]?.status === 'completed') {
+      queuedWhenCompleted = ownCompletion(started.taskId) !== undefined
+    } else {
+      await new Promise(resolve => setTimeout(resolve, 0))
+    }
+  }
+  const result = await started.done
+  expect(result.success).toBe(true)
+
+  expect(queuedWhenCompleted).toBe(true)
+  expect(ownCompletion(started.taskId)).toContain('<result>FINAL: all done.</result>')
+})

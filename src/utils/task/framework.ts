@@ -19,6 +19,7 @@ import { recordDelegatedRunFinished } from '../../services/supervisor/delegation
 import { enqueueSdkEvent } from '../sdkEventQueue.js'
 import { getTaskOutputDelta, getTaskOutputPath } from './diskOutput.js'
 import { isRetainedOrWithinGrace } from './retention.js'
+import { escapeXml } from '../xml.js'
 
 // Standard polling interval for all tasks
 export const POLL_INTERVAL_MS = 1000
@@ -297,7 +298,7 @@ export async function pollTasks(
 /**
  * Enqueue a task notification to the message queue.
  */
-function enqueueTaskNotification(attachment: TaskAttachment): void {
+export function enqueueTaskNotification(attachment: TaskAttachment): void {
   const statusText = getStatusText(attachment.status)
 
   const outputPath = getTaskOutputPath(attachment.taskId)
@@ -309,7 +310,7 @@ function enqueueTaskNotification(attachment: TaskAttachment): void {
 <${TASK_TYPE_TAG}>${attachment.taskType}</${TASK_TYPE_TAG}>
 <${OUTPUT_FILE_TAG}>${outputPath}</${OUTPUT_FILE_TAG}>
 <${STATUS_TAG}>${attachment.status}</${STATUS_TAG}>
-<${SUMMARY_TAG}>Task "${attachment.description}" ${statusText}</${SUMMARY_TAG}>
+<${SUMMARY_TAG}>${escapeXml(`Task "${attachment.description}" ${statusText}`)}</${SUMMARY_TAG}>
 </${TASK_NOTIFICATION_TAG}>`
 
   // Supervision: teammate (and other agent-shaped) tasks are the supervisor's

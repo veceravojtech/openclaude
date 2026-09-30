@@ -252,6 +252,58 @@ test('a watchdog deadline failure writes its failure report to <output-file> bef
   expect(fileAtEnqueue).toBe(`${unescapeXml(result)}\n`)
 })
 
+test('a late completion that wins during the failure capture leaves no stale failure in <output-file>', async () => {
+  const world = makeWorld()
+  let releaseCapture: (tail: string | null) => void = () => {}
+  const capture = new Promise<string | null>(resolve => {
+    releaseCapture = resolve
+  })
+  let captureStarted = false
+  const handle = registerOutOfProcessTeammateTask(
+    world.setAppState,
+    {
+      teammateId: `${WORKER}@${TEAM}`,
+      sanitizedName: WORKER,
+      teamName: TEAM,
+      teammateColor: 'cyan',
+      prompt: 'count the call sites',
+      paneId: '%42',
+      backendType: 'tmux',
+      toolUseId: 'toolu-1',
+    },
+    {
+      ...deps(world),
+      capturePaneTail: () => {
+        captureStarted = true
+        return capture
+      },
+    },
+  )
+  handles.push(handle)
+  const taskId = Object.keys(world.state.tasks)[0]!
+  await _clearOutputsForTest()
+
+  // Alive pane past its progress deadline: failed, capture pending.
+  world.nowMs += 600_001
+  const failing = handle.scan()
+  while (!captureStarted) await Promise.resolve()
+
+  world.mailbox.push(
+    idle(world, { idleReason: 'available', lastAssistantText: 'FINAL: late but real.' }),
+  )
+  const capture2 = captureAtEnqueue()
+  await handle.scan()
+  releaseCapture('stale tail')
+  await failing
+  capture2.stop()
+  await _clearOutputsForTest()
+
+  expect(capture2.seen).toHaveLength(1)
+  expect(capture2.seen[0]!.value).toContain('<status>completed</status>')
+  // Only the winning report is on disk; the stale failure never got appended.
+  expect(readFileSync(getTaskOutputPath(taskId), 'utf8')).toBe('FINAL: late but real.\n')
+})
+
 test('eviction keeps the file, so the path advertised after it still reads', async () => {
   const world = makeWorld()
   const { taskId, handle } = register(world)

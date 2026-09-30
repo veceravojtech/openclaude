@@ -307,8 +307,34 @@ function runTmuxInSwarm(
 function runTmuxInSocket(
   socketName: string,
   args: string[],
+  options?: { timeoutMs?: number },
 ): Promise<{ stdout: string; stderr: string; code: number }> {
-  return execFileNoThrow(TMUX_COMMAND, ['-L', socketName, ...args])
+  if (options?.timeoutMs === undefined) {
+    return execFileNoThrow(TMUX_COMMAND, ['-L', socketName, ...args])
+  }
+  // Same defaults as execFileNoThrow's, with a bounded timeout. A timed-out
+  // command resolves with a non-zero code, never throws.
+  return execFileNoThrow(TMUX_COMMAND, ['-L', socketName, ...args], {
+    timeout: options.timeoutMs,
+    preserveOutputOnError: true,
+    useCwd: true,
+  })
+}
+
+/**
+ * Upper bound on the pane capture a failure report waits for. A wedged tmux
+ * must not hold up the notification that the teammate failed; the report
+ * then says no output could be captured.
+ */
+export const TMUX_CAPTURE_TIMEOUT_MS = 3_000
+
+/** Test seam: the tmux runner capturePaneTail uses. */
+let captureRunner: typeof runTmuxInSocket = runTmuxInSocket
+
+export function setTmuxCaptureRunnerForTesting(
+  runner: typeof runTmuxInSocket | undefined,
+): void {
+  captureRunner = runner ?? runTmuxInSocket
 }
 
 /**
@@ -508,7 +534,8 @@ export class TmuxBackend implements PaneBackend {
    * The last `lines` lines of the pane (`capture-pane -p -S -<lines>`) on the
    * pane's recorded socket, trailing blank lines dropped. `null` when there is
    * no recorded socket (a guessed server could hold a different pane with the
-   * same id), when the pane is gone or tmux fails, and on any thrown error.
+   * same id), when the pane is gone or tmux fails, when tmux does not answer
+   * within {@link TMUX_CAPTURE_TIMEOUT_MS}, and on any thrown error.
    */
   async capturePaneTail(
     paneId: PaneId,
@@ -520,14 +547,11 @@ export class TmuxBackend implements PaneBackend {
     }
     try {
       const tailLines = Math.max(1, Math.floor(lines))
-      const result = await runTmuxInSocket(socketName, [
-        'capture-pane',
-        '-p',
-        '-t',
-        paneId,
-        '-S',
-        `-${tailLines}`,
-      ])
+      const result = await captureRunner(
+        socketName,
+        ['capture-pane', '-p', '-t', paneId, '-S', `-${tailLines}`],
+        { timeoutMs: TMUX_CAPTURE_TIMEOUT_MS },
+      )
       if (result.code !== 0) {
         logForDebugging(
           `[TmuxBackend] capturePaneTail(${paneId}) failed (exit ${result.code}): ${result.stderr}`,

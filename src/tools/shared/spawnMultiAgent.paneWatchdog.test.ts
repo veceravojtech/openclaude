@@ -468,7 +468,7 @@ test('a pane capture that throws is reported as gone, never thrown out of the sc
   expect(resultOf(notifications[0]!)).toContain(PANE_GONE_LINE)
 })
 
-test("a watchdog failure unassigns the teammate's tasks, once", async () => {
+test("a dead-pane failure unassigns the teammate's tasks, once", async () => {
   const world = makeWorld()
   registerTeammate(world)
   worldToDispose.push(...world.handles)
@@ -477,7 +477,7 @@ test("a watchdog failure unassigns the teammate's tasks, once", async () => {
   await world.handles[0]!.scan()
   expect(world.unassignCalls).toEqual([])
 
-  world.probes = ['alive']
+  world.probes = ['dead']
   world.nowMs += PROGRESS_TIMEOUT_MS + 1
   await world.handles[0]!.scan()
   expect(taskStatus(world)).toBe('failed')
@@ -490,6 +490,127 @@ test("a watchdog failure unassigns the teammate's tasks, once", async () => {
   world.nowMs += PROGRESS_TIMEOUT_MS
   await world.handles[0]!.scan()
   expect(world.unassignCalls.length).toBe(1)
+})
+
+test('an alive-pane timeout keeps the teammate\'s tasks: a slow child may still complete', async () => {
+  const world = makeWorld()
+  registerTeammate(world)
+  worldToDispose.push(...world.handles)
+
+  world.teamFile.members[1]!.isActive = true
+  await world.handles[0]!.scan()
+  world.paneTail = 'still compiling...'
+  world.probes = ['alive']
+  world.nowMs += PROGRESS_TIMEOUT_MS + 1
+  await world.handles[0]!.scan()
+
+  expect(taskStatus(world)).toBe('failed')
+  expect(world.unassignCalls).toEqual([])
+  // The lead is still told, with the pane tail.
+  expect(world.notifications().length).toBe(1)
+  expect(resultOf(world.notifications()[0]!)).toContain('still compiling...')
+})
+
+test('an unknown-pane timeout keeps the teammate\'s tasks too', async () => {
+  const world = makeWorld()
+  registerTeammate(world)
+  worldToDispose.push(...world.handles)
+
+  world.nowMs += FIRST_CONTACT_TIMEOUT_MS + 1
+  // Every probe answers unknown: the bounded deferral runs out, then fails.
+  for (let i = 0; i <= MAX_UNKNOWN_RETRIES + 1; i++) {
+    await world.handles[0]!.scan()
+    world.nowMs += UNKNOWN_RETRY_DELAY_MS
+  }
+  expect(taskStatus(world)).toBe('failed')
+  expect(world.unassignCalls).toEqual([])
+  expect(world.notifications().length).toBe(1)
+})
+
+test('a completion that lands while the failure capture is pending wins: no stale failure, no unassign', async () => {
+  const world = makeWorld()
+  let releaseCapture: (tail: string | null) => void = () => {}
+  const capture = new Promise<string | null>(resolve => {
+    releaseCapture = resolve
+  })
+  let captureStarted = false
+  registerTeammate(world, 'worker', {
+    ...watchdogDeps(world),
+    capturePaneTail: () => {
+      captureStarted = true
+      return capture
+    },
+  })
+  worldToDispose.push(...world.handles)
+
+  // The dead pane fails the task; the failure path now awaits the capture.
+  world.probes = ['dead']
+  world.nowMs += FIRST_CONTACT_TIMEOUT_MS + 1
+  const failing = world.handles[0]!.scan()
+  while (!captureStarted) await Promise.resolve()
+  expect(taskStatus(world)).toBe('failed')
+
+  // Meanwhile an overlapping scan sees the late real completion.
+  world.mailbox.push(
+    idleWithReport('worker', world.nowMs, { lastAssistantText: 'DONE after all' }),
+  )
+  await world.handles[0]!.scan()
+  expect(taskStatus(world)).toBe('completed')
+
+  // Now the capture returns; the stale failure must not go out.
+  releaseCapture('late tail')
+  await failing
+
+  expect(taskStatus(world)).toBe('completed')
+  expect(world.unassignCalls).toEqual([])
+  const notifications = world.notifications()
+  expect(notifications.length).toBe(1)
+  expect(notifications[0]).toContain('<status>completed</status>')
+  expect(resultOf(notifications[0]!)).toBe('DONE after all')
+  expect(notifications.some(n => n.includes('<status>failed</status>'))).toBe(false)
+})
+
+test('a completion that lands during the dead-pane roster read wins: no unassign, no stale failure', async () => {
+  const world = makeWorld()
+  let releaseRoster: () => void = () => {}
+  const rosterGate = new Promise<void>(resolve => {
+    releaseRoster = resolve
+  })
+  let failing = false
+  let rosterPending = false
+  registerTeammate(world, 'worker', {
+    ...watchdogDeps(world),
+    // Once the task has failed, the next roster read is the unassign's.
+    readTeamFile: async () => {
+      if (failing && taskStatus(world) === 'failed') {
+        rosterPending = true
+        await rosterGate
+      }
+      return world.teamFile
+    },
+  })
+  worldToDispose.push(...world.handles)
+
+  world.probes = ['dead']
+  world.nowMs += FIRST_CONTACT_TIMEOUT_MS + 1
+  failing = true
+  const failingScan = world.handles[0]!.scan()
+  while (!rosterPending) await Promise.resolve()
+  failing = false
+
+  world.mailbox.push(
+    idleWithReport('worker', world.nowMs, { lastAssistantText: 'DONE late' }),
+  )
+  await world.handles[0]!.scan()
+  expect(taskStatus(world)).toBe('completed')
+
+  releaseRoster()
+  await failingScan
+
+  expect(world.unassignCalls).toEqual([])
+  const notifications = world.notifications()
+  expect(notifications.length).toBe(1)
+  expect(notifications[0]).toContain('<status>completed</status>')
 })
 
 test('a failure whose unassign throws still notifies the lead', async () => {

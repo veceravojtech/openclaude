@@ -908,11 +908,15 @@ export function armPaneTeammateWatchdog({
     status: 'completed' | 'failed',
     error?: string,
     finalMessage?: string,
+    options?: { stillCurrent?: () => boolean },
   ): Promise<void> {
     if (finalMessage) {
       appendTaskOutput(taskId, `${finalMessage}\n`)
       await flushTaskOutput(taskId)
       void evictTaskOutput(taskId)
+      // Re-checked after the flush: a late completion that won meanwhile
+      // re-armed `notified`, so a stale enqueue here would take its slot.
+      if (options?.stillCurrent && !options.stillCurrent()) return
     }
     enqueueAgentNotification({
       taskId,
@@ -991,16 +995,36 @@ export function armPaneTeammateWatchdog({
   }
 
   /**
-   * Put the failed teammate's open tasks back on the board, as the ghost
-   * sweep does for a retired one. Best-effort: logged, never thrown, so the
-   * failure notification still goes out.
+   * Whether the task still holds the failure THIS failTask wrote. Re-read
+   * from the task state after every await in the failure path, because an
+   * overlapping scan may have let a late completion win (failed → completed)
+   * and a TaskStop may have killed it meanwhile. The task state is the one
+   * record every writer goes through, so reading it catches both; a token
+   * private to this watchdog would miss the kill.
    */
-  async function unassignFailedTeammateTasks(): Promise<void> {
+  function stillOurFailure(error: string): boolean {
+    let current = false
+    updateTaskState(taskId, setAppState, task => {
+      current =
+        task.status === 'failed' && 'error' in task && task.error === error
+      return task
+    })
+    return current
+  }
+
+  /**
+   * Put a teammate whose pane is confirmed dead back on the board, as the
+   * ghost sweep does for a retired one. Best-effort: logged, never thrown,
+   * so the failure notification still goes out. Skipped when a late
+   * completion or a kill overtook the failure during the roster read.
+   */
+  async function unassignDeadTeammateTasks(error: string): Promise<void> {
     try {
       const agentId =
         (await readTeamFile(teamName))?.members?.find(
           m => m.name === teammateName,
         )?.agentId ?? teammateName
+      if (!stillOurFailure(error)) return
       await unassignMemberTasks(teamName, { agentId, name: teammateName })
     } catch (error) {
       logForDebugging(
@@ -1014,9 +1038,21 @@ export function armPaneTeammateWatchdog({
    * state AND in the notification summary — transitionTerminal is what
    * writes the state, emit is what reaches the lead's conversation. The
    * `<result>` (also appended to the output file) carries the teammate's last
-   * text and the pane's last lines, and the teammate's tasks are unassigned.
+   * text and the pane's last lines.
+   *
+   * The teammate's tasks are unassigned only when its pane is confirmed dead
+   * (`paneDead`). An alive or unknown pane may still be a merely-slow child
+   * whose late completion wins; putting its claims back on the board would
+   * let someone else start the same work a second time.
+   *
+   * Every await is followed by a re-check (stillOurFailure): once a late
+   * completion or a kill has overtaken this failure, the stale failure is
+   * neither unassigned nor emitted.
    */
-  async function failTask(error: string): Promise<void> {
+  async function failTask(
+    error: string,
+    { paneDead }: { paneDead: boolean },
+  ): Promise<void> {
     if (!transitionTerminal('failed', error)) {
       dispose()
       return
@@ -1024,9 +1060,15 @@ export function armPaneTeammateWatchdog({
     // Set before any await: an overlapping scan then only watches for a late
     // completion and can never fail (or append) a second time.
     watchdogFailedTask = true
-    const result = paneFailureResult(error, lastIdleSeen, await readPaneTail())
-    await unassignFailedTeammateTasks()
-    await emit('failed', error, result)
+    const paneTail = await readPaneTail()
+    if (!stillOurFailure(error)) return
+    if (paneDead) {
+      await unassignDeadTeammateTasks(error)
+      if (!stillOurFailure(error)) return
+    }
+    await emit('failed', error, paneFailureResult(error, lastIdleSeen, paneTail), {
+      stillCurrent: () => stillOurFailure(error),
+    })
     // Do NOT dispose: a merely-slow child was failed spuriously, and its
     // late idle notification must still be able to complete the task.
   }
@@ -1127,7 +1169,9 @@ export function armPaneTeammateWatchdog({
           const liveness = await probePane()
           if (disposed) return
           if (liveness === 'dead') {
-            await failTask('Pane exited while waiting for descendants')
+            await failTask('Pane exited while waiting for descendants', {
+              paneDead: true,
+            })
           }
           return
         }
@@ -1241,14 +1285,14 @@ export function armPaneTeammateWatchdog({
         )
         return
       }
-      await failTask(noProgressError(elapsed, 'unknown'))
+      await failTask(noProgressError(elapsed, 'unknown'), { paneDead: false })
       return
     }
     if (liveness === 'dead') {
-      await failTask('Pane exited without completing')
+      await failTask('Pane exited without completing', { paneDead: true })
       return
     }
-    await failTask(noProgressError(elapsed, 'alive'))
+    await failTask(noProgressError(elapsed, 'alive'), { paneDead: false })
   }
 
   signal?.addEventListener('abort', () => dispose(), { once: true })

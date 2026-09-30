@@ -7,6 +7,7 @@ import { TodoWriteTool } from '../../tools/TodoWriteTool/TodoWriteTool.js';
 import { type BackgroundRemoteSessionPrecondition, checkBackgroundRemoteSessionEligibility } from '../../utils/background/remote/remoteSession.js';
 import { logForDebugging } from '../../utils/debug.js';
 import { logError } from '../../utils/log.js';
+import { escapeXml } from '../../utils/xml.js';
 import { enqueuePendingNotification } from '../../utils/messageQueueManager.js';
 import { extractTag } from '../../utils/messages.js';
 import { emitTaskTerminatedSdk } from '../../utils/sdkEventQueue.js';
@@ -198,7 +199,7 @@ function enqueueRemoteNotification(taskId: string, title: string, status: 'compl
 <${TASK_TYPE_TAG}>remote_agent</${TASK_TYPE_TAG}>
 <${OUTPUT_FILE_TAG}>${outputPath}</${OUTPUT_FILE_TAG}>
 <${STATUS_TAG}>${status}</${STATUS_TAG}>
-<${SUMMARY_TAG}>Remote task "${title}" ${statusText}</${SUMMARY_TAG}>
+<${SUMMARY_TAG}>${escapeXml(`Remote task "${title}" ${statusText}`)}</${SUMMARY_TAG}>
 </${TASK_NOTIFICATION_TAG}>`;
   enqueuePendingNotification({
     value: message,
@@ -253,9 +254,9 @@ export function enqueueUltraplanFailureNotification(taskId: string, sessionId: s
 <${TASK_ID_TAG}>${taskId}</${TASK_ID_TAG}>
 <${TASK_TYPE_TAG}>remote_agent</${TASK_TYPE_TAG}>
 <${STATUS_TAG}>failed</${STATUS_TAG}>
-<${SUMMARY_TAG}>Ultraplan failed: ${reason}</${SUMMARY_TAG}>
+<${SUMMARY_TAG}>${escapeXml(`Ultraplan failed: ${reason}`)}</${SUMMARY_TAG}>
 </${TASK_NOTIFICATION_TAG}>
-The remote Ultraplan session did not produce a plan (${reason}). Inspect the session at ${sessionUrl} and tell the user to retry locally with plan mode.`;
+The remote Ultraplan session did not produce a plan (${escapeXml(reason)}). Inspect the session at ${sessionUrl} and tell the user to retry locally with plan mode.`;
   enqueuePendingNotification({
     value: message,
     mode: 'task-notification'
@@ -374,9 +375,9 @@ function enqueueRemoteReviewFailureNotification(taskId: string, reason: string, 
 <${TASK_ID_TAG}>${taskId}</${TASK_ID_TAG}>
 <${TASK_TYPE_TAG}>remote_agent</${TASK_TYPE_TAG}>
 <${STATUS_TAG}>failed</${STATUS_TAG}>
-<${SUMMARY_TAG}>Remote review failed: ${reason}</${SUMMARY_TAG}>
+<${SUMMARY_TAG}>${escapeXml(`Remote review failed: ${reason}`)}</${SUMMARY_TAG}>
 </${TASK_NOTIFICATION_TAG}>
-Remote review did not produce output (${reason}). Tell the user to retry /ultrareview, or use /review for a local review instead.`;
+Remote review did not produce output (${escapeXml(reason)}). Tell the user to retry /ultrareview, or use /review for a local review instead.`;
   enqueuePendingNotification({
     value: message,
     mode: 'task-notification'

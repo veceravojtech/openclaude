@@ -3,6 +3,8 @@ import {
   interpretTmuxPanePresence,
   interpretTmuxPaneProbe,
   interpretTmuxPaneState,
+  setTmuxCaptureRunnerForTesting,
+  TMUX_CAPTURE_TIMEOUT_MS,
   TmuxBackend,
 } from './TmuxBackend.js'
 
@@ -184,4 +186,42 @@ test('a pane capture with no recorded socket answers null without shelling out',
   // return another pane's output, so no socket means nothing is captured.
   const backend = new TmuxBackend()
   await expect(backend.capturePaneTail('%1', 40, undefined)).resolves.toBeNull()
+})
+
+test('a pane capture is bounded by a short timeout and a timed-out capture answers null', async () => {
+  const calls: Array<{ args: string[]; timeoutMs?: number }> = []
+  // What execFileNoThrow resolves with when its timeout kills tmux.
+  setTmuxCaptureRunnerForTesting(async (_socket, args, options) => {
+    calls.push({ args, timeoutMs: options?.timeoutMs })
+    return { stdout: '', stderr: '', code: 1 }
+  })
+  try {
+    const backend = new TmuxBackend()
+    await expect(backend.capturePaneTail('%1', 40, 'default')).resolves.toBeNull()
+    expect(TMUX_CAPTURE_TIMEOUT_MS).toBe(3_000)
+    expect(calls).toEqual([
+      {
+        args: ['capture-pane', '-p', '-t', '%1', '-S', '-40'],
+        timeoutMs: TMUX_CAPTURE_TIMEOUT_MS,
+      },
+    ])
+  } finally {
+    setTmuxCaptureRunnerForTesting(undefined)
+  }
+})
+
+test('a pane capture returns the last lines, trailing blanks dropped', async () => {
+  setTmuxCaptureRunnerForTesting(async () => ({
+    stdout: 'one\ntwo\nthree\n\n\n',
+    stderr: '',
+    code: 0,
+  }))
+  try {
+    const backend = new TmuxBackend()
+    await expect(backend.capturePaneTail('%1', 2, 'default')).resolves.toBe(
+      'two\nthree',
+    )
+  } finally {
+    setTmuxCaptureRunnerForTesting(undefined)
+  }
 })
