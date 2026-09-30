@@ -47,6 +47,7 @@ import type {
 import {
   createActivityDescriptionResolver,
   createProgressTracker,
+  enqueueAgentNotification,
   getProgressUpdate,
   updateProgressFromMessage,
 } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
@@ -149,11 +150,14 @@ import type { TeammateContext } from '../teammateContext.js'
 import { runWithTeammateContext } from '../teammateContext.js'
 import {
   createIdleNotification,
+  formatTeammateReportResult,
   getLastPeerDmSummary,
+  getTeammateTurnReport,
   isPermissionResponse,
   isShutdownRequest,
   markMessageAsReadByIndex,
   readMailbox,
+  type TeammateTurnReport,
   writeToMailbox,
 } from '../teammateMailbox.js'
 import { unregisterAgent as unregisterPerfettoAgent } from '../telemetry/perfettoTracing.js'
@@ -798,6 +802,19 @@ async function sendMessageToLeader(
 }
 
 /**
+ * What one turn of this teammate leaves for its lead: the final assistant text,
+ * or `reportedToLead` when the turn already delivered a plain-text SendMessage
+ * to "team-lead" (see getTeammateTurnReport for the dedupe rule). Computed from
+ * that turn's own messages only, so the flag resets with every new prompt.
+ */
+function teammateTurnReport(
+  identity: TeammateIdentity,
+  turnMessages: Message[],
+): TeammateTurnReport {
+  return getTeammateTurnReport(turnMessages, TEAM_LEAD_NAME, identity.teamName)
+}
+
+/**
  * Sends idle notification to the leader via file-based mailbox.
  * Uses agentName (not agentId) for consistency with process-based teammates.
  */
@@ -815,7 +832,7 @@ async function sendIdleNotification(
     completedTaskId?: string
     completedStatus?: 'resolved' | 'blocked' | 'failed'
     failureReason?: string
-  },
+  } & TeammateTurnReport,
   isCurrent?: () => boolean,
 ): Promise<void> {
   const notification = createIdleNotification(agentName, options)
@@ -2121,6 +2138,8 @@ async function idleUntilNextPrompt(params: {
   toolUseContext: ToolUseContext
   allMessages: Message[]
   workWasAborted: boolean
+  /** The turn that just ended; absent for an idle spawn (no turn ran). */
+  turnReport?: TeammateTurnReport
   /** Notify the lead even if the task is already flagged idle (idle spawn:
    *  the task is registered idle, but the lead has not been told yet). */
   forceIdleNotification?: boolean
@@ -2132,6 +2151,7 @@ async function idleUntilNextPrompt(params: {
     toolUseContext,
     allMessages,
     workWasAborted,
+    turnReport,
     forceIdleNotification = false,
   } = params
   const { setAppState } = toolUseContext
@@ -2155,9 +2175,10 @@ async function idleUntilNextPrompt(params: {
     setAppState,
   )
 
-  // Note: We do NOT automatically send the teammate's response to the leader.
-  // Teammates should use the Teammate tool to communicate with the leader.
-  // This matches process-based teammates where output is not visible to the leader.
+  // The turn's final text rides on the idle notification below (capped, and
+  // replaced by `reportedToLead` when the teammate already sent its report
+  // with SendMessage), matching the pane teammates' Stop hook, so the lead
+  // gets the report even if the teammate never messaged it.
 
   // Self-idle stays a scheduling fact; availability additionally includes the
   // recursive delegation tree. Refresh in the existing poll, never a timer.
@@ -2177,6 +2198,7 @@ async function idleUntilNextPrompt(params: {
         : delegatedActivity.status === 'none' ? 'available' : 'waiting_for_children',
       delegatedActivity,
       summary: getLastPeerDmSummary(allMessages),
+      ...turnReport,
     }, () => {
       const latest = toolUseContext.getAppState().tasks[taskId]
       return !abortController.signal.aborted && latest?.type === 'in_process_teammate' &&
@@ -2418,6 +2440,13 @@ export async function runInProcessTeammate(
    * id, so it is the only key a later resume can reach the conversation with.
    */
   let lastTurnAgentId: string | undefined
+  /**
+   * What the most recent turn left for the lead (final text, or that it was
+   * already sent by SendMessage). Reset when each turn starts and filled when
+   * it ends, so it always describes the latest turn; the completion and
+   * failure tails put it in the lead's notification.
+   */
+  let lastTurnReport: TeammateTurnReport = {}
   // Wrap initial prompt with XML for proper styling in transcript view.
   // Undefined for an idle spawn: the teammate waits for its first message.
   const wrappedInitialPrompt =
@@ -2726,6 +2755,7 @@ export async function runInProcessTeammate(
       allMessages.push(userMessage)
 
       const iterationMessages: Message[] = []
+      lastTurnReport = {}
 
       // Track if this iteration was interrupted by work abort (not lifecycle abort)
       let workWasAborted = false
@@ -2879,6 +2909,7 @@ export async function runInProcessTeammate(
         task => ({ ...task, currentWorkAbortController: undefined }),
         setAppState,
       )
+      lastTurnReport = teammateTurnReport(identity, iterationMessages)
 
       // Check if lifecycle aborted during agent run (kills whole teammate)
       if (abortController.signal.aborted) {
@@ -2942,6 +2973,7 @@ export async function runInProcessTeammate(
               idleReason: 'parked',
               delegatedActivity: readDelegatedActivity(identity, toolUseContext.getAppState().tasks),
               failureReason: usageLimitNotice,
+              ...lastTurnReport,
             },
           )
         }
@@ -3017,6 +3049,7 @@ export async function runInProcessTeammate(
         toolUseContext,
         allMessages,
         workWasAborted,
+        turnReport: lastTurnReport,
       })
       if (nextPrompt === undefined) {
         shouldExit = true
@@ -3026,9 +3059,21 @@ export async function runInProcessTeammate(
       }
     }
 
-    // Mark as completed when exiting the loop
+    // Mark as completed when exiting the loop.
+    //
+    // A root-team teammate's lead is this process's main thread, so the
+    // completion goes out as a real <task-notification> through the same
+    // enqueueAgentNotification path pane teammates and background agents use,
+    // with the last turn's text in <result> — the lead gets the report even if
+    // the mailbox copy was lost. `notified` is left for enqueueAgentNotification
+    // to claim, which is what keeps it to one notification. A sub-team member
+    // reports to a sub-lead, which only drains notifications addressed to it,
+    // so it keeps the old silent `notified: true` and relies on the idle
+    // notification in the sub-lead's inbox.
+    const notifyMainThread = getParentTeamName(identity.teamName) === undefined
     let alreadyTerminal = false
     let toolUseId: string | undefined
+    let description = identity.agentName
     updateTaskState(
       taskId,
       task => {
@@ -3040,12 +3085,13 @@ export async function runInProcessTeammate(
           return task
         }
         toolUseId = task.toolUseId
+        description = task.description || description
         task.onIdleCallbacks?.forEach(cb => cb())
         task.unregisterCleanup?.()
         return {
           ...task,
           status: 'completed' as const,
-          notified: true,
+          ...(notifyMainThread ? {} : { notified: true }),
           endTime: Date.now(),
           // Keep the row for TEAMMATE_GRACE_MS instead of evicting here: the
           // retain/grace pair is what isRetainedOrWithinGrace reads, and the one
@@ -3065,9 +3111,20 @@ export async function runInProcessTeammate(
       setAppState,
     )
     void evictTaskOutput(taskId)
-    // notified:true pre-set → no XML notification → print.ts won't emit
-    // the SDK task_notification. Close the task_started bookend directly.
-    if (!alreadyTerminal) {
+    if (!alreadyTerminal && notifyMainThread) {
+      // The XML notification carries <status>, so print.ts emits the SDK
+      // task_notification from it — no direct bookend here (it would double).
+      enqueueAgentNotification({
+        taskId,
+        description,
+        status: 'completed',
+        finalMessage: formatTeammateReportResult(lastTurnReport),
+        setAppState,
+        toolUseId,
+      })
+    } else if (!alreadyTerminal) {
+      // notified:true pre-set → no XML notification → print.ts won't emit
+      // the SDK task_notification. Close the task_started bookend directly.
       emitTaskTerminatedSdk(taskId, 'completed', {
         toolUseId,
         summary: identity.agentId,
@@ -3169,6 +3226,9 @@ export async function runInProcessTeammate(
         idleReason: 'failed',
         completedStatus: 'failed',
         failureReason: errorMessage,
+        // Whatever the last finished turn said, so a crash does not also
+        // lose the report that preceded it.
+        ...lastTurnReport,
       },
     )
 

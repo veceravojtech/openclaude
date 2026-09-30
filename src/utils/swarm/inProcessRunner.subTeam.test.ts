@@ -768,6 +768,25 @@ test('pane Stop hook uses live getter, writes self-idle, and refreshes delegated
   expect(harness.inbox(TEAM_LEAD, PARENT_TEAM).some(m => m.text.includes('"idleReason":"available"'))).toBe(true)
 })
 
+test("pane Stop hook carries the turn's final assistant text to the lead", async () => {
+  const harness = await importRunnerWithMocks()
+  const { initializeTeammateHooks } = await import('./teammateInit.js')
+  const world = createWorld()
+  writeSubTeamWorld()
+  initializeTeammateHooks(world.setAppState, 'pane-final-text', { teamName: PARENT_TEAM, agentName: SUB_LEAD, agentId: SUB_LEAD_AGENT_ID }, world.getState)
+  const hook = world.getState().sessionHooks.get('pane-final-text')?.hooks.Stop?.[0]?.hooks[0]?.hook
+  if (!hook || hook.type !== 'function') throw new Error('Stop hook missing')
+  const turn = [
+    { type: 'user', uuid: 'u1', timestamp: '', message: { role: 'user', content: 'do it' } },
+    { type: 'assistant', uuid: 'a1', timestamp: '', message: { id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'PANE FINAL: done.' }] } },
+  ] as unknown as Parameters<typeof hook.callback>[0]
+  await hook.callback(turn)
+  const idle = harness.inbox(TEAM_LEAD, PARENT_TEAM)
+    .map(m => { try { return JSON.parse(m.text) } catch { return undefined } })
+    .find(m => m?.type === 'idle_notification')
+  expect(idle?.lastAssistantText).toBe('PANE FINAL: done.')
+})
+
 test('delegated activity refreshes during the same self-idle period', async () => {
   const harness = await importRunnerWithMocks()
   const world = createWorld()

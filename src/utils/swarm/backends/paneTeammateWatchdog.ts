@@ -8,6 +8,8 @@ import {
 } from '../../task/framework.js'
 import {
   readMailbox,
+  formatTeammateReportResult,
+  type IdleNotificationMessage,
   isIdleNotification,
   isTeammateStartupNotification,
 } from '../../teammateMailbox.js'
@@ -162,6 +164,21 @@ export const PANE_TEAMMATE_MAX_UNKNOWN_RETRIES = 3
  * spawn timestamp at millisecond granularity.
  */
 const TIMESTAMP_SLACK_MS = 1_000
+
+/**
+ * The `<result>` of a pane teammate's task-notification, built from the idle
+ * notification that ended the turn: the teammate's final text (or the short
+ * "already delivered by SendMessage" line), followed by the peer-DM summary
+ * when the turn also messaged a peer. Undefined when the turn left neither.
+ */
+export function paneTurnResult(
+  idle: IdleNotificationMessage,
+): string | undefined {
+  const parts = [formatTeammateReportResult(idle), idle.summary].filter(
+    (part): part is string => !!part,
+  )
+  return parts.length > 0 ? parts.join('\n\n') : undefined
+}
 
 /** Mailbox message shape the watchdog needs. Subset of TeammateMessage. */
 export type PaneWatchdogMailboxMessage = {
@@ -991,7 +1008,7 @@ export function armPaneTeammateWatchdog({
           const reason =
             latestIdle.failureReason ?? 'Teammate reported a failed turn'
           if (transitionTerminal('failed', reason)) {
-            emit('failed', reason)
+            emit('failed', reason, paneTurnResult(latestIdle))
             // Explicit self-reported failure only (never the deadline path,
             // where a slow child's late completion must still win).
             scheduleFailedReap()
@@ -1005,7 +1022,7 @@ export function armPaneTeammateWatchdog({
               fromWatchdogFailure: true,
             })
           ) {
-            emit('completed', undefined, latestIdle.summary)
+            emit('completed', undefined, paneTurnResult(latestIdle))
           }
         } else {
           // 'available' and 'interrupted' from a living pane mean the turn is
@@ -1020,7 +1037,7 @@ export function armPaneTeammateWatchdog({
             isIdle: true,
             delegatedActivity: latestIdle!.delegatedActivity,
           }))
-          emit('completed', undefined, latestIdle.summary)
+          emit('completed', undefined, paneTurnResult(latestIdle))
         }
         dispose()
         return

@@ -16,6 +16,7 @@ import { PermissionModeSchema } from '../entrypoints/sdk/coreSchemas.js'
 import { SEND_MESSAGE_TOOL_NAME } from '../tools/SendMessageTool/constants.js'
 import type { Message } from '../types/message.js'
 import { generateRequestId } from './agentId.js'
+import { getAssistantMessageText } from './messages/content.js'
 import { count } from './array.js'
 import { replaceFileAtomic } from './atomicReplace.js'
 import { logForDebugging } from './debug.js'
@@ -576,6 +577,44 @@ export type IdleNotificationMessage = {
   completedTaskId?: string
   completedStatus?: 'resolved' | 'blocked' | 'failed'
   failureReason?: string
+  /**
+   * Text of the teammate's last assistant message of the turn, capped by
+   * {@link truncateTeammateReport}. Absent when the turn produced no text, or
+   * when `reportedToLead` is set (the lead already has the report). Optional,
+   * so older readers simply ignore it.
+   */
+  lastAssistantText?: string
+  /**
+   * The teammate delivered a plain-text SendMessage to its lead during this
+   * turn, so the report is in the lead's inbox already and is not repeated.
+   */
+  reportedToLead?: boolean
+}
+
+/** Cap on a teammate's final text carried to the lead, in characters (UTF-16 code units). */
+export const TEAMMATE_REPORT_MAX_CHARS = 8192
+
+const TRUNCATION_MARKER_PATTERN = /\n\[truncated: \d+ more chars\]$/
+
+/**
+ * Caps a teammate's final text at {@link TEAMMATE_REPORT_MAX_CHARS} characters
+ * and appends `\n[truncated: N more chars]`, N being the characters dropped.
+ * Text within the cap is returned unchanged. Idempotent: an already-truncated
+ * text is returned as-is, so the idle notification and the task-notification
+ * built from it never stack two markers.
+ */
+export function truncateTeammateReport(
+  text: string,
+  maxChars: number = TEAMMATE_REPORT_MAX_CHARS,
+): string {
+  if (text.length <= maxChars) return text
+  const marker = text.match(TRUNCATION_MARKER_PATTERN)
+  if (marker && text.length - marker[0].length <= maxChars) return text
+  let cut = maxChars
+  // Never split a surrogate pair.
+  const last = text.charCodeAt(cut - 1)
+  if (last >= 0xd800 && last <= 0xdbff) cut--
+  return `${text.slice(0, cut)}\n[truncated: ${text.length - cut} more chars]`
 }
 
 /**
@@ -590,7 +629,7 @@ export function createIdleNotification(
     completedTaskId?: string
     completedStatus?: 'resolved' | 'blocked' | 'failed'
     failureReason?: string
-  },
+  } & TeammateTurnReport,
 ): IdleNotificationMessage {
   return {
     type: 'idle_notification',
@@ -602,7 +641,39 @@ export function createIdleNotification(
     completedTaskId: options?.completedTaskId,
     completedStatus: options?.completedStatus,
     failureReason: options?.failureReason,
+    // Dedupe: a report the lead already got by SendMessage is flagged, not
+    // repeated. Enforced here so no caller can send both.
+    ...(options?.reportedToLead
+      ? { reportedToLead: true }
+      : options?.lastAssistantText
+        ? { lastAssistantText: truncateTeammateReport(options.lastAssistantText) }
+        : {}),
   }
+}
+
+/** What a teammate's turn left for its lead: its final text, or that it already messaged the lead. */
+export type TeammateTurnReport = {
+  lastAssistantText?: string
+  reportedToLead?: boolean
+}
+
+/** The `<result>` line used when the report already reached the lead by SendMessage. */
+export const REPORTED_TO_LEAD_RESULT =
+  'Final report was delivered to the lead by SendMessage (not repeated here).'
+
+/**
+ * The `<result>` text of a teammate's task-notification: the final text
+ * (capped), or a short line when the report was already sent by message.
+ * Undefined when there is nothing to report.
+ */
+export function formatTeammateReportResult(
+  report: TeammateTurnReport | null | undefined,
+): string | undefined {
+  if (!report) return undefined
+  if (report.reportedToLead) return REPORTED_TO_LEAD_RESULT
+  return report.lastAssistantText
+    ? truncateTeammateReport(report.lastAssistantText)
+    : undefined
 }
 
 /**
@@ -1363,6 +1434,103 @@ export async function markMessagesAsReadByPredicate(
         // Lock may have already been released
       }
     }
+  }
+}
+
+/** True when a tool_result's content is SendMessage's `{ success: true, ... }` output. */
+function isSuccessfulSendMessageResult(content: unknown): boolean {
+  const texts =
+    typeof content === 'string'
+      ? [content]
+      : Array.isArray(content)
+        ? content.flatMap(b =>
+            b && typeof b === 'object' && b.type === 'text' && typeof b.text === 'string'
+              ? [b.text as string]
+              : [],
+          )
+        : []
+  return texts.some(text => {
+    try {
+      const parsed = jsonParse(text)
+      return !!parsed && typeof parsed === 'object' && parsed.success === true
+    } catch {
+      return false
+    }
+  })
+}
+
+/**
+ * What the teammate's latest turn leaves for its lead — the input to
+ * `createIdleNotification` and to the completion `<result>`.
+ *
+ * The turn is everything after the last wake-up prompt (a user message with
+ * string content, the same boundary {@link getLastPeerDmSummary} uses), so
+ * the state resets by construction when a new task or prompt starts.
+ *
+ * - `lastAssistantText`: text of the latest assistant message in the turn that
+ *   has any (API-error messages are skipped — their text is a failure notice,
+ *   not a report). Returned raw; `createIdleNotification` truncates it.
+ * - `reportedToLead` (dedupe rule): the turn contains a SendMessage tool_use
+ *   with a plain-text `message` addressed to the lead (`leadName`, "team-lead",
+ *   or `<lead>@<teamName>`, case-insensitive) AND its tool_result says
+ *   `success: true`. Structured messages (shutdown_response etc.) and failed
+ *   sends do not count. When set, the text is not repeated to the lead.
+ */
+export function getTeammateTurnReport(
+  messages: Message[],
+  leadName: string = TEAM_LEAD_NAME,
+  teamName?: string,
+): TeammateTurnReport {
+  const leadAddresses = new Set(
+    [leadName, TEAM_LEAD_NAME].flatMap(name => [
+      name.toLowerCase(),
+      ...(teamName ? [`${name}@${teamName}`.toLowerCase()] : []),
+    ]),
+  )
+  const succeededToolUseIds = new Set<string>()
+  let lastAssistantText: string | undefined
+  let reportedToLead = false
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i]
+    if (!msg) continue
+    if (msg.type === 'user') {
+      const content = msg.message.content
+      if (typeof content === 'string') break // wake-up boundary
+      for (const block of content) {
+        if (
+          block.type === 'tool_result' &&
+          block.is_error !== true &&
+          isSuccessfulSendMessageResult(block.content)
+        ) {
+          succeededToolUseIds.add(block.tool_use_id)
+        }
+      }
+      continue
+    }
+    if (msg.type !== 'assistant') continue
+    if (lastAssistantText === undefined && !msg.isApiErrorMessage) {
+      lastAssistantText = getAssistantMessageText(msg) ?? undefined
+    }
+    for (const block of msg.message.content) {
+      if (
+        block.type === 'tool_use' &&
+        block.name === SEND_MESSAGE_TOOL_NAME &&
+        succeededToolUseIds.has(block.id) &&
+        typeof block.input === 'object' &&
+        block.input !== null &&
+        'to' in block.input &&
+        typeof block.input.to === 'string' &&
+        leadAddresses.has(block.input.to.toLowerCase()) &&
+        'message' in block.input &&
+        typeof block.input.message === 'string'
+      ) {
+        reportedToLead = true
+      }
+    }
+  }
+  return {
+    ...(lastAssistantText ? { lastAssistantText } : {}),
+    ...(reportedToLead ? { reportedToLead: true } : {}),
   }
 }
 

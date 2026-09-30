@@ -422,6 +422,64 @@ test('a healthy child disarms the watchdog and reports success', async () => {
   expect(world.notifications().length).toBe(1)
 })
 
+function idleWithReport(
+  from: string,
+  nowMs: number,
+  report: { lastAssistantText?: string; reportedToLead?: boolean; summary?: string },
+): PaneWatchdogMailboxMessage {
+  return {
+    from,
+    text: JSON.stringify({
+      type: 'idle_notification',
+      from,
+      timestamp: new Date(nowMs).toISOString(),
+      idleReason: 'available',
+      ...report,
+    }),
+    timestamp: new Date(nowMs).toISOString(),
+  }
+}
+
+test("the completion <result> carries the pane teammate's final text", async () => {
+  const world = makeWorld()
+  registerTeammate(world)
+  worldToDispose.push(...world.handles)
+
+  world.teamFile.members[1]!.isActive = true
+  world.mailbox.push(
+    idleWithReport('worker', world.nowMs, {
+      lastAssistantText: 'FINAL REPORT: 3 call sites, all fixed.',
+      summary: '[to peer] handed over the tests',
+    }),
+  )
+  await world.handles[0]!.scan()
+
+  const notifications = world.notifications()
+  expect(notifications.length).toBe(1)
+  const result = notifications[0]!.match(/<result>([\s\S]*)<\/result>/)?.[1]
+  expect(result).toContain('FINAL REPORT: 3 call sites, all fixed.')
+  // The peer-DM summary is kept beside it.
+  expect(result).toContain('[to peer] handed over the tests')
+})
+
+test('a pane teammate that already messaged its lead gets a short <result>, not the text again', async () => {
+  const world = makeWorld()
+  registerTeammate(world)
+  worldToDispose.push(...world.handles)
+
+  world.teamFile.members[1]!.isActive = true
+  world.mailbox.push(
+    idleWithReport('worker', world.nowMs, { reportedToLead: true }),
+  )
+  await world.handles[0]!.scan()
+
+  const notifications = world.notifications()
+  expect(notifications.length).toBe(1)
+  expect(notifications[0]).toContain(
+    '<result>Final report was delivered to the lead by SendMessage (not repeated here).</result>',
+  )
+})
+
 test('a child-reported provider failure fails immediately without waiting for the watchdog deadline', async () => {
   const world = makeWorld()
   registerTeammate(world)

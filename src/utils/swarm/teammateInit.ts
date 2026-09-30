@@ -16,6 +16,8 @@ import {
   createIdleNotification,
   createTeammateStartupNotification,
   getLastPeerDmSummary,
+  getTeammateTurnReport,
+  type TeammateTurnReport,
   writeToMailbox,
 } from '../teammateMailbox.js'
 import { getAPIProvider } from '../model/providers.js'
@@ -164,6 +166,9 @@ export function initializeTeammateHooks(
   let lastDelegated: string | undefined
   let stopped = false
   let idleSummary: string | undefined
+  // The turn's final report (or the fact it was already sent by SendMessage),
+  // carried on every idle notification until the next Stop replaces it.
+  let idleReport: TeammateTurnReport = {}
   const reportIdle = async () => {
     if (!stopped) return
     const own = readTeamFile(teamName)?.members.find(m => m.agentId === agentId)
@@ -179,6 +184,7 @@ export function initializeTeammateHooks(
           idleReason: delegatedActivity.status === 'none' ? 'available' : 'waiting_for_children',
           delegatedActivity,
           summary: idleSummary,
+          ...idleReport,
         })),
         timestamp: new Date().toISOString(),
         color: getTeammateColor(),
@@ -204,6 +210,7 @@ export function initializeTeammateHooks(
       await setMemberActive(teamName, agentName, false)
       stopped = true
       idleSummary = getLastPeerDmSummary(messages)
+      idleReport = getTeammateTurnReport(messages, leadAgentName, teamName)
       lastDelegated = undefined
       idleReporter = reportIdle
       await reportIdle()

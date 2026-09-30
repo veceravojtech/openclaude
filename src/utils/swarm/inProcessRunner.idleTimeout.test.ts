@@ -19,6 +19,10 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import { setClaudeConfigHomeDirForTesting } from '../envUtils.js'
+import {
+  getCommandQueueSnapshot,
+  resetCommandQueue,
+} from '../messageQueueManager.js'
 import type { TeammateMessage } from '../teammateMailbox.js'
 import { spawnInProcessTeammate } from './spawnInProcess.js'
 import { getTeamFilePath, readTeamFile, type TeamFile } from './teamHelpers.js'
@@ -57,10 +61,24 @@ let configDir: string | undefined
 let previousInteractive = true
 let previousRegisteredHooks: ReturnType<typeof getRegisteredHooks> = null
 
+/**
+ * Terminal <task-notification>s queued for the main thread, as
+ * `{ taskId, status }` — the same shape the direct SDK bookend records.
+ */
+function queuedTerminalNotifications(): Array<{ taskId: string; status: string }> {
+  return getCommandQueueSnapshot().flatMap(cmd => {
+    if (cmd.mode !== 'task-notification' || typeof cmd.value !== 'string') return []
+    const taskId = cmd.value.match(/<task-id>([^<]*)<\/task-id>/)?.[1]
+    const status = cmd.value.match(/<status>([^<]*)<\/status>/)?.[1]
+    return taskId && status ? [{ taskId, status }] : []
+  })
+}
+
 beforeEach(async () => {
   await acquireSharedMutationLock(
     'utils/swarm/inProcessRunner.idleTimeout.test.ts',
   )
+  resetCommandQueue()
   for (const key of ENV_KEYS) {
     savedEnv[key] = process.env[key]
     delete process.env[key]
@@ -78,6 +96,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   try {
+    resetCommandQueue()
     nowSpy?.mockRestore()
     nowSpy = undefined
     mock.restore()
@@ -262,7 +281,12 @@ async function importRunnerWithMocks(): Promise<Harness> {
     leadMailbox,
     teammateInbox,
     unassignCalls,
-    terminatedEvents,
+    // A root-team teammate's completion is a queued <task-notification>
+    // (print.ts turns its <status> into the SDK bookend); the direct
+    // emitTaskTerminatedSdk calls cover every other ending. Both count.
+    get terminatedEvents() {
+      return [...terminatedEvents, ...queuedTerminalNotifications()]
+    },
   }
 }
 

@@ -92,6 +92,8 @@ type Harness = {
   leadMailbox: Array<{ from: string; text: string }>
   teammateInbox: TeammateMessage[]
   taskList: Task[]
+  /** Messages the next runAgent call yields instead of the default 'noted'. */
+  nextTurn: { messages?: unknown[] }
 }
 
 async function importRunnerWithMocks(): Promise<Harness> {
@@ -113,6 +115,7 @@ async function importRunnerWithMocks(): Promise<Harness> {
   const leadMailbox: Array<{ from: string; text: string }> = []
   const teammateInbox: TeammateMessage[] = []
   const taskList: Task[] = []
+  const nextTurn: { messages?: unknown[] } = {}
 
   mock.module('../../constants/prompts.js', () => ({
     ...actualPrompts!,
@@ -122,6 +125,12 @@ async function importRunnerWithMocks(): Promise<Harness> {
     ...actualRunAgent!,
     runAgent: async function* (params: RunAgentParams) {
       runAgentCalls.push(params)
+      if (nextTurn.messages) {
+        const scripted = nextTurn.messages
+        nextTurn.messages = undefined
+        for (const message of scripted) yield message as never
+        return
+      }
       yield {
         type: 'assistant',
         uuid: `assistant-${runAgentCalls.length}`,
@@ -178,7 +187,7 @@ async function importRunnerWithMocks(): Promise<Harness> {
   const runner: RunnerModule = await import(
     `./inProcessRunner.ts?taskNotification=${stamp}`
   )
-  return { runner, runAgentCalls, leadMailbox, teammateInbox, taskList }
+  return { runner, runAgentCalls, leadMailbox, teammateInbox, taskList, nextTurn }
 }
 
 function idleNotificationCount(
@@ -382,7 +391,17 @@ test('an unaddressed notification is left in the queue untouched', async () => {
   expect(getCommandQueueSnapshot()).toHaveLength(3)
 
   await stopTeammate(started)
-  expect(getCommandQueueSnapshot()).toHaveLength(3)
+  // The three are still there, untouched; the one addition is this
+  // teammate's own completion, addressed to the main thread.
+  const after = getCommandQueueSnapshot()
+  expect(after).toHaveLength(4)
+  expect(after.slice(0, 3).map(c => c.value)).toEqual([
+    notificationText('agent-lead', 'Agent "lead work" completed'),
+    notificationText('agent-peer', 'Agent "peer work" completed'),
+    'a prompt, not a notification',
+  ])
+  expect(String(after[3]!.value)).toContain(`<task-id>${started.taskId}</task-id>`)
+  expect(after[3]!.agentId).toBeUndefined()
 })
 
 test('several addressed notifications arrive in one turn, none dropped', async () => {
@@ -494,4 +513,145 @@ test('a shutdown request still pre-empts a queued notification', async () => {
   expect(prompt).not.toContain('<task-notification>')
 
   await stopTeammate(started)
+})
+
+function assistantMessage(content: unknown[]): unknown {
+  return {
+    type: 'assistant',
+    uuid: `assistant-${Math.random()}`,
+    timestamp: new Date().toISOString(),
+    message: {
+      id: `msg-${Math.random()}`,
+      role: 'assistant',
+      content,
+      usage: {
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_creation_input_tokens: null,
+        cache_read_input_tokens: null,
+      },
+    },
+  }
+}
+
+function lastIdleNotification(
+  leadMailbox: Array<{ from: string; text: string }>,
+): Record<string, unknown> | undefined {
+  for (let i = leadMailbox.length - 1; i >= 0; i--) {
+    try {
+      const parsed = JSON.parse(leadMailbox[i]!.text) as Record<string, unknown>
+      if (parsed.type === 'idle_notification') return parsed
+    } catch {
+      // not JSON
+    }
+  }
+  return undefined
+}
+
+function ownCompletion(taskId: string): string | undefined {
+  return getCommandQueueSnapshot()
+    .map(c => String(c.value))
+    .find(v => v.includes(`<task-id>${taskId}</task-id>`))
+}
+
+test("the completion tail sends a completed task-notification carrying the teammate's final text", async () => {
+  const harness = await importRunnerWithMocks()
+  const started = await startIdleTeammate(harness)
+  await waitFor(
+    () => idleNotificationCount(harness.leadMailbox) === 1,
+    'initial idle notification',
+  )
+
+  harness.nextTurn.messages = [
+    assistantMessage([{ type: 'text', text: 'FINAL: counted 7 call sites.' }]),
+  ]
+  enqueuePendingNotification({
+    value: notificationText('agent-abc', 'Agent "x" completed'),
+    mode: 'task-notification',
+    agentId: WORKER_AGENT_ID,
+  })
+  await waitFor(
+    () => idleNotificationCount(harness.leadMailbox) === 2,
+    'post-turn idle notification',
+  )
+  // The idle notification carries the text too.
+  expect(lastIdleNotification(harness.leadMailbox)?.lastAssistantText).toBe(
+    'FINAL: counted 7 call sites.',
+  )
+  expect(ownCompletion(started.taskId)).toBeUndefined()
+
+  await stopTeammate(started)
+
+  const completion = ownCompletion(started.taskId)
+  expect(completion).toContain('<task-notification>')
+  expect(completion).toContain('<status>completed</status>')
+  expect(completion).toContain('<result>FINAL: counted 7 call sites.</result>')
+  const task = getTeammateTask(started.getState(), started.taskId)
+  expect(task?.status).toBe('completed')
+  // enqueueAgentNotification claimed the flag: exactly one notification.
+  expect(task?.notified).toBe(true)
+  expect(
+    getCommandQueueSnapshot().filter(c =>
+      String(c.value).includes(`<task-id>${started.taskId}</task-id>`),
+    ),
+  ).toHaveLength(1)
+})
+
+test('a teammate that already sent its report to the lead is not repeated', async () => {
+  const harness = await importRunnerWithMocks()
+  const started = await startIdleTeammate(harness)
+  await waitFor(
+    () => idleNotificationCount(harness.leadMailbox) === 1,
+    'initial idle notification',
+  )
+
+  harness.nextTurn.messages = [
+    assistantMessage([
+      {
+        type: 'tool_use',
+        id: 'toolu-send',
+        name: 'SendMessage',
+        input: { to: 'team-lead', summary: 'report', message: 'REPORT: all green.' },
+      },
+    ]),
+    {
+      type: 'user',
+      uuid: 'result-1',
+      timestamp: new Date().toISOString(),
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu-send',
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({ success: true, message: 'sent' }),
+              },
+            ],
+          },
+        ],
+      },
+    },
+    assistantMessage([{ type: 'text', text: 'REPORT: all green. (sent)' }]),
+  ]
+  enqueuePendingNotification({
+    value: notificationText('agent-abc', 'Agent "x" completed'),
+    mode: 'task-notification',
+    agentId: WORKER_AGENT_ID,
+  })
+  await waitFor(
+    () => idleNotificationCount(harness.leadMailbox) === 2,
+    'post-turn idle notification',
+  )
+  const idle = lastIdleNotification(harness.leadMailbox)
+  expect(idle?.reportedToLead).toBe(true)
+  expect(idle?.lastAssistantText).toBeUndefined()
+
+  await stopTeammate(started)
+  const completion = ownCompletion(started.taskId)
+  expect(completion).toContain('<status>completed</status>')
+  expect(completion).toContain('delivered to the lead by SendMessage')
+  expect(completion).not.toContain('all green')
 })
