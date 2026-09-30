@@ -6,6 +6,7 @@ import type { Task } from '../utils/tasks.js'
 import {
   getTaskListId,
   getTasksDir,
+  isTaskResolved,
   isTodoV2Enabled,
   listTasks,
   onTasksUpdated,
@@ -120,7 +121,8 @@ class TasksV2Store {
     )
     this.#tasks = current
 
-    const hasIncomplete = current.some(t => t.status !== 'completed')
+    // Cancelled tasks are closed work, like completed ones
+    const hasIncomplete = current.some(t => !isTaskResolved(t.status))
 
     if (hasIncomplete || current.length === 0) {
       // Has unresolved tasks (open/in_progress) or empty — reset hide state
@@ -161,7 +163,7 @@ class TasksV2Store {
     void listTasks(currentId).then(async tasksToCheck => {
       const allStillCompleted =
         tasksToCheck.length > 0 &&
-        tasksToCheck.every(t => t.status === 'completed')
+        tasksToCheck.every(t => isTaskResolved(t.status))
       if (allStillCompleted) {
         await resetTaskList(currentId)
         this.#tasks = []

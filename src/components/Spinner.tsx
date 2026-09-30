@@ -17,7 +17,7 @@ import { getSpinnerVerbs } from '../constants/spinnerVerbs.js';
 import { MessageResponse } from './MessageResponse.js';
 import { TaskListV2 } from './TaskListV2.js';
 import { useTasksV2 } from '../hooks/useTasksV2.js';
-import type { Task } from '../utils/tasks.js';
+import { isTaskResolved, type Task } from '../utils/tasks.js';
 import { type AppState, useAppState } from '../state/AppState.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { stringWidth } from '../ink/stringWidth.js';
@@ -163,7 +163,7 @@ function SpinnerWithVerbInner({
   }, [mode]);
 
   // Find the current in-progress task and next pending task
-  const currentTodo = tasksV2?.find(task => task.status !== 'pending' && task.status !== 'completed');
+  const currentTodo = tasksV2?.find(task => task.status !== 'pending' && !isTaskResolved(task.status));
   const nextTask = findNextPendingTask(tasksV2);
 
   // Use useState with initializer to pick a random verb once on mount
@@ -545,6 +545,6 @@ function findNextPendingTask(tasks: Task[] | undefined): Task | undefined {
   if (pendingTasks.length === 0) {
     return undefined;
   }
-  const unresolvedIds = new Set(tasks.filter(t => t.status !== 'completed').map(t => t.id));
+  const unresolvedIds = new Set(tasks.filter(t => !isTaskResolved(t.status)).map(t => t.id));
   return pendingTasks.find(t => !t.blockedBy.some(id => unresolvedIds.has(id))) ?? pendingTasks[0];
 }

@@ -139,6 +139,7 @@ import { asSystemPrompt } from '../systemPromptType.js'
 import {
   claimTask,
   getSubTeamTaskListId,
+  isTaskResolved,
   listTasks,
   type Task,
   unassignTeammateTasks,
@@ -834,7 +835,7 @@ async function sendIdleNotification(
  */
 function findAvailableTask(tasks: Task[]): Task | undefined {
   const unresolvedTaskIds = new Set(
-    tasks.filter(t => t.status !== 'completed').map(t => t.id),
+    tasks.filter(t => !isTaskResolved(t.status)).map(t => t.id),
   )
 
   return tasks.find(task => {

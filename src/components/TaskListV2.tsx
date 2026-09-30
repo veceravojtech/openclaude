@@ -11,7 +11,7 @@ import { isAgentSwarmsEnabled } from '../utils/agentSwarmsEnabled.js';
 import { count } from '../utils/array.js';
 import { summarizeRecentActivities } from '../utils/collapseReadSearch.js';
 import { truncateToWidth } from '../utils/format.js';
-import { isTodoV2Enabled, type Task } from '../utils/tasks.js';
+import { isTaskResolved, isTodoV2Enabled, type Task } from '../utils/tasks.js';
 import type { Theme } from '../utils/theme.js';
 import FullWidthRow from './design-system/FullWidthRow.js';
 import ThemedText from './design-system/ThemedText.js';
@@ -129,9 +129,11 @@ export function TaskListV2({
   // Get task counts for display
   const completedCount = count(tasks, t_3 => t_3.status === 'completed');
   const pendingCount = count(tasks, t_4 => t_4.status === 'pending');
-  const inProgressCount = tasks.length - completedCount - pendingCount;
-  // Unresolved tasks (open or in_progress) block dependent tasks
-  const unresolvedTaskIds = new Set(tasks.filter(t_5 => t_5.status !== 'completed').map(t_6 => t_6.id));
+  const cancelledCount = count(tasks, t_c => t_c.status === 'cancelled');
+  const inProgressCount = tasks.length - completedCount - pendingCount - cancelledCount;
+  // Unresolved tasks (open or in_progress) block dependent tasks; completed
+  // and cancelled tasks do not
+  const unresolvedTaskIds = new Set(tasks.filter(t_5 => !isTaskResolved(t_5.status)).map(t_6 => t_6.id));
 
   // Check if we need to truncate
   const needsTruncation = tasks.length > maxDisplay;
@@ -160,7 +162,8 @@ export function TaskListV2({
       }
       return byIdAsc(a, b);
     });
-    const prioritized = [...recentCompleted, ...inProgress, ...pending, ...olderCompleted];
+    const cancelled = tasks.filter(t_c2 => t_c2.status === 'cancelled').sort(byIdAsc);
+    const prioritized = [...recentCompleted, ...inProgress, ...pending, ...olderCompleted, ...cancelled];
     visibleTasks = prioritized.slice(0, maxDisplay);
     hiddenTasks = prioritized.slice(maxDisplay);
   } else {
@@ -174,6 +177,7 @@ export function TaskListV2({
     const hiddenPending = count(hiddenTasks, t_10 => t_10.status === 'pending');
     const hiddenInProgress = count(hiddenTasks, t_11 => t_11.status === 'in_progress');
     const hiddenCompleted = count(hiddenTasks, t_12 => t_12.status === 'completed');
+    const hiddenCancelled = count(hiddenTasks, t_13 => t_13.status === 'cancelled');
     if (hiddenInProgress > 0) {
       parts.push(`${hiddenInProgress} in progress`);
     }
@@ -182,6 +186,9 @@ export function TaskListV2({
     }
     if (hiddenCompleted > 0) {
       parts.push(`${hiddenCompleted} completed`);
+    }
+    if (hiddenCancelled > 0) {
+      parts.push(`${hiddenCancelled} cancelled`);
     }
     hiddenSummary = ` … +${parts.join(', ')}`;
   }
@@ -202,7 +209,13 @@ export function TaskListV2({
                 {' in progress, '}
               </>}
             <Text bold>{pendingCount}</Text>
-            {' open)'}
+            {' open'}
+            {cancelledCount > 0 && <>
+                {', '}
+                <Text bold>{cancelledCount}</Text>
+                {' cancelled'}
+              </>}
+            {')'}
           </Text>
         </Box>
         {content}
@@ -238,10 +251,15 @@ function getTaskIcon(status: Task['status']): {
         icon: figures.squareSmall,
         color: undefined
       };
+    case 'cancelled':
+      return {
+        icon: figures.cross,
+        color: 'inactive'
+      };
   }
 }
 function TaskItem(t0) {
-  const $ = _c(37);
+  const $ = _c(38);
   const {
     task,
     ownerColor,
@@ -250,7 +268,8 @@ function TaskItem(t0) {
     ownerActive,
     columns
   } = t0;
-  const isCompleted = task.status === "completed";
+  // Cancelled tasks render like closed work: struck through and dimmed
+  const isCompleted = task.status === "completed" || task.status === "cancelled";
   const isInProgress = task.status === "in_progress";
   const isBlocked = openBlockers.length > 0;
   let t1;
@@ -331,10 +350,11 @@ function TaskItem(t0) {
     t8 = $[22];
   }
   let t9;
-  if ($[23] !== isBlocked || $[24] !== openBlockers) {
-    t9 = isBlocked && <Text dimColor={true}>{" "}{figures.pointerSmall} blocked by{" "}{[...openBlockers].sort(_temp).map(_temp2).join(", ")}</Text>;
+  if ($[23] !== isBlocked || $[24] !== openBlockers || $[37] !== task.supersededBy) {
+    t9 = isBlocked ? <Text dimColor={true}>{" "}{figures.pointerSmall} blocked by{" "}{[...openBlockers].sort(_temp).map(_temp2).join(", ")}</Text> : task.supersededBy ? <Text dimColor={true}>{" "}{figures.pointerSmall} superseded by #{task.supersededBy}</Text> : false;
     $[23] = isBlocked;
     $[24] = openBlockers;
+    $[37] = task.supersededBy;
     $[25] = t9;
   } else {
     t9 = $[25];

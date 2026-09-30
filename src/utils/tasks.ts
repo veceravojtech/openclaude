@@ -1,4 +1,11 @@
-import { mkdir, readdir, readFile, unlink, writeFile } from 'fs/promises'
+import {
+  mkdir,
+  readdir,
+  readFile,
+  rename,
+  unlink,
+  writeFile,
+} from 'fs/promises'
 import { join } from 'path'
 import { z } from 'zod/v4'
 import { getIsNonInteractiveSession, getSessionId } from '../bootstrap/state.js'
@@ -70,12 +77,25 @@ export function notifyTasksUpdated(): void {
   }
 }
 
-export const TASK_STATUSES = ['pending', 'in_progress', 'completed'] as const
+export const TASK_STATUSES = [
+  'pending',
+  'in_progress',
+  'completed',
+  'cancelled',
+] as const
 
-export const TaskStatusSchema = lazySchema(() =>
-  z.enum(['pending', 'in_progress', 'completed']),
-)
+export const TaskStatusSchema = lazySchema(() => z.enum(TASK_STATUSES))
 export type TaskStatus = z.infer<ReturnType<typeof TaskStatusSchema>>
+
+/**
+ * True when a task no longer represents open work: it was either completed or
+ * cancelled. Use this for blocker checks, busy checks and "all done" checks.
+ * A cancelled task is resolved but NOT completed — callers that need "the
+ * work was actually done" must still compare against 'completed'.
+ */
+export function isTaskResolved(status: TaskStatus): boolean {
+  return status === 'completed' || status === 'cancelled'
+}
 
 export const TaskSchema = lazySchema(() =>
   z.object({
@@ -88,6 +108,7 @@ export const TaskSchema = lazySchema(() =>
     blocks: z.array(z.string()), // task IDs this task blocks
     blockedBy: z.array(z.string()), // task IDs that block this task
     metadata: z.record(z.string(), z.unknown()).optional(), // arbitrary metadata
+    supersededBy: z.string().optional(), // ID of the task that replaced this cancelled task
   }),
 )
 export type Task = z.infer<ReturnType<typeof TaskSchema>>
@@ -386,6 +407,14 @@ async function updateTaskUnsafe(
     return null
   }
   const updated: Task = { ...existing, ...updates, id: taskId }
+  // A cancelled task was never done. Completing it would sidestep both the
+  // cancel semantics (its dependents were already released or re-pointed)
+  // and the verification gate, so the transition is refused outright.
+  if (existing.status === 'cancelled' && updated.status === 'completed') {
+    throw new TaskTransitionError(
+      `Task #${taskId} is cancelled and cannot be marked completed. Create a new task for the work instead.`,
+    )
+  }
   // Authoritative verification gate: checked against the task as read under
   // the caller's lock, so a flag added by a concurrent write (or by a
   // TaskCompleted hook) is honored and no caller can complete a flagged task
@@ -479,6 +508,251 @@ export async function deleteTask(
   }
 }
 
+/**
+ * Thrown when a status transition is not allowed (e.g. cancelled → completed).
+ */
+export class TaskTransitionError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'TaskTransitionError'
+  }
+}
+
+/**
+ * Thrown by cancelTask when validation fails. Nothing was written.
+ */
+export class TaskCancelError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'TaskCancelError'
+  }
+}
+
+export type CancelTaskOptions = {
+  /** ID of the task that replaces the cancelled one. */
+  supersededBy?: string
+}
+
+/**
+ * True when `to` is reachable from `from` by following "blocks" edges
+ * (A blocks B, i.e. B waits on A). Edges come from both `blocks` and
+ * `blockedBy` so a half-written pair still counts.
+ */
+function blocksPathExists(
+  tasks: Map<string, Task>,
+  from: string,
+  to: string,
+): boolean {
+  const edges = new Map<string, Set<string>>()
+  const addEdge = (a: string, b: string) => {
+    let set = edges.get(a)
+    if (!set) {
+      set = new Set()
+      edges.set(a, set)
+    }
+    set.add(b)
+  }
+  for (const task of tasks.values()) {
+    for (const blocked of task.blocks) addEdge(task.id, blocked)
+    for (const blocker of task.blockedBy) addEdge(blocker, task.id)
+  }
+  const seen = new Set<string>([from])
+  const stack = [from]
+  while (stack.length > 0) {
+    const current = stack.pop()!
+    if (current === to) return true
+    for (const next of edges.get(current) ?? []) {
+      if (!seen.has(next)) {
+        seen.add(next)
+        stack.push(next)
+      }
+    }
+  }
+  return false
+}
+
+/**
+ * Cancels a task instead of deleting it. The task file is kept with status
+ * 'cancelled' and no owner.
+ *
+ * - Without `supersededBy`, the work is no longer needed: the id is removed
+ *   from every other task's `blockedBy`/`blocks`, so its dependents unblock.
+ * - With `supersededBy: X`, the task is replaced: every dependent's
+ *   `blockedBy` is re-pointed from the old id to X (deduped) and added to
+ *   `X.blocks`, so dependents stay blocked until X completes. The old task
+ *   records `supersededBy: X`.
+ *
+ * Runs under the task-list lock plus every task file's lock. Everything is
+ * validated before anything is written; a validation failure throws
+ * TaskCancelError and leaves every task file untouched. New contents are
+ * staged in temp files first and then renamed into place, so an I/O error
+ * while staging also writes nothing.
+ */
+export async function cancelTask(
+  taskListId: string,
+  taskId: string,
+  options: CancelTaskOptions = {},
+): Promise<Task> {
+  const { supersededBy } = options
+  const lockPath = await ensureTaskListLockFile(taskListId)
+
+  let releaseList: (() => Promise<void>) | undefined
+  const taskReleases: Array<() => Promise<void>> = []
+  try {
+    releaseList = await lockfile.lock(lockPath, LOCK_OPTIONS)
+
+    // Take every task file's lock (sorted, always after the list lock) so a
+    // concurrent single-task updateTask cannot interleave with our rewrite of
+    // blocks/blockedBy. Files that vanish meanwhile are simply skipped.
+    const initial = await listTasks(taskListId)
+    const ids = initial.map(t => t.id).sort()
+    for (const id of ids) {
+      try {
+        taskReleases.push(
+          await lockfile.lock(getTaskPath(taskListId, id), LOCK_OPTIONS),
+        )
+      } catch (e) {
+        if (getErrnoCode(e) !== 'ENOENT') throw e
+      }
+    }
+
+    // Re-read under the locks: this is the state we validate and rewrite.
+    const tasks = new Map(
+      (await listTasks(taskListId)).map(t => [t.id, t] as const),
+    )
+    const task = tasks.get(taskId)
+    if (!task) {
+      throw new TaskCancelError(`Task #${taskId} not found`)
+    }
+    if (task.status === 'cancelled') {
+      throw new TaskCancelError(`Task #${taskId} is already cancelled`)
+    }
+    if (task.status === 'completed') {
+      throw new TaskCancelError(
+        `Task #${taskId} is already completed and cannot be cancelled`,
+      )
+    }
+
+    const next = new Map<string, Task>()
+    const current = (id: string): Task => next.get(id) ?? tasks.get(id)!
+
+    if (supersededBy !== undefined) {
+      if (supersededBy === taskId) {
+        throw new TaskCancelError(
+          `Task #${taskId} cannot be superseded by itself`,
+        )
+      }
+      const replacement = tasks.get(supersededBy)
+      if (!replacement) {
+        throw new TaskCancelError(
+          `Cannot supersede task #${taskId}: replacement task #${supersededBy} not found`,
+        )
+      }
+      if (replacement.status === 'cancelled') {
+        throw new TaskCancelError(
+          `Cannot supersede task #${taskId}: replacement task #${supersededBy} is cancelled`,
+        )
+      }
+    }
+
+    // Detach the cancelled task from every other task. With a replacement,
+    // its dependents wait on the replacement instead.
+    const dependents: string[] = []
+    for (const other of tasks.values()) {
+      if (other.id === taskId) continue
+      const waitsOnTask = other.blockedBy.includes(taskId)
+      const blocksTask = other.blocks.includes(taskId)
+      if (!waitsOnTask && !blocksTask) continue
+      let blockedBy = other.blockedBy.filter(id => id !== taskId)
+      if (waitsOnTask && supersededBy !== undefined) {
+        dependents.push(other.id)
+        blockedBy = uniq([...blockedBy, supersededBy])
+      }
+      next.set(other.id, {
+        ...other,
+        blocks: other.blocks.filter(id => id !== taskId),
+        blockedBy,
+      })
+    }
+
+    if (supersededBy !== undefined && dependents.length > 0) {
+      const replacement = current(supersededBy)
+      next.set(supersededBy, {
+        ...replacement,
+        blocks: uniq([...replacement.blocks, ...dependents]),
+      })
+    }
+
+    const cancelled: Task = {
+      ...task,
+      status: 'cancelled',
+      owner: undefined,
+      blocks: [],
+      blockedBy: [],
+      ...(supersededBy !== undefined ? { supersededBy } : {}),
+    }
+    next.set(taskId, cancelled)
+
+    // Cycle check on the resulting graph: the new edges are X → dependent,
+    // so a cycle exists iff X is reachable from some dependent (which also
+    // covers X being one of the dependents itself).
+    if (supersededBy !== undefined) {
+      const after = new Map(tasks)
+      for (const [id, t] of next) after.set(id, t)
+      after.delete(taskId)
+      // Drop the new edges and look for a path dependent ⇒ X among the rest.
+      const withoutNewEdges = new Map(after)
+      const replacement = after.get(supersededBy)!
+      withoutNewEdges.set(supersededBy, {
+        ...replacement,
+        blocks: replacement.blocks.filter(id => !dependents.includes(id)),
+      })
+      for (const dependentId of dependents) {
+        const dependent = after.get(dependentId)!
+        withoutNewEdges.set(dependentId, {
+          ...dependent,
+          blockedBy: dependent.blockedBy.filter(id => id !== supersededBy),
+        })
+      }
+      for (const dependentId of dependents) {
+        if (
+          dependentId === supersededBy ||
+          blocksPathExists(withoutNewEdges, dependentId, supersededBy)
+        ) {
+          throw new TaskCancelError(
+            `Cannot supersede task #${taskId} with #${supersededBy}: task #${dependentId} would then both wait on and block #${supersededBy} (dependency cycle)`,
+          )
+        }
+      }
+    }
+
+    // Stage every write, then rename into place.
+    const staged: Array<{ tmp: string; path: string }> = []
+    try {
+      for (const [id, t] of next) {
+        const path = getTaskPath(taskListId, id)
+        const tmp = `${path}.${process.pid}.cancel-tmp`
+        await writeFile(tmp, jsonStringify(t, null, 2))
+        staged.push({ tmp, path })
+      }
+    } catch (e) {
+      await Promise.all(staged.map(({ tmp }) => unlink(tmp).catch(() => {})))
+      throw e
+    }
+    for (const { tmp, path } of staged) {
+      await rename(tmp, path)
+    }
+
+    notifyTasksUpdated()
+    return cancelled
+  } finally {
+    for (const release of taskReleases.reverse()) {
+      await release().catch(() => {})
+    }
+    await releaseList?.()
+  }
+}
+
 export async function listTasks(taskListId: string): Promise<Task[]> {
   const dir = getTasksDir(taskListId)
   let files: string[]
@@ -530,6 +804,7 @@ export type ClaimTaskResult = {
     | 'task_not_found'
     | 'already_claimed'
     | 'already_resolved'
+    | 'cancelled'
     | 'blocked'
     | 'agent_busy'
   task?: Task
@@ -615,6 +890,11 @@ export async function claimTask(
       return { success: false, reason: 'already_claimed', task }
     }
 
+    // A cancelled task is never claimable
+    if (task.status === 'cancelled') {
+      return { success: false, reason: 'cancelled', task }
+    }
+
     // Check if already resolved
     if (task.status === 'completed') {
       return { success: false, reason: 'already_resolved', task }
@@ -623,7 +903,7 @@ export async function claimTask(
     // Check for unresolved blockers (open or in_progress tasks block)
     const allTasks = await listTasks(taskListId)
     const unresolvedTaskIds = new Set(
-      allTasks.filter(t => t.status !== 'completed').map(t => t.id),
+      allTasks.filter(t => !isTaskResolved(t.status)).map(t => t.id),
     )
     const blockedByTasks = task.blockedBy.filter(id =>
       unresolvedTaskIds.has(id),
@@ -680,6 +960,11 @@ async function claimTaskWithBusyCheck(
       return { success: false, reason: 'already_claimed', task }
     }
 
+    // A cancelled task is never claimable
+    if (task.status === 'cancelled') {
+      return { success: false, reason: 'cancelled', task }
+    }
+
     // Check if already resolved
     if (task.status === 'completed') {
       return { success: false, reason: 'already_resolved', task }
@@ -687,7 +972,7 @@ async function claimTaskWithBusyCheck(
 
     // Check for unresolved blockers (open or in_progress tasks block)
     const unresolvedTaskIds = new Set(
-      allTasks.filter(t => t.status !== 'completed').map(t => t.id),
+      allTasks.filter(t => !isTaskResolved(t.status)).map(t => t.id),
     )
     const blockedByTasks = task.blockedBy.filter(id =>
       unresolvedTaskIds.has(id),
@@ -699,7 +984,7 @@ async function claimTaskWithBusyCheck(
     // Check if agent is busy with other unresolved tasks
     const agentOpenTasks = allTasks.filter(
       t =>
-        t.status !== 'completed' &&
+        !isTaskResolved(t.status) &&
         t.owner === claimantAgentId &&
         t.id !== taskId,
     )
@@ -813,7 +1098,7 @@ export async function getAgentStatuses(
   // Get unresolved tasks grouped by owner (open or in_progress)
   const unresolvedTasksByOwner = new Map<string, string[]>()
   for (const task of allTasks) {
-    if (task.status !== 'completed' && task.owner) {
+    if (!isTaskResolved(task.status) && task.owner) {
       const existing = unresolvedTasksByOwner.get(task.owner) || []
       existing.push(task.id)
       unresolvedTasksByOwner.set(task.owner, existing)
@@ -863,7 +1148,7 @@ export async function unassignTeammateTasks(
   const tasks = await listTasks(teamName)
   const unresolvedAssignedTasks = tasks.filter(
     t =>
-      t.status !== 'completed' &&
+      !isTaskResolved(t.status) &&
       (t.owner === teammateId || t.owner === teammateName),
   )
 
