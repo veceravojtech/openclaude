@@ -1034,8 +1034,7 @@ describe('usage-limit account switch', () => {
   })
 
   async function runWithRetry(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    withRetry: any,
+    withRetry: typeof import('./withRetry.js').withRetry,
     operation: () => Promise<string>,
     overrides: Record<string, unknown> = {},
   ): Promise<{ result: unknown; threw: unknown }> {
@@ -1348,7 +1347,7 @@ describe('revoked OAuth grant is terminal', () => {
     const { withRetry } = await importFreshWithRetryModule('firstParty', {
       auth: {
         isClaudeAISubscriber: () => true,
-        getClaudeAIOAuthTokens: () => ({ accessToken: 'old-access' }) as any,
+        getClaudeAIOAuthTokens: () => ({ accessToken: 'old-access' }) as never,
         recoverRotatedOAuthToken: recover,
         handleOAuth401Error: refresh,
       },
@@ -1373,7 +1372,7 @@ describe('revoked OAuth grant is terminal', () => {
     const { withRetry, CannotRetryError } = await importFreshWithRetryModule('firstParty', {
       auth: {
         isClaudeAISubscriber: () => true,
-        getClaudeAIOAuthTokens: () => ({ accessToken: 'old-access' }) as any,
+        getClaudeAIOAuthTokens: () => ({ accessToken: 'old-access' }) as never,
         recoverRotatedOAuthToken: recover,
       },
     })

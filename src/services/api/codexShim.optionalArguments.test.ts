@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import { codexStreamToAnthropic, convertCodexResponseToAnthropicMessage, convertToolsToResponsesTools } from './codexShim'
 
+type StreamEventLike = { type: string; index: number; delta?: { type?: string; partial_json?: string } }
+type ToolUseLike = { input?: unknown }
+type EncodedSchemaLike = { properties: Record<string, { anyOf: unknown[] }>; required?: string[] }
+
 const schema = {
   type: 'object',
   properties: {
@@ -23,10 +27,10 @@ const added = (argumentsText = '', id = 'item') => frame('response.output_item.a
 const done = (argumentsText = JSON.stringify(args), id = 'item', status = 'completed') => frame('response.output_item.done', { item: { ...item(argumentsText, id), status } })
 const terminal = frame('response.completed', { response: { status: 'completed' } })
 async function consume(sse: string, map: ReadonlyMap<string, Record<string, unknown>> = schemas, signal?: AbortSignal) {
-  const events: any[] = []
+  const events: StreamEventLike[] = []
   let error: unknown
   try {
-    for await (const event of codexStreamToAnthropic(new Response(sse), 'codex', signal, map)) events.push(event)
+    for await (const event of codexStreamToAnthropic(new Response(sse), 'codex', signal, map)) events.push(event as StreamEventLike)
   } catch (caught) { error = caught }
   // This is the consumer's execution gate: only stopped tool blocks are executable.
   const executable = events.filter(e => e.type === 'content_block_stop')
@@ -38,14 +42,14 @@ async function consume(sse: string, map: ReadonlyMap<string, Record<string, unkn
 describe('Codex strict optional argument roundtrip', () => {
   test('nonstream omits only synthetic nulls and preserves defaults/falsy/required/genuine null', () => {
     const result = convertCodexResponseToAnthropicMessage({ output: [item()] }, 'codex', schemas)
-    expect((result.content as any[])[0].input).toEqual(expected)
+    expect((result.content as ToolUseLike[])[0].input).toEqual(expected)
     expect(schema.properties.optional.default).toBe('default')
   })
 
   test('enum, const and combinators are wholly wrapped, not narrowed by sibling constraints', () => {
     const properties = { enum: { type: 'string', enum: ['a'] }, const: { const: 'a' }, combo: { anyOf: [{ type: 'string' }, { type: 'number' }] } }
     const tools = convertToolsToResponsesTools([{ name: 'probe', input_schema: { type: 'object', properties } }])
-    const encoded = tools[0].parameters as any
+    const encoded = tools[0].parameters as EncodedSchemaLike
     expect(encoded.properties.enum).toEqual({ anyOf: [properties.enum, { type: 'null' }] })
     expect(encoded.properties.const).toEqual({ anyOf: [{ const: 'a', type: 'string' }, { type: 'null' }] })
     expect(encoded.properties.combo).toEqual({ anyOf: [properties.combo, { type: 'null' }] })
@@ -54,7 +58,7 @@ describe('Codex strict optional argument roundtrip', () => {
 
   test('nullable enum/const inference preserves genuine null in the original strict branch', () => {
     const tools = convertToolsToResponsesTools([{ name: 'probe', input_schema: { type: 'object', properties: { enumeration: { enum: ['a', null] }, constant: { const: null } } } }])
-    const properties = (tools[0].parameters as any).properties
+    const properties = (tools[0].parameters as EncodedSchemaLike).properties
     expect(properties.enumeration.anyOf[0]).toEqual({ enum: ['a', null], type: ['string', 'null'] })
     expect(properties.constant.anyOf[0]).toEqual({ const: null, type: 'null' })
   })
@@ -102,11 +106,11 @@ describe('Codex strict optional argument roundtrip', () => {
     expect(missing.error).toBeDefined()
     expect(missing.executable).toHaveLength(0)
     const controller = new AbortController()
-    const events: any[] = []
+    const events: StreamEventLike[] = []
     let error: unknown
     try {
       for await (const event of codexStreamToAnthropic(new Response(added('{}') + done('{}') + terminal), 'codex', controller.signal, schemas)) {
-        events.push(event)
+        events.push(event as StreamEventLike)
         if (event.type === 'content_block_start') controller.abort()
       }
     } catch (caught) { error = caught }
@@ -119,7 +123,7 @@ describe('Codex strict optional argument roundtrip', () => {
       const nested = { type: 'object', properties: { keep: { type: 'string' } }, required: ['keep'], [keyword]: [{ type: 'object', properties: { keep: { type: 'string' }, omit: { type: 'string' } } }, ...(keyword === 'allOf' ? [] : [{ type: 'null' }])] }
       const map = new Map([['probe', { type: 'object', properties: { nested } }]])
       const result = convertCodexResponseToAnthropicMessage({ output: [item('{"nested":{"keep":null,"omit":null}}')] }, 'codex', map)
-      expect((result.content as any[])[0].input).toEqual({ nested: { keep: null } })
+      expect((result.content as ToolUseLike[])[0].input).toEqual({ nested: { keep: null } })
     }
   })
 
@@ -162,7 +166,7 @@ describe('Codex strict optional argument roundtrip', () => {
       const before = JSON.stringify(entry.schema)
       const text = JSON.stringify(entry.input)
       const result = convertCodexResponseToAnthropicMessage({ output: [item(text)] }, 'codex', map)
-      expect((result.content as any[])[0].input).toEqual(entry.expected)
+      expect((result.content as ToolUseLike[])[0].input).toEqual(entry.expected)
       const stream = await consume(added() + done(text) + terminal, map)
       expect(stream.error).toBeUndefined()
       expect(JSON.parse(stream.inputs.get(0)!)).toEqual(entry.expected)
@@ -183,9 +187,9 @@ describe('Codex strict optional argument roundtrip', () => {
     cyclic.allOf = [cyclic]
     const map = new Map([['probe', cyclic]])
     const result = convertCodexResponseToAnthropicMessage({ output: [item('{"x":null}')] }, 'codex', map)
-    expect((result.content as any[])[0].input).toEqual({ x: null })
+    expect((result.content as ToolUseLike[])[0].input).toEqual({ x: null })
     const reference = new Map([['probe', { properties: { x: { type: 'string', $ref: '#/unknown' } } }]])
-    expect((convertCodexResponseToAnthropicMessage({ output: [item('{"x":null}')] }, 'codex', reference).content as any[])[0].input).toEqual({ x: null })
+    expect((convertCodexResponseToAnthropicMessage({ output: [item('{"x":null}')] }, 'codex', reference).content as ToolUseLike[])[0].input).toEqual({ x: null })
   })
 
   test('unproved applicability and unsupported assertions preserve potentially required values', async () => {
@@ -207,7 +211,7 @@ describe('Codex strict optional argument roundtrip', () => {
       const map = new Map([['probe', schema]])
       const text = JSON.stringify(input)
       const nonstream = convertCodexResponseToAnthropicMessage({ output: [item(text)] }, 'codex', map)
-      expect((nonstream.content as any[])[0].input).toEqual(input)
+      expect((nonstream.content as ToolUseLike[])[0].input).toEqual(input)
       const stream = await consume(added() + done(text) + terminal, map)
       expect(stream.error).toBeUndefined()
       expect(JSON.parse(stream.inputs.get(0)!)).toEqual(input)
@@ -233,6 +237,6 @@ describe('Codex strict optional argument roundtrip', () => {
     expect(() => convertCodexResponseToAnthropicMessage({ output: [{ ...item(), status: 'in_progress' }] }, 'codex', schemas)).toThrow()
     expect(() => convertCodexResponseToAnthropicMessage({ status: 'incomplete', output: [item()] }, 'codex', schemas)).toThrow()
     const result = convertCodexResponseToAnthropicMessage({ output: [item('{')] }, 'codex')
-    expect((result.content as any[])[0].input).toEqual({ raw: '{' })
+    expect((result.content as ToolUseLike[])[0].input).toEqual({ raw: '{' })
   })
 })

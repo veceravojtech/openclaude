@@ -43,7 +43,7 @@ test('findProviderProfilesForModel returns all positive profile matches for ambi
 
 test('child binding applies native profile and wins refresh without changing global selection', async () => {
   const { applySessionBoundProviderProfileFromEnv, applyActiveProviderProfileFromConfig } = await import('./providerProfiles.js')
-  const config = { activeProviderProfileId: 'leader', providerProfiles: [{ id: 'child', name: 'Child', provider: 'anthropic', baseUrl: 'https://api.anthropic.com', model: 'claude-sonnet-4', apiKey: 'selected-key' }] } as any
+  const config = { activeProviderProfileId: 'leader', providerProfiles: [{ id: 'child', name: 'Child', provider: 'anthropic', baseUrl: 'https://api.anthropic.com', model: 'claude-sonnet-4', apiKey: 'selected-key' }] } as never
   const before = JSON.stringify(config)
   process.env.OPENCLAUDE_TEAMMATE_PROFILE_ID = 'child'
   process.env.OPENCLAUDE_TEAMMATE_MODEL = 'claude-custom'
@@ -73,7 +73,7 @@ for (const entry of [
   process.env.OPENCLAUDE_TEAMMATE_MODEL = 'chosen-model'
   process.env.OPENAI_API_KEY = 'wrong-leader-key'
   process.env.ANTHROPIC_API_KEY = 'wrong-native-key'
-  const config = { providerProfiles: [{ id: 'selected', name: 'Selected', provider: entry.provider, baseUrl: entry.baseUrl, model: 'default', ...(entry.key ? { apiKey: 'selected-key' } : {}) }] } as any
+  const config = { providerProfiles: [{ id: 'selected', name: 'Selected', provider: entry.provider, baseUrl: entry.baseUrl, model: 'default', ...(entry.key ? { apiKey: 'selected-key' } : {}) }] } as never
   applySessionBoundProviderProfileFromEnv(config)
   expect(process.env[entry.modelKey]).toBe('chosen-model')
   expect(process.env.ANTHROPIC_API_KEY).toBeUndefined()

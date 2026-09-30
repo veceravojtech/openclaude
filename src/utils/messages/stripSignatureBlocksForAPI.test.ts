@@ -14,11 +14,9 @@ function assistantMessage(
     message: {
       id: 'msg_1',
       role: 'assistant',
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      content: content as any,
+      content: content as never,
     },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  } as any
+  } as unknown as AssistantMessage
 }
 
 function userMessage(content: string): UserMessage {
@@ -26,8 +24,7 @@ function userMessage(content: string): UserMessage {
     type: 'user',
     uuid: 'user-1',
     message: { role: 'user', content },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  } as any
+  } as unknown as UserMessage
 }
 
 describe('stripSignatureBlocksForAPI', () => {

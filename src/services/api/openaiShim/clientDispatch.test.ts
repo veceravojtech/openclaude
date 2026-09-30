@@ -87,8 +87,8 @@ for (const codex of [false, true]) for (const streaming of [false, true]) {
     let input: unknown
     if (streaming) {
       const events = await collect(result as AsyncIterable<AnthropicStreamEvent>)
-      input = JSON.parse(events.filter((event: any) => event.delta?.type === 'input_json_delta').map((event: any) => event.delta.partial_json).join(''))
-    } else input = (result as any).content[0].input
+      input = JSON.parse((events as Array<{ delta?: { type?: string; partial_json?: string } }>).filter(event => event.delta?.type === 'input_json_delta').map(event => event.delta?.partial_json ?? '').join(''))
+    } else input = (result as unknown as { content: Array<{ input?: unknown }> }).content[0].input
     expect(input).toEqual(codex ? {} : { optional: null })
   })
 }

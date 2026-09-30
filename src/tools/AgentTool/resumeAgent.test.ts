@@ -113,7 +113,7 @@ test('fails closed when resuming an unavailable agent instead of falling back', 
       agentId: 'test-agent',
       prompt: 'continue',
       toolUseContext: context,
-      canUseTool: async () => ({ behavior: 'allow' } as any),
+      canUseTool: async () => ({ behavior: 'allow' } as never),
     }),
   ).rejects.toThrow(
     "Cannot resume agent: type 'code-reviewer' is unavailable or disabled in the current session."
@@ -133,7 +133,7 @@ test('successfully resumes when agent is available', async () => {
     agentId: 'test-agent',
     prompt: 'continue',
     toolUseContext: context,
-    canUseTool: async () => ({ behavior: 'allow' } as any),
+    canUseTool: async () => ({ behavior: 'allow' } as never),
   })
 
   expect(result.agentId).toBe('test-agent')
@@ -159,7 +159,7 @@ test('rejects resume when agent definition source does not match metadata', asyn
       agentId: 'test-agent',
       prompt: 'continue',
       toolUseContext: context,
-      canUseTool: async () => ({ behavior: 'allow' } as any),
+      canUseTool: async () => ({ behavior: 'allow' } as never),
     }),
   ).rejects.toThrow(
     "Cannot resume agent: identity mismatch. Expected source 'built-in', found 'projectSettings' for type 'code-reviewer'."
@@ -185,7 +185,7 @@ test('rejects resume when legacy metadata lacks a source', async () => {
       agentId: 'test-agent',
       prompt: 'continue',
       toolUseContext: context,
-      canUseTool: async () => ({ behavior: 'allow' } as any),
+      canUseTool: async () => ({ behavior: 'allow' } as never),
     }),
   ).rejects.toThrow(
     "Cannot resume agent: identity mismatch. Expected source 'undefined', found 'built-in' for type 'code-reviewer'."
@@ -210,7 +210,7 @@ test('successfully resumes when legacy metadata lacks a source and agent is not 
     agentId: 'test-agent',
     prompt: 'continue',
     toolUseContext: context,
-    canUseTool: async () => ({ behavior: 'allow' } as any),
+    canUseTool: async () => ({ behavior: 'allow' } as never),
   })
 
   expect(result.agentId).toBe('test-agent')
@@ -245,7 +245,7 @@ test('first resume registers with resumeCount 1 when the prior run has none', as
     agentId: 'test-agent',
     prompt: 'continue',
     toolUseContext: context,
-    canUseTool: async () => ({ behavior: 'allow' } as any),
+    canUseTool: async () => ({ behavior: 'allow' } as never),
   })
 
   expect(registeredTask(context, 'test-agent')?.resumeCount).toBe(1)
@@ -260,7 +260,7 @@ test('a second resume increments the count instead of flipping a flag', async ()
     agentId: 'test-agent',
     prompt: 'continue again',
     toolUseContext: context,
-    canUseTool: async () => ({ behavior: 'allow' } as any),
+    canUseTool: async () => ({ behavior: 'allow' } as never),
   })
 
   expect(registeredTask(context, 'test-agent')?.resumeCount).toBe(2)
@@ -275,7 +275,7 @@ test('a third resume reaches 3', async () => {
     agentId: 'test-agent',
     prompt: 'once more',
     toolUseContext: context,
-    canUseTool: async () => ({ behavior: 'allow' } as any),
+    canUseTool: async () => ({ behavior: 'allow' } as never),
   })
 
   expect(registeredTask(context, 'test-agent')?.resumeCount).toBe(3)
@@ -288,7 +288,7 @@ test('resuming with no prior task in AppState still counts as resume 1', async (
     agentId: 'test-agent',
     prompt: 'continue',
     toolUseContext: context,
-    canUseTool: async () => ({ behavior: 'allow' } as any),
+    canUseTool: async () => ({ behavior: 'allow' } as never),
   })
 
   expect(registeredTask(context, 'test-agent')?.resumeCount).toBe(1)
@@ -303,7 +303,7 @@ test('re-registering the resumed run clears notified so it can notify again', as
     agentId: 'test-agent',
     prompt: 'continue',
     toolUseContext: context,
-    canUseTool: async () => ({ behavior: 'allow' } as any),
+    canUseTool: async () => ({ behavior: 'allow' } as never),
   })
 
   expect(registeredTask(context, 'test-agent')?.notified).toBe(false)
@@ -326,7 +326,7 @@ test('a user-initiated resume does not inherit the original run tool_use_id', as
     agentId: 'test-agent',
     prompt: 'continue',
     toolUseContext: context,
-    canUseTool: async () => ({ behavior: 'allow' } as any),
+    canUseTool: async () => ({ behavior: 'allow' } as never),
   })
 
   expect(registeredTask(context, 'test-agent')?.toolUseId).toBeUndefined()
@@ -346,7 +346,7 @@ test('a tool-driven resume records the resuming call, not the original run', asy
     agentId: 'test-agent',
     prompt: 'continue',
     toolUseContext: context,
-    canUseTool: async () => ({ behavior: 'allow' } as any),
+    canUseTool: async () => ({ behavior: 'allow' } as never),
   })
 
   expect(registeredTask(context, 'test-agent')?.toolUseId).toBe(

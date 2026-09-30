@@ -49,7 +49,7 @@ test('generic Responses planner keeps legacy optional schema encoding', () => {
     params: { messages: [], tools: [{ name: 'probe', input_schema: { type: 'object', properties: { optional: { type: 'string' } } } }] },
     convertToolsToResponsesTools,
   })
-  const body = planner.buildResponsesBody() as any
+  const body = planner.buildResponsesBody() as unknown as { tools: Array<{ parameters: { properties: Record<string, unknown> } }> }
   expect(body.tools[0].parameters.properties.optional).toEqual({ type: 'string' })
 })
 
