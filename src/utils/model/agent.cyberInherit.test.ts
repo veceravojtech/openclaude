@@ -42,7 +42,10 @@ describe('subagent inherit under an explicit Cyber lead model', () => {
     setCyberModeEnabled(true)
     expect(getAgentModel('inherit', 'glm-5.3')).toBe('glm-5.3')
     setCyberModeEnabled(false)
-    expect(getAgentModel('inherit', 'claude-opus-5-5')).toBe('claude-opus-5-5')
+    // "Unchanged" = no Cyber substitution. getAgentModel still applies the
+    // 1M-context preference every agent gets (preferOneMillionContext), so a
+    // parent that already carries the tag must come back exactly as given.
+    expect(getAgentModel('inherit', 'claude-opus-5-5[1m]')).toBe('claude-opus-5-5[1m]')
   })
 
   test('an explicit tool model still follows the normal Cyber rules', () => {
