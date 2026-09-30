@@ -6,6 +6,17 @@ import {
 import * as realAuth from '../auth.js'
 import * as realCheck1m from './check1mAccess.js'
 import * as realProviders from './providers.js'
+import { captureRealModules } from '../../test/moduleMockRestore.js'
+
+// Every module this file stubs with mock.module(), captured before any stub
+// is installed. mock.restore() does not undo mock.module(), so afterEach puts
+// the real modules back; otherwise the last stub leaked into later test files
+// (e.g. a ./providers.js stub decided UsageTool/logout's provider).
+const restoreRealModules = await captureRealModules(import.meta.dir, [
+  '../auth.js',
+  './check1mAccess.js',
+  './providers.js',
+])
 
 // The pinned "Opus 4.6 (1M context)" row must be the next pick after Default on
 // every first-party picker, and must not leak onto third-party providers.
@@ -38,6 +49,7 @@ afterEach(() => {
       else process.env[key] = value
     }
   } finally {
+    restoreRealModules()
     releaseSharedMutationLock()
   }
 })

@@ -14,6 +14,16 @@ import {
   clearPluginSettingsBase,
   resetSettingsCache,
 } from '../settings/settingsCache.js'
+import { captureRealModules } from '../../test/moduleMockRestore.js'
+
+// Every module this file stubs with mock.module(), captured before any stub
+// is installed. mock.restore() does not undo mock.module(), so afterEach puts
+// the real modules back; otherwise the last stub leaked into later test files
+// (e.g. a ./providers.js stub decided UsageTool/logout's provider).
+const restoreRealModules = await captureRealModules(import.meta.dir, [
+  './modelAllowlist.js',
+  './providers.js',
+])
 let allowedModels: Set<string> | undefined
 
 async function importFreshModelModule() {
@@ -188,6 +198,7 @@ afterEach(async () => {
       availableModels: undefined,
     }))
   } finally {
+    restoreRealModules()
     releaseSharedMutationLock()
   }
 })

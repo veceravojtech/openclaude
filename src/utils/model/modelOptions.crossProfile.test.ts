@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, expect, test } from 'bun:test'
 import { mock } from 'bun:test'
 
 import { resetModelStringsForTestingOnly } from '../../bootstrap/state.js'
@@ -266,6 +266,24 @@ function restoreRouteEnv(): void {
     else process.env[key] = saved
   }
 }
+
+
+// The module-scope stubs above stay installed for this whole file (every test
+// relies on them), but mock.restore() does not undo mock.module(), so they
+// used to leak into every later test file. Put the real modules back — from
+// the snapshots taken before the stubs were installed — once this file is done.
+afterAll(() => {
+  mock.module('./ollamaModels.js', () => ({ ...realOllamaModels }))
+  mock.module('./nvidiaNimModels.js', () => ({ ...realNvidiaModels }))
+  mock.module('./minimaxModels.js', () => ({ ...realMiniMaxModels }))
+  mock.module('./xiaomi-mimoModels.js', () => ({ ...realXiaomiModels }))
+  mock.module('../settings/settings.js', () => ({ ...realSettings }))
+  mock.module('./modelAllowlist.js', () => ({ ...realModelAllowlist }))
+  mock.module('../../services/api/providerConfig.js', () => ({ ...realProviderConfig }))
+  mock.module('../providerProfiles.js', () => ({ ...realProviderProfiles }))
+  mock.module('./providers.js', () => ({ ...realProviders }))
+  mock.module('../auth.js', () => ({ ...realAuth }))
+})
 
 beforeEach(() => {
   clearRouteEnv()

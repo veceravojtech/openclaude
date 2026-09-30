@@ -5,6 +5,16 @@ import {
 } from '../../test/sharedMutationLock.js'
 import * as realModel from './model.js'
 import * as realProviders from './providers.js'
+import { captureRealModules } from '../../test/moduleMockRestore.js'
+
+// Every module this file stubs with mock.module(), captured before any stub
+// is installed. mock.restore() does not undo mock.module(), so afterEach puts
+// the real modules back; otherwise the last stub leaked into later test files
+// (e.g. a ./providers.js stub decided UsageTool/logout's provider).
+const restoreRealModules = await captureRealModules(import.meta.dir, [
+  './model.js',
+  './providers.js',
+])
 
 // The "Newer version available" hint used to gate on a `claude-opus-4`
 // substring, so it was silently dead for the whole 5.x line: a user pinned to
@@ -43,6 +53,7 @@ afterEach(() => {
       else process.env[key] = value
     }
   } finally {
+    restoreRealModules()
     releaseSharedMutationLock()
   }
 })

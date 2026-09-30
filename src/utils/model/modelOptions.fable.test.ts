@@ -4,6 +4,18 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
+import { captureRealModules } from '../../test/moduleMockRestore.js'
+
+// Every module this file stubs with mock.module(), captured before any stub
+// is installed. mock.restore() does not undo mock.module(), so afterEach puts
+// the real modules back; otherwise the last stub leaked into later test files
+// (e.g. a ./providers.js stub decided UsageTool/logout's provider).
+const restoreRealModules = await captureRealModules(import.meta.dir, [
+  '../auth.js',
+  './check1mAccess.js',
+  './providers.js',
+  '../sideQuery.js',
+])
 // Snapshot the real exports before any mock.module() swaps them out.
 const realAuth = { ...(await import('../auth.js')) }
 const realCheck1m = { ...(await import('./check1mAccess.js')) }
@@ -55,6 +67,7 @@ afterEach(() => {
     }
     resetModelStringsForTestingOnly()
   } finally {
+    restoreRealModules()
     releaseSharedMutationLock()
   }
 })

@@ -25,6 +25,15 @@ import {
 } from './opusVersion.js'
 import { MODEL_COSTS } from '../modelCost.js'
 import { sanitizeModelName } from '../commitAttribution.js'
+import { captureRealModules } from '../../test/moduleMockRestore.js'
+
+// Every module this file stubs with mock.module(), captured before any stub
+// is installed. mock.restore() does not undo mock.module(), so afterEach puts
+// the real modules back; otherwise the last stub leaked into later test files
+// (e.g. a ./providers.js stub decided UsageTool/logout's provider).
+const restoreRealModules = await captureRealModules(import.meta.dir, [
+  './providers.js',
+])
 
 const FABLE_5_1 = 'claude-fable-5-1'
 const FABLE_5_1_BEDROCK = 'us.anthropic.claude-fable-5-1'
@@ -81,6 +90,7 @@ afterEach(() => {
     }
     resetStateForTests()
   } finally {
+    restoreRealModules()
     releaseSharedMutationLock()
   }
 })

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
 
 import { resetModelStringsForTestingOnly } from '../../bootstrap/state.js'
 import { acquireEnvMutex, releaseEnvMutex } from '../../entrypoints/sdk/shared.js'
@@ -150,6 +150,19 @@ function resetGlobalConfig(): void {
     activeProviderProfileId: undefined,
   }))
 }
+
+
+// The module-scope stubs above stay installed for this whole file (every test
+// relies on them), but mock.restore() does not undo mock.module(), so they
+// used to leak into every later test file. Put the real modules back — from
+// the snapshots taken before the stubs were installed — once this file is done.
+afterAll(() => {
+  mock.module('./providers.js', () => ({ ...realProviders }))
+  mock.module('../../integrations/index.js', () => ({ ...realIndex }))
+  mock.module('../../services/api/providerConfig.js', () => ({ ...realProviderConfig }))
+  mock.module('../providerProfiles.js', () => ({ ...realProviderProfiles }))
+  mock.module('./model.js', () => ({ ...realModel }))
+})
 
 beforeEach(async () => {
   await acquireEnvMutex()

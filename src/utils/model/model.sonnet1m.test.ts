@@ -4,6 +4,18 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import type { GlobalConfig } from '../config.js'
+import { captureRealModules } from '../../test/moduleMockRestore.js'
+
+// Every module this file stubs with mock.module(), captured before any stub
+// is installed. mock.restore() does not undo mock.module(), so afterEach puts
+// the real modules back; otherwise the last stub leaked into later test files
+// (e.g. a ./providers.js stub decided UsageTool/logout's provider).
+const restoreRealModules = await captureRealModules(import.meta.dir, [
+  '../auth.js',
+  '../config.js',
+  './check1mAccess.js',
+  './providers.js',
+])
 
 /**
  * Sonnet 4.x's 1M window is a paid long-context feature for Claude.ai
@@ -42,6 +54,7 @@ afterEach(() => {
       process.env.CLAUDE_CODE_DISABLE_1M_CONTEXT = originalDisable1m
     }
   } finally {
+    restoreRealModules()
     releaseSharedMutationLock()
   }
 })

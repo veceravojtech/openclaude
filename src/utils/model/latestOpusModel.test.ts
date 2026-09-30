@@ -8,6 +8,17 @@ import * as realAuth from '../auth.js'
 import { getGlobalConfig, saveGlobalConfig } from '../config.js'
 import { pickNewestOpusModel } from './latestOpusModel.js'
 import * as realProviders from './providers.js'
+import { captureRealModules } from '../../test/moduleMockRestore.js'
+
+// Every module this file stubs with mock.module(), captured before any stub
+// is installed. mock.restore() does not undo mock.module(), so afterEach puts
+// the real modules back; otherwise the last stub leaked into later test files
+// (e.g. a ./providers.js stub decided UsageTool/logout's provider).
+const restoreRealModules = await captureRealModules(import.meta.dir, [
+  '../auth.js',
+  'axios',
+  './providers.js',
+])
 
 const KILL_SWITCH = 'OPENCLAUDE_DISABLE_LATEST_OPUS_RESOLUTION'
 
@@ -30,6 +41,7 @@ afterEach(() => {
     delete process.env[KILL_SWITCH]
     clearCachedOpus()
   } finally {
+    restoreRealModules()
     releaseSharedMutationLock()
   }
 })
