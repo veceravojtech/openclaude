@@ -76,8 +76,8 @@ export const JEV_MODEL = 'typesafe-ai/jev'
 
 const DEFAULT_TIMEOUT_MS = 3000
 const PROBABILITY_SUM_TOLERANCE = 0.02
-const RULE_A_MIN_P = 0.75
-const RULE_A_MIN_MARGIN = 0.15
+export const RULE_A_MIN_P = 0.75
+export const RULE_A_MIN_MARGIN = 0.15
 const CACHE_SIZE = 256
 const CACHE_TTL_MS = 600_000
 const MAX_DETAIL_LENGTH = 200

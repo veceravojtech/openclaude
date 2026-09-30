@@ -409,6 +409,128 @@ Configure it with `teammateDispatch`:
   `exhausted` below `high` warns once and is raised to `high`.
 - In `suggest` mode a refusal is reported as `WOULD REFUSE: …` instead.
 
+### Benchmarking JEV decisions
+
+`bun run bench:jev` replays task scenarios through the real dispatcher and
+reports what JEV picked, what the confidence rule accepted and what was finally
+decided. The same run can be exported as training data. It uses a synthetic
+environment (your saved profiles and login are not read), so runs are
+comparable between machines. It is not part of `check`, CI or the pre-push
+contract: a live run needs a key and costs money.
+
+```bash
+bun run bench:jev                    # baseline: JEV is not called; free and offline
+bun run bench:jev --list-sets        # the built-in scenario sets
+bun run bench:jev --set all --verbose  # every set, with a per-scenario table
+bun run bench:jev --show-request re-firmware-update-check  # the exact JEV request
+bun run bench:jev --set security,reverse-engineering --cyber  # the /cyber on policy
+AI_GATEWAY_API_KEY=… bun run bench:jev --live --set all --repeat 3 --baseline \
+  --max-calls 400 --out run.json --export train.jsonl
+bun run bench:jev --report run.json  # re-analyse a saved run; makes no calls
+```
+
+- **Baseline** (the default) never calls JEV: the role comes from the keyword
+  heuristic and the model from the tier table. It still captures the exact JEV
+  request, so `--export` works offline. Its accuracy against the gold labels is
+  the bar JEV has to beat.
+- **`--live`** calls the real endpoint and needs `AI_GATEWAY_API_KEY`. The
+  scenario text leaves the machine and each call costs money, so use synthetic
+  prompts. A run that needs more calls than `--max-calls` (default 300) is
+  refused before it starts. Use `--repeat 3` or more to measure stability; the
+  client's cache is off, so repeats are independent samples. `--baseline` adds
+  one JEV-off pass and reports how often the decisions agree. `--zdr` asks the
+  gateway for zero data retention (Hobby plans reject it with a 403).
+- **Environment**: `--allowlist default` offers only the matrix families,
+  `--allowlist '*'` every catalog model of every route, and `--profiles
+  fireworks` adds a route with hundreds of models — visible only under `'*'`,
+  because the default allowlist keeps just the matrix families. The report
+  prints how many models were offered per call, so runs at different sizes show
+  whether confidence falls as the choice grows. `--min-p`, `--min-margin` and
+  `--timeout-ms` set the `teammateDispatch.jev` values for the run.
+
+The report gives, for each question (role, model, agent type), how many answers
+the confidence rule accepts, how often JEV's raw top pick matches the gold
+label, the precision of the accepted picks, and calibration (Brier score and
+expected calibration error). It also lists what was finally chosen per role and
+complexity, stability across repeats, latency and cost, and a threshold sweep:
+coverage and precision for a grid of `minP` × `minMargin`, computed from the
+recorded probabilities, so thresholds can be chosen from data.
+
+**Scenario sets.** `--set` takes a comma list of built-in sets, or `all`
+(default `seed`); `--list-sets` shows their sizes and `--list` the scenarios and
+which set each is in. `--id` alone is looked up in every set, and `--tag` filters
+within the chosen sets.
+
+| Set | Scenarios | What it probes |
+| --- | --- | --- |
+| `seed` | general | every role and complexity, the separation rule, vision, long context, negation, ambiguous prompts, a non-English prompt, explicit agent types |
+| `computer-use` | browser and desktop | work that must drive a browser, plus traps that only share the vocabulary |
+| `coding` | bug fixes to migrations | a difficulty ladder: does the router tell a one-line fix from a subtle concurrency bug |
+| `reverse-engineering` | binaries, firmware, protocols | analysis of samples we own or that are quarantined; carries cyber labels |
+| `security` | defensive review and triage | review, threat modelling, detections; carries cyber labels |
+| `data-analysis` | SQL, notebooks, pipelines | research versus implement on data work |
+| `ops-debugging` | deploys, incidents, profiling | including "reproduce the bug", which is verification without its keywords |
+| `docs-research` | writing and reading | docs are `implement`; "check the docs against the code" is `verify` |
+| `vision` | images without a browser | an attached image needs a vision model for every role, not just `computer_use` |
+
+The scenarios tagged `trap` carry wording that points at another role (a
+Playwright test is not computer use). Whether the keyword heuristic falls for one
+shows in the baseline run; the point is whether JEV, which reads the whole
+prompt, does. Labels in all sets are starter labels: role → tier follows the
+policy above and the rest is one reviewer's judgment, so review and extend them
+before training anything. `--show-request <id>` prints the exact request JEV
+would receive for one scenario (the instruction, the state, and every question
+with its options); nothing is sent.
+
+`--scenarios file.json` takes your own set instead (an array, or `{ "scenarios":
+[...] }`). A scenario needs `id`,
+`description` and `prompt`, and may carry `implementers` (models already
+implementing in the team), `subagentType`, `spawnPath`, `tags` and `gold`:
+
+```json
+{
+  "id": "review-auth-diff",
+  "description": "Review the auth refresh diff",
+  "prompt": "Review the diff on branch feature/auth-refresh for correctness and security.",
+  "implementers": ["claude-opus-5-5"],
+  "gold": {
+    "role": "review",
+    "complexity": ["moderate", "hard"],
+    "needsLongContext": false,
+    "agentType": "code-reviewer",
+    "model": { "tier": "deep" }
+  }
+}
+```
+
+A gold field given as an array is a set of acceptable answers. `gold.model` may
+combine `tier` (resolved through the effective tier table), `anyOf`, `vendors`,
+`vision`, `minContext` and `notIn`; every constraint that is set must hold.
+Scenarios without `gold` still count for stability, fallbacks and the
+"what gets chosen" tables.
+
+**Cyber mode.** With `/cyber on` the dispatcher never calls JEV (see
+[cyber-mode.md](cyber-mode.md)): it reads role and complexity from the same
+keywords as the baseline and maps them onto a fixed policy. `--cyber` measures
+that policy. It is offline, defaults `--allowlist` to `*` (the policy's models
+are outside the default matrix), cannot be combined with `--live`, and exports
+nothing, because no request is built. A scenario's `gold.cyberModel` says where
+the policy should send it given its true difficulty, and replaces `gold.model` in
+a cyber run. The reverse-engineering and security sets carry these labels.
+
+What a cyber run shows is how far keyword complexity is from real difficulty. A
+task counts as hard only if its text contains words like "hard", "complex" or
+"race condition"; a hard task worded plainly goes to the cheap model, and a
+sentence like "the key looks hard-coded" is read as hard. A run where no policy
+model is available raises instead of choosing; the report lists those runs.
+
+**Training data.** `--export file.jsonl` writes one example per gold-labelled
+scenario: the exact request the dispatcher built (`instruction`, `state`,
+`questions`) and the gold answers. Choice questions carry the acceptable set
+with a uniform `distribution`; `model` lists the offered ids that satisfy the
+gold. Gold choices JEV was never offered are dropped. The tool produces the
+labelled data and the evaluation; it does not train anything.
+
 ## Teammate replicas per call
 
 `replicas` on an Agent call spawns several teammates from one call. They are
