@@ -6,6 +6,18 @@ import React from 'react'
 import * as actualAccountSwitch from '../../utils/accountSwitch.js'
 import type { AccountResolution } from '../../utils/accountSwitch.js'
 import type { AccountSummary } from '../../utils/authAccounts.js'
+import { captureRealModules } from '../../test/moduleMockRestore.js'
+
+// Every module this file stubs with mock.module(), captured (cache-busted)
+// before any stub is installed. mock.restore() does not undo mock.module(), so
+// the accountSwitch stub (readAccounts -> this file's ACCOUNTS) used to leak:
+// commands/logout/logout.test.ts then promoted this file's 'key-active'
+// account instead of its own survivor. afterEach puts the real modules back.
+const restoreRealModules = await captureRealModules(import.meta.dir, [
+  '../../utils/accountSwitch.js',
+  '../applyAccountSwitchEffects.js',
+  '../login/login.js',
+])
 
 /**
  * Argument parsing for `/account`.
@@ -92,6 +104,7 @@ beforeEach(() => {
 
 afterEach(() => {
   mock.restore()
+  restoreRealModules()
 })
 
 describe('/account argument parsing', () => {

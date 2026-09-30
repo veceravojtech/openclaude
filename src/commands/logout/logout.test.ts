@@ -43,6 +43,7 @@ const pinRealModules = await captureRealModules(import.meta.dir, [
   '../../utils/model/model.js',
   '../../utils/auth.js',
   '../../utils/config.js',
+  '../../utils/accountSwitch.js',
 ])
 
 const HOUR = 60 * 60 * 1000
