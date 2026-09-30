@@ -26,12 +26,24 @@ import {
 } from '../../test/sharedMutationLock.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
 import * as realSecureStorage from '../../utils/secureStorage/index.js'
+import { captureRealModules } from '../../test/moduleMockRestore.js'
 import type { SecureStorageData } from '../../utils/secureStorage/index.js'
 
 // Snapshots taken before any mock.module() call. mock.module() mutates the
 // live namespace object in place, so restoring from the namespace (or from a
 // spread of it) would re-install the stub instead of undoing it.
 const pristineRealSecureStorage = { ...realSecureStorage }
+
+// Pinned to the real modules before every test: other suites stub these
+// with mock.module(), which mock.restore() does not undo, so without the pin
+// this file's outcome depended on which file ran before it in the sweep
+// (e.g. a leaked ./providers.js stub reporting a non-first-party provider).
+const pinRealModules = await captureRealModules(import.meta.dir, [
+  '../../utils/model/providers.js',
+  '../../utils/model/model.js',
+  '../../utils/auth.js',
+  '../../utils/config.js',
+])
 
 const HOUR = 60 * 60 * 1000
 
@@ -56,6 +68,7 @@ describe('signing out of one account among several', () => {
   beforeEach(async () => {
     await acquireSharedMutationLock('commands/logout/logout.test.ts')
     mock.restore()
+    pinRealModules()
     tmpRoot = mkdtempSync(join(tmpdir(), 'openclaude-logout-'))
     const configDir = join(tmpRoot, 'config')
     mkdirSync(configDir)

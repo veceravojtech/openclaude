@@ -7,6 +7,18 @@ import {
 } from '../../services/api/providerUsageRegistry.js'
 import { buildUsageReport, clearUsageReportCache, renderUsageReport } from './report.js'
 import { UsageTool, type Output } from './UsageTool.js'
+import { captureRealModules } from '../../test/moduleMockRestore.js'
+
+// Pinned to the real modules before every test: other suites stub these
+// with mock.module(), which mock.restore() does not undo, so without the pin
+// this file's outcome depended on which file ran before it in the sweep
+// (e.g. a leaked ./providers.js stub reporting a non-first-party provider).
+const pinRealModules = await captureRealModules(import.meta.dir, [
+  '../../utils/model/providers.js',
+  '../../utils/model/model.js',
+  '../../utils/auth.js',
+  '../../utils/config.js',
+])
 
 // The report resolves the active provider from process.env; snapshot every
 // key that can influence route resolution so each case starts clean.
@@ -34,6 +46,7 @@ const originalEnv = new Map(
 )
 
 beforeEach(() => {
+  pinRealModules()
   for (const key of MANAGED_ENV_KEYS) delete process.env[key]
   clearProviderUsageRegistry()
   clearUsageReportCache()

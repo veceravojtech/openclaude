@@ -3,6 +3,19 @@ import { setCyberModeEnabled } from '../../bootstrap/state.js'
 import { resetSettingsCache } from '../settings/settingsCache.js'
 import { getAgentModel } from './agent.js'
 import { recordCyberLeadModelChoice } from './cyberLead.js'
+import { captureRealModules } from '../../test/moduleMockRestore.js'
+
+// Pinned to the real modules before every test: other suites stub these
+// with mock.module(), which mock.restore() does not undo, so without the pin
+// this file's outcome depended on which file ran before it in the sweep
+// (e.g. a leaked ./providers.js stub reporting a non-first-party provider).
+const pinRealModules = await captureRealModules(import.meta.dir, [
+  './providers.js',
+  './model.js',
+  './check1mAccess.js',
+  './modelAllowlist.js',
+  '../auth.js',
+])
 
 const HERMETIC_ENV = [
   'CLAUDE_CODE_USE_OPENAI',
@@ -15,6 +28,7 @@ const HERMETIC_ENV = [
 const savedEnv: Record<string, string | undefined> = {}
 
 beforeEach(() => {
+  pinRealModules()
   for (const key of HERMETIC_ENV) {
     savedEnv[key] = process.env[key]
     delete process.env[key]

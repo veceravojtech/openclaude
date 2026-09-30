@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { captureRealModules } from '../../test/moduleMockRestore.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -23,6 +24,15 @@ const realConfigModule = { ...(await import('../../utils/config.js')) }
 const realStorageModule = {
   ...(await import('../../utils/secureStorage/index.js')),
 }
+
+// Pinned to the real modules before every test: other suites stub these
+// with mock.module(), which mock.restore() does not undo, so without the pin
+// this file's outcome depended on which file ran before it in the sweep
+// (e.g. a leaked ./providers.js stub reporting a non-first-party provider).
+const pinRealModelModules = await captureRealModules(import.meta.dir, [
+  '../../utils/model/providers.js',
+  '../../utils/model/model.js',
+])
 
 // The report resolves the active provider from process.env; the same keys the
 // sibling UsageTool suite scrubs, so every case starts on the first-party
@@ -247,6 +257,7 @@ function tick(): Promise<void> {
 
 beforeEach(async () => {
   await acquireSharedMutationLock('report.accounts.test.ts')
+  pinRealModelModules()
   for (const key of MANAGED_ENV_KEYS) delete process.env[key]
   activeAccountUuid = LEAD
   storedAccounts = {}
