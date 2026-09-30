@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, expect, mock, test } from 'bun:test'
 
 import { resetModelStringsForTestingOnly } from '../bootstrap/state.js'
 import { acquireEnvMutex, releaseEnvMutex } from '../entrypoints/sdk/shared.js'
@@ -25,6 +25,17 @@ const realProviders = { ...actualProviders }
 // each mock is gated and falls through to the real implementation whenever
 // activeProfilesOverride is null — a transparent passthrough for every other
 // suite in the same `bun test` run.
+// The module-scope stubs below stay installed for this whole file, but
+// mock.restore() does not undo mock.module(), so they used to leak into every
+// later test file. Put the real modules back from the pre-stub snapshots once
+// this file is done.
+afterAll(() => {
+  mock.module('../utils/model/providers.js', () => ({ ...realProviders }))
+  mock.module('../utils/auth.js', () => ({ ...realAuth }))
+  mock.module('../utils/providerProfiles.js', () => ({ ...realProviderProfiles }))
+  mock.module('../utils/model/modelOptions.js', () => ({ ...realModelOptions }))
+})
+
 let activeProfilesOverride: Partial<typeof actualProviderProfiles> | null = null
 
 mock.module('../utils/model/providers.js', () => ({

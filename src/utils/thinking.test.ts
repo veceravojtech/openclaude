@@ -51,10 +51,21 @@ afterEach(() => {
       }
     }
     resetSettingsCache()
+    restoreRealModules()
   } finally {
     releaseSharedMutationLock()
   }
 })
+
+import { captureRealModules } from '../test/moduleMockRestore.js'
+
+// Every module this file stubs with mock.module(), captured (cache-busted)
+// before any stub is installed; mock.restore() does not undo mock.module(), so
+// afterEach puts the real modules back instead of leaking the last stub into
+// later test files.
+const restoreRealModules = await captureRealModules(import.meta.dir, [
+  './model/providers.js',
+])
 
 async function importFreshThinkingModule() {
   mock.restore()

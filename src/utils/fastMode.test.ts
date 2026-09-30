@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
+import { captureRealModules } from '../test/moduleMockRestore.js'
 import * as realAxios from 'axios'
 import {
   acquireSharedMutationLock,
@@ -25,6 +26,11 @@ const realAuth = (await import(
 const realModel = (await import(
   `./model/model.js?fastModeReal=${Date.now()}-${Math.random()}`
 )) as typeof import('./model/model.js')
+
+// axios used to be restored from `originalAxiosModule ?? realAxios` — a live
+// namespace object, which mock.module() cannot install (silent no-op), so the
+// axios stub leaked. Restore from a cache-busted snapshot instead.
+const restoreRealAxios = await captureRealModules(import.meta.dir, ['axios'])
 
 type ProvidersModule = typeof import('./model/providers.js')
 type AxiosModule = typeof import('axios')
@@ -252,7 +258,7 @@ afterEach(async () => {
     if (originalProvidersModule) {
       mock.module('./model/providers.js', () => ({ ...originalProvidersModule! }))
     }
-    mock.module('axios', () => originalAxiosModule ?? realAxios)
+    restoreRealAxios()
     mock.module('src/constants/oauth.js', () => ({ ...realOauthConstants }))
     mock.module('src/services/analytics/growthbook.js', () => ({
       ...realGrowthbook,

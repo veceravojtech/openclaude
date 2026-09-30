@@ -4,6 +4,15 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import * as realProviders from '../model/providers.js'
+import { captureRealModules } from '../../test/moduleMockRestore.js'
+
+// Every module this file stubs with mock.module(), captured (cache-busted)
+// before any stub is installed; mock.restore() does not undo mock.module(), so
+// afterEach puts the real modules back instead of leaking the last stub into
+// later test files.
+const restoreRealModules = await captureRealModules(import.meta.dir, [
+  '../model/providers.js',
+])
 
 beforeEach(async () => {
   await acquireSharedMutationLock('utils/swarm/teammateModel.test.ts')
@@ -12,6 +21,7 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    restoreRealModules()
   } finally {
     releaseSharedMutationLock()
   }
