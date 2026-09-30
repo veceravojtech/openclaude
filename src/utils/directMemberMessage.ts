@@ -1,4 +1,6 @@
 import type { AppState } from '../state/AppState.js'
+import { logForDebugging } from './debug.js'
+import { errorMessage } from './errors.js'
 
 /**
  * Parse `@agent-name message` syntax for direct team member messaging.
@@ -25,6 +27,12 @@ export type DirectMessageResult =
       success: false
       error: 'no_team_context' | 'unknown_recipient'
       recipientName?: string
+    }
+  | {
+      success: false
+      error: 'write_failed'
+      recipientName: string
+      reason: string
     }
 
 type WriteToMailboxFn = (
@@ -55,15 +63,23 @@ export async function sendDirectMemberMessage(
     return { success: false, error: 'unknown_recipient', recipientName }
   }
 
-  await writeToMailbox(
-    recipientName,
-    {
-      from: 'user',
-      text: message,
-      timestamp: new Date().toISOString(),
-    },
-    teamContext.teamName,
-  )
+  try {
+    await writeToMailbox(
+      recipientName,
+      {
+        from: 'user',
+        text: message,
+        timestamp: new Date().toISOString(),
+      },
+      teamContext.teamName,
+    )
+  } catch (error) {
+    const reason = errorMessage(error)
+    logForDebugging(
+      `[directMemberMessage] Failed to write to ${recipientName}'s inbox: ${reason}`,
+    )
+    return { success: false, error: 'write_failed', recipientName, reason }
+  }
 
   return { success: true, recipientName }
 }

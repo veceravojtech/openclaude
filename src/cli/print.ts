@@ -365,8 +365,8 @@ import {
   waitForTeammatesToBecomeIdle,
 } from '../utils/teammate.js'
 import {
-  readUnreadMessages,
-  markMessagesAsRead,
+  readUnreadMailboxEntries,
+  markMailboxEntriesAsRead,
   isShutdownApproved,
 } from '../utils/teammateMailbox.js'
 import { removeTeammateFromTeamFile } from '../utils/swarm/teamHelpers.js'
@@ -2742,20 +2742,24 @@ function runHeadlessStreaming(
             break
           }
 
-          const unread = await readUnreadMessages(
+          const snapshot = await readUnreadMailboxEntries(
             agentName,
             refreshedState.teamContext?.teamName,
           )
+          const unread = snapshot.map(e => e.message)
 
           if (unread.length > 0) {
             logForDebugging(
               `[print.ts] Team-lead found ${unread.length} unread messages`,
             )
 
-            // Mark as read immediately to avoid duplicate processing
-            await markMessagesAsRead(
+            // Mark as read immediately to avoid duplicate processing. Only
+            // this snapshot: a message that arrived after the read above is
+            // not processed here and must stay unread for the next pass.
+            await markMailboxEntriesAsRead(
               agentName,
               refreshedState.teamContext?.teamName,
+              snapshot,
             )
 
             // Process shutdown_approved messages - remove teammates from team file

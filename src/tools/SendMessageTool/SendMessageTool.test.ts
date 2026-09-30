@@ -15,6 +15,10 @@ import type { TaskStatus } from '../../Task.js'
 import type { ToolUseContext } from '../../Tool.js'
 import type { AgentId } from '../../types/ids.js'
 import type { AssistantMessage } from '../../types/message.js'
+import {
+  resetAtomicReplaceFaultInjectorForTesting,
+  setAtomicReplaceFaultInjectorForTesting,
+} from '../../utils/atomicReplace.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
 import { getTeamFilePath, type TeamFile } from '../../utils/swarm/teamHelpers.js'
 import {
@@ -25,7 +29,7 @@ import {
   createTeammateContext,
   runWithTeammateContext,
 } from '../../utils/teammateContext.js'
-import { readMailbox } from '../../utils/teammateMailbox.js'
+import { getInboxPath, readMailbox } from '../../utils/teammateMailbox.js'
 import { createAgentId } from '../../utils/uuid.js'
 import {
   type BroadcastOutput,
@@ -862,4 +866,78 @@ test('an untracked delivery whose pane probe is unknown is not refused on that b
   expect(result.success).toBe(true)
   expect(result.request_id).toBeTruthy()
   expect(await lastSenderTo('coder')).toBe('team-lead')
+})
+
+/**
+ * Phase 3 item 1 (B): `writeToMailbox` swallowed lock-exhaustion and write
+ * errors, so SendMessage reported a delivery that never reached the file —
+ * one of the ways a teammate's report was lost on the way to the lead. The
+ * fault is injected at the last step of the real write.
+ */
+function failInboxWritesTo(recipient: string, reason: string): void {
+  const inboxPath = getInboxPath(recipient, TEAM)
+  setAtomicReplaceFaultInjectorForTesting((stage, context) => {
+    if (stage === 'rename' && context.targetPath === inboxPath) {
+      throw new Error(reason)
+    }
+  })
+}
+
+test('a message whose inbox write fails is reported as not delivered, with the reason', async () => {
+  const teammate = contextFor(appStateWith({}, [teammateTask('coder', 'running')]))
+  failInboxWritesTo('team-lead', 'EIO: i/o error, rename')
+  try {
+    const result = await asSupervisor(() =>
+      send({ to: 'team-lead', message: 'final report', summary: 'report' }, teammate.context),
+    )
+    expect(result.success).toBe(false)
+    expect(result.message).toContain('EIO: i/o error, rename')
+    expect(result.message).toContain('NOT delivered')
+    expect(result.routing).toBeUndefined()
+  } finally {
+    resetAtomicReplaceFaultInjectorForTesting()
+  }
+  expect(await readMailbox('team-lead', TEAM)).toEqual([])
+})
+
+test('a broadcast names the recipients whose inbox write failed and is not a success', async () => {
+  const lead = contextFor(appStateWith({}, [teammateTask('coder', 'running')]))
+  failInboxWritesTo('coder', 'ENOSPC: no space left on device')
+  try {
+    const result = await send(
+      { to: '*', message: 'standup', summary: 'standup' },
+      lead.context,
+    )
+    expect(result.success).toBe(false)
+    expect(result.message).toContain('coder (ENOSPC: no space left on device)')
+    expect(result.recipients).toEqual(['supervisor'])
+  } finally {
+    resetAtomicReplaceFaultInjectorForTesting()
+  }
+})
+
+test('a shutdown approval that cannot reach the lead is reported and does not exit', async () => {
+  failInboxWritesTo('team-lead', 'EACCES: permission denied')
+  // A real controller: with the write succeeding, this approval aborts it.
+  const abortController = new AbortController()
+  const teammate = contextFor(
+    appStateWith({}, [
+      { ...teammateTask('supervisor', 'running'), abortController },
+    ]),
+  )
+  try {
+    const result = await asSupervisor(() =>
+      sendStructured(
+        'team-lead',
+        { type: 'shutdown_response', request_id: 'shutdown-1', approve: true },
+        teammate.context,
+      ),
+    )
+    expect(result.success).toBe(false)
+    expect(result.message).toContain('EACCES: permission denied')
+    expect(result.message).toContain('Not exiting')
+  } finally {
+    resetAtomicReplaceFaultInjectorForTesting()
+  }
+  expect(abortController.signal.aborted).toBe(false)
 })

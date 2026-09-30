@@ -66,8 +66,8 @@ import {
   isShutdownRequest,
   isTeammateStartupNotification,
   isTeamPermissionUpdate,
-  markMessagesAsRead,
-  readUnreadMessages,
+  markMailboxEntriesAsRead,
+  readUnreadMailboxEntries,
   type TeammateMessage,
   writeToMailbox,
 } from '../utils/teammateMailbox.js'
@@ -151,10 +151,14 @@ export function useInboxPoller({
     const agentName = getAgentNameToPoll(currentAppState)
     if (!agentName) return
 
-    const unread = await readUnreadMessages(
+    // Keep the snapshot's indices: only these entries are marked read below.
+    // Anything appended while this poll works (the awaits in the handlers)
+    // stays unread and is picked up by the next poll.
+    const snapshot = await readUnreadMailboxEntries(
       agentName,
       currentAppState.teamContext?.teamName,
     )
+    const unread = snapshot.map(e => e.message)
 
     if (unread.length === 0) {
       if (!isLoading && isTeammate()) await refreshTeammateDelegatedActivity()
@@ -222,8 +226,15 @@ export function useInboxPoller({
 
     // Helper to mark messages as read in the inbox file.
     // Called after messages are successfully delivered or reliably queued.
+    // Marks exactly this poll's snapshot, never "everything unread": a message
+    // that arrived after the read above was not processed here, and marking it
+    // would drop it for good.
     const markRead = () => {
-      void markMessagesAsRead(agentName, currentAppState.teamContext?.teamName)
+      void markMailboxEntriesAsRead(
+        agentName,
+        currentAppState.teamContext?.teamName,
+        snapshot,
+      )
     }
 
     // Separate permission messages from regular teammate messages
@@ -377,7 +388,7 @@ export function useInboxPoller({
             },
           }
 
-          // Deduplicate: if markMessagesAsRead failed on a prior poll,
+          // Deduplicate: if marking read failed on a prior poll,
           // the same message will be re-read — skip if already queued.
           setToolUseConfirmQueue(queue => {
             if (queue.some(q => q.toolUseID === parsed.tool_use_id)) {
@@ -690,7 +701,11 @@ export function useInboxPoller({
             timestamp: new Date().toISOString(),
           },
           teamName,
-        )
+        ).catch(error => {
+          logForDebugging(
+            `[InboxPoller] Failed to send plan approval to ${m.from}: ${error}`,
+          )
+        })
 
         // Update in-process teammate task state if applicable
         const taskId = findInProcessTeammateTaskId(m.from, currentAppState)

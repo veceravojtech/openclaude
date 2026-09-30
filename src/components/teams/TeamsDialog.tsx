@@ -241,9 +241,9 @@ export function TeamsDialog({
     if (input === 's') {
       if (dialogLevel.type === 'teammateList' && teammateStatuses[selectedIndex]) {
         const teammate = teammateStatuses[selectedIndex];
-        void sendShutdownRequestToMailbox(teammate.name, dialogLevel.teamName, 'Graceful shutdown requested by team lead');
+        void sendShutdownRequestToMailbox(teammate.name, dialogLevel.teamName, 'Graceful shutdown requested by team lead').catch(error => logForDebugging(`[TeamsDialog] Failed to send shutdown request to ${teammate.name}: ${error}`));
       } else if (dialogLevel.type === 'teammateDetail' && currentTeammate) {
-        void sendShutdownRequestToMailbox(currentTeammate.name, dialogLevel.teamName, 'Graceful shutdown requested by team lead');
+        void sendShutdownRequestToMailbox(currentTeammate.name, dialogLevel.teamName, 'Graceful shutdown requested by team lead').catch(error => logForDebugging(`[TeamsDialog] Failed to send shutdown request to ${currentTeammate.name}: ${error}`));
         goBackToList();
       }
       return;
@@ -755,7 +755,7 @@ function sendModeChangeToTeammate(teammateName: string, teamName: string, target
     from: 'team-lead',
     text: jsonStringify(message),
     timestamp: new Date().toISOString()
-  }, teamName);
+  }, teamName).catch(error => logForDebugging(`[TeamsDialog] Failed to send mode change to ${teammateName}: ${error}`));
   logForDebugging(`[TeamsDialog] Sent mode change to ${teammateName}: ${targetMode}`);
 }
 
@@ -813,7 +813,7 @@ function cycleAllTeammateModes(teammates: TeammateStatus[], teamName: string, is
       from: 'team-lead',
       text: jsonStringify(message),
       timestamp: new Date().toISOString()
-    }, teamName);
+    }, teamName).catch(error => logForDebugging(`[TeamsDialog] Failed to send mode change to ${teammate.name}: ${error}`));
   }
   logForDebugging(`[TeamsDialog] Sent mode change to all ${teammates.length} teammates: ${targetMode}`);
 }

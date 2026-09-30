@@ -29,6 +29,8 @@ import {
   getTeammateColor,
   getTeamName,
 } from '../../utils/teammate.js'
+import { logForDebugging } from '../../utils/debug.js'
+import { errorMessage } from '../../utils/errors.js'
 import { writeToMailbox } from '../../utils/teammateMailbox.js'
 import {
   checkVerificationGateIn,
@@ -93,6 +95,8 @@ const outputSchema = lazySchema(() =>
       })
       .optional(),
     verificationNudgeNeeded: z.boolean().optional(),
+    /** The update was saved, but the new owner's inbox write failed. */
+    ownerNotificationError: z.string().optional(),
   }),
 )
 type OutputSchema = ReturnType<typeof outputSchema>
@@ -386,7 +390,10 @@ export const TaskUpdateTool = buildTool({
       }
     }
 
-    // Notify new owner via mailbox when ownership changes
+    // Notify new owner via mailbox when ownership changes. The update above is
+    // already saved, so a failed notification does not fail the tool; it is
+    // reported in the result instead, so the caller can tell the owner itself.
+    let ownerNotificationError: string | undefined
     if (updates.owner && isAgentSwarmsEnabled()) {
       const senderName = getAgentName() || 'team-lead'
       const senderColor = getTeammateColor()
@@ -398,16 +405,23 @@ export const TaskUpdateTool = buildTool({
         assignedBy: senderName,
         timestamp: new Date().toISOString(),
       })
-      await writeToMailbox(
-        updates.owner,
-        {
-          from: senderName,
-          text: assignmentMessage,
-          timestamp: new Date().toISOString(),
-          color: senderColor,
-        },
-        taskListId,
-      )
+      try {
+        await writeToMailbox(
+          updates.owner,
+          {
+            from: senderName,
+            text: assignmentMessage,
+            timestamp: new Date().toISOString(),
+            color: senderColor,
+          },
+          taskListId,
+        )
+      } catch (error) {
+        ownerNotificationError = errorMessage(error)
+        logForDebugging(
+          `[TaskUpdateTool] Failed to notify ${updates.owner} of task #${taskId}: ${ownerNotificationError}`,
+        )
+      }
     }
 
     // Add blocks if provided and not already present
@@ -480,6 +494,9 @@ export const TaskUpdateTool = buildTool({
               }
             : undefined,
         verificationNudgeNeeded,
+        ...(ownerNotificationError !== undefined
+          ? { ownerNotificationError }
+          : {}),
       },
     }
   },
@@ -491,6 +508,7 @@ export const TaskUpdateTool = buildTool({
       error,
       statusChange,
       verificationNudgeNeeded,
+      ownerNotificationError,
     } = content as Output
     if (!success) {
       // Return as non-error so it doesn't trigger sibling tool cancellation
@@ -513,6 +531,10 @@ export const TaskUpdateTool = buildTool({
     ) {
       resultContent +=
         '\n\nTask completed. Call TaskList now to find your next available task or see if your work unblocked others.'
+    }
+
+    if (ownerNotificationError !== undefined) {
+      resultContent += `\n\nWARNING: the assignment message to the new owner was NOT delivered (${ownerNotificationError}). Tell them with SendMessage.`
     }
 
     if (verificationNudgeNeeded) {

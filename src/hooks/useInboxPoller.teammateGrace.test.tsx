@@ -213,12 +213,12 @@ test('a pane teammate shutting down keeps its row for the grace window', async (
   let delivered = false
   mock.module(MAILBOX_MODULE, () => ({
     ...actualMailbox,
-    readUnreadMessages: async () => {
+    readUnreadMailboxEntries: async () => {
       if (delivered) return []
       delivered = true
-      return [shutdownApproval()]
+      return [{ index: 0, message: shutdownApproval() }]
     },
-    markMessagesAsRead: async () => {},
+    markMailboxEntriesAsRead: async () => {},
   }))
 
   const before = Date.now()
@@ -258,12 +258,12 @@ test('…and the task is then COLLECTED once the deadline passes, instead of sit
   let delivered = false
   mock.module(MAILBOX_MODULE, () => ({
     ...actualMailbox,
-    readUnreadMessages: async () => {
+    readUnreadMailboxEntries: async () => {
       if (delivered) return []
       delivered = true
-      return [shutdownApproval()]
+      return [{ index: 0, message: shutdownApproval() }]
     },
-    markMessagesAsRead: async () => {},
+    markMailboxEntriesAsRead: async () => {},
   }))
 
   const polled = await pollOnce(leadState(paneTeammateTask()))

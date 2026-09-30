@@ -676,3 +676,59 @@ test('a duplicate that lands between the read and the mark stays unread', async 
     { text: 'build is red', read: false },
   ])
 })
+
+test("a message that lands after the lead's snapshot stays unread for the next round", async () => {
+  // Phase 3 item 1 (A), lead path. The lead read its inbox lock-free, built
+  // the attachment, then marked every non-protocol unread message read — a
+  // teammate's report that landed in between was marked read and never
+  // delivered. The late report is written right after the snapshot read.
+  const stamp = `${Date.now()}-${Math.random()}`
+  actualMailbox ??= await import(`./teammateMailbox.ts?leadSnapshotActual=${stamp}`)
+  let injected = false
+  mock.module('./teammateMailbox.js', () => ({
+    ...actualMailbox!,
+    readUnreadMailboxEntries: async (agentName: string, teamName?: string) => {
+      const snapshot = await actualMailbox!.readUnreadMailboxEntries(
+        agentName,
+        teamName,
+      )
+      if (!injected) {
+        injected = true
+        await actualMailbox!.writeToMailbox(
+          agentName,
+          mail('worker', 'late report'),
+          teamName,
+        )
+      }
+      return snapshot
+    },
+  }))
+  const freshAttachments = (await import(
+    `./attachments.ts?leadSnapshot=${stamp}`
+  )) as typeof import('./attachments.js')
+
+  process.env.USER_TYPE = 'ant'
+  const harness = createLeadHarness()
+  await writeToMailbox(TEAM_LEAD_NAME, mail('worker', 'first report'), TEAM)
+
+  const first = await freshAttachments.__test.getTeammateMailboxAttachments(
+    harness.context,
+  )
+  expect(injected).toBe(true)
+  expect(textsOf(first)).toEqual(['first report'])
+  expect(
+    (await readMailbox(TEAM_LEAD_NAME, TEAM)).map(m => [m.text, m.read]),
+  ).toEqual([
+    ['first report', true],
+    ['late report', false],
+  ])
+
+  const second = await freshAttachments.__test.getTeammateMailboxAttachments(
+    harness.context,
+  )
+  expect(textsOf(second)).toEqual(['late report'])
+  expect((await readMailbox(TEAM_LEAD_NAME, TEAM)).map(m => m.read)).toEqual([
+    true,
+    true,
+  ])
+})

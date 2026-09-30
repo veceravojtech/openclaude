@@ -172,16 +172,26 @@ export function initializeTeammateHooks(
     const key = JSON.stringify(delegatedActivity)
     if (key === lastDelegated) return
     lastDelegated = key
-    await writeToMailbox(leadAgentName, {
-      from: agentName,
-      text: jsonStringify(createIdleNotification(agentName, {
-        idleReason: delegatedActivity.status === 'none' ? 'available' : 'waiting_for_children',
-        delegatedActivity,
-        summary: idleSummary,
-      })),
-      timestamp: new Date().toISOString(),
-      color: getTeammateColor(),
-    }, teamName)
+    try {
+      await writeToMailbox(leadAgentName, {
+        from: agentName,
+        text: jsonStringify(createIdleNotification(agentName, {
+          idleReason: delegatedActivity.status === 'none' ? 'available' : 'waiting_for_children',
+          delegatedActivity,
+          summary: idleSummary,
+        })),
+        timestamp: new Date().toISOString(),
+        color: getTeammateColor(),
+      }, teamName)
+    } catch (error) {
+      // Not written: forget the key so the next inbox poll
+      // (refreshTeammateDelegatedActivity) sends it again instead of treating
+      // it as already reported. Also runs from the poll, which must not throw.
+      lastDelegated = undefined
+      logForDebugging(
+        `[TeammateInit] Failed to send idle notification for ${agentName} to ${leadAgentName}: ${error instanceof Error ? error.message : 'unknown error'}`,
+      )
+    }
   }
 
   // Register Stop hook to notify leader when this teammate stops

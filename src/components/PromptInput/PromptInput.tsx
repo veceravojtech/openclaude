@@ -1189,6 +1189,16 @@ function PromptInput({
           clearBuffer();
           resetHistory();
           return;
+        } else if (result.error === 'write_failed') {
+          // The recipient exists but the inbox write failed: say so and keep
+          // the input, rather than sending the message to the model instead.
+          addNotification({
+            key: 'direct-message-failed',
+            text: `Not sent to @${result.recipientName}: ${result.reason}`,
+            color: 'warning',
+            priority: 'high'
+          });
+          return;
         } else if (result.error === 'no_team_context') {
           // No team context - fall through to normal prompt submission
         } else {

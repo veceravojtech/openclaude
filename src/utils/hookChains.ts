@@ -935,18 +935,30 @@ export async function executeNotifyTeamAction(args: {
     }
   }
 
+  const failed: string[] = []
   for (const recipient of recipients) {
-    await writeToMailbox(
-      recipient,
-      {
-        from: senderName,
-        text: body,
-        summary,
-        color: senderColor,
-        timestamp: new Date().toISOString(),
-      },
-      teamName,
-    )
+    try {
+      await writeToMailbox(
+        recipient,
+        {
+          from: senderName,
+          text: body,
+          summary,
+          color: senderColor,
+          timestamp: new Date().toISOString(),
+        },
+        teamName,
+      )
+    } catch (error) {
+      failed.push(`${recipient} (${String(error)})`)
+    }
+  }
+
+  if (failed.length > 0) {
+    return {
+      status: 'failed',
+      reason: `Team notification not written for ${failed.length} of ${recipients.length} recipient(s): ${failed.join(', ')}`,
+    }
   }
 
   return {

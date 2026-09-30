@@ -162,6 +162,33 @@ function findTeammateColor(
 }
 
 /**
+ * Write to an inbox and say why it failed, if it did.
+ *
+ * `writeToMailbox` rejects when nothing was written (lock not acquired, inbox
+ * not creatable, write failed). Every handler below reports that as
+ * `success: false` with the reason: a SendMessage that claims delivery for a
+ * message that never reached the file is how a teammate's report got lost.
+ */
+async function tryWriteToMailbox(
+  ...args: Parameters<typeof writeToMailbox>
+): Promise<string | undefined> {
+  try {
+    await writeToMailbox(...args)
+    return undefined
+  } catch (error) {
+    const reason = errorMessage(error)
+    logForDebugging(
+      `[SendMessageTool] inbox write to ${args[0]} failed: ${reason}`,
+    )
+    return reason
+  }
+}
+
+function mailboxWriteFailure(address: string, reason: string): string {
+  return `Failed to write to ${address}'s inbox: ${reason}. The message was NOT delivered; retry or report the failure.`
+}
+
+/**
  * Whether the recipient of a direct message has anything alive to read it.
  *
  * A teammate's inbox is a file on disk (`getInboxPath`); it becomes a delivery
@@ -353,7 +380,7 @@ async function handleMessage(
   // left in it is recoverable, while a message never written is gone for good.
   // Dropping it could only ever destroy the single copy; keeping it costs one
   // append. What was wrong here was never the write, it was the claim.
-  await writeToMailbox(
+  const writeFailure = await tryWriteToMailbox(
     recipientName,
     {
       from: senderName,
@@ -364,6 +391,14 @@ async function handleMessage(
     },
     teamName,
   )
+  if (writeFailure !== undefined) {
+    return {
+      data: {
+        success: false,
+        message: mailboxWriteFailure(address, writeFailure),
+      },
+    }
+  }
 
   if (delivery.state === 'undeliverable') {
     // No `routing`: the UI draws a delivery whenever routing is present
@@ -441,8 +476,10 @@ async function handleBroadcast(
     }
   }
 
+  const delivered: string[] = []
+  const failed: string[] = []
   for (const recipientName of recipients) {
-    await writeToMailbox(
+    const writeFailure = await tryWriteToMailbox(
       recipientName,
       {
         from: senderName,
@@ -453,6 +490,21 @@ async function handleBroadcast(
       },
       teamName,
     )
+    if (writeFailure === undefined) {
+      delivered.push(recipientName)
+    } else {
+      failed.push(`${recipientName} (${writeFailure})`)
+    }
+  }
+
+  if (failed.length > 0) {
+    return {
+      data: {
+        success: false,
+        message: `Broadcast NOT delivered to ${failed.length} of ${recipients.length} teammate(s): ${failed.join(', ')}${delivered.length > 0 ? `. Delivered to: ${delivered.join(', ')}` : ''}`,
+        recipients: delivered,
+      },
+    }
   }
 
   return {
@@ -547,7 +599,7 @@ async function handleShutdownRequest(
   // spawn epoch — so a refused request that was persisted would be executed by
   // a later respawn under the same name with no basis to know it is stale. A
   // refused shutdown must leave no envelope behind.
-  await writeToMailbox(
+  const writeFailure = await tryWriteToMailbox(
     targetName,
     {
       from: senderName,
@@ -557,6 +609,16 @@ async function handleShutdownRequest(
     },
     teamName,
   )
+  if (writeFailure !== undefined) {
+    return {
+      data: {
+        success: false,
+        message: mailboxWriteFailure(address, writeFailure),
+        request_id: requestId,
+        target: targetName,
+      },
+    }
+  }
 
   return {
     data: {
@@ -605,7 +667,7 @@ async function handleShutdownApproval(
     backendType: ownBackendType,
   })
 
-  await writeToMailbox(
+  const approvalWriteFailure = await tryWriteToMailbox(
     TEAM_LEAD_NAME,
     {
       from: senderName,
@@ -615,6 +677,17 @@ async function handleShutdownApproval(
     },
     teamName,
   )
+  if (approvalWriteFailure !== undefined) {
+    // Do not exit: the lead never learns of an approval it did not receive,
+    // so a teammate that exits now just vanishes. Staying alive lets it retry.
+    return {
+      data: {
+        success: false,
+        message: `${mailboxWriteFailure(TEAM_LEAD_NAME, approvalWriteFailure)} Not exiting.`,
+        request_id: requestId,
+      },
+    }
+  }
 
   if (ownBackendType === 'in-process') {
     logForDebugging(
@@ -687,7 +760,7 @@ async function handleShutdownRejection(
     reason,
   })
 
-  await writeToMailbox(
+  const rejectionWriteFailure = await tryWriteToMailbox(
     TEAM_LEAD_NAME,
     {
       from: senderName,
@@ -697,6 +770,17 @@ async function handleShutdownRejection(
     },
     teamName,
   )
+  if (rejectionWriteFailure !== undefined) {
+    // The lead did not get the answer, so the request is still in flight:
+    // leave `shutdownRequested` set.
+    return {
+      data: {
+        success: false,
+        message: mailboxWriteFailure(TEAM_LEAD_NAME, rejectionWriteFailure),
+        request_id: requestId,
+      },
+    }
+  }
 
   // The request has been ANSWERED, so it is no longer in flight: an in-process
   // teammate takes its own `shutdownRequested` flag down again. Leaving it set
@@ -752,7 +836,7 @@ async function handlePlanApproval(
     appState.teamContext?.teamName,
   )
 
-  await writeToMailbox(
+  const writeFailure = await tryWriteToMailbox(
     recipientName,
     {
       from: TEAM_LEAD_NAME,
@@ -761,6 +845,15 @@ async function handlePlanApproval(
     },
     teamName,
   )
+  if (writeFailure !== undefined) {
+    return {
+      data: {
+        success: false,
+        message: mailboxWriteFailure(recipientName, writeFailure),
+        request_id: requestId,
+      },
+    }
+  }
 
   return {
     data: {
@@ -799,7 +892,7 @@ async function handlePlanRejection(
     appState.teamContext?.teamName,
   )
 
-  await writeToMailbox(
+  const writeFailure = await tryWriteToMailbox(
     recipientName,
     {
       from: TEAM_LEAD_NAME,
@@ -808,6 +901,15 @@ async function handlePlanRejection(
     },
     teamName,
   )
+  if (writeFailure !== undefined) {
+    return {
+      data: {
+        success: false,
+        message: mailboxWriteFailure(recipientName, writeFailure),
+        request_id: requestId,
+      },
+    }
+  }
 
   return {
     data: {

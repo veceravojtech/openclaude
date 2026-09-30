@@ -254,9 +254,9 @@ import { getAutoMemPath, isAutoMemoryEnabled } from '../memdir/paths.js'
 import { getAgentMemoryDir } from '../tools/AgentTool/agentMemory.js'
 import {
   readMailbox,
-  readUnreadMessages,
+  readUnreadMailboxEntries,
   markMessageAsReadByIndex,
-  markMessagesAsReadByPredicate,
+  markMailboxEntriesAsRead,
   isShutdownApproved,
   isShutdownRejected,
   isStructuredProtocolMessage,
@@ -4068,9 +4068,9 @@ function isMidTurnDeliverableMessage(text: string): boolean {
  * without ever being delivered. Indices are stable here because an inbox is
  * append-only for as long as it is polled: every writer pushes
  * (`writeToMailbox`), the mark paths rewrite entries in place
- * (`markMessageAsReadByIndex`, `markMessagesAsRead`,
- * `markMessagesAsReadByPredicate`), and nothing but `clearMailbox` — which no
- * caller runs — ever shortens the array.
+ * (`markMessageAsReadByIndex`, `markMailboxEntriesAsRead`,
+ * `markMessagesAsRead`, `markMessagesAsReadByPredicate`), and nothing but
+ * `clearMailbox` — which no caller runs — ever shortens the array.
  */
 async function drainInboxForMidTurnDelivery(
   agentName: string,
@@ -4361,10 +4361,16 @@ async function getTeammateMailboxAttachments(
   // attachment generation races with InboxPoller: whichever reads first marks all
   // messages as read, and if attachments wins, protocol messages get bundled as raw
   // LLM context text instead of being routed to their UI handlers.
-  const allUnreadMessages = await readUnreadMessages(agentName, teamName)
-  const unreadMessages = allUnreadMessages.filter(
-    m => !isStructuredProtocolMessage(m.text),
+  //
+  // The snapshot keeps each message's index so exactly these entries are
+  // marked read below; a message that lands after this read is not in it and
+  // stays unread for the next round.
+  const allUnreadEntries = await readUnreadMailboxEntries(agentName, teamName)
+  const deliverableEntries = allUnreadEntries.filter(
+    e => !isStructuredProtocolMessage(e.message.text),
   )
+  const allUnreadMessages = allUnreadEntries.map(e => e.message)
+  const unreadMessages = deliverableEntries.map(e => e.message)
   logForDebugging(
     `[MailboxBridge] Found ${allUnreadMessages.length} unread message(s) for "${agentName}" (${allUnreadMessages.length - unreadMessages.length} structured protocol messages filtered out)`,
   )
@@ -4457,14 +4463,11 @@ async function getTeammateMailboxAttachments(
     },
   ]
 
-  // Mark only non-structured mailbox messages as read after attachment is built.
-  // Structured protocol messages stay unread for useInboxPoller to handle.
+  // Mark only the non-structured messages of THIS snapshot as read, after the
+  // attachment is built. Structured protocol messages stay unread for
+  // useInboxPoller to handle, and so does anything that arrived after the read.
   if (unreadMessages.length > 0) {
-    await markMessagesAsReadByPredicate(
-      agentName,
-      m => !isStructuredProtocolMessage(m.text),
-      teamName,
-    )
+    await markMailboxEntriesAsRead(agentName, teamName, deliverableEntries)
     logForDebugging(
       `[MailboxBridge] marked ${unreadMessages.length} non-structured message(s) as read for agent="${agentName}" team="${teamName || 'default'}"`,
     )

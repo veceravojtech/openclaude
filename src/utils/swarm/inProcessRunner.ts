@@ -820,13 +820,22 @@ async function sendIdleNotification(
 ): Promise<void> {
   const notification = createIdleNotification(agentName, options)
 
-  await sendMessageToLeader(
-    agentName,
-    jsonStringify(notification),
-    agentColor,
-    teamName,
-    isCurrent,
-  )
+  // Best-effort status ping: `writeToMailbox` now rejects when the write did
+  // not happen (e.g. the inbox lock stayed busy), and an idle notification that
+  // could not be written must not run the caller's failure tail.
+  try {
+    await sendMessageToLeader(
+      agentName,
+      jsonStringify(notification),
+      agentColor,
+      teamName,
+      isCurrent,
+    )
+  } catch (err) {
+    logForDebugging(
+      `[inProcessRunner] Could not send idle notification (${options?.idleReason ?? 'available'}) for ${agentName} to the lead of ${teamName}: ${err}`,
+    )
+  }
 }
 
 /**
@@ -1721,12 +1730,20 @@ async function finalizeIdleShutdown(
     'shutdown',
   )
 
-  await sendMessageToLeader(
-    identity.agentName,
-    `${notificationMessage} Reason: shut down after idle timeout (${cause}).`,
-    identity.color,
-    identity.teamName,
-  )
+  // Best-effort: the teammate has already left the roster, so a failed write
+  // must not turn this completed shutdown into a runner failure.
+  try {
+    await sendMessageToLeader(
+      identity.agentName,
+      `${notificationMessage} Reason: shut down after idle timeout (${cause}).`,
+      identity.color,
+      identity.teamName,
+    )
+  } catch (err) {
+    logForDebugging(
+      `[inProcessRunner] Could not tell the lead that ${identity.agentName} shut down after idle timeout: ${err}`,
+    )
+  }
   return true
 }
 
@@ -1906,9 +1923,8 @@ async function completeSubLeadHandoff(
       )
     }
 
-    // FIRST, before anything is registered. `writeToMailbox` awaits an
-    // `ensureInboxDir` mkdir outside its own try/catch, so a read-only or full
-    // disk rejects here; writing before the spawn is what keeps that failure
+    // FIRST, before anything is registered. `writeToMailbox` rejects when the
+    // message was not written (a read-only or full disk, a busy lock); writing before the spawn is what keeps that failure
     // clean — the catch below warns the lead and NOTHING is left registered,
     // rather than a never-started `running` task under this id that the caps
     // would count, `RecoverTeam respawn` would refuse as a live lead, and a
