@@ -195,4 +195,39 @@ describe('getGitDiff', () => {
       rmSync(repo, { recursive: true, force: true })
     }
   })
+
+  test('returns diffs larger than the 1 MiB spawnSync default buffer', () => {
+    const repo = mkdtempSync(join(tmpdir(), 'openclaude-pr-intent-scan-large-'))
+    const originalCwd = process.cwd()
+
+    try {
+      git(repo, ['init', '-q', '-b', 'main'])
+      git(repo, ['config', 'user.email', 'test@example.com'])
+      git(repo, ['config', 'user.name', 'Test User'])
+
+      writeFileSync(join(repo, 'README.md'), 'base\n')
+      git(repo, ['add', 'README.md'])
+      git(repo, ['commit', '-q', '-m', 'base'])
+      const base = git(repo, ['rev-parse', 'HEAD'])
+
+      // ~3 MB of added lines: well past spawnSync's 1 MiB default maxBuffer.
+      const bigLine = 'x'.repeat(99)
+      writeFileSync(
+        join(repo, 'large.txt'),
+        Array.from({ length: 30_000 }, (_, i) => `${i} ${bigLine}`).join('\n') + '\n',
+      )
+      git(repo, ['add', 'large.txt'])
+      git(repo, ['commit', '-q', '-m', 'large change'])
+
+      process.chdir(repo)
+      const diff = getGitDiff(base, 'HEAD')
+
+      expect(diff.length).toBeGreaterThan(1024 * 1024)
+      expect(diff).toContain('+++ b/large.txt')
+      expect(diff).toContain(`+29999 ${bigLine}`)
+    } finally {
+      process.chdir(originalCwd)
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
 })

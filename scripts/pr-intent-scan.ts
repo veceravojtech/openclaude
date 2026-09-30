@@ -377,6 +377,11 @@ export function scanAddedLines(lines: DiffLine[]): Finding[] {
   return uniqueFindings(findings)
 }
 
+// spawnSync's default maxBuffer is 1 MiB; a long-lived branch's --unified=0
+// diff easily exceeds that (a large merge produced ~4.4 MB), and the overflow
+// used to surface as a misleading "git diff failed" with the diff as message.
+export const GIT_DIFF_MAX_BUFFER_BYTES = 256 * 1024 * 1024
+
 export function getGitDiff(baseRef: string, headRef = 'HEAD'): string {
   const mergeBase = spawnSync('git', ['merge-base', baseRef, headRef], {
     encoding: 'utf8',
@@ -392,9 +397,14 @@ export function getGitDiff(baseRef: string, headRef = 'HEAD'): string {
   const diff = spawnSync(
     'git',
     ['diff', '--unified=0', '--no-ext-diff', `${base}...${headRef}`],
-    { encoding: 'utf8' },
+    { encoding: 'utf8', maxBuffer: GIT_DIFF_MAX_BUFFER_BYTES },
   )
 
+  if (diff.error) {
+    // e.g. ENOBUFS when the diff outgrows maxBuffer: report the real cause
+    // instead of dumping the truncated diff as if git had failed.
+    throw new Error(`git diff failed: ${diff.error.message}`)
+  }
   if (diff.status !== 0) {
     throw new Error(`git diff failed: ${diff.stderr.trim() || diff.stdout.trim()}`)
   }
