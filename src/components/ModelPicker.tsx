@@ -61,6 +61,12 @@ export type Props = {
    * leave this off so they never surface an option they cannot honor.
    */
   allowProfileSwitch?: boolean;
+  /**
+   * Keep Cyber-mode model filtering. Set by pickers that choose a model for
+   * something other than the lead (teammate default, compaction), where an
+   * explicitly chosen non-Cyber model would be rejected later.
+   */
+  restrictToCyber?: boolean;
 };
 const NO_PREFERENCE = '__NO_PREFERENCE__';
 function normalizeModelPickerValue(value: unknown): string | null {
@@ -93,7 +99,7 @@ function mapDiscoveryToneToColor(tone: ModelPickerDiscoveryState['tone']): 'erro
   }
 }
 export function ModelPicker(t0) {
-  const $ = _c(84);
+  const $ = _c(85);
   const {
     initial,
     sessionModel,
@@ -106,7 +112,8 @@ export function ModelPicker(t0) {
     optionsOverride,
     discoveryState,
     onRefresh,
-    allowProfileSwitch
+    allowProfileSwitch,
+    restrictToCyber
   } = t0;
   const setAppState = useSetAppState();
   const exitState = useExitOnCtrlCDWithKeybindings();
@@ -125,9 +132,10 @@ export function ModelPicker(t0) {
   const [effort, setEffort] = useState(t1);
   const t2 = isFastMode ?? false;
   let t3;
-  if ($[2] !== t2) {
-    t3 = getModelOptions(t2);
+  if ($[2] !== t2 || $[84] !== restrictToCyber) {
+    t3 = getModelOptions(t2, !restrictToCyber);
     $[2] = t2;
+    $[84] = restrictToCyber;
     $[3] = t3;
   } else {
     t3 = $[3];

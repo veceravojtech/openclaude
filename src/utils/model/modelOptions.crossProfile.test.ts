@@ -132,9 +132,14 @@ mock.module('../settings/settings.js', () => ({
 // the agent.test.ts allowlist pattern.
 mock.module('./modelAllowlist.js', () => ({
   ...realModelAllowlist,
-  isModelAllowed: (model: string) => {
+  // Forward every argument on the passthrough so options such as
+  // allowEscalationModel / explicitChoice / leadQuery still reach the real check.
+  isModelAllowed: (
+    model: string,
+    ...rest: Parameters<typeof realModelAllowlist.isModelAllowed> extends [unknown, ...infer R] ? R : never
+  ) => {
     const allowlist = activeSettingsOverride?.availableModels
-    return allowlist ? allowlist.includes(model) : realModelAllowlist.isModelAllowed(model)
+    return allowlist ? allowlist.includes(model) : realModelAllowlist.isModelAllowed(model, ...rest)
   },
 }))
 

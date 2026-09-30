@@ -98,6 +98,7 @@ import {
   updateProviderProfile,
 } from '../utils/providerProfiles.js'
 import { getDefaultMainLoopModelSetting } from '../utils/model/model.js'
+import { recordCyberLeadModelChoice } from '../utils/model/cyberLead.js'
 import {
   clearGithubModelsToken,
   clearHydratedGithubModelsTokenFromEnv,
@@ -1551,6 +1552,7 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
           return
         }
 
+        recordCyberLeadModelChoice(GITHUB_PROVIDER_DEFAULT_MODEL)
         setAppState(prev => ({
           ...prev,
           mainLoopModel: GITHUB_PROVIDER_DEFAULT_MODEL,
@@ -1589,6 +1591,7 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
         // failure as a warning the same way the saved-profile path does.
         const settingsOverrideError = clearStartupProviderOverrideFromUserSettings()
         const anthropicModel = getPrimaryModel(getDefaultMainLoopModelSetting())
+        recordCyberLeadModelChoice(anthropicModel)
         setAppState(prev => ({
           ...prev,
           mainLoopModel: anthropicModel,
@@ -1626,6 +1629,7 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
       // not overwrite the multi-model list because it checks if the model
       // is already in the provider's configured model list.
       const newModel = getPrimaryModel(active.model)
+      recordCyberLeadModelChoice(newModel)
       setAppState(prev => ({
         ...prev,
         mainLoopModel: newModel,
@@ -1989,6 +1993,7 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
 
     const isActiveSavedProfile = getActiveProviderProfile()?.id === saved.id
     if (isActiveSavedProfile) {
+      recordCyberLeadModelChoice(getPrimaryModel(saved.model))
       setAppState(prev => ({
         ...prev,
         mainLoopModel: getPrimaryModel(saved.model),
@@ -4268,6 +4273,7 @@ export function ProviderManager({ mode, onDone }: Props): React.ReactNode {
             // (e.g. kimi-k2.6) and gets a 400 "Model not found" against
             // api.x.ai. Mirrors the activateSelectedProvider /
             // saveAndCloseProvider flows.
+            recordCyberLeadModelChoice(getPrimaryModel(saved.model))
             setAppState(prev => ({
               ...prev,
               mainLoopModel: getPrimaryModel(saved.model),

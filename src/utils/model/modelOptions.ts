@@ -1145,9 +1145,14 @@ function hasOptionValue(
   )
 }
 
-export function getModelOptions(fastMode = false): ModelOption[] {
+/**
+ * `leadPicker` (default true) lists models the user may choose for the lead,
+ * which Cyber mode does not filter. Non-lead pickers pass false to keep the
+ * Cyber restriction.
+ */
+export function getModelOptions(fastMode = false, leadPicker = true): ModelOption[] {
   if (getAPIProvider() === 'github') {
-    return filterModelOptionsByAllowlist(getModelOptionsBase(fastMode))
+    return filterModelOptionsByAllowlist(getModelOptionsBase(fastMode), leadPicker)
   }
 
   const options = getModelOptionsBase(fastMode)
@@ -1209,13 +1214,13 @@ export function getModelOptions(fastMode = false): ModelOption[] {
     customModel === null ||
     hasOptionValue(options, customModel, getSharedRouteCatalogContext)
   ) {
-    return filterModelOptionsByAllowlist(options)
+    return filterModelOptionsByAllowlist(options, leadPicker)
   } else if (customModel === 'opusplan') {
-    return filterModelOptionsByAllowlist([...options, getOpusPlanOption()])
+    return filterModelOptionsByAllowlist([...options, getOpusPlanOption()], leadPicker)
   } else if (customModel === 'gpt-5.5') {
-    return filterModelOptionsByAllowlist([...options, getCodexPlanOption()])
+    return filterModelOptionsByAllowlist([...options, getCodexPlanOption()], leadPicker)
   } else if (customModel === 'gpt-5.3-codex-spark') {
-    return filterModelOptionsByAllowlist([...options, getCodexSparkOption()])
+    return filterModelOptionsByAllowlist([...options, getCodexSparkOption()], leadPicker)
   }
 
   // Persisted Codex model while a non-Codex provider is active (the Codex
@@ -1234,18 +1239,18 @@ export function getModelOptions(fastMode = false): ModelOption[] {
       customCodexBase === customModel
         ? customCodexOption
         : { ...customCodexOption, value: customModel },
-    ])
+    ], leadPicker)
   }
   if (customModel === 'opus' && getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()) {
     return filterModelOptionsByAllowlist([
       ...options,
       getMaxOpusOption(fastMode),
-    ])
+    ], leadPicker)
   } else if (customModel === 'opus[1m]' && getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()) {
     return filterModelOptionsByAllowlist([
       ...options,
       getMergedOpus1MOption(fastMode),
-    ])
+    ], leadPicker)
   } else {
     const catalogOption = findRouteCatalogOption(
       getSharedRouteCatalogContext(),
@@ -1253,7 +1258,7 @@ export function getModelOptions(fastMode = false): ModelOption[] {
     )
     if (catalogOption) {
       options.push(catalogOption)
-      return filterModelOptionsByAllowlist(options)
+      return filterModelOptionsByAllowlist(options, leadPicker)
     }
 
     // Try to show a human-readable label for known Anthropic models, with an
@@ -1268,7 +1273,7 @@ export function getModelOptions(fastMode = false): ModelOption[] {
         description: 'Custom model',
       })
     }
-    return filterModelOptionsByAllowlist(options)
+    return filterModelOptionsByAllowlist(options, leadPicker)
   }
 }
 
@@ -1276,7 +1281,7 @@ export function getModelOptions(fastMode = false): ModelOption[] {
  * Filter model options by the availableModels allowlist.
  * Always preserves the "Default" option (value: null).
  */
-function filterModelOptionsByAllowlist(options: ModelOption[]): ModelOption[] {
+function filterModelOptionsByAllowlist(options: ModelOption[], leadPicker = true): ModelOption[] {
   const settings = getSettings_DEPRECATED() || {}
   const filtered = !settings.availableModels
     ? options // No restrictions
@@ -1295,7 +1300,7 @@ function filterModelOptionsByAllowlist(options: ModelOption[]): ModelOption[] {
           opt.switchToProfileId !== undefined
             ? parseSwitchProfileValue(opt.value)?.model ?? opt.value
             : opt.value
-        return isModelAllowed(effectiveModel, undefined, { explicitChoice: true })
+        return isModelAllowed(effectiveModel, undefined, { explicitChoice: leadPicker })
       })
 
   // Select state uses option values as identity keys. If two entries share the

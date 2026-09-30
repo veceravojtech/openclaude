@@ -279,6 +279,8 @@ import {
   modelDisplayString,
   parseUserSpecifiedModel,
 } from 'src/utils/model/model.js'
+import { CYBER_MODELS } from 'src/utils/model/cyber.js'
+import { recordCyberLeadModelChoice } from 'src/utils/model/cyberLead.js'
 import {
   getModelOptions,
   type ModelOption,
@@ -293,6 +295,7 @@ import { modelSupportsAutoMode } from 'src/utils/betas.js'
 import { ensureModelStringsInitialized } from 'src/utils/model/modelStrings.js'
 import {
   getSessionId,
+  getCyberMode,
   setMainLoopModelOverride,
   setMainThreadAgentType,
   switchSession,
@@ -3150,9 +3153,13 @@ function runHeadlessStreaming(
           const requestedModel = message.request.model ?? 'default'
           const model =
             requestedModel === 'default'
-              ? getDefaultMainLoopModel()
+              ? getCyberMode().enabled
+                ? CYBER_MODELS.lead
+                : getDefaultMainLoopModel()
               : requestedModel
           activeUserSpecifiedModel = model
+          // An explicit SDK pick is an explicit lead choice under Cyber mode.
+          recordCyberLeadModelChoice(model)
           setMainLoopModelOverride(model)
           // queryLoop resolves the request model from AppState, not from the
           // override. Pin it session-only (mainLoopModelForSession does not
@@ -3956,9 +3963,13 @@ function runHeadlessStreaming(
           // change is silently ignored (matching set_model at :2811).
           if ('model' in incoming) {
             if (incoming.model != null) {
+              recordCyberLeadModelChoice(String(incoming.model))
               setMainLoopModelOverride(String(incoming.model))
             } else {
-              setMainLoopModelOverride(undefined)
+              recordCyberLeadModelChoice(null)
+              setMainLoopModelOverride(
+                getCyberMode().enabled ? CYBER_MODELS.lead : undefined,
+              )
             }
           }
 
@@ -4161,8 +4172,13 @@ function runHeadlessStreaming(
                   },
                   onSetModel(model) {
                     const resolved =
-                      model === 'default' ? getDefaultMainLoopModel() : model
+                      model === 'default'
+                        ? getCyberMode().enabled
+                          ? CYBER_MODELS.lead
+                          : getDefaultMainLoopModel()
+                        : model
                     activeUserSpecifiedModel = resolved
+                    recordCyberLeadModelChoice(resolved)
                     setMainLoopModelOverride(resolved)
                     setAppState(prev => ({
                       ...prev,

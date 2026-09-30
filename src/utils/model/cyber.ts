@@ -1,7 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { getCyberMode, setCyberExplicitLeadModel } from '../../bootstrap/state.js'
+import { getCyberMode } from '../../bootstrap/state.js'
 import { isTeammate } from '../teammate.js'
-import { parseUserSpecifiedModel } from './model.js'
 
 const escalationContext = new AsyncLocalStorage<string>()
 export function withCyberScope<T>(scope: string, action: () => T): T {
@@ -65,26 +64,25 @@ function comparableModel(model: string): string {
  * `claude-opus-5-5` and `claude-opus-5-5[1m]` are the same choice.
  */
 export function isExplicitCyberLeadModel(model: string): boolean {
-  const chosen = getCyberMode().explicitLeadModel
-  if (!chosen) return false
+  const { explicitLeadModel, explicitLeadModelResolved } = getCyberMode()
+  if (!explicitLeadModel) return false
   const target = comparableModel(model)
-  return comparableModel(chosen) === target || comparableModel(parseUserSpecifiedModel(chosen)) === target
-}
-
-/** Lead main-loop request sources; teammates and subagents never qualify. */
-export function isCyberLeadQuerySource(querySource: string | undefined): boolean {
-  return !isTeammate() && (querySource === 'repl_main_thread' || querySource === 'sdk')
+  return comparableModel(explicitLeadModel) === target ||
+    (explicitLeadModelResolved !== undefined && comparableModel(explicitLeadModelResolved) === target)
 }
 
 /**
- * Record a user-initiated lead model choice. Choosing null (default) or the
- * Cyber lead model clears it, restoring the Cyber defaults.
+ * Lead main-loop request sources; teammates and subagents never qualify. The
+ * REPL tags the main loop `repl_main_thread:outputStyle:*` under a non-default
+ * output style, so match the prefix too.
  */
-export function recordCyberLeadModelChoice(model: string | null | undefined): void {
-  if (!getCyberMode().enabled) return
-  const trimmed = model?.trim()
-  const clears = !trimmed || cyberModelId(trimmed) === CYBER_MODELS.lead
-  setCyberExplicitLeadModel(clears ? undefined : trimmed)
+export function isCyberMainLoopSource(querySource: string | undefined): boolean {
+  return typeof querySource === 'string' &&
+    (querySource === 'repl_main_thread' || querySource.startsWith('repl_main_thread:') || querySource === 'sdk')
+}
+
+export function isCyberLeadQuerySource(querySource: string | undefined): boolean {
+  return !isTeammate() && isCyberMainLoopSource(querySource)
 }
 
 export function isCyberModelAllowed(

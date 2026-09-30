@@ -1,4 +1,6 @@
 import { feature } from 'bun:bundle'
+import { getCyberMode } from '../../bootstrap/state.js'
+import { CYBER_MODELS, isExplicitCyberLeadModel } from '../../utils/model/cyber.js'
 import { markPostCompaction } from 'src/bootstrap/state.js'
 import { getSdkBetas } from '../../bootstrap/state.js'
 import type { QuerySource } from '../../constants/querySource.js'
@@ -53,6 +55,17 @@ export function getEffectiveContextWindowSize(
     runtimeLimits,
     route,
   )
+
+  // Cyber mode sends the compaction request to the Cyber lead model even when
+  // the lead's main loop runs an explicitly chosen model. Never let that
+  // model's (possibly larger) window push the threshold past what the compact
+  // request can actually hold.
+  if (getCyberMode().enabled && isExplicitCyberLeadModel(model)) {
+    contextWindow = Math.min(
+      contextWindow,
+      getContextWindowForModel(CYBER_MODELS.lead, getSdkBetas()),
+    )
+  }
 
   const autoCompactWindow = process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
   if (autoCompactWindow) {

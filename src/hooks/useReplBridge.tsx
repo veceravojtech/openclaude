@@ -1,6 +1,7 @@
 import { feature } from 'bun:bundle';
 import React, { useCallback, useEffect, useRef } from 'react';
 import { setMainLoopModelOverride } from '../bootstrap/state.js';
+import { recordCyberLeadModelChoice } from '../utils/model/cyberLead.js';
 import { type BridgePermissionCallbacks, type BridgePermissionResponse, isBridgePermissionResponse } from '../bridge/bridgePermissionCallbacks.js';
 import { buildBridgeConnectUrl } from '../bridge/bridgeStatusUtil.js';
 import { extractInboundMessageFields } from '../bridge/inboundMessages.js';
@@ -398,6 +399,7 @@ export function useReplBridge(messages: Message[], setMessages: (action: React.S
             },
             onSetModel(model) {
               const resolved = model === 'default' ? null : model ?? null;
+              recordCyberLeadModelChoice(resolved);
               setMainLoopModelOverride(resolved);
               setAppState(prev_10 => {
                 if (prev_10.mainLoopModelForSession === resolved) return prev_10;

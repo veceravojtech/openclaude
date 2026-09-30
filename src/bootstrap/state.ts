@@ -46,6 +46,8 @@ export type CyberModeState = {
   // while Cyber mode is on. Cleared by /cyber on and when the user returns to
   // a Cyber/default model. Never applies to teammates or subagents.
   explicitLeadModel?: string
+  // The same choice with aliases resolved to a concrete id (set by the recorder).
+  explicitLeadModelResolved?: string
   // Unlocks belong to individual request/agent IDs, never the whole session.
   escalationScopes: ReadonlyMap<string, string>
 }
@@ -975,9 +977,13 @@ export function setCyberModeEnabled(enabled: boolean): void {
   }
 }
 
-export function setCyberExplicitLeadModel(model: string | undefined): void {
+export function setCyberExplicitLeadModel(model: string | undefined, resolved?: string): void {
   if (!STATE.cyberMode.enabled) return
-  STATE.cyberMode = { ...STATE.cyberMode, explicitLeadModel: model }
+  STATE.cyberMode = {
+    ...STATE.cyberMode,
+    explicitLeadModel: model,
+    explicitLeadModelResolved: model === undefined ? undefined : resolved,
+  }
 }
 
 export function unlockCyberEscalation(scope: string, reason: string): void {

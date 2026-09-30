@@ -1,6 +1,6 @@
 import { findProviderProfileRouteForModel } from '../../utils/providerProfiles.js'
 import { getCyberMode, unlockCyberEscalation, clearCyberEscalation } from '../../bootstrap/state.js'
-import { assertCyberModelAllowed, CYBER_MODELS, isCyberLeadQuerySource, isCyberSpawnQuerySource, withCyberScope } from '../../utils/model/cyber.js'
+import { assertCyberModelAllowed, CYBER_MODELS, isCyberLeadQuerySource, isCyberMainLoopSource, isCyberSpawnQuerySource, withCyberScope } from '../../utils/model/cyber.js'
 import type {
   BetaContentBlock,
   BetaContentBlockParam,
@@ -1227,7 +1227,7 @@ async function* queryModel(
   }
   if (options.advisorModel) options = { ...options, advisorModel: CYBER_MODELS.lead }
   const source = String(options.querySource ?? '')
-  const foreground = source === 'sdk' || source === 'repl_main_thread' || source.startsWith('agent:') || source === 'cyber_escalation'
+  const foreground = isCyberMainLoopSource(source) || source.startsWith('agent:') || source === 'cyber_escalation'
   if (!foreground) options = { ...options, model: CYBER_MODELS.lead, requestModel: undefined, providerOverride: findProviderProfileRouteForModel(CYBER_MODELS.lead) ?? undefined }
   if (!options.providerOverride) {
     options = { ...options, providerOverride: findProviderProfileRouteForModel(options.model) ?? undefined }

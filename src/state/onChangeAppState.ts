@@ -1,4 +1,6 @@
 import {
+  getCyberMode,
+  setCyberExplicitLeadModel,
   setMainLoopModelOverride,
   setSessionBypassPermissionsMode,
   setSessionDangerousPermissionMode,
@@ -23,7 +25,7 @@ import {
   notifySessionMetadataChanged,
   type SessionExternalMetadata,
 } from '../utils/sessionState.js'
-import { recordCyberLeadModelChoice } from '../utils/model/cyber.js'
+import { CYBER_MODELS } from '../utils/model/cyber.js'
 import { updateSettingsForSource } from '../utils/settings/settings.js'
 import type { AppState } from './AppStateStore.js'
 
@@ -114,8 +116,14 @@ export function onChangeAppState({
   ) {
     // Remove from settings
     updateSettingsForSource('userSettings', { model: undefined })
-    setMainLoopModelOverride(null)
-    recordCyberLeadModelChoice(null)
+    // /model default in Cyber mode returns to the Cyber lead (mirrors
+    // setCyberModeEnabled) instead of a provider default Cyber would block.
+    if (getCyberMode().enabled) {
+      setMainLoopModelOverride(CYBER_MODELS.lead)
+      setCyberExplicitLeadModel(undefined)
+    } else {
+      setMainLoopModelOverride(null)
+    }
   }
 
   // mainLoopModel: add it to settings?
@@ -126,9 +134,6 @@ export function onChangeAppState({
     // Save to settings
     updateSettingsForSource('userSettings', { model: newState.mainLoopModel })
     setMainLoopModelOverride(newState.mainLoopModel)
-    // /model, the picker and /provider all land here: in Cyber mode this is
-    // the user's explicit lead choice.
-    recordCyberLeadModelChoice(newState.mainLoopModel)
 
     // Keep active provider profiles in sync with /model choices so restarts
     // keep using the last selected model instead of the profile's old default.

@@ -1,4 +1,5 @@
 import { getCyberMode } from '../../bootstrap/state.js'
+import { CYBER_MODELS, isExplicitCyberLeadModel } from './cyber.js'
 import type { SettingsJson } from '../settings/types.js'
 import { getInitialSettings } from '../settings/settings.js'
 import type { PermissionMode } from '../permissions/PermissionMode.js'
@@ -55,6 +56,18 @@ export function getAgentModel(
   )
 }
 
+/**
+ * In Cyber mode a subagent that INHERITS the lead's explicitly chosen
+ * non-Cyber model runs on the Cyber lead model instead, as inherit meant
+ * before the explicit choice existed. An explicit agent `model:` never comes
+ * through here, so it keeps the normal Cyber rules.
+ */
+function cyberInheritedModel(model: string): string {
+  return getCyberMode().enabled && isExplicitCyberLeadModel(model)
+    ? CYBER_MODELS.lead
+    : model
+}
+
 function resolveAgentModel(
   agentModel: string | undefined,
   parentModel: string,
@@ -91,11 +104,13 @@ function resolveAgentModel(
   const trimmedToolSpecifiedModel = toolSpecifiedModel?.trim()
   if (trimmedToolSpecifiedModel) {
     if (trimmedToolSpecifiedModel.toLowerCase() === 'inherit') {
-      return getRuntimeMainLoopModel({
-        permissionMode: permissionMode ?? 'default',
-        mainLoopModel: parentModel,
-        exceeds200kTokens: false,
-      })
+      return cyberInheritedModel(
+        getRuntimeMainLoopModel({
+          permissionMode: permissionMode ?? 'default',
+          mainLoopModel: parentModel,
+          exceeds200kTokens: false,
+        }),
+      )
     }
     if (aliasMatchesParentTier(trimmedToolSpecifiedModel, parentModel)) {
       assertToolSpecifiedModelAllowed(trimmedToolSpecifiedModel, parentModel)
@@ -125,25 +140,29 @@ function resolveAgentModel(
     !checkIsClaudeNativeProvider()
   ) {
     // Non-Claude-native provider → inherit parent model
-    return getRuntimeMainLoopModel({
-      permissionMode: permissionMode ?? 'default',
-      mainLoopModel: parentModel,
-      exceeds200kTokens: false,
-    })
+    return cyberInheritedModel(
+      getRuntimeMainLoopModel({
+        permissionMode: permissionMode ?? 'default',
+        mainLoopModel: parentModel,
+        exceeds200kTokens: false,
+      }),
+    )
   }
 
   if (agentModelWithExp === 'inherit') {
     // Apply runtime model resolution for inherit to get the effective model
     // This ensures agents using 'inherit' get opusplan→Opus resolution in plan mode
-    return getRuntimeMainLoopModel({
-      permissionMode: permissionMode ?? 'default',
-      mainLoopModel: parentModel,
-      exceeds200kTokens: false,
-    })
+    return cyberInheritedModel(
+      getRuntimeMainLoopModel({
+        permissionMode: permissionMode ?? 'default',
+        mainLoopModel: parentModel,
+        exceeds200kTokens: false,
+      }),
+    )
   }
 
   if (aliasMatchesParentTier(agentModelWithExp, parentModel)) {
-    return parentModel
+    return cyberInheritedModel(parentModel)
   }
   const model = parseUserSpecifiedModel(agentModelWithExp)
   return applyParentRegionPrefix(model, agentModelWithExp)

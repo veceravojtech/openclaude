@@ -128,7 +128,7 @@ import { getGhAuthStatus } from './utils/github/ghAuthStatus.js';
 import { safeParseJSON } from './utils/json.js';
 import { logError } from './utils/log.js';
 import { getModelDeprecationWarning } from './utils/model/deprecation.js';
-import { recordCyberLeadModelChoice } from './utils/model/cyber.js';
+import { recordCyberLeadModelChoice } from './utils/model/cyberLead.js';
 import { getDefaultMainLoopModel, getUserSpecifiedModelSetting, normalizeModelStringForAPI, parseUserSpecifiedModel } from './utils/model/model.js';
 import { ensureModelStringsInitialized } from './utils/model/modelStrings.js';
 import { PERMISSION_MODES } from './utils/permissions/PermissionMode.js';
@@ -2035,7 +2035,7 @@ async function run(): Promise<CommanderCommand> {
     }
     setMainLoopModelOverride(effectiveModel);
     // --model given while Cyber mode is on is an explicit lead choice.
-    if (hasExplicitModelOverride) recordCyberLeadModelChoice(userSpecifiedModel);
+    if (hasExplicitModelOverride && options.model !== 'default') recordCyberLeadModelChoice(userSpecifiedModel);
 
     // Compute resolved model for hooks (use user-specified model at launch)
     setInitialMainLoopModel(getUserSpecifiedModelSetting() || null);

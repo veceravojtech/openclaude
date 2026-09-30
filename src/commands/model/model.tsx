@@ -73,6 +73,7 @@ import {
 } from '../../utils/model/model.js'
 import { getCyberMode } from '../../bootstrap/state.js'
 import { CYBER_MODELS, cyberModelId } from '../../utils/model/cyber.js'
+import { recordCyberLeadModelChoice } from '../../utils/model/cyberLead.js'
 import { isModelAllowed } from '../../utils/model/modelAllowlist.js'
 import { validateModel } from '../../utils/model/validateModel.js'
 import { getLocalOpenAICompatibleProviderLabel } from '../../utils/providerDiscovery.js'
@@ -778,6 +779,7 @@ function ModelPickerWrapper({
         from_model: String(mainLoopModel) as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
         to_model: String(switchTarget.model) as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       })
+      recordCyberLeadModelChoice(switchTarget.model)
       setAppState(prev => ({
         ...prev,
         mainLoopModel: switchTarget.model,
@@ -852,6 +854,7 @@ function ModelPickerWrapper({
       to_model: String(model) as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
     })
 
+    recordCyberLeadModelChoice(model)
     setAppState(prev => ({
       ...prev,
       mainLoopModel: model,
@@ -1139,6 +1142,7 @@ function SetModelAndClose({
     }
 
     function setModel(modelValue: string | null): void {
+      recordCyberLeadModelChoice(modelValue)
       setAppState(prev => ({
         ...prev,
         mainLoopModel: modelValue,

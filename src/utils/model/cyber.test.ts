@@ -10,7 +10,8 @@ import {
 } from '../../bootstrap/state.js'
 import { isModelAllowed } from './modelAllowlist.js'
 import { setSessionSettingsCache, resetSettingsCache } from '../settings/settingsCache.js'
-import { assertCyberModelAllowed, cyberModelId, isCyberLeadQuerySource, isCyberModelAllowed, recordCyberLeadModelChoice, withCyberScope } from './cyber.js'
+import { assertCyberModelAllowed, cyberModelId, isCyberLeadQuerySource, isCyberMainLoopSource, isCyberModelAllowed, withCyberScope } from './cyber.js'
+import { recordCyberLeadModelChoice } from './cyberLead.js'
 import { clearDynamicTeamContext, setDynamicTeamContext } from '../teammate.js'
 
 const isSpawnAllowed = (model: string) => isModelAllowed(model, undefined, { allowEscalationModel: true })
@@ -156,6 +157,20 @@ describe('explicit lead model in Cyber mode', () => {
     setDynamicTeamContext({ agentId: 'a@t', agentName: 'a', teamName: 't', planModeRequired: false })
     expect(isCyberLeadQuerySource('repl_main_thread')).toBe(false)
     expect(leadCheck('claude-opus-5-5')).toBe(false)
+  })
+
+  test('main-loop sources pass with the explicit model, output-style tags included; agents do not', () => {
+    setCyberModeEnabled(true)
+    recordCyberLeadModelChoice('claude-opus-5-5')
+    const gate = (source: string) =>
+      isCyberModelAllowed('claude-opus-5-5', undefined, false, { leadQuery: isCyberLeadQuerySource(source) })
+    expect(gate('repl_main_thread')).toBe(true)
+    expect(gate('repl_main_thread:outputStyle:Explanatory')).toBe(true)
+    expect(gate('sdk')).toBe(true)
+    expect(gate('agent:general-purpose')).toBe(false)
+    expect(gate('compact')).toBe(false)
+    expect(isCyberMainLoopSource('repl_main_thread:outputStyle:x')).toBe(true)
+    expect(isCyberMainLoopSource('repl_main_threads')).toBe(false)
   })
 
   test('choosing the Cyber lead model or the default clears the explicit choice', () => {

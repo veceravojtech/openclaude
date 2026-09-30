@@ -1,5 +1,6 @@
 import { c as _c } from "react-compiler-runtime";
 // biome-ignore-all assist/source/organizeImports: internal-only import markers must not be reordered
+import { recordCyberLeadModelChoice } from '../../utils/model/cyberLead.js';
 import { feature } from 'bun:bundle';
 import { Box, Text, useTheme, useThemeSetting, useTerminalFocus } from '../../ink.js';
 import type { KeyboardEvent } from '../../ink/events/keyboard-event.js';
@@ -217,6 +218,7 @@ export function Config({
       from_model: previousModel as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS,
       to_model: value as AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS
     });
+    recordCyberLeadModelChoice(value);
     setAppState(prev => ({
       ...prev,
       mainLoopModel: value,
@@ -1666,7 +1668,7 @@ export function Config({
             </Byline>
           </Text>
         </> : showSubmenu === 'TeammateModel' ? <>
-          <ModelPicker initial={globalConfig.teammateDefaultModel ?? null} skipSettingsWrite headerText="Default model for newly spawned teammates. The leader can override via the tool call's model parameter." onSelect={(model_1, _effort_0) => {
+          <ModelPicker initial={globalConfig.teammateDefaultModel ?? null} skipSettingsWrite restrictToCyber headerText="Default model for newly spawned teammates. The leader can override via the tool call's model parameter." onSelect={(model_1, _effort_0) => {
         setShowSubmenu(null);
         setTabsHidden(false);
         // First-open-then-Enter from unset: picker highlights "Default"
@@ -1702,7 +1704,7 @@ export function Config({
             </Byline>
           </Text>
         </> : showSubmenu === 'CompactModel' ? <>
-          <ModelPicker initial={globalConfig.compactModel ?? null} skipSettingsWrite headerText="Model used for conversation compaction. Defaults to the main model when unset." onSelect={(model_2, _effort_1) => {
+          <ModelPicker initial={globalConfig.compactModel ?? null} skipSettingsWrite restrictToCyber headerText="Model used for conversation compaction. Defaults to the main model when unset." onSelect={(model_2, _effort_1) => {
         setShowSubmenu(null);
         setTabsHidden(false);
         if ((globalConfig.compactModel ?? null) === model_2) {
