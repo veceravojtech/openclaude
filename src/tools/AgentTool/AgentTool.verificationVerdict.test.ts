@@ -1,7 +1,15 @@
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync } from 'fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { backgroundAgentTask } from '../../tasks/LocalAgentTask/LocalAgentTask.js'
 import type { ToolUseContext } from '../../Tool.js'
 import {
   acquireSharedMutationLock,
@@ -12,8 +20,10 @@ import {
   createFileStateCacheWithSizeLimit,
   READ_FILE_STATE_CACHE_SIZE,
 } from '../../utils/fileStateCache.js'
+import { dequeueAllMatching } from '../../utils/messageQueueManager.js'
 import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
 import type { SettingsJson } from '../../utils/settings/types.js'
+import { getTasksDir } from '../../utils/tasks.js'
 import {
   getVerdictPath,
   getVerdictsDir,
@@ -25,7 +35,9 @@ import type { AgentDefinition } from './loadAgentsDir.js'
 // Phase 1 wiring through the real synchronous AgentTool.call path: a built-in
 // verification run records its verdict under its agentId BEFORE completion
 // is signalled (SDK task_notification), an overriding custom "verification"
-// agent records nothing, and an errored run records nothing.
+// agent records nothing, and an errored run records nothing. A run moved to
+// the background reports in its completion notification whether the verdict
+// was recorded.
 // Harness modelled on AgentTool.routing.test.ts.
 
 type PromptsModule = typeof import('../../constants/prompts.js')
@@ -128,14 +140,43 @@ afterEach(() => {
 
 type SdkEvent = { type: string; subtype?: string; status?: string }
 
-async function importAgentTool(script: {
+// What the on-disk record for the run's own agentId said at the moment an
+// SDK task_notification was enqueued. Read synchronously on purpose: the
+// enqueue is synchronous, and an async read would observe the file later.
+type NotificationObservation = {
+  status?: string
+  recordAgentId?: string
+  recordVerdict?: string
+}
+
+type Script = {
   finalText: string
   throwAfter?: Error
-}): Promise<{
+  // Move the run to the background: the foreground run blocks until the
+  // test backgrounds it, then the background continuation produces the
+  // final text. beforeFinal runs in the background continuation first.
+  background?: { beforeFinal?: () => void }
+}
+
+function readRecordSync(agentId: string): {
+  agentId?: string
+  verdict?: string
+} {
+  const path = getVerdictPath(agentId, LIST)
+  if (!existsSync(path)) return {}
+  try {
+    return JSON.parse(readFileSync(path, 'utf-8'))
+  } catch {
+    return {}
+  }
+}
+
+async function importAgentTool(script: Script): Promise<{
   AgentTool: AgentToolModule['AgentTool']
-  // Each SDK task_notification with whether a verdict file for the run's
-  // agentId existed at the moment it was enqueued.
-  notifications: Array<{ status?: string; verdictsDirExisted: boolean }>
+  notifications: NotificationObservation[]
+  // agentId of each runAgent call, as AgentTool passed it in override.agentId.
+  runAgentIds: string[]
+  foregroundStarted: Promise<string>
 }> {
   actualPromptsModule ??= await import(
     `../../constants/prompts.ts?agentVerdictActual=${Date.now()}-${Math.random()}`
@@ -147,8 +188,12 @@ async function importAgentTool(script: {
     `../../utils/sdkEventQueue.ts?agentVerdictActual=${Date.now()}-${Math.random()}`
   )
 
-  const notifications: Array<{ status?: string; verdictsDirExisted: boolean }> =
-    []
+  const notifications: NotificationObservation[] = []
+  const runAgentIds: string[] = []
+  let resolveForeground: (agentId: string) => void = () => {}
+  const foregroundStarted = new Promise<string>(resolve => {
+    resolveForeground = resolve
+  })
 
   mock.module('../../constants/prompts.js', () => ({
     ...actualPromptsModule!,
@@ -159,17 +204,32 @@ async function importAgentTool(script: {
   mock.module('../../utils/sdkEventQueue.js', () => ({
     ...actualSdkEventQueueModule!,
     enqueueSdkEvent: (event: SdkEvent) => {
-      if (event.subtype === 'task_notification') {
-        notifications.push({
-          status: event.status,
-          verdictsDirExisted: existsSync(getVerdictsDir(LIST)),
-        })
-      }
+      if (event.subtype !== 'task_notification') return
+      const agentId = runAgentIds[0]
+      const record = agentId ? readRecordSync(agentId) : {}
+      notifications.push({
+        status: event.status,
+        recordAgentId: record.agentId,
+        recordVerdict: record.verdict,
+      })
     },
   }))
   mock.module('./runAgent.js', () => ({
     ...actualRunAgentModule!,
-    runAgent: mock(async function* () {
+    runAgent: mock(async function* (params: {
+      isAsync?: boolean
+      override?: { agentId?: string }
+    }) {
+      const agentId = String(params.override?.agentId)
+      runAgentIds.push(agentId)
+      if (script.background) {
+        if (!params.isAsync) {
+          // Foreground leg: never yields; the test backgrounds it.
+          resolveForeground(agentId)
+          await new Promise(() => {})
+        }
+        script.background.beforeFinal?.()
+      }
       yield {
         type: 'assistant',
         uuid: 'assistant-1',
@@ -186,7 +246,7 @@ async function importAgentTool(script: {
   const { AgentTool } = await import(
     `./AgentTool.js?agentVerdict=${Date.now()}-${Math.random()}`
   )
-  return { AgentTool, notifications }
+  return { AgentTool, notifications, runAgentIds, foregroundStarted }
 }
 
 function verificationAgent(source: string): AgentDefinition {
@@ -200,7 +260,9 @@ function verificationAgent(source: string): AgentDefinition {
 }
 
 function createToolUseContext(activeAgents: AgentDefinition[]): ToolUseContext {
-  const appState = {
+  // A real (if minimal) store: foreground registration, backgrounding and
+  // the background completion notification all go through it.
+  let appState: Record<string, unknown> = {
     toolPermissionContext: {
       mode: 'default',
       additionalWorkingDirectories: new Map<string, string>(),
@@ -210,6 +272,8 @@ function createToolUseContext(activeAgents: AgentDefinition[]): ToolUseContext {
     },
     mcp: { clients: [], tools: [] as Array<{ name: string }> },
     todos: {},
+    tasks: {},
+    speculation: { status: 'idle' },
   }
   return {
     options: {
@@ -230,7 +294,9 @@ function createToolUseContext(activeAgents: AgentDefinition[]): ToolUseContext {
     ),
     messages: [],
     getAppState: () => appState,
-    setAppState: () => {},
+    setAppState: (f: (prev: Record<string, unknown>) => Record<string, unknown>) => {
+      appState = f(appState)
+    },
     setInProgressToolUseIDs: () => {},
     setResponseLength: () => {},
     updateFileHistoryState: () => {},
@@ -241,6 +307,7 @@ function createToolUseContext(activeAgents: AgentDefinition[]): ToolUseContext {
 async function callVerifier(
   AgentTool: AgentToolModule['AgentTool'],
   source: string,
+  context: ToolUseContext = createToolUseContext([verificationAgent(source)]),
 ) {
   const result = await AgentTool.call(
     {
@@ -248,7 +315,7 @@ async function callVerifier(
       prompt: 'Verify it.',
       subagent_type: VERIFICATION_AGENT_TYPE,
     },
-    createToolUseContext([verificationAgent(source)]),
+    context,
     mock(async () => ({ behavior: 'allow' })) as never,
     { message: { id: 'parent-message' } } as never,
   )
@@ -261,19 +328,35 @@ async function callVerifier(
   return { data, trailer }
 }
 
+/** Waits for the background completion notification for `agentId`. */
+async function takeTaskNotification(agentId: string): Promise<string> {
+  const matches = (cmd: { value: unknown; mode?: string }) =>
+    cmd.mode === 'task-notification' &&
+    typeof cmd.value === 'string' &&
+    cmd.value.includes(`<task-id>${agentId}</task-id>`)
+  const deadline = Date.now() + 15_000
+  while (Date.now() < deadline) {
+    const found = dequeueAllMatching(matches as never)
+    if (found.length > 0) return String(found[0]!.value)
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  throw new Error(`no task notification for ${agentId}`)
+}
+
 test('sync built-in verification run records its verdict before completion is signalled', async () => {
-  const { AgentTool, notifications } = await importAgentTool({
+  const { AgentTool, notifications, runAgentIds } = await importAgentTool({
     finalText: 'checked everything\nVERDICT: PASS',
   })
 
   const { data, trailer } = await callVerifier(AgentTool, 'built-in')
 
   expect(data.status).toBe('completed')
+  expect(runAgentIds).toEqual([data.agentId])
   expect((await readVerdict(data.agentId, LIST))?.verdict).toBe('PASS')
-  expect(existsSync(getVerdictPath(data.agentId, LIST))).toBe(true)
-  // The SDK "completed" notification only went out once the record existed.
+  // At the moment the SDK "completed" notification was enqueued, this run's
+  // own record was already on disk and said PASS.
   expect(notifications).toEqual([
-    { status: 'completed', verdictsDirExisted: true },
+    { status: 'completed', recordAgentId: data.agentId, recordVerdict: 'PASS' },
   ])
   expect(trailer).toContain(
     'verificationVerdict: PASS (recorded for this agentId',
@@ -309,3 +392,53 @@ test('an errored sync verification run records nothing', async () => {
   expect(existsSync(getVerdictsDir(LIST))).toBe(false)
   expect(trailer).not.toContain('verificationVerdict')
 })
+
+async function runBackgroundedVerifier(script: Script) {
+  const { AgentTool, foregroundStarted } = await importAgentTool(script)
+  const context = createToolUseContext([verificationAgent('built-in')])
+  const call = callVerifier(AgentTool, 'built-in', context)
+  const agentId = await foregroundStarted
+  expect(
+    backgroundAgentTask(
+      agentId,
+      context.getAppState as never,
+      context.setAppState as never,
+    ),
+  ).toBe(true)
+  const { data } = await call
+  expect(data.agentId).toBe(agentId)
+  const notification = await takeTaskNotification(agentId)
+  return { agentId, notification }
+}
+
+test('a verification run moved to the background records and reports its verdict', async () => {
+  const { agentId, notification } = await runBackgroundedVerifier({
+    finalText: 'checked\nVERDICT: PASS',
+    background: {},
+  })
+
+  expect(notification).toContain('<status>completed</status>')
+  expect(notification).toContain(
+    `verificationVerdict: PASS (recorded for this agentId; to complete a task with requiresVerification, set metadata.verifiedBy: '${agentId}'`,
+  )
+  expect((await readVerdict(agentId, LIST))?.verdict).toBe('PASS')
+}, 30_000)
+
+test('a backgrounded verification run whose write fails says NOT recorded', async () => {
+  const { agentId, notification } = await runBackgroundedVerifier({
+    finalText: 'checked\nVERDICT: PASS',
+    background: {
+      // After the launch-time clear, put a regular file where the
+      // .verdicts directory must go, so recording the verdict fails.
+      beforeFinal: () => {
+        mkdirSync(getTasksDir(LIST), { recursive: true })
+        writeFileSync(getVerdictsDir(LIST), 'not a directory')
+      },
+    },
+  })
+
+  expect(notification).toContain('<status>completed</status>')
+  expect(notification).toContain('verificationVerdict: PASS (NOT recorded:')
+  expect(notification).not.toContain('(recorded for this agentId')
+  expect(await readVerdict(agentId, LIST)).toBeUndefined()
+}, 30_000)

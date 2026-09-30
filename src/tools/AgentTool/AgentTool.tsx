@@ -1656,6 +1656,12 @@ export const AgentTool = buildTool({
 
                     // Extract text from agent result content for the notification
                     let finalMessage = extractTextContent(agentResult.content, '\n');
+                    // Same as the async-from-start path: say whether the
+                    // verdict was recorded (and why not, if the write failed).
+                    const verdictLine = formatVerificationVerdictLine(agentResult);
+                    if (verdictLine) {
+                      finalMessage = `${finalMessage}\n\n${verdictLine}`;
+                    }
                     if (feature('TRANSCRIPT_CLASSIFIER')) {
                       const backgroundedAppState = toolUseContext.getAppState();
                       const handoffWarning = await classifyHandoffIfNeeded({
