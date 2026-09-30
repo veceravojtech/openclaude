@@ -4,8 +4,10 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   clearRegisteredHooks,
+  getIsInteractive,
   getRegisteredHooks,
   registerHookCallbacks,
+  setIsInteractive,
 } from '../../bootstrap/state.js'
 import {
   acquireSharedMutationLock,
@@ -13,10 +15,16 @@ import {
 } from '../../test/sharedMutationLock.js'
 import type { ToolUseContext } from '../../Tool.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
-import { createTask, getTask, type Task } from '../../utils/tasks.js'
+import {
+  createTask,
+  getTask,
+  type Task,
+  updateTask,
+} from '../../utils/tasks.js'
 import {
   type ParsedVerdict,
   recordVerdict,
+  VerificationGateError,
 } from '../../utils/verificationVerdicts.js'
 import { TaskUpdateTool, type Output } from './TaskUpdateTool.js'
 
@@ -61,7 +69,8 @@ afterEach(() => {
 
 function makeContext(): ToolUseContext {
   return {
-    getAppState: () => ({}),
+    // sessionHooks is read when TaskCompleted hooks are matched.
+    getAppState: () => ({ sessionHooks: new Map() }),
     setAppState: mock(() => {}),
     abortController: new AbortController(),
     messages: [],
@@ -263,5 +272,114 @@ describe('TaskUpdate verification gate', () => {
     )
     expect((result as { data: Output }).data.success).toBe(true)
     expect((await getTask(LIST, id))?.status).toBe('pending')
+  })
+})
+
+// The authoritative check lives in the locked write (tasks.ts updateTask),
+// so it holds even when the flag appears after TaskUpdate's own read, and
+// for callers that bypass TaskUpdate entirely.
+describe('verification gate inside the locked updateTask', () => {
+  test('a TaskCompleted hook that adds the flag mid-completion blocks it', async () => {
+    // Hooks only run once workspace trust is settled; non-interactive
+    // sessions treat trust as implicit (as hooks.idleTimeoutStreamStalled.test
+    // does), and CLAUDE_CODE_SIMPLE would skip hooks entirely.
+    const previousInteractive = getIsInteractive()
+    const previousSimpleEnv = process.env.CLAUDE_CODE_SIMPLE
+    setIsInteractive(false)
+    delete process.env.CLAUDE_CODE_SIMPLE
+    try {
+      const id = await seedTask()
+      let hookRan = false
+      registerHookCallbacks({
+        TaskCompleted: [
+          {
+            hooks: [
+              {
+                type: 'callback',
+                callback: async () => {
+                  hookRan = true
+                  // Interleaved write: flag the task after TaskUpdate read it.
+                  await updateTask(LIST, id, {
+                    metadata: { requiresVerification: true },
+                  })
+                  return {}
+                },
+              },
+            ],
+          },
+        ],
+      })
+
+      const data = await complete(id)
+
+      expect(hookRan).toBe(true)
+      expect(data.success).toBe(false)
+      expect(data.error).toContain('metadata.verifiedBy is not set')
+      const after = await getTask(LIST, id)
+      expect(after?.status).toBe('in_progress')
+      expect(after?.metadata).toEqual({ requiresVerification: true })
+    } finally {
+      setIsInteractive(previousInteractive)
+      if (previousSimpleEnv === undefined) {
+        delete process.env.CLAUDE_CODE_SIMPLE
+      } else {
+        process.env.CLAUDE_CODE_SIMPLE = previousSimpleEnv
+      }
+    }
+  })
+
+  test('direct updateTask completion of a flagged task is rejected', async () => {
+    const id = await seedTask({ requiresVerification: true })
+    const before = await getTask(LIST, id)
+
+    await expect(
+      updateTask(LIST, id, { status: 'completed' }),
+    ).rejects.toBeInstanceOf(VerificationGateError)
+    await expectUnchanged(id, before)
+  })
+
+  test('direct updateTask cannot clear the flag while completing', async () => {
+    const id = await seedTask({ requiresVerification: true })
+    const before = await getTask(LIST, id)
+
+    await expect(
+      updateTask(LIST, id, { status: 'completed', metadata: {} }),
+    ).rejects.toBeInstanceOf(VerificationGateError)
+    await expectUnchanged(id, before)
+  })
+
+  test('direct updateTask with a FAIL verifier is rejected', async () => {
+    const id = await seedTask({ requiresVerification: true, verifiedBy: VERIFIER })
+    await recordVerdict({ agentId: VERIFIER, verdict: 'FAIL' }, LIST)
+    const before = await getTask(LIST, id)
+
+    await expect(
+      updateTask(LIST, id, { status: 'completed' }),
+    ).rejects.toThrow(/recorded verdict FAIL/)
+    await expectUnchanged(id, before)
+  })
+
+  test('direct updateTask with a PASS verifier completes', async () => {
+    const id = await seedTask({ requiresVerification: true, verifiedBy: VERIFIER })
+    await recordVerdict({ agentId: VERIFIER, verdict: 'PASS' }, LIST)
+
+    const updated = await updateTask(LIST, id, { status: 'completed' })
+    expect(updated?.status).toBe('completed')
+  })
+
+  test('only the transition into completed is gated', async () => {
+    const id = await seedTask({ requiresVerification: true })
+    // Other status changes and field edits on a flagged task are unaffected.
+    expect((await updateTask(LIST, id, { status: 'pending' }))?.status).toBe(
+      'pending',
+    )
+    expect((await updateTask(LIST, id, { owner: 'someone' }))?.owner).toBe(
+      'someone',
+    )
+    // Unflagged tasks complete through updateTask exactly as before.
+    const plain = await seedTask()
+    expect(
+      (await updateTask(LIST, plain, { status: 'completed' }))?.status,
+    ).toBe('completed')
   })
 })

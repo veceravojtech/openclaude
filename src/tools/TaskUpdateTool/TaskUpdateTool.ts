@@ -13,6 +13,7 @@ import {
   deleteTask,
   getTask,
   getTaskListId,
+  getTasksDir,
   isTodoV2Enabled,
   listTasks,
   type TaskStatus,
@@ -26,7 +27,10 @@ import {
   getTeamName,
 } from '../../utils/teammate.js'
 import { writeToMailbox } from '../../utils/teammateMailbox.js'
-import { readVerdict } from '../../utils/verificationVerdicts.js'
+import {
+  checkVerificationGateIn,
+  VerificationGateError,
+} from '../../utils/verificationVerdictStore.js'
 import { VERIFICATION_AGENT_TYPE } from '../AgentTool/constants.js'
 import { TASK_UPDATE_TOOL_NAME } from './constants.js'
 import { DESCRIPTION, PROMPT } from './prompt.js'
@@ -85,45 +89,6 @@ const outputSchema = lazySchema(() =>
 type OutputSchema = ReturnType<typeof outputSchema>
 
 export type Output = z.infer<OutputSchema>
-
-/**
- * Returns an error message when a task flagged `requiresVerification: true`
- * may not be completed, or undefined when completion is allowed (including
- * every task without the flag).
- *
- * The flag is sticky for the completing call: it applies when set on the
- * stored task OR in this call's metadata, so clearing it (null/false) in the
- * same call that completes the task cannot bypass the gate. `verifiedBy` is
- * read from the merged metadata, so it may be supplied in the same call.
- */
-async function checkVerificationGate(
-  storedMetadata: Record<string, unknown> | undefined,
-  mergedMetadata: Record<string, unknown> | undefined,
-  taskListId: string,
-): Promise<string | undefined> {
-  const required =
-    storedMetadata?.requiresVerification === true ||
-    mergedMetadata?.requiresVerification === true
-  if (!required) return undefined
-  const metadata = mergedMetadata ?? {}
-  const rerun = `Fix the work, re-run the verification agent (subagent_type="${VERIFICATION_AGENT_TYPE}") until it ends with "VERDICT: PASS", then complete the task with metadata.verifiedBy set to that verifier's agentId.`
-  const verifiedBy = metadata.verifiedBy
-  if (typeof verifiedBy !== 'string' || verifiedBy.trim() === '') {
-    return `Cannot complete task: it has requiresVerification: true but metadata.verifiedBy is not set. ${rerun}`
-  }
-  const record = await readVerdict(verifiedBy, taskListId)
-  if (!record) {
-    return `Cannot complete task: requiresVerification is set but no verdict was recorded for verifier '${verifiedBy}'. ${rerun}`
-  }
-  if (record.verdict !== 'PASS') {
-    const found =
-      record.verdict === 'MISSING'
-        ? 'MISSING (its report had no "VERDICT: PASS|FAIL|PARTIAL" line)'
-        : record.verdict
-    return `Cannot complete task: verifier '${verifiedBy}' recorded verdict ${found}; only PASS allows completion. ${rerun}`
-  }
-  return undefined
-}
 
 export const TaskUpdateTool = buildTool({
   name: TASK_UPDATE_TOOL_NAME,
@@ -270,13 +235,14 @@ export const TaskUpdateTool = buildTool({
       if (status !== existingTask.status) {
         // Verification gate (opt-in): a task flagged requiresVerification can
         // only complete when metadata.verifiedBy names a verifier whose
-        // recorded verdict is PASS. Runs before TaskCompleted hooks and
-        // before anything is written, so a blocked call changes nothing.
+        // recorded verdict is PASS. This early check gives a fast answer
+        // before TaskCompleted hooks run; updateTask re-checks under the task
+        // lock and is the authority.
         if (status === 'completed') {
-          const gateError = await checkVerificationGate(
+          const gateError = await checkVerificationGateIn(
+            getTasksDir(taskListId),
             existingTask.metadata,
             updates.metadata ?? existingTask.metadata,
-            taskListId,
           )
           if (gateError) {
             return {
@@ -332,7 +298,23 @@ export const TaskUpdateTool = buildTool({
     }
 
     if (Object.keys(updates).length > 0) {
-      await updateTask(taskListId, taskId, updates)
+      try {
+        await updateTask(taskListId, taskId, updates)
+      } catch (error) {
+        // The locked write re-checks the verification gate against the
+        // current task, so a flag added since our read still blocks it.
+        if (error instanceof VerificationGateError) {
+          return {
+            data: {
+              success: false,
+              taskId,
+              updatedFields: [],
+              error: error.message,
+            },
+          }
+        }
+        throw error
+      }
     }
 
     // Notify new owner via mailbox when ownership changes

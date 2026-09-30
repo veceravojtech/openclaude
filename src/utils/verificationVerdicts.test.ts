@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'fs'
 import { tmpdir } from 'os'
 import { basename, join } from 'path'
 import {
@@ -9,6 +16,7 @@ import {
 import { setClaudeConfigHomeDirForTesting } from './envUtils.js'
 import { getTasksDir } from './tasks.js'
 import {
+  clearVerdict,
   getVerdictPath,
   getVerdictsDir,
   parseVerdict,
@@ -81,13 +89,14 @@ describe('verdict store', () => {
     }
   })
 
-  test('round-trips a verdict to <tasksDir>/.verdicts/<agentId>.json', async () => {
+  test('round-trips a verdict to <tasksDir>/.verdicts/<agentId>-<hash>.json', async () => {
     const written = await recordVerdict(
       { agentId: 'a1234abcd', verdict: 'PASS' },
       LIST,
     )
     const path = getVerdictPath('a1234abcd', LIST)
-    expect(path).toBe(join(getTasksDir(LIST), '.verdicts', 'a1234abcd.json'))
+    expect(join(path, '..')).toBe(join(getTasksDir(LIST), '.verdicts'))
+    expect(basename(path)).toMatch(/^a1234abcd-[0-9a-f]{12}\.json$/)
 
     const onDisk = JSON.parse(readFileSync(path, 'utf-8'))
     expect(onDisk).toEqual({
@@ -98,7 +107,7 @@ describe('verdict store', () => {
     expect(Number.isNaN(Date.parse(onDisk.recordedAt))).toBe(false)
     expect(await readVerdict('a1234abcd', LIST)).toEqual(written)
     // No temp files left behind by the atomic write.
-    expect(readdirSync(getVerdictsDir(LIST))).toEqual(['a1234abcd.json'])
+    expect(readdirSync(getVerdictsDir(LIST))).toEqual([basename(path)])
   })
 
   test('a later record replaces the earlier one', async () => {
@@ -122,10 +131,54 @@ describe('verdict store', () => {
     expect((await readVerdict(nasty, LIST))?.verdict).toBe('PARTIAL')
   })
 
-  test('two agentIds that sanitize to the same filename do not alias', async () => {
+  test('two agentIds that sanitize to the same text get separate files', async () => {
     await recordVerdict({ agentId: 'name@team', verdict: 'PASS' }, LIST)
-    // 'name-team' maps to the same file, but the stored agentId differs.
-    expect(await readVerdict('name-team', LIST)).toBeUndefined()
+    await recordVerdict({ agentId: 'name-team', verdict: 'FAIL' }, LIST)
+    expect(getVerdictPath('name@team', LIST)).not.toBe(
+      getVerdictPath('name-team', LIST),
+    )
+    // Neither record overwrote the other.
     expect((await readVerdict('name@team', LIST))?.verdict).toBe('PASS')
+    expect((await readVerdict('name-team', LIST))?.verdict).toBe('FAIL')
+    expect(readdirSync(getVerdictsDir(LIST))).toHaveLength(2)
+  })
+
+  test('a record embedding a different agentId is ignored on read', async () => {
+    await recordVerdict({ agentId: 'real', verdict: 'PASS' }, LIST)
+    const forgedPath = getVerdictPath('other', LIST)
+    writeFileSync(
+      forgedPath,
+      JSON.stringify({
+        agentId: 'real',
+        verdict: 'PASS',
+        recordedAt: new Date().toISOString(),
+      }),
+    )
+    expect(await readVerdict('other', LIST)).toBeUndefined()
+  })
+
+  test('clearVerdict removes a record and tolerates a missing one', async () => {
+    await recordVerdict({ agentId: 'a1', verdict: 'PASS' }, LIST)
+    await clearVerdict('a1', LIST)
+    expect(await readVerdict('a1', LIST)).toBeUndefined()
+    // ENOENT (never recorded, or already cleared) is not an error.
+    await clearVerdict('a1', LIST)
+    await clearVerdict('never-recorded', LIST)
+  })
+
+  test('clearVerdict rejects when the record cannot be removed', async () => {
+    // A directory at the record path makes unlink fail with EISDIR/EPERM,
+    // not ENOENT, which must surface rather than be swallowed.
+    mkdirSync(getVerdictPath('stuck', LIST), { recursive: true })
+    await expect(clearVerdict('stuck', LIST)).rejects.toThrow()
+  })
+
+  test('recordVerdict rejects when the write fails', async () => {
+    // A regular file where the .verdicts directory should be makes mkdir fail.
+    mkdirSync(getTasksDir(LIST), { recursive: true })
+    writeFileSync(getVerdictsDir(LIST), 'not a directory')
+    await expect(
+      recordVerdict({ agentId: 'a1', verdict: 'PASS' }, LIST),
+    ).rejects.toThrow()
   })
 })

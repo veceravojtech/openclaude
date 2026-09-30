@@ -13,6 +13,10 @@ import { createSignal } from './signal.js'
 import { jsonParse, jsonStringify } from './slowOperations.js'
 import { getTeamName } from './teammate.js'
 import { getTeammateContext } from './teammateContext.js'
+import {
+  checkVerificationGateIn,
+  VerificationGateError,
+} from './verificationVerdictStore.js'
 
 // Listeners for task list updates (used for immediate UI refresh in same process)
 const tasksUpdated = createSignal()
@@ -382,6 +386,20 @@ async function updateTaskUnsafe(
     return null
   }
   const updated: Task = { ...existing, ...updates, id: taskId }
+  // Authoritative verification gate: checked against the task as read under
+  // the caller's lock, so a flag added by a concurrent write (or by a
+  // TaskCompleted hook) is honored and no caller can complete a flagged task
+  // without a PASS verdict. Only the transition into 'completed' is gated.
+  if (existing.status !== 'completed' && updated.status === 'completed') {
+    const gateError = await checkVerificationGateIn(
+      getTasksDir(taskListId),
+      existing.metadata,
+      updated.metadata,
+    )
+    if (gateError) {
+      throw new VerificationGateError(gateError)
+    }
+  }
   const path = getTaskPath(taskListId, taskId)
   await writeFile(path, jsonStringify(updated, null, 2))
   notifyTasksUpdated()
