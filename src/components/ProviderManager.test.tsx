@@ -196,6 +196,7 @@ const PRESET_ORDER = [
   'Anthropic',
   'Alibaba Coding Plan (China)',
   'Alibaba Coding Plan',
+  'API Route',
   'ApiSmart',
   'Atlas Cloud',
   'Azure OpenAI',
