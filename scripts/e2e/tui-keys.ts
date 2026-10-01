@@ -81,6 +81,14 @@ import {
   isTmuxTooOld,
   parseTmuxVersion,
 } from './tmux-version'
+import { E2E_FAKE_MODEL, providerFreeEnv } from './provider-env'
+
+/**
+ * The private tmux server's environment, and so every CLI's: this process's
+ * own minus any ambient provider selection. Computed once, before any
+ * scenario starts a server (see provider-env.ts).
+ */
+const SERVER_ENV = providerFreeEnv(process.env)
 
 /**
  * Socket path of the private tmux server for THIS run, assigned by `main()`
@@ -231,6 +239,9 @@ function tmux(...args: string[]): { status: number; stdout: string; stderr: stri
   const result = spawnSync('tmux', ['-S', socketPath, ...args], {
     encoding: 'utf8',
     timeout: 15_000,
+    // The server takes its global environment, and every CLI its own, from
+    // here: never an ambient provider selection (see provider-env.ts).
+    env: SERVER_ENV,
   })
   return {
     status: result.status ?? 1,
@@ -1628,6 +1639,7 @@ async function scenarioTeammateViewEscape(): Promise<ScenarioResult> {
       extraEnv: {
         ANTHROPIC_BASE_URL: api.baseUrl,
         ANTHROPIC_API_KEY: FAKE_API_KEY,
+        ANTHROPIC_MODEL: E2E_FAKE_MODEL,
       },
       // Pre-approve the env key so no "use this API key?" dialog precedes the
       // prompt. Both the raw key and its 20-char tail are listed so the check
@@ -1895,6 +1907,7 @@ async function scenarioNestedTeamTree(): Promise<ScenarioResult> {
       extraEnv: {
         ANTHROPIC_BASE_URL: api.baseUrl,
         ANTHROPIC_API_KEY: FAKE_API_KEY,
+        ANTHROPIC_MODEL: E2E_FAKE_MODEL,
       },
       extraGlobalConfig: {
         customApiKeyResponses: { approved: [FAKE_API_KEY, FAKE_API_KEY.slice(-20)], rejected: [] },
@@ -2209,6 +2222,7 @@ async function scenarioTreePersists(): Promise<ScenarioResult> {
       extraEnv: {
         ANTHROPIC_BASE_URL: api.baseUrl,
         ANTHROPIC_API_KEY: FAKE_API_KEY,
+        ANTHROPIC_MODEL: E2E_FAKE_MODEL,
       },
       extraGlobalConfig: {
         customApiKeyResponses: { approved: [FAKE_API_KEY, FAKE_API_KEY.slice(-20)], rejected: [] },

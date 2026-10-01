@@ -422,6 +422,16 @@ teammate that creates and claims team task #1. Two scenarios:
 | crash | `tmux kill-pane` on the teammate while it runs a Bash heartbeat loop — no shutdown was requested | a `<status>failed</status>` task-notification, exactly one undecided transient attention item `failure-<taskId>-0`, task #1 pending, unowned and held for it (`metadata.attentionHold`), no "has shut down" |
 | shutdown | the lead sends a `shutdown_request`, the teammate approves it | "has shut down", task #1 released without a hold, no attention item, no failed notification |
 
+Both harnesses start their private tmux server with the harness's environment
+minus every ambient provider selection (`scripts/e2e/provider-env.ts`:
+`CLAUDE_CODE_USE_*`, `CLAUDE_CODE_PROVIDER_*`, `OPENCLAUDE_TEAMMATE_*`, and the
+`ANTHROPIC_*`/`OPENAI_*`/`GEMINI_*`/... endpoint, key and model variables), and
+set `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY` and `ANTHROPIC_MODEL` for the fake
+explicitly. `tmux new-session -e` only adds variables, so without the strip a
+run launched from a provider-bound shell (an OpenClaude teammate pane, or an
+exported `CLAUDE_CODE_USE_OPENAI=1`) routed the CLI away from the fake and
+failed before reaching the feature.
+
 The deterministic counterparts that `bun test` does run are
 `src/utils/swarm/backends/paneCrashPath.test.ts` (real files, real watchdog and
 sweeper) and `src/hooks/useInboxPoller.paneCrash.test.tsx` (the lead's real

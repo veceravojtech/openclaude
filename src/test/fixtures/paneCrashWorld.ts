@@ -28,6 +28,7 @@ import {
   getTeamSweeper,
   PANE_CLOSED_WITHOUT_SHUTDOWN_ERROR,
   PANE_GONE_LINE,
+  type PaneTeammateWatchdogDeps,
   type PaneTeammateWatchdogHandle,
 } from '../../utils/swarm/backends/paneTeammateWatchdog.js'
 import type { PanePresence } from '../../utils/swarm/backends/types.js'
@@ -47,7 +48,14 @@ const SESSION = 'crash-path-session'
 export const CRASH_LEAD_LIST = 'crash-path-lead-list'
 
 /** Config home, lead list, team file and team task #1 (claimed by the mate). */
-export async function setUpPaneCrashFiles(): Promise<{
+export async function setUpPaneCrashFiles(
+  options: {
+    /** A legacy member row: no `joinedAt`. */
+    legacyMember?: boolean
+    /** The team file's `createdAt`; `null` leaves it out. */
+    teamCreatedAt?: number | null
+  } = {},
+): Promise<{
   configDir: string
   teardown: () => Promise<void>
 }> {
@@ -61,7 +69,9 @@ export async function setUpPaneCrashFiles(): Promise<{
     teamFilePath,
     JSON.stringify({
       name: CRASH_TEAM,
-      createdAt: Date.now(),
+      ...(options.teamCreatedAt === null
+        ? {}
+        : { createdAt: options.teamCreatedAt ?? Date.now() }),
       leadAgentId: CRASH_LEAD_ID,
       leadSessionId: SESSION,
       members: [
@@ -76,7 +86,7 @@ export async function setUpPaneCrashFiles(): Promise<{
         {
           agentId: CRASH_MATE_ID,
           name: CRASH_MATE,
-          joinedAt: Date.now() - 5_000,
+          ...(options.legacyMember ? {} : { joinedAt: Date.now() - 5_000 }),
           tmuxPaneId: CRASH_PANE,
           tmuxSocket: 'crash-sock',
           backendType: 'tmux',
@@ -136,6 +146,8 @@ export function crashLeadState(configDir: string): AppState {
 export function registerCrasher(
   setAppState: (updater: (prev: AppState) => AppState) => void,
   pane: { state: PanePresence },
+  /** Extra watchdog deps (a clock, a failing flush, a fake crash hand-off). */
+  extraDeps: PaneTeammateWatchdogDeps = {},
 ): PaneTeammateWatchdogHandle {
   return registerOutOfProcessTeammateTask(
     setAppState,
@@ -157,6 +169,7 @@ export function registerCrasher(
       capturePaneTail: async () => null,
       discoverReachableSockets: async () => ['crash-sock'],
       scanIntervalMs: null,
+      ...extraDeps,
     },
   )
 }

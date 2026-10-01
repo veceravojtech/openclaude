@@ -1,5 +1,4 @@
 import { c as _c } from "react-compiler-runtime";
-import { randomUUID } from 'crypto';
 import figures from 'figures';
 import * as React from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -22,6 +21,7 @@ import { getModeColor, type PermissionMode, permissionModeFromString, permission
 import { jsonStringify } from '../../utils/slowOperations.js';
 import { IT2_COMMAND, isInsideTmuxSync } from '../../utils/swarm/backends/detection.js';
 import { ensureBackendsRegistered, getBackendByType, getCachedBackend } from '../../utils/swarm/backends/registry.js';
+import { markPaneTeammateEndRequested } from '../../utils/swarm/backends/paneTeammateWatchdog.js';
 import type { PaneBackendType } from '../../utils/swarm/backends/types.js';
 import { getSwarmSocketName, TMUX_COMMAND } from '../../utils/swarm/constants.js';
 import { addHiddenPaneId, removeHiddenPaneId, removeMemberFromTeam, setMemberMode, setMultipleMemberModes } from '../../utils/swarm/teamHelpers.js';
@@ -644,10 +644,13 @@ async function removeGhostTeammate(teamName: string, teammate: TeammateStatus, s
   });
   logForDebugging(`[TeamsDialog] Removed ghost ${teammate.agentId} from team ${teamName}`);
 }
-async function killTeammate(paneId: string, backendType: PaneBackendType | undefined, teamName: string, teammateId: string, teammateName: string, setAppState: (f: (prev: AppState) => AppState) => void): Promise<void> {
-  // Off the roster BEFORE the pane dies, as the shutdown-approval handlers do:
-  // the ghost sweep treats a roster member whose pane vanished with no
-  // shutdown on record as a crash, and this kill is the user's own request.
+export async function killTeammate(paneId: string, backendType: PaneBackendType | undefined, teamName: string, teammateId: string, teammateName: string, setAppState: (f: (prev: AppState) => AppState) => void): Promise<void> {
+  // This kill is the user's own request, and it must read as one on every
+  // path BEFORE the pane dies: the task row is marked shutdownRequested and
+  // its watchdog disposed (so no deadline fails the dead pane later), and the
+  // member leaves the roster, as the shutdown-approval handlers do (so the
+  // ghost sweep never sees a vanished pane with no shutdown on record).
+  markPaneTeammateEndRequested(teammateId, setAppState);
   removeMemberFromTeam(teamName, paneId);
 
   // Kill the pane using the backend that created it (handles -s / -L flags correctly).
@@ -675,33 +678,13 @@ async function killTeammate(paneId: string, backendType: PaneBackendType | undef
     notificationMessage
   } = await unassignTeammateTasks(teamName, teammateId, teammateName, 'terminated');
 
-  // Update AppState to keep status line in sync and notify the lead
-  setAppState(prev => {
-    if (!prev.teamContext?.teammates) return prev;
-    if (!(teammateId in prev.teamContext.teammates)) return prev;
-    const {
-      [teammateId]: _,
-      ...remainingTeammates
-    } = prev.teamContext.teammates;
-    return {
-      ...prev,
-      teamContext: {
-        ...prev.teamContext,
-        teammates: remainingTeammates
-      },
-      inbox: {
-        messages: [...prev.inbox.messages, {
-          id: randomUUID(),
-          from: 'system',
-          text: jsonStringify({
-            type: 'teammate_terminated',
-            message: notificationMessage
-          }),
-          timestamp: new Date().toISOString(),
-          status: 'pending' as const
-        }]
-      }
-    };
+  // The same retirement the ghost removal and the approval handlers use:
+  // teammate out of teamContext, its task row completed (not left running
+  // for a deadline to find), and the lead told it was terminated.
+  retireTeammateFromLeaderView({
+    teammateId,
+    notificationMessage,
+    setAppState
   });
   logForDebugging(`[TeamsDialog] Removed ${teammateId} from teamContext`);
 }

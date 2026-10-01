@@ -40,6 +40,7 @@ import {
   MIN_TMUX_MINOR,
   parseTmuxVersion,
 } from './tmux-version.js'
+import { E2E_FAKE_MODEL, providerFreeEnv } from './provider-env.js'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const LAUNCHER = join(REPO_ROOT, 'bin', 'openclaude')
@@ -142,8 +143,11 @@ async function runScenario(mode: Mode): Promise<{ passed: boolean; details: stri
       permissions: { allow: ['Bash', 'TaskCreate', 'TaskUpdate', 'SendMessage'] },
     }),
   )
+  // The private server's global environment, and so every CLI's: the
+  // harness's own minus any ambient provider selection (provider-env.ts).
+  const serverEnv = providerFreeEnv(process.env)
   const tmux = (...args: string[]) =>
-    spawnSync('tmux', ['-L', socket, ...args], { encoding: 'utf8' })
+    spawnSync('tmux', ['-L', socket, ...args], { encoding: 'utf8', env: serverEnv })
 
   // The fake API: per-role scripts, plus every lead request's text kept.
   const leadTexts: string[] = []
@@ -274,6 +278,7 @@ async function runScenario(mode: Mode): Promise<{ passed: boolean; details: stri
       '-e', 'OPENCLAUDE_DEFAULT_YOLO=0',
       '-e', `ANTHROPIC_BASE_URL=http://127.0.0.1:${server.port}`,
       '-e', `ANTHROPIC_API_KEY=${FAKE_KEY}`,
+      '-e', `ANTHROPIC_MODEL=${E2E_FAKE_MODEL}`,
       LAUNCHER,
     )
     const pane = (target: string) => tmux('capture-pane', '-p', '-t', target).stdout ?? ''

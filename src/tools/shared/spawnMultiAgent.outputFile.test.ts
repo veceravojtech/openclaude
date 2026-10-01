@@ -466,7 +466,7 @@ test('a TaskStop kill that lands during the dead-pane unassign leaves no failure
   expect(readFileSync(getTaskOutputPath(taskId), 'utf8')).toBe('')
 })
 
-test('a failure whose flush throws still releases finalization: the late completion is delivered', async () => {
+test('a failure whose flush throws is still reported (the file write is best-effort), and the late completion is delivered', async () => {
   const world = makeWorld()
   let thrown = false
   const { taskId, handle } = registerWith(world, {
@@ -480,8 +480,15 @@ test('a failure whose flush throws still releases finalization: the late complet
   })
   await _clearOutputsForTest()
 
+  // The failure is committed before emit, so an output file that cannot be
+  // written must not cost the lead the failed notification (it used to
+  // reject the scan and drop the notification).
+  const failureCapture = captureAtEnqueue()
   world.nowMs += 600_001
-  await expect(handle.scan()).rejects.toThrow('disk full')
+  await handle.scan()
+  failureCapture.stop()
+  expect(failureCapture.seen).toHaveLength(1)
+  expect(failureCapture.seen[0]!.value).toContain('<status>failed</status>')
   expect((world.state.tasks as Record<string, { status: string }>)[taskId]!.status).toBe('failed')
 
   const capture = captureAtEnqueue()
@@ -491,8 +498,13 @@ test('a failure whose flush throws still releases finalization: the late complet
   await handle.scan()
   capture.stop()
 
-  expect(capture.seen).toHaveLength(1)
-  expect(capture.seen[0]!.value).toContain('<status>completed</status>')
+  // The queue still holds the failed notification above; the late
+  // completion is the one new completed notification.
+  const completed = capture.seen.filter(seen =>
+    seen.value.includes('<status>completed</status>'),
+  )
+  expect(completed).toHaveLength(1)
+  expect(completed[0]!.value).toContain('FINAL: after the throw.')
   expect((world.state.tasks as Record<string, { status: string }>)[taskId]!.status).toBe('completed')
 })
 

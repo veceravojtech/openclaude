@@ -282,6 +282,8 @@ export type PaneWatchdogMailboxMessage = {
 /** Team-file shape the watchdog needs. Subset of TeamFile. */
 export type PaneWatchdogTeamFile = {
   leadAgentId?: string
+  /** Team creation time (ms): the evidence bound for a legacy member row. */
+  createdAt?: number
   /** Session that owns this team; a sweep must never touch another session's. */
   leadSessionId?: string
   members?: Array<{
@@ -325,7 +327,7 @@ export type PaneTeammateWatchdogDeps = {
     taskId: string,
     member: { agentId: string; name: string },
   ) => Promise<boolean>
-  readTeamFile?:(teamName: string) => Promise<PaneWatchdogTeamFile | null>
+  readTeamFile?: (teamName: string) => Promise<PaneWatchdogTeamFile | null>
   probePane?: () => Promise<PaneLiveness>
   /** Probe for any pane of the team, used by the ghost sweep. */
   probeMemberPane?: (
@@ -422,11 +424,53 @@ export type PaneTeammateWatchdogHandle = {
 
 /**
  * Every armed watchdog by task id, so the team sweeper can hand a crashed
- * member to its own watchdog. Kept past dispose(): a watchdog disarms after a
- * delivered turn, but its idle teammate can still crash. Dropped when the
- * task leaves AppState, is aborted (killed), or its member is retired.
+ * member to its own watchdog.
+ *
+ * Dropped by every terminal dispose() (the task is done, gone, killed,
+ * failed or completed by another hand) and by the abort. The ONE disposal
+ * that keeps the entry is the delivered turn: it disarms the deadlines, but
+ * its idle teammate is still running and can still crash. Such an entry is
+ * reclaimed by its team's sweeper once the task is no longer running
+ * ({@link prunePaneWatchdogRegistry}) or the team is gone.
  */
-const paneWatchdogsByTask = new Map<string, PaneTeammateWatchdogHandle>()
+const paneWatchdogsByTask = new Map<
+  string,
+  { handle: PaneTeammateWatchdogHandle; teamName: string }
+>()
+
+/**
+ * Drop `teamName`'s entries whose watchdog is disposed and whose task is no
+ * longer running (retired, killed, completed) or gone; with `all`, every
+ * entry of the team (its team file is gone). Run by the team sweeper.
+ */
+function prunePaneWatchdogRegistry(
+  teamName: string,
+  setAppState: SetAppState,
+  all = false,
+): void {
+  const ours = [...paneWatchdogsByTask].filter(
+    ([, entry]) => entry.teamName === teamName,
+  )
+  if (ours.length === 0) return
+  if (all) {
+    for (const [taskId] of ours) paneWatchdogsByTask.delete(taskId)
+    return
+  }
+  let running = new Set<string>()
+  setAppState(prev => {
+    running = new Set(
+      Object.values(prev.tasks)
+        .filter(task => task.status === 'running')
+        .map(task => task.id),
+    )
+    return prev
+  })
+  for (const [taskId, entry] of ours) {
+    if (entry.handle.disposed && !running.has(taskId)) {
+      paneWatchdogsByTask.delete(taskId)
+    }
+  }
+}
 
 /**
  * Fail a crashed pane teammate's running task through its own watchdog.
@@ -436,7 +480,7 @@ export async function failPaneTeammateOnPaneGone(
   taskId: string,
   member: { agentId: string; name: string },
 ): Promise<boolean> {
-  const handle = paneWatchdogsByTask.get(taskId)
+  const handle = paneWatchdogsByTask.get(taskId)?.handle
   if (!handle) {
     logForDebugging(
       `[PaneWatchdog] no watchdog registered for ${member.name}'s task ${taskId}; its crash cannot be reported as a failure`,
@@ -451,11 +495,46 @@ export async function failPaneTeammateOnPaneGone(
   }
 }
 
+/**
+ * The lead is ending this teammate on purpose (a kill from the teams dialog):
+ * record it BEFORE the pane dies. Its running task rows get
+ * `shutdownRequested` — the state evidence the ghost sweep reads as a
+ * requested end — and their watchdogs are disposed, so no deadline can later
+ * probe the dead pane and fail the task as a crash. Returns the task ids.
+ */
+export function markPaneTeammateEndRequested(
+  agentId: string,
+  setAppState: SetAppState,
+): string[] {
+  const taskIds: string[] = []
+  setAppState(prev => {
+    let tasks = prev.tasks
+    for (const task of Object.values(prev.tasks)) {
+      if (
+        !isInProcessTeammateTask(task) ||
+        task.identity.agentId !== agentId ||
+        task.status !== 'running'
+      ) {
+        continue
+      }
+      taskIds.push(task.id)
+      if (!task.shutdownRequested) {
+        tasks = { ...tasks, [task.id]: { ...task, shutdownRequested: true } }
+      }
+    }
+    return tasks === prev.tasks ? prev : { ...prev, tasks }
+  })
+  for (const taskId of taskIds) {
+    paneWatchdogsByTask.get(taskId)?.handle.dispose()
+  }
+  return taskIds
+}
+
 /** The watchdog registered for `taskId`, if any (test seam). */
 export function getPaneWatchdogForTask(
   taskId: string,
 ): PaneTeammateWatchdogHandle | undefined {
-  return paneWatchdogsByTask.get(taskId)
+  return paneWatchdogsByTask.get(taskId)?.handle
 }
 
 function envPositiveInt(name: string): number | undefined {
@@ -662,7 +741,10 @@ async function sweepRosterOnce(
           { level: 'error' },
         )
       }
-      if (failed) {
+      // The task row is the record: a crash failure that committed and then
+      // threw on a later step is still committed, and the retirement below
+      // would contradict it with "has shut down" and a second unassign.
+      if (failed || crashFailureCommitted(deps, death.taskId)) {
         // The failed notification IS the lead's report; a second "has shut
         // down" message would contradict it, and the failed row must stay.
         retireTeammateFromLeaderView({
@@ -705,6 +787,21 @@ async function sweepRosterOnce(
       absentPaneScans.delete(key)
     }
   }
+}
+
+/** Whether `taskId`'s row holds the pane-gone crash failure. */
+function crashFailureCommitted(deps: SweepDeps, taskId: string): boolean {
+  let committed = false
+  deps.setAppState(prev => {
+    const task = prev.tasks[taskId]
+    committed =
+      task !== undefined &&
+      task.status === 'failed' &&
+      'error' in task &&
+      task.error === PANE_CLOSED_WITHOUT_SHUTDOWN_ERROR
+    return prev
+  })
+  return committed
 }
 
 /** Slack on a member's spawn time when dating shutdown evidence. */
@@ -756,11 +853,20 @@ async function classifyPaneDeath(
   if (requestedByState) return { verdict: 'requested' }
   if (runningTaskId === undefined) return { verdict: 'no-run' }
 
-  const since = (member.joinedAt ?? 0) - SHUTDOWN_EVIDENCE_SLACK_MS
+  // Mailbox evidence counts only from this spawn on (a former run under the
+  // same name left its own). A legacy row with no joinedAt falls back to the
+  // team's creation; with neither there is no bound at all, so no message
+  // can be dated to this run and only the state evidence above counts — the
+  // verdict leans to crash rather than reading an old approval as current.
+  const spawnedAt = member.joinedAt ?? teamFile.createdAt
+  if (spawnedAt === undefined || !Number.isFinite(spawnedAt)) {
+    return { verdict: 'crash', taskId: runningTaskId }
+  }
+  const since = spawnedAt - SHUTDOWN_EVIDENCE_SLACK_MS
   const current = (timestamp: string | undefined): boolean => {
-    if (!timestamp) return true
+    if (!timestamp) return false
     const at = Date.parse(timestamp)
-    return !Number.isFinite(at) || at >= since
+    return Number.isFinite(at) && at >= since
   }
   const leadName =
     teamFile.members?.find(m => m.agentId === teamFile.leadAgentId)?.name ??
@@ -971,10 +1077,12 @@ export function ensureTeamSweeper({
       // so the sweeper retires itself.
       const teamFile = await readTeamFile(teamName)
       if (!teamFile?.members) {
+        prunePaneWatchdogRegistry(teamName, setAppState, true)
         dispose()
         return
       }
       await sweepRosterOnce(sweepDeps, absentPaneScans)
+      prunePaneWatchdogRegistry(teamName, setAppState)
     } finally {
       scanning = false
     }
@@ -1139,7 +1247,14 @@ export function armPaneTeammateWatchdog({
   let leadName: string | null = null
   let timer: ReturnType<typeof setInterval> | undefined
 
-  function dispose(): void {
+  /**
+   * Disarm. Unregisters from the crash registry too, unless
+   * `keepCrashWatch`: the delivered-turn disarm, whose teammate is idle but
+   * still running (and can still crash). A later full dispose() of an
+   * already-disarmed watchdog still unregisters.
+   */
+  function dispose(options?: { keepCrashWatch?: boolean }): void {
+    if (!options?.keepCrashWatch) unregister()
     if (disposed) {
       return
     }
@@ -1147,6 +1262,16 @@ export function armPaneTeammateWatchdog({
     if (timer !== undefined) {
       clearInterval(timer)
       timer = undefined
+    }
+  }
+
+  let registered: PaneTeammateWatchdogHandle | undefined
+  function unregister(): void {
+    if (
+      registered !== undefined &&
+      paneWatchdogsByTask.get(taskId)?.handle === registered
+    ) {
+      paneWatchdogsByTask.delete(taskId)
     }
   }
 
@@ -1219,6 +1344,11 @@ export function armPaneTeammateWatchdog({
    * file (created at registration) and flushed, so the <output-file> the
    * notification names already holds it. Without a report nothing is awaited
    * and the notification is enqueued synchronously.
+   *
+   * The file write is best-effort, like the unassign: a terminal outcome is
+   * already committed when emit runs, so an output file that cannot be
+   * written must not cost the lead the notification itself (which carries
+   * the same text in its <result>).
    */
   async function emit(
     status: 'completed' | 'failed',
@@ -1231,9 +1361,16 @@ export function armPaneTeammateWatchdog({
     },
   ): Promise<void> {
     if (finalMessage) {
-      appendTaskOutput(taskId, `${options?.filePrefix ?? ''}${finalMessage}\n`)
-      await flushOutput(taskId)
-      void evictTaskOutput(taskId)
+      try {
+        appendTaskOutput(taskId, `${options?.filePrefix ?? ''}${finalMessage}\n`)
+        await flushOutput(taskId)
+        void evictTaskOutput(taskId).catch(() => {})
+      } catch (writeError) {
+        logForDebugging(
+          `[PaneWatchdog] could not write ${teammateName}'s report to its output file: ${String(writeError)}`,
+          { level: 'error' },
+        )
+      }
       // Re-checked after the flush: the finalization lock keeps a late
       // completion out, but a TaskStop kill is not a lock holder, and a
       // failure notification for a task killed meanwhile would be stale.
@@ -1767,28 +1904,39 @@ export function armPaneTeammateWatchdog({
     }
     const result = paneFailureResult(error, lastIdleSeen, await readPaneTail())
     let committed = false
-    await withFinalization(async () => {
-      if (!transitionTerminal('failed', error, { rearmNotification: true })) {
-        return
-      }
-      committed = true
-      watchdogFailedTask = true
-      const attentionTransient = {
-        transient: true,
-        transientReason: 'pane exited (dead pane)',
-      }
-      const hold = await noteFailureBeforeRelease(
-        error,
-        attentionTransient,
-        knownAgentId,
-      )
-      await unassignDeadTeammateTasks(hold, knownAgentId)
-      if (!stillOurFailure(error)) return
-      await emit('failed', error, result, {
-        stillCurrent: () => stillOurFailure(error),
-        attentionTransient,
+    try {
+      await withFinalization(async () => {
+        if (!transitionTerminal('failed', error, { rearmNotification: true })) {
+          return
+        }
+        committed = true
+        watchdogFailedTask = true
+        const attentionTransient = {
+          transient: true,
+          transientReason: 'pane exited (dead pane)',
+        }
+        const hold = await noteFailureBeforeRelease(
+          error,
+          attentionTransient,
+          knownAgentId,
+        )
+        await unassignDeadTeammateTasks(hold, knownAgentId)
+        if (!stillOurFailure(error)) return
+        await emit('failed', error, result, {
+          stillCurrent: () => stillOurFailure(error),
+          attentionTransient,
+        })
       })
-    })
+    } catch (commitError) {
+      // Once the failed transition is committed, a later step throwing does
+      // not un-commit it: the caller must still see `true`, or the sweep
+      // retires the member as a clean shutdown on top of the failure.
+      logForDebugging(
+        `[PaneWatchdog] failing crashed teammate ${teammateName} threw after ${committed ? 'committing' : 'deciding'}: ${String(commitError)}`,
+        { level: 'error' },
+      )
+      if (!committed) throw commitError
+    }
     return committed
   }
 
@@ -1876,7 +2024,9 @@ export function armPaneTeammateWatchdog({
         try {
           await emit('completed', undefined, paneTurnResult(latestIdle))
         } finally {
-          dispose()
+          // Deadlines off; the crash watch stays (the teammate is idle, not
+          // gone).
+          dispose({ keepCrashWatch: true })
         }
         return
       }
@@ -1926,7 +2076,6 @@ export function armPaneTeammateWatchdog({
     })
     if (!taskSeen) {
       dispose()
-      paneWatchdogsByTask.delete(taskId)
       return
     }
     // A snapshot, used only to decide whether this scan has anything left to
@@ -2129,15 +2278,9 @@ export function armPaneTeammateWatchdog({
     return scanQueued
   }
 
-  signal?.addEventListener(
-    'abort',
-    () => {
-      dispose()
-      // Killed by the lead: a requested end, never the sweep's crash.
-      paneWatchdogsByTask.delete(taskId)
-    },
-    { once: true },
-  )
+  // Killed by the lead: a requested end, never the sweep's crash — dispose()
+  // also drops the crash-registry entry.
+  signal?.addEventListener('abort', () => dispose(), { once: true })
 
   // The ghost sweep is owned by a team-scoped sweeper, not this watchdog — a
   // teammate that self-reports a failure disposes its own watchdog in the same
@@ -2162,11 +2305,14 @@ export function armPaneTeammateWatchdog({
     scan,
     scanUnserialized,
     failOnPaneGone,
-    dispose,
+    dispose: () => dispose(),
     get disposed() {
       return disposed
     },
   }
-  if (!signal?.aborted) paneWatchdogsByTask.set(taskId, handle)
+  if (!signal?.aborted) {
+    registered = handle
+    paneWatchdogsByTask.set(taskId, { handle, teamName })
+  }
   return handle
 }
