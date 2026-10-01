@@ -20,12 +20,14 @@ import {
   type PaneTeammateWatchdogDeps,
   type PaneTeammateWatchdogHandle,
   type PaneWatchdogMailboxMessage,
+  LATE_COMPLETION_SEPARATOR,
 } from '../../utils/swarm/backends/paneTeammateWatchdog.js'
 import { resetFailedTeammateReapsForTesting } from '../../utils/swarm/failedTeammateReaper.js'
 import {
   _clearOutputsForTest,
   _resetTaskOutputDirForTest,
   evictTaskOutput,
+  flushTaskOutput,
   getTaskOutputPath,
 } from '../../utils/task/diskOutput.js'
 import { unescapeXml } from '../../utils/xml.js'
@@ -286,7 +288,7 @@ test('a late completion that wins during the failure capture leaves no stale fai
   // Alive pane past its progress deadline: failed, capture pending.
   world.nowMs += 600_001
   const failing = handle.scan()
-  while (!captureStarted) await Promise.resolve()
+  await waitUntil(() => captureStarted, 'captureStarted')
 
   world.mailbox.push(
     idle(world, { idleReason: 'available', lastAssistantText: 'FINAL: late but real.' }),
@@ -302,6 +304,182 @@ test('a late completion that wins during the failure capture leaves no stale fai
   expect(capture2.seen[0]!.value).toContain('<status>completed</status>')
   // Only the winning report is on disk; the stale failure never got appended.
   expect(readFileSync(getTaskOutputPath(taskId), 'utf8')).toBe('FINAL: late but real.\n')
+})
+
+/** Wait (yielding to timers and I/O) until `cond` holds; fail fast instead of hanging. */
+async function waitUntil(cond: () => boolean, label: string): Promise<void> {
+  for (let i = 0; i < 500; i++) {
+    if (cond()) return
+    await new Promise(resolve => setTimeout(resolve, 1))
+  }
+  throw new Error(`timed out waiting for ${label}`)
+}
+
+function registerWith(
+  world: World,
+  extra: PaneTeammateWatchdogDeps,
+): { taskId: string; handle: PaneTeammateWatchdogHandle } {
+  const handle = registerOutOfProcessTeammateTask(
+    world.setAppState,
+    {
+      teammateId: `${WORKER}@${TEAM}`,
+      sanitizedName: WORKER,
+      teamName: TEAM,
+      teammateColor: 'cyan',
+      prompt: 'count the call sites',
+      paneId: '%42',
+      backendType: 'tmux',
+      toolUseId: 'toolu-1',
+    },
+    { ...deps(world), ...extra },
+  )
+  handles.push(handle)
+  return { taskId: Object.keys(world.state.tasks)[0]!, handle }
+}
+
+const FAILURE_TEXT_START = 'Teammate emitted no lifecycle signal within 600s'
+
+test('a completion that arrives while the failure flush is in flight waits: failure first, then the late completion after a separator', async () => {
+  const world = makeWorld()
+  let releaseFlush: () => void = () => {}
+  const flushGate = new Promise<void>(resolve => {
+    releaseFlush = resolve
+  })
+  let flushInFlight = false
+  let gated = false
+  const { taskId, handle } = registerWith(world, {
+    // Gate the FIRST flush after the failure text is appended.
+    flushTaskOutput: async id => {
+      if (!gated) {
+        gated = true
+        flushInFlight = true
+        await flushGate
+      }
+      await flushTaskOutput(id)
+    },
+  })
+  await _clearOutputsForTest()
+
+  const capture = captureAtEnqueue()
+  world.nowMs += 600_001
+  const failing = handle.scan()
+  await waitUntil(() => flushInFlight, 'flushInFlight')
+
+  world.mailbox.push(
+    idle(world, { idleReason: 'available', lastAssistantText: 'FINAL: late but real.' }),
+  )
+  const completing = handle.scan()
+  for (let i = 0; i < 5; i++) await new Promise(resolve => setTimeout(resolve, 0))
+  // The completion waits for the failure to finish finalizing.
+  expect(capture.seen).toHaveLength(0)
+  expect((world.state.tasks as Record<string, { status: string }>)[taskId]!.status).toBe('failed')
+
+  releaseFlush()
+  await failing
+  await completing
+  capture.stop()
+  await _clearOutputsForTest()
+
+  expect(capture.seen.map(s => s.value.match(/<status>([^<]+)</)?.[1])).toEqual([
+    'failed',
+    'completed',
+  ])
+  // The failed notification's file held the failure alone; the completed one's
+  // file holds the failure, the separator, then the real result.
+  expect(capture.seen[0]!.fileAtEnqueue?.startsWith(FAILURE_TEXT_START)).toBe(true)
+  expect(capture.seen[0]!.fileAtEnqueue).not.toContain('FINAL: late but real.')
+  const finalFile = readFileSync(getTaskOutputPath(taskId), 'utf8')
+  expect(finalFile).toBe(capture.seen[1]!.fileAtEnqueue!)
+  expect(finalFile.startsWith(FAILURE_TEXT_START)).toBe(true)
+  expect(finalFile.endsWith(`${LATE_COMPLETION_SEPARATOR}FINAL: late but real.\n`)).toBe(true)
+  expect(finalFile.split(LATE_COMPLETION_SEPARATOR)).toHaveLength(2)
+})
+
+test('a TaskStop kill that lands during the failure flush suppresses the failure notification', async () => {
+  const world = makeWorld()
+  let releaseFlush: () => void = () => {}
+  const flushGate = new Promise<void>(resolve => {
+    releaseFlush = resolve
+  })
+  let flushInFlight = false
+  const { taskId, handle } = registerWith(world, {
+    flushTaskOutput: async id => {
+      flushInFlight = true
+      await flushGate
+      await flushTaskOutput(id)
+    },
+  })
+  await _clearOutputsForTest()
+
+  const capture = captureAtEnqueue()
+  world.nowMs += 600_001
+  const failing = handle.scan()
+  await waitUntil(() => flushInFlight, 'flushInFlight')
+
+  // TaskStop is not a finalization-lock holder: it rewrites the task directly.
+  // `notified` is left false so enqueueAgentNotification's own dedupe cannot
+  // mask the failure path's post-flush ownership check.
+  const tasks = world.state.tasks as Record<string, Record<string, unknown>>
+  tasks[taskId] = { ...tasks[taskId]!, status: 'killed', notified: false }
+
+  releaseFlush()
+  await failing
+  capture.stop()
+  await _clearOutputsForTest()
+
+  expect(capture.seen).toHaveLength(0)
+  expect(tasks[taskId]!.status).toBe('killed')
+})
+
+test('a failure whose flush throws still releases finalization: the late completion is delivered', async () => {
+  const world = makeWorld()
+  let thrown = false
+  const { taskId, handle } = registerWith(world, {
+    flushTaskOutput: async id => {
+      if (!thrown) {
+        thrown = true
+        throw new Error('disk full')
+      }
+      await flushTaskOutput(id)
+    },
+  })
+  await _clearOutputsForTest()
+
+  world.nowMs += 600_001
+  await expect(handle.scan()).rejects.toThrow('disk full')
+  expect((world.state.tasks as Record<string, { status: string }>)[taskId]!.status).toBe('failed')
+
+  const capture = captureAtEnqueue()
+  world.mailbox.push(
+    idle(world, { idleReason: 'available', lastAssistantText: 'FINAL: after the throw.' }),
+  )
+  await handle.scan()
+  capture.stop()
+
+  expect(capture.seen).toHaveLength(1)
+  expect(capture.seen[0]!.value).toContain('<status>completed</status>')
+  expect((world.state.tasks as Record<string, { status: string }>)[taskId]!.status).toBe('completed')
+})
+
+test('a completion after the failure fully committed is appended after the separator', async () => {
+  const world = makeWorld()
+  const { taskId, handle } = registerWith(world, {})
+  await _clearOutputsForTest()
+
+  world.nowMs += 600_001
+  await handle.scan()
+  const afterFailure = readFileSync(getTaskOutputPath(taskId), 'utf8')
+  expect(afterFailure.startsWith(FAILURE_TEXT_START)).toBe(true)
+
+  world.mailbox.push(
+    idle(world, { idleReason: 'available', lastAssistantText: 'FINAL: much later.' }),
+  )
+  await handle.scan()
+  await _clearOutputsForTest()
+
+  expect(readFileSync(getTaskOutputPath(taskId), 'utf8')).toBe(
+    `${afterFailure}${LATE_COMPLETION_SEPARATOR}FINAL: much later.\n`,
+  )
 })
 
 test('eviction keeps the file, so the path advertised after it still reads', async () => {

@@ -198,6 +198,14 @@ export const PANE_FAILURE_TAIL_LINES = 40
  */
 const PANE_FAILURE_SECTION_MAX_CHARS = 3_500
 
+/**
+ * Written to the output file before a completion that arrives after a
+ * watchdog failure was fully reported, so the file reads as the failure
+ * followed by the late real result rather than one run-on report.
+ */
+export const LATE_COMPLETION_SEPARATOR =
+  '\n----- Late completion: the teammate finished after the failure above was reported -----\n'
+
 /** The line reported when no pane output could be read. */
 export const PANE_GONE_LINE =
   'Pane is gone or unreadable; no output could be captured.'
@@ -313,6 +321,8 @@ export type PaneTeammateWatchdogDeps = {
    * read. Defaults to the backend's `capturePaneTail` on the recorded socket.
    */
   capturePaneTail?: (lines: number) => Promise<string | null>
+  /** Flush the task's output file (test seam; defaults to flushTaskOutput). */
+  flushTaskOutput?: (taskId: string) => Promise<void>
   /** Grace before a self-reported failed teammate is auto-killed (default 3000). */
   failedReapDelayMs?: number
   /** Injectable clock for the auto-kill timer. */
@@ -786,6 +796,7 @@ export function armPaneTeammateWatchdog({
     })
   const unassignMemberTasks =
     deps?.unassignMemberTasks ?? defaultUnassignMemberTasks
+  const flushOutput = deps?.flushTaskOutput ?? flushTaskOutput
   const firstContactTimeoutMs =
     deps?.firstContactTimeoutMs ??
     envPositiveInt(PANE_TEAMMATE_FIRST_CONTACT_TIMEOUT_ENV) ??
@@ -908,14 +919,15 @@ export function armPaneTeammateWatchdog({
     status: 'completed' | 'failed',
     error?: string,
     finalMessage?: string,
-    options?: { stillCurrent?: () => boolean },
+    options?: { filePrefix?: string; stillCurrent?: () => boolean },
   ): Promise<void> {
     if (finalMessage) {
-      appendTaskOutput(taskId, `${finalMessage}\n`)
-      await flushTaskOutput(taskId)
+      appendTaskOutput(taskId, `${options?.filePrefix ?? ''}${finalMessage}\n`)
+      await flushOutput(taskId)
       void evictTaskOutput(taskId)
-      // Re-checked after the flush: a late completion that won meanwhile
-      // re-armed `notified`, so a stale enqueue here would take its slot.
+      // Re-checked after the flush: the finalization lock keeps a late
+      // completion out, but a TaskStop kill is not a lock holder, and a
+      // failure notification for a task killed meanwhile would be stale.
       if (options?.stillCurrent && !options.stillCurrent()) return
     }
     enqueueAgentNotification({
@@ -995,12 +1007,44 @@ export function armPaneTeammateWatchdog({
   }
 
   /**
-   * Whether the task still holds the failure THIS failTask wrote. Re-read
-   * from the task state after every await in the failure path, because an
-   * overlapping scan may have let a late completion win (failed → completed)
-   * and a TaskStop may have killed it meanwhile. The task state is the one
-   * record every writer goes through, so reading it catches both; a token
-   * private to this watchdog would miss the kill.
+   * Terminal finalization lock. Both terminal writers of a task this
+   * watchdog failed run their side effects through it: failTask (unassign →
+   * append → flush → enqueue) and the late-completion rewrite (failed →
+   * completed → append → flush → enqueue). A promise chain, so holders run
+   * one at a time in arrival order; a holder that throws still releases
+   * (the chain continues on either outcome), so it cannot wedge.
+   *
+   * Outcome, all or nothing:
+   * - the completion finalizes first: the failure, on acquiring, finds the
+   *   task no longer its own and does NOTHING — no unassign, no output
+   *   text, no notification;
+   * - the failure finalizes first: it commits everything, and the
+   *   completion waits, then applies the LATE-AFTER-COMMIT rule below.
+   *
+   * LATE-AFTER-COMMIT rule (a completion that arrives after the failure has
+   * fully committed): the task becomes completed, the completion text is
+   * appended to the output file after {@link LATE_COMPLETION_SEPARATOR}, a
+   * completed notification fires after the failed one, and the claims the
+   * failure released are NOT restored — they may already belong to someone
+   * else, and taking them back would strand that work.
+   */
+  let finalizing: Promise<void> = Promise.resolve()
+  function withFinalization(fn: () => Promise<void>): Promise<void> {
+    const run = finalizing.then(fn)
+    finalizing = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
+  }
+  // True once a watchdog failure committed its side effects (inside the lock).
+  let failureCommitted = false
+
+  /**
+   * Whether the task still holds the failure THIS failTask wrote, read from
+   * the task state once failTask owns finalization: a late completion that
+   * finalized first (failed → completed), or a TaskStop kill, means the
+   * failure is no longer ours to commit.
    */
   function stillOurFailure(error: string): boolean {
     let current = false
@@ -1015,16 +1059,15 @@ export function armPaneTeammateWatchdog({
   /**
    * Put a teammate whose pane is confirmed dead back on the board, as the
    * ghost sweep does for a retired one. Best-effort: logged, never thrown,
-   * so the failure notification still goes out. Skipped when a late
-   * completion or a kill overtook the failure during the roster read.
+   * so the failure notification still goes out. Runs only inside the
+   * finalization lock, so no completion can interleave with it.
    */
-  async function unassignDeadTeammateTasks(error: string): Promise<void> {
+  async function unassignDeadTeammateTasks(): Promise<void> {
     try {
       const agentId =
         (await readTeamFile(teamName))?.members?.find(
           m => m.name === teammateName,
         )?.agentId ?? teammateName
-      if (!stillOurFailure(error)) return
       await unassignMemberTasks(teamName, { agentId, name: teammateName })
     } catch (error) {
       logForDebugging(
@@ -1045,9 +1088,10 @@ export function armPaneTeammateWatchdog({
    * whose late completion wins; putting its claims back on the board would
    * let someone else start the same work a second time.
    *
-   * Every await is followed by a re-check (stillOurFailure): once a late
-   * completion or a kill has overtaken this failure, the stale failure is
-   * neither unassigned nor emitted.
+   * The pane capture runs first, outside the finalization lock (it is
+   * bounded, and writes nothing). Every side effect — unassign, output text,
+   * notification — happens inside the lock, and only if the task is still
+   * this failure when the lock is acquired; see withFinalization.
    */
   async function failTask(
     error: string,
@@ -1060,14 +1104,19 @@ export function armPaneTeammateWatchdog({
     // Set before any await: an overlapping scan then only watches for a late
     // completion and can never fail (or append) a second time.
     watchdogFailedTask = true
-    const paneTail = await readPaneTail()
-    if (!stillOurFailure(error)) return
-    if (paneDead) {
-      await unassignDeadTeammateTasks(error)
+    // Built in memory only: nothing is written before finalization is owned.
+    const result = paneFailureResult(error, lastIdleSeen, await readPaneTail())
+    await withFinalization(async () => {
       if (!stillOurFailure(error)) return
-    }
-    await emit('failed', error, paneFailureResult(error, lastIdleSeen, paneTail), {
-      stillCurrent: () => stillOurFailure(error),
+      failureCommitted = true
+      if (paneDead) {
+        await unassignDeadTeammateTasks()
+        // A kill is not a lock holder: do not write text onto a killed task.
+        if (!stillOurFailure(error)) return
+      }
+      await emit('failed', error, result, {
+        stillCurrent: () => stillOurFailure(error),
+      })
     })
     // Do NOT dispose: a merely-slow child was failed spuriously, and its
     // late idle notification must still be able to complete the task.
@@ -1201,14 +1250,27 @@ export function armPaneTeammateWatchdog({
         } else if (watchingLateCompletion) {
           // A merely-slow child was failed spuriously; its late completion
           // wins. The fromWatchdogFailure option lets the failed → completed
-          // rewrite re-arm `notified` so the completion is emitted.
-          if (
-            transitionTerminal('completed', undefined, {
-              fromWatchdogFailure: true,
-            })
-          ) {
-            await emit('completed', undefined, paneTurnResult(latestIdle))
-          }
+          // rewrite re-arm `notified` so the completion is emitted. It goes
+          // through the finalization lock, so it never interleaves with the
+          // failure's side effects (see withFinalization for the rule).
+          const completionResult = paneTurnResult(latestIdle)
+          await withFinalization(async () => {
+            if (
+              !transitionTerminal('completed', undefined, {
+                fromWatchdogFailure: true,
+              })
+            ) {
+              return
+            }
+            await emit(
+              'completed',
+              undefined,
+              completionResult,
+              failureCommitted
+                ? { filePrefix: LATE_COMPLETION_SEPARATOR }
+                : undefined,
+            )
+          })
         } else {
           // 'available' and 'interrupted' from a living pane mean the turn is
           // over and the teammate is idle at its prompt — alive and resumable,

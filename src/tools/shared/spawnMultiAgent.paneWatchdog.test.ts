@@ -547,7 +547,7 @@ test('a completion that lands while the failure capture is pending wins: no stal
   world.probes = ['dead']
   world.nowMs += FIRST_CONTACT_TIMEOUT_MS + 1
   const failing = world.handles[0]!.scan()
-  while (!captureStarted) await Promise.resolve()
+  await waitUntil(() => captureStarted, 'captureStarted')
   expect(taskStatus(world)).toBe('failed')
 
   // Meanwhile an overlapping scan sees the late real completion.
@@ -570,47 +570,95 @@ test('a completion that lands while the failure capture is pending wins: no stal
   expect(notifications.some(n => n.includes('<status>failed</status>'))).toBe(false)
 })
 
-test('a completion that lands during the dead-pane roster read wins: no unassign, no stale failure', async () => {
+/** Wait (yielding to timers and I/O) until `cond` holds; fail fast instead of hanging. */
+async function waitUntil(cond: () => boolean, label: string): Promise<void> {
+  for (let i = 0; i < 500; i++) {
+    if (cond()) return
+    await new Promise(resolve => setTimeout(resolve, 1))
+  }
+  throw new Error(`timed out waiting for ${label}`)
+}
+
+/** Let queued microtasks and timers run, so a waiting scan gets its chance. */
+async function yieldTurns(n = 5): Promise<void> {
+  for (let i = 0; i < n; i++) await new Promise(resolve => setTimeout(resolve, 0))
+}
+
+test('a completion that arrives while the dead-pane unassign is in flight waits: the failure commits whole, then the completion follows', async () => {
   const world = makeWorld()
-  let releaseRoster: () => void = () => {}
-  const rosterGate = new Promise<void>(resolve => {
-    releaseRoster = resolve
+  let releaseUnassign: () => void = () => {}
+  const unassignGate = new Promise<void>(resolve => {
+    releaseUnassign = resolve
   })
-  let failing = false
-  let rosterPending = false
+  let unassignInFlight = false
   registerTeammate(world, 'worker', {
     ...watchdogDeps(world),
-    // Once the task has failed, the next roster read is the unassign's.
-    readTeamFile: async () => {
-      if (failing && taskStatus(world) === 'failed') {
-        rosterPending = true
-        await rosterGate
-      }
-      return world.teamFile
+    // Gated INSIDE the task updates, where claims are being released.
+    unassignMemberTasks: async (teamName, member) => {
+      world.unassignCalls.push({ teamName, ...member })
+      unassignInFlight = true
+      await unassignGate
+      return ''
     },
   })
   worldToDispose.push(...world.handles)
 
   world.probes = ['dead']
   world.nowMs += FIRST_CONTACT_TIMEOUT_MS + 1
-  failing = true
   const failingScan = world.handles[0]!.scan()
-  while (!rosterPending) await Promise.resolve()
-  failing = false
+  await waitUntil(() => unassignInFlight, 'unassignInFlight')
 
+  // The completion lands mid-unassign. It must wait for the failure to finish.
   world.mailbox.push(
     idleWithReport('worker', world.nowMs, { lastAssistantText: 'DONE late' }),
   )
-  await world.handles[0]!.scan()
-  expect(taskStatus(world)).toBe('completed')
+  const completionScan = world.handles[0]!.scan()
+  await yieldTurns()
+  expect(taskStatus(world)).toBe('failed')
+  expect(world.notifications()).toEqual([])
 
-  releaseRoster()
+  releaseUnassign()
   await failingScan
+  await completionScan
 
-  expect(world.unassignCalls).toEqual([])
+  // (a): the failure committed whole, then the late-after-commit rule ran.
+  expect(world.unassignCalls.length).toBe(1)
+  expect(taskStatus(world)).toBe('completed')
   const notifications = world.notifications()
-  expect(notifications.length).toBe(1)
-  expect(notifications[0]).toContain('<status>completed</status>')
+  expect(notifications.map(n => n.match(/<status>([^<]+)</)?.[1])).toEqual([
+    'failed',
+    'completed',
+  ])
+  expect(resultOf(notifications[1]!)).toBe('DONE late')
+})
+
+test('a completion after the failure fully committed: completed, notified after the failure, claims not restored', async () => {
+  const world = makeWorld()
+  registerTeammate(world)
+  worldToDispose.push(...world.handles)
+
+  world.probes = ['dead']
+  world.nowMs += FIRST_CONTACT_TIMEOUT_MS + 1
+  await world.handles[0]!.scan()
+  expect(taskStatus(world)).toBe('failed')
+  expect(world.unassignCalls.length).toBe(1)
+  expect(world.notifications().length).toBe(1)
+
+  world.mailbox.push(
+    idleWithReport('worker', world.nowMs, { lastAssistantText: 'DONE much later' }),
+  )
+  await world.handles[0]!.scan()
+
+  expect(taskStatus(world)).toBe('completed')
+  const notifications = world.notifications()
+  expect(notifications.map(n => n.match(/<status>([^<]+)</)?.[1])).toEqual([
+    'failed',
+    'completed',
+  ])
+  // The <result> is the completion alone; the separator is only in the file.
+  expect(resultOf(notifications[1]!)).toBe('DONE much later')
+  // Claims are not restored: nothing re-assigns, and unassign ran once.
+  expect(world.unassignCalls.length).toBe(1)
 })
 
 test('a failure whose unassign throws still notifies the lead', async () => {

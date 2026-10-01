@@ -62,5 +62,16 @@ test('remote Ultraplan failure notifications escape the reason in <summary>', ()
   }) as SetAppState
   enqueueUltraplanFailureNotification('remote-esc-1', 'session-1', HOSTILE, setAppState)
   const message = onlyNotification()
-  assertEscaped(message, 'failed', `Ultraplan failed: ${HOSTILE}`)
+  // The XML wrapper is everything up to its FIRST close; the plain-text
+  // repetition of the reason follows it. Text after the close cannot end
+  // the wrapper early, and every consumer reads the first match.
+  const close = '</task-notification>'
+  const wrapper = message.slice(0, message.indexOf(close) + close.length)
+  const trailing = message.slice(wrapper.length)
+  assertEscaped(wrapper, 'failed', `Ultraplan failed: ${HOSTILE}`)
+  expect(statusOf(message)).toBe('failed')
+  expect(unescapeXml(extractTag(message, 'summary'))).toBe(`Ultraplan failed: ${HOSTILE}`)
+  // The plain-text repetition is left as written: the model reads it as
+  // prose, so escaping it would show literal entities.
+  expect(trailing).toContain(`did not produce a plan (${HOSTILE}).`)
 })
