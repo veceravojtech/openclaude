@@ -527,7 +527,7 @@ test('an unknown-pane timeout keeps the teammate\'s tasks too', async () => {
   expect(world.notifications().length).toBe(1)
 })
 
-test('a completion that lands while the failure capture is pending wins: no stale failure, no unassign', async () => {
+test('a completion that lands while the failure capture is pending wins: no failure, no unassign, no disarm race', async () => {
   const world = makeWorld()
   let releaseCapture: (tail: string | null) => void = () => {}
   const capture = new Promise<string | null>(resolve => {
@@ -543,25 +543,30 @@ test('a completion that lands while the failure capture is pending wins: no stal
   })
   worldToDispose.push(...world.handles)
 
-  // The dead pane fails the task; the failure path now awaits the capture.
+  // The dead pane's failure awaits the capture. Nothing is committed yet:
+  // the failed state is written only once the failure owns finalization.
   world.probes = ['dead']
   world.nowMs += FIRST_CONTACT_TIMEOUT_MS + 1
-  const failing = world.handles[0]!.scan()
+  const failing = world.handles[0]!.scanUnserialized()
   await waitUntil(() => captureStarted, 'captureStarted')
-  expect(taskStatus(world)).toBe('failed')
+  expect(taskStatus(world)).toBe('running')
 
-  // Meanwhile an overlapping scan sees the late real completion.
+  // Meanwhile an overlapping scan sees the real completion and finalizes it.
   world.mailbox.push(
     idleWithReport('worker', world.nowMs, { lastAssistantText: 'DONE after all' }),
   )
-  await world.handles[0]!.scan()
-  expect(taskStatus(world)).toBe('completed')
+  await world.handles[0]!.scanUnserialized()
+  expect(world.handles[0]!.disposed).toBe(true)
 
-  // Now the capture returns; the stale failure must not go out.
+  // Now the capture returns; the failure finds the watchdog disarmed and
+  // leaves no trace.
   releaseCapture('late tail')
   await failing
 
-  expect(taskStatus(world)).toBe('completed')
+  expect(taskStatus(world)).toBe('running')
+  const task = world.state.tasks[world.taskId()!] as Record<string, unknown>
+  expect(task.isIdle).toBe(true)
+  expect(task.notified).toBe(true)
   expect(world.unassignCalls).toEqual([])
   const notifications = world.notifications()
   expect(notifications.length).toBe(1)
@@ -584,7 +589,8 @@ async function yieldTurns(n = 5): Promise<void> {
   for (let i = 0; i < n; i++) await new Promise(resolve => setTimeout(resolve, 0))
 }
 
-test('a completion that arrives while the dead-pane unassign is in flight waits: the failure commits whole, then the completion follows', async () => {
+for (const scanMode of ['scan', 'scanUnserialized'] as const) {
+test(`[${scanMode}] a completion that arrives while the dead-pane unassign is in flight waits: the failure commits whole, then the completion follows`, async () => {
   const world = makeWorld()
   let releaseUnassign: () => void = () => {}
   const unassignGate = new Promise<void>(resolve => {
@@ -612,7 +618,7 @@ test('a completion that arrives while the dead-pane unassign is in flight waits:
   world.mailbox.push(
     idleWithReport('worker', world.nowMs, { lastAssistantText: 'DONE late' }),
   )
-  const completionScan = world.handles[0]!.scan()
+  const completionScan = world.handles[0]![scanMode]()
   await yieldTurns()
   expect(taskStatus(world)).toBe('failed')
   expect(world.notifications()).toEqual([])
@@ -631,6 +637,7 @@ test('a completion that arrives while the dead-pane unassign is in flight waits:
   ])
   expect(resultOf(notifications[1]!)).toBe('DONE late')
 })
+}
 
 test('a completion after the failure fully committed: completed, notified after the failure, claims not restored', async () => {
   const world = makeWorld()
@@ -659,6 +666,183 @@ test('a completion after the failure fully committed: completed, notified after 
   expect(resultOf(notifications[1]!)).toBe('DONE much later')
   // Claims are not restored: nothing re-assigns, and unassign ran once.
   expect(world.unassignCalls.length).toBe(1)
+})
+
+test('an overlapping scan that read the mailbox before the failure committed delivers the completion by the late rule: never completed-over-failed, notified taken by the right outcome', async () => {
+  const world = makeWorld()
+  let mailReads = 0
+  let releaseMail: (messages: PaneWatchdogMailboxMessage[]) => void = () => {}
+  registerTeammate(world, 'worker', {
+    ...watchdogDeps(world),
+    readLeadMailbox: async () => {
+      mailReads++
+      // Scan B parks here with a running-task snapshot; scan A sails through.
+      if (mailReads === 1) {
+        return new Promise<PaneWatchdogMailboxMessage[]>(resolve => {
+          releaseMail = resolve
+        })
+      }
+      return world.mailbox
+    },
+  })
+  const handle = world.handles[0]!
+  worldToDispose.push(handle)
+
+  world.probes = ['dead']
+  world.nowMs += FIRST_CONTACT_TIMEOUT_MS + 1
+  const scanB = handle.scanUnserialized()
+  await waitUntil(() => mailReads === 1, 'scan B parked on the mailbox')
+  await handle.scanUnserialized() // scan A: the dead pane fails the task, fully
+  expect(taskStatus(world)).toBe('failed')
+  expect(world.notifications().length).toBe(1)
+
+  releaseMail([
+    idleWithReport('worker', world.nowMs, { lastAssistantText: 'DONE overlapping' }),
+  ])
+  await scanB
+
+  // B decided inside the lock from the fresh state (failed by this watchdog),
+  // so it took the late-after-commit path: the task is completed, not left
+  // failed under a completed notification, and `notified` was re-armed for it.
+  expect(taskStatus(world)).toBe('completed')
+  const task = world.state.tasks[world.taskId()!] as Record<string, unknown>
+  expect(task.notified).toBe(true)
+  const notifications = world.notifications()
+  expect(notifications.map(n => n.match(/<status>([^<]+)</)?.[1])).toEqual([
+    'failed',
+    'completed',
+  ])
+  expect(resultOf(notifications[1]!)).toBe('DONE overlapping')
+  expect(world.unassignCalls.length).toBe(1)
+})
+
+test('an overlapping failure that loses does not disarm: the late completion is still delivered', async () => {
+  const world = makeWorld()
+  registerTeammate(world)
+  const handle = world.handles[0]!
+  worldToDispose.push(handle)
+
+  // Two scans both see the expired deadline and both go to failTask.
+  world.probes = ['alive', 'alive']
+  world.nowMs += PROGRESS_TIMEOUT_MS * 2
+  await Promise.all([handle.scanUnserialized(), handle.scanUnserialized()])
+
+  expect(taskStatus(world)).toBe('failed')
+  expect(world.notifications().length).toBe(1)
+  // The loser must not have disposed: the late-completion watch is promised.
+  expect(handle.disposed).toBe(false)
+
+  world.mailbox.push(
+    idleWithReport('worker', world.nowMs, { lastAssistantText: 'DONE after the double failure' }),
+  )
+  await handle.scan()
+
+  expect(taskStatus(world)).toBe('completed')
+  const notifications = world.notifications()
+  expect(notifications.map(n => n.match(/<status>([^<]+)</)?.[1])).toEqual([
+    'failed',
+    'completed',
+  ])
+})
+
+test('scan is single-flight: a call during a running scan does not start a second, and queued calls coalesce', async () => {
+  const world = makeWorld()
+  let mailReads = 0
+  let release: () => void = () => {}
+  const gate = new Promise<void>(resolve => {
+    release = resolve
+  })
+  registerTeammate(world, 'worker', {
+    ...watchdogDeps(world),
+    readLeadMailbox: async () => {
+      mailReads++
+      if (mailReads === 1) await gate
+      return []
+    },
+  })
+  const handle = world.handles[0]!
+  worldToDispose.push(handle)
+
+  const first = handle.scan()
+  await waitUntil(() => mailReads === 1, 'first scan parked')
+  const second = handle.scan()
+  const third = handle.scan()
+  await yieldTurns()
+  expect(mailReads).toBe(1) // neither started while the first is in flight
+  expect(second).toBe(third) // coalesced into one follow-up
+
+  release()
+  await first
+  await second
+  expect(mailReads).toBe(2) // exactly one follow-up ran
+})
+
+test('a scan that throws does not block later scans', async () => {
+  const world = makeWorld()
+  let mailReads = 0
+  registerTeammate(world, 'worker', {
+    ...watchdogDeps(world),
+    readLeadMailbox: async () => {
+      mailReads++
+      if (mailReads === 1) throw new Error('mailbox unreadable')
+      return []
+    },
+  })
+  const handle = world.handles[0]!
+  worldToDispose.push(handle)
+
+  await expect(handle.scan()).rejects.toThrow('mailbox unreadable')
+  await handle.scan()
+  expect(mailReads).toBe(2)
+})
+
+test('an interval tick during an in-flight scan is skipped, not queued', async () => {
+  const world = makeWorld()
+  let mailReads = 0
+  let release: () => void = () => {}
+  const gate = new Promise<void>(resolve => {
+    release = resolve
+  })
+  const TICK_MS = 777_001
+  const ticks: Array<() => void> = []
+  const realSetInterval = globalThis.setInterval
+  globalThis.setInterval = ((fn: () => void, ms?: number) => {
+    if (ms !== TICK_MS) return realSetInterval(fn, ms)
+    // Capture the watchdog's tick; hand back an inert real timer to clear.
+    ticks.push(fn)
+    return realSetInterval(() => {}, 1_000_000)
+  }) as unknown as typeof setInterval
+  try {
+    registerTeammate(world, 'worker', {
+      ...watchdogDeps(world),
+      scanIntervalMs: TICK_MS,
+      readLeadMailbox: async () => {
+        mailReads++
+        if (mailReads === 1) await gate
+        return []
+      },
+    })
+  } finally {
+    globalThis.setInterval = realSetInterval
+  }
+  worldToDispose.push(...world.handles)
+  // The team sweeper arms on the same interval; fire every captured tick.
+  expect(ticks.length).toBeGreaterThanOrEqual(1)
+  const tick = () => {
+    for (const fn of ticks) fn()
+  }
+
+  tick() // starts the scan, which parks on the gate
+  await waitUntil(() => mailReads === 1, 'tick scan parked')
+  tick() // overlapping ticks: skipped
+  tick()
+  await yieldTurns()
+  expect(mailReads).toBe(1)
+
+  release()
+  await yieldTurns()
+  tick() // free again: the next tick scans
+  await waitUntil(() => mailReads === 2, 'next tick scanned')
 })
 
 test('a failure whose unassign throws still notifies the lead', async () => {

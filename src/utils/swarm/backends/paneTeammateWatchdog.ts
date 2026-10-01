@@ -345,8 +345,18 @@ export type PaneTeammateWatchdogDeps = {
 }
 
 export type PaneTeammateWatchdogHandle = {
-  /** One polling step. Safe to call after dispose (no-op). */
+  /**
+   * One polling step. Safe to call after dispose (no-op). Single-flight: a
+   * call made while a scan is running does not start a second one; it queues
+   * (one at most, coalesced) and runs a fresh scan once the current one ends.
+   */
   scan(): Promise<void>
+  /**
+   * The scan body without the single-flight guard. A test seam only: it lets a
+   * test overlap two scans to prove the finalization lock holds on its own,
+   * independent of {@link scan}'s single-flight guard (defence in depth).
+   */
+  scanUnserialized(): Promise<void>
   /** Disarm: stop the interval, ignore every future signal. */
   dispose(): void
   readonly disposed: boolean
@@ -1007,17 +1017,23 @@ export function armPaneTeammateWatchdog({
   }
 
   /**
-   * Terminal finalization lock. Both terminal writers of a task this
-   * watchdog failed run their side effects through it: failTask (unassign →
-   * append → flush → enqueue) and the late-completion rewrite (failed →
-   * completed → append → flush → enqueue). A promise chain, so holders run
-   * one at a time in arrival order; a holder that throws still releases
-   * (the chain continues on either outcome), so it cannot wedge.
+   * Terminal finalization lock. EVERY terminal decision of this watchdog runs
+   * inside it, each from task state read once the lock is held: the deadline
+   * failure (failTask), the self-reported failure, the ordinary turn
+   * completion and the late-completion rewrite (finalizeFromIdleReport). A
+   * promise chain, so holders run one at a time in arrival order; a holder
+   * that throws still releases (the chain continues on either outcome), so
+   * it cannot wedge. The lock is per watchdog, hence per task, and is
+   * collected with it.
+   *
+   * It sits behind {@link scan}'s single-flight guard as defence in depth:
+   * single-flight keeps two scans from overlapping, the lock keeps two
+   * decisions from interleaving even if they did (see scanUnserialized).
    *
    * Outcome, all or nothing:
    * - the completion finalizes first: the failure, on acquiring, finds the
-   *   task no longer its own and does NOTHING — no unassign, no output
-   *   text, no notification;
+   *   watchdog disposed or the task no longer running and does NOTHING — no
+   *   unassign, no output text, no notification, no disposal;
    * - the failure finalizes first: it commits everything, and the
    *   completion waits, then applies the LATE-AFTER-COMMIT rule below.
    *
@@ -1037,9 +1053,6 @@ export function armPaneTeammateWatchdog({
     )
     return run
   }
-  // True once a watchdog failure committed its side effects (inside the lock).
-  let failureCommitted = false
-
   /**
    * Whether the task still holds the failure THIS failTask wrote, read from
    * the task state once failTask owns finalization: a late completion that
@@ -1089,26 +1102,29 @@ export function armPaneTeammateWatchdog({
    * let someone else start the same work a second time.
    *
    * The pane capture runs first, outside the finalization lock (it is
-   * bounded, and writes nothing). Every side effect — unassign, output text,
-   * notification — happens inside the lock, and only if the task is still
-   * this failure when the lock is acquired; see withFinalization.
+   * bounded, and writes nothing). Everything else happens inside the lock:
+   * the decision (watchdog still armed, task still running), the failed
+   * state itself, and every side effect — unassign, output text,
+   * notification. See withFinalization.
    */
   async function failTask(
     error: string,
     { paneDead }: { paneDead: boolean },
   ): Promise<void> {
-    if (!transitionTerminal('failed', error)) {
-      dispose()
-      return
-    }
-    // Set before any await: an overlapping scan then only watches for a late
-    // completion and can never fail (or append) a second time.
-    watchdogFailedTask = true
     // Built in memory only: nothing is written before finalization is owned.
     const result = paneFailureResult(error, lastIdleSeen, await readPaneTail())
     await withFinalization(async () => {
-      if (!stillOurFailure(error)) return
-      failureCommitted = true
+      // The decision is made here, from state read inside the lock. A holder
+      // that already committed a terminal outcome and disarmed (disposed), or
+      // a task that is no longer running (completed, killed), means this
+      // failure attempt lost: it leaves no trace and — losing — must not
+      // dispose, so the late-completion watch of a failure committed by
+      // another holder survives.
+      if (disposed) return
+      if (!transitionTerminal('failed', error)) return
+      // From here the failure is committed: the late-completion watch and the
+      // late-after-commit rule apply.
+      watchdogFailedTask = true
       if (paneDead) {
         await unassignDeadTeammateTasks()
         // A kill is not a lock holder: do not write text onto a killed task.
@@ -1122,7 +1138,105 @@ export function armPaneTeammateWatchdog({
     // late idle notification must still be able to complete the task.
   }
 
-  async function scan(): Promise<void> {
+  /**
+   * Resolve the teammate's terminal idle report (anything but waiting /
+   * parked) into ONE outcome, decided inside the finalization lock from a
+   * fresh read of the task. Never from a snapshot taken before an await: an
+   * overlapping scan or a failure may have changed the task meanwhile.
+   *
+   * - task running, report 'failed': self-reported failure — fail, notify,
+   *   schedule the reap, disarm;
+   * - task running, any other report: the turn result is delivered once and
+   *   the task stays running and addressable — disarm;
+   * - task failed BY THIS WATCHDOG's deadline (committed), report is a
+   *   completion: the late-after-commit rewrite — completed, text appended
+   *   after LATE_COMPLETION_SEPARATOR, completed notification — disarm;
+   * - task failed by this watchdog, report 'failed': nothing to rewrite, the
+   *   watch stays armed (not a committed outcome of this holder);
+   * - anything else (killed, completed, gone): terminal by another hand, not
+   *   ours — disarm, no side effects.
+   *
+   * Only a holder that commits an outcome disposes (after its emit settles,
+   * even if the emit throws). A second holder queued behind it re-reads the
+   * task and `disposed` only once the lock is free, so the report cannot be
+   * appended twice; it is the lock, not the disposal, that orders them.
+   */
+  async function finalizeFromIdleReport(
+    latestIdle: NonNullable<ReturnType<typeof isIdleNotification>>,
+  ): Promise<void> {
+    await withFinalization(async () => {
+      if (disposed) return
+      let status: string | undefined
+      updateTaskState(taskId, setAppState, task => {
+        status = task.status
+        return task
+      })
+      const selfReportedFailure = latestIdle.idleReason === 'failed'
+      if (status === 'running') {
+        if (selfReportedFailure) {
+          const reason =
+            latestIdle.failureReason ?? 'Teammate reported a failed turn'
+          if (!transitionTerminal('failed', reason)) return
+          try {
+            await emit('failed', reason, paneTurnResult(latestIdle))
+            // Explicit self-reported failure only (never the deadline path,
+            // where a slow child's late completion must still win).
+            scheduleFailedReap()
+          } finally {
+            dispose()
+          }
+          return
+        }
+        // 'available' and 'interrupted' from a living pane mean the turn is
+        // over and the teammate is idle at its prompt — alive and resumable,
+        // NOT finished-for-good. Deliver the turn result to the lead exactly
+        // once (emit sets `notified`), but keep the task running so the pane
+        // stays addressable for follow-ups. The task only reaches terminal
+        // via a confirmed dead pane (ghost sweep) or an approved shutdown
+        // (killInProcessTeammate's abort, which disposes this watchdog).
+        updateTaskState(taskId, setAppState, task =>
+          task.status === 'running'
+            ? {
+                ...task,
+                isIdle: true,
+                delegatedActivity: latestIdle.delegatedActivity,
+              }
+            : task,
+        )
+        try {
+          await emit('completed', undefined, paneTurnResult(latestIdle))
+        } finally {
+          dispose()
+        }
+        return
+      }
+      if (status === 'failed' && watchdogFailedTask) {
+        if (selfReportedFailure) return
+        // A merely-slow child was failed spuriously; its late completion
+        // wins. The fromWatchdogFailure option lets the failed → completed
+        // rewrite re-arm `notified` so the completion is emitted.
+        if (
+          !transitionTerminal('completed', undefined, {
+            fromWatchdogFailure: true,
+          })
+        ) {
+          return
+        }
+        try {
+          await emit('completed', undefined, paneTurnResult(latestIdle), {
+            filePrefix: LATE_COMPLETION_SEPARATOR,
+          })
+        } finally {
+          dispose()
+        }
+        return
+      }
+      // Terminal by another hand (or gone): the watchdog's job is done.
+      dispose()
+    })
+  }
+
+  async function scanUnserialized(): Promise<void> {
     if (disposed) {
       return
     }
@@ -1143,9 +1257,11 @@ export function armPaneTeammateWatchdog({
       dispose()
       return
     }
-    const watchingLateCompletion =
-      watchdogFailedTask && taskStatusNow === 'failed'
-    if (taskStatusNow !== 'running' && !watchingLateCompletion) {
+    // A snapshot, used only to decide whether this scan has anything left to
+    // do (early exit, skipping the deadlines). It never drives a terminal
+    // decision: finalizeFromIdleReport and failTask re-read inside the lock.
+    const lateWatchAtStart = watchdogFailedTask && taskStatusNow === 'failed'
+    if (taskStatusNow !== 'running' && !lateWatchAtStart) {
       dispose()
       return
     }
@@ -1197,7 +1313,11 @@ export function armPaneTeammateWatchdog({
           if (waitingForChildren) lastSignalAt = now()
           waitingForChildren = false
           consumedWaiting = key
-          updateTaskState(taskId, setAppState, task => ({ ...task, isIdle: false, delegatedActivity: undefined }))
+          updateTaskState(taskId, setAppState, task =>
+            task.status === 'running'
+              ? { ...task, isIdle: false, delegatedActivity: undefined }
+              : task,
+          )
           latestIdle = null
         } else if (key === consumedWaiting && !waitingForChildren) {
           latestIdle = null
@@ -1210,11 +1330,15 @@ export function armPaneTeammateWatchdog({
         if (latestIdle.idleReason === 'waiting_for_children') {
           // Waiting is not completion. Keep the watchdog alive, including its
           // death probe, until the child's existing poll emits the quiet edge.
-          updateTaskState(taskId, setAppState, task => ({
-            ...task,
-            isIdle: true,
-            delegatedActivity: latestIdle!.delegatedActivity,
-          }))
+          updateTaskState(taskId, setAppState, task =>
+            task.status === 'running'
+              ? {
+                  ...task,
+                  isIdle: true,
+                  delegatedActivity: latestIdle!.delegatedActivity,
+                }
+              : task,
+          )
           const liveness = await probePane()
           if (disposed) return
           if (liveness === 'dead') {
@@ -1225,9 +1349,15 @@ export function armPaneTeammateWatchdog({
           return
         }
         if (latestIdle.idleReason === 'parked') {
-          updateTaskState(taskId, setAppState, task => ({
-            ...task, isIdle: true, delegatedActivity: latestIdle!.delegatedActivity,
-          }))
+          updateTaskState(taskId, setAppState, task =>
+            task.status === 'running'
+              ? {
+                  ...task,
+                  isIdle: true,
+                  delegatedActivity: latestIdle!.delegatedActivity,
+                }
+              : task,
+          )
           parked = true
           logForDebugging(
             `[PaneWatchdog] ${teammateName} parked (usage limit); failure deadlines stand down`,
@@ -1235,57 +1365,7 @@ export function armPaneTeammateWatchdog({
           return
         }
         parked = false
-        // Disarm before emitting: emit awaits the output-file flush, and an
-        // interval scan overlapping it must not append the report again.
-        dispose()
-        if (latestIdle.idleReason === 'failed') {
-          const reason =
-            latestIdle.failureReason ?? 'Teammate reported a failed turn'
-          if (transitionTerminal('failed', reason)) {
-            await emit('failed', reason, paneTurnResult(latestIdle))
-            // Explicit self-reported failure only (never the deadline path,
-            // where a slow child's late completion must still win).
-            scheduleFailedReap()
-          }
-        } else if (watchingLateCompletion) {
-          // A merely-slow child was failed spuriously; its late completion
-          // wins. The fromWatchdogFailure option lets the failed → completed
-          // rewrite re-arm `notified` so the completion is emitted. It goes
-          // through the finalization lock, so it never interleaves with the
-          // failure's side effects (see withFinalization for the rule).
-          const completionResult = paneTurnResult(latestIdle)
-          await withFinalization(async () => {
-            if (
-              !transitionTerminal('completed', undefined, {
-                fromWatchdogFailure: true,
-              })
-            ) {
-              return
-            }
-            await emit(
-              'completed',
-              undefined,
-              completionResult,
-              failureCommitted
-                ? { filePrefix: LATE_COMPLETION_SEPARATOR }
-                : undefined,
-            )
-          })
-        } else {
-          // 'available' and 'interrupted' from a living pane mean the turn is
-          // over and the teammate is idle at its prompt — alive and resumable,
-          // NOT finished-for-good. Deliver the turn result to the lead exactly
-          // once (emit sets `notified`), but keep the task running so the pane
-          // stays addressable for follow-ups. The task only reaches terminal
-          // via a confirmed dead pane (ghost sweep) or an approved shutdown
-          // (killInProcessTeammate's abort, which disposes this watchdog).
-          updateTaskState(taskId, setAppState, task => ({
-            ...task,
-            isIdle: true,
-            delegatedActivity: latestIdle!.delegatedActivity,
-          }))
-          await emit('completed', undefined, paneTurnResult(latestIdle))
-        }
+        await finalizeFromIdleReport(latestIdle)
         return
       }
       for (const message of qualifying) {
@@ -1303,7 +1383,7 @@ export function armPaneTeammateWatchdog({
 
     // A task this watchdog already failed has no deadlines left to mind —
     // the late-completion watch above is its only remaining job.
-    if (watchingLateCompletion) {
+    if (lateWatchAtStart) {
       return
     }
 
@@ -1357,6 +1437,34 @@ export function armPaneTeammateWatchdog({
     await failTask(noProgressError(elapsed, 'alive'), { paneDead: false })
   }
 
+  // Single-flight: at most one scan runs at a time. A call during a running
+  // scan queues ONE follow-up (coalesced) that starts when the current scan
+  // settles; the flag is cleared in `finally`, so a scan that throws never
+  // blocks later ones. The interval tick skips instead of queueing.
+  let scanInFlight: Promise<void> | null = null
+  let scanQueued: Promise<void> | null = null
+  function scan(): Promise<void> {
+    if (scanInFlight === null) {
+      const run: Promise<void> = scanUnserialized().finally(() => {
+        if (scanInFlight === run) scanInFlight = null
+      })
+      scanInFlight = run
+      return run
+    }
+    if (scanQueued === null) {
+      scanQueued = scanInFlight
+        .then(
+          () => undefined,
+          () => undefined,
+        )
+        .then(() => {
+          scanQueued = null
+          return scan()
+        })
+    }
+    return scanQueued
+  }
+
   signal?.addEventListener('abort', () => dispose(), { once: true })
 
   // The ghost sweep is owned by a team-scoped sweeper, not this watchdog — a
@@ -1366,6 +1474,8 @@ export function armPaneTeammateWatchdog({
 
   if (scanInterval !== null) {
     timer = setInterval(() => {
+      // Skip, never queue: the next tick comes anyway.
+      if (scanInFlight !== null) return
       void scan().catch(error => {
         logForDebugging(
           `[PaneWatchdog] scan for ${teammateName} failed: ${String(error)}`,
@@ -1378,6 +1488,7 @@ export function armPaneTeammateWatchdog({
 
   return {
     scan,
+    scanUnserialized,
     dispose,
     get disposed() {
       return disposed

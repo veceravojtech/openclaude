@@ -287,14 +287,14 @@ test('a late completion that wins during the failure capture leaves no stale fai
 
   // Alive pane past its progress deadline: failed, capture pending.
   world.nowMs += 600_001
-  const failing = handle.scan()
+  const failing = handle.scanUnserialized()
   await waitUntil(() => captureStarted, 'captureStarted')
 
   world.mailbox.push(
     idle(world, { idleReason: 'available', lastAssistantText: 'FINAL: late but real.' }),
   )
   const capture2 = captureAtEnqueue()
-  await handle.scan()
+  await handle.scanUnserialized()
   releaseCapture('stale tail')
   await failing
   capture2.stop()
@@ -429,6 +429,41 @@ test('a TaskStop kill that lands during the failure flush suppresses the failure
 
   expect(capture.seen).toHaveLength(0)
   expect(tasks[taskId]!.status).toBe('killed')
+})
+
+test('a TaskStop kill that lands during the dead-pane unassign leaves no failure text on the killed task', async () => {
+  const world = makeWorld()
+  let releaseUnassign: () => void = () => {}
+  const unassignGate = new Promise<void>(resolve => {
+    releaseUnassign = resolve
+  })
+  let unassignInFlight = false
+  const { taskId, handle } = registerWith(world, {
+    probePane: async () => 'dead',
+    unassignMemberTasks: async () => {
+      unassignInFlight = true
+      await unassignGate
+      return ''
+    },
+  })
+  await _clearOutputsForTest()
+
+  const capture = captureAtEnqueue()
+  world.nowMs += 600_001
+  const failing = handle.scan()
+  await waitUntil(() => unassignInFlight, 'unassignInFlight')
+
+  // Not a lock holder: the kill rewrites the task directly, mid-unassign.
+  const tasks = world.state.tasks as Record<string, Record<string, unknown>>
+  tasks[taskId] = { ...tasks[taskId]!, status: 'killed', notified: false }
+
+  releaseUnassign()
+  await failing
+  capture.stop()
+  await _clearOutputsForTest()
+
+  expect(capture.seen).toHaveLength(0)
+  expect(readFileSync(getTaskOutputPath(taskId), 'utf8')).toBe('')
 })
 
 test('a failure whose flush throws still releases finalization: the late completion is delivered', async () => {
