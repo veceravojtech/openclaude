@@ -49,6 +49,11 @@ import { FORK_AGENT, isForkSubagentEnabled } from './forkSubagent.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
 import { isBuiltInAgent } from './loadAgentsDir.js'
 import { runAgent } from './runAgent.js'
+import {
+  AttentionSpawnBlockedError,
+  checkAttentionSpawnGate,
+} from '../../utils/attentionItems.js'
+import { isTeammate } from '../../utils/teammate.js'
 
 export type ResumeAgentResult = {
   agentId: string
@@ -61,13 +66,25 @@ export async function resumeAgentBackground({
   toolUseContext,
   canUseTool,
   invokingRequestId,
+  userInitiated = false,
 }: {
   agentId: string
   prompt: string
   toolUseContext: ToolUseContext
   canUseTool: CanUseToolFn
   invokingRequestId?: string
+  /**
+   * The user resumed the agent from its transcript view. The Phase 5 spawn
+   * gate binds the root LEAD's decisions, not the user's explicit action.
+   */
+  userInitiated?: boolean
 }): Promise<ResumeAgentResult> {
+  // Phase 5 spawn gate, as in AgentTool.call: the root lead cannot restart a
+  // stopped agent (SendMessage's auto-resume) while a failure is undecided.
+  if (!userInitiated && !toolUseContext.agentId && !isTeammate()) {
+    const blocked = await checkAttentionSpawnGate()
+    if (blocked) throw new AttentionSpawnBlockedError(blocked)
+  }
   const startTime = Date.now()
   const appState = toolUseContext.getAppState()
   const permissionSessionState = {

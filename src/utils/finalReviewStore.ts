@@ -300,6 +300,7 @@ export function finalReviewersOf(
 }
 
 type OpenGapTask = { id: string; subject: string; gapOf: string }
+type GapTask = OpenGapTask & { gapId?: string; open: boolean }
 
 /**
  * Open (not completed, not cancelled) tasks in `tasksDir` whose
@@ -310,6 +311,45 @@ export async function listOpenGapTasksIn(
   tasksDir: string,
   reviewerIds: readonly string[],
 ): Promise<OpenGapTask[]> {
+  return (await listGapTasksIn(tasksDir, reviewerIds))
+    .filter(t => t.open)
+    .map(({ id, subject, gapOf }) => ({ id, subject, gapOf }))
+}
+
+/**
+ * GAPs recorded by these reviewers that have no task at all (open or
+ * resolved), as `<reviewer>/<gapId>`. A GAPS record is written before its
+ * GAP tasks are filed, so a crash or a failed `fileGapTasks` in between
+ * leaves GAPs that no task tracks; the gate treats them as open.
+ */
+export async function listUnfiledGapsIn(
+  tasksDir: string,
+  reviewerIds: readonly string[],
+): Promise<{ reviewer: string; gapId: string }[]> {
+  if (reviewerIds.length === 0) return []
+  const filed = new Set(
+    (await listGapTasksIn(tasksDir, reviewerIds, true)).map(
+      t => `${t.gapOf}\u0000${t.gapId ?? ''}`,
+    ),
+  )
+  const missing: { reviewer: string; gapId: string }[] = []
+  for (const reviewer of reviewerIds) {
+    const record = await readFinalReviewIn(tasksDir, reviewer)
+    if (record?.result !== 'GAPS') continue
+    for (const gap of record.gaps) {
+      if (!filed.has(`${reviewer}\u0000${gap.id}`)) {
+        missing.push({ reviewer, gapId: gap.id })
+      }
+    }
+  }
+  return missing
+}
+
+async function listGapTasksIn(
+  tasksDir: string,
+  reviewerIds: readonly string[],
+  includeResolved = false,
+): Promise<GapTask[]> {
   if (reviewerIds.length === 0) return []
   let files: string[]
   try {
@@ -318,7 +358,7 @@ export async function listOpenGapTasksIn(
     return []
   }
   const wanted = new Set(reviewerIds)
-  const open: OpenGapTask[] = []
+  const open: GapTask[] = []
   await Promise.all(
     files
       .filter(f => f.endsWith('.json'))
@@ -333,19 +373,19 @@ export async function listOpenGapTasksIn(
             metadata?: Record<string, unknown>
           } | null
           const gapOf = task?.metadata?.gapOf
-          if (
-            !task ||
-            typeof gapOf !== 'string' ||
-            !wanted.has(gapOf) ||
-            task.status === 'completed' ||
-            task.status === 'cancelled'
-          ) {
+          if (!task || typeof gapOf !== 'string' || !wanted.has(gapOf)) {
             return
           }
+          const isOpen =
+            task.status !== 'completed' && task.status !== 'cancelled'
+          if (!isOpen && !includeResolved) return
+          const gapId = task.metadata?.gapId
           open.push({
             id: typeof task.id === 'string' ? task.id : file.replace(/\.json$/, ''),
             subject: typeof task.subject === 'string' ? task.subject : '',
             gapOf,
+            gapId: typeof gapId === 'string' ? gapId : undefined,
+            open: isOpen,
           })
         } catch {
           // Unreadable task files are not GAP tasks we can see.
@@ -392,10 +432,13 @@ export async function checkFinalReviewGateIn(
         : `GAPS (${record.gaps.map(g => g.id).join(', ')})`
     return `Cannot complete task: final reviewer '${reviewedBy}' recorded ${found}; only DONE allows completion. ${rerun}`
   }
-  const openGaps = await listOpenGapTasksIn(
-    tasksDir,
-    finalReviewersOf(storedMetadata, resultingMetadata),
-  )
+  const reviewers = finalReviewersOf(storedMetadata, resultingMetadata)
+  const openGaps = await listOpenGapTasksIn(tasksDir, reviewers)
+  const unfiled = await listUnfiledGapsIn(tasksDir, reviewers)
+  if (unfiled.length > 0) {
+    const list = unfiled.map(g => `${g.gapId} (reviewer ${g.reviewer})`).join(', ')
+    return `Cannot complete task: a final review recorded GAPs that have no GAP task yet: ${list}. Re-file them with AttentionDecide (decision "patch" on the reviewer's gap item re-files missing GAP tasks), resolve each GAP task, then complete this task again.`
+  }
   if (openGaps.length > 0) {
     const list = openGaps
       .map(t => `#${t.id}${t.subject ? ` (${t.subject})` : ''}`)

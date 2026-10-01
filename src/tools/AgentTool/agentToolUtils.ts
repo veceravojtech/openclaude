@@ -57,8 +57,17 @@ import { emitTaskProgress as emitTaskProgressEvent } from '../../utils/task/sdkP
 import { isInProcessTeammate } from '../../utils/teammateContext.js'
 import { getTokenCountFromUsage } from '../../utils/tokens.js'
 import {
+  gapItemId,
+  noteAttentionItem,
+  reportLostAttentionItem,
+  supersedeAttentionItem,
+  verdictItemId,
+} from '../../utils/attentionItems.js'
+import { isTeammate } from '../../utils/teammate.js'
+import {
   clearFinalReview,
   fileGapTasks,
+  registerFinalReviewer,
   type ParsedFinalReview,
   parseFinalReview,
   parseReviewIdentity,
@@ -271,6 +280,9 @@ export const agentToolResultSchema = lazySchema(() =>
     // Ids of the tasks filed for the GAPs of a GAPS result.
     finalReviewGapTaskIds: z.array(z.string()).optional(),
     finalReviewGapTaskError: z.string().optional(),
+    // Set when the Phase 5 attention item for this verdict / GAPS review
+    // could not be written; appended to the caller's verdict line.
+    attentionItemError: z.string().optional(),
     content: z.array(z.object({ type: z.literal('text'), text: z.string() })),
     totalToolUseCount: z.number(),
     totalDurationMs: z.number(),
@@ -488,6 +500,23 @@ export async function recordVerificationVerdictIfApplicable(
     logForDebugging(
       `[verificationVerdicts] recorded ${verdict} for verifier ${result.agentId}`,
     )
+    // Phase 5: anything but PASS is a failure the root lead must decide.
+    if (verdict !== 'PASS' && !isTeammate()) {
+      await noteAttentionItem(
+        {
+          id: verdictItemId(result.agentId),
+          kind: 'verdict',
+          source: { agentId: result.agentId, backend: 'local_agent' },
+          summary:
+            verdict === 'MISSING'
+              ? `verifier ${result.agentId} gave no verdict (no "VERDICT:" line)`
+              : `verifier ${result.agentId} returned VERDICT: ${verdict}`,
+          transient: false,
+          transientReason: 'a verdict is about the work, not the provider',
+        },
+        { onLost: message => noteLostAttention(result, message) },
+      )
+    }
   } catch (error) {
     result.verificationVerdictRecorded = false
     result.verificationVerdictError = errorMessage(error)
@@ -501,6 +530,18 @@ export async function recordVerificationVerdictIfApplicable(
   }
 }
 
+/** Records a lost attention-item write on the result and tells the lead. */
+function noteLostAttention(result: AgentToolResult, message: string): void {
+  result.attentionItemError = message
+  reportLostAttentionItem(message)
+}
+
+function withAttentionError(result: AgentToolResult, line: string): string {
+  return result.attentionItemError
+    ? `${line}\n${result.attentionItemError}`
+    : line
+}
+
 /**
  * One line describing a verification run's verdict for the caller: whether
  * it was recorded and how to cite it, or that it was NOT recorded and why.
@@ -511,9 +552,9 @@ export function formatVerificationVerdictLine(
 ): string | undefined {
   if (!result.verificationVerdict) return undefined
   if (result.verificationVerdictRecorded) {
-    return `verificationVerdict: ${result.verificationVerdict} (recorded for this agentId; to complete a task with requiresVerification, set metadata.verifiedBy: '${result.agentId}' — only PASS allows completion)`
+    return withAttentionError(result, `verificationVerdict: ${result.verificationVerdict} (recorded for this agentId; to complete a task with requiresVerification, set metadata.verifiedBy: '${result.agentId}' — only PASS allows completion)`)
   }
-  return `verificationVerdict: ${result.verificationVerdict} (NOT recorded: ${result.verificationVerdictError ?? 'unknown error'}; this agentId cannot satisfy requiresVerification — run the verification again)`
+  return withAttentionError(result, `verificationVerdict: ${result.verificationVerdict} (NOT recorded: ${result.verificationVerdictError ?? 'unknown error'}; this agentId cannot satisfy requiresVerification — run the verification again)`)
 }
 
 /** The detached checkout a final-reviewer run was given. */
@@ -634,6 +675,42 @@ export async function recordFinalReviewIfApplicable(
     result.finalReview = parsed.result
     result.finalReviewCommit = target?.commit
     if (parsed.result === 'MISSING') result.finalReviewReason = parsed.reason
+    if (parsed.result === 'GAPS') {
+      // Before the record exists, and independent of filing GAP tasks: list
+      // this reviewer on every open flagged task, so the gate also refuses
+      // completion while one of its GAPs has no task (a crash or a failed
+      // fileGapTasks below cannot leave the GAPS result unenforced).
+      let flaggedIds: string[] = []
+      try {
+        flaggedIds = await registerFinalReviewer(result.agentId)
+      } catch (error) {
+        result.finalReviewGapTaskError = `could not list the reviewer on flagged tasks: ${errorMessage(error)}`
+        logForDebugging(
+          `[finalReviews] failed to register reviewer ${result.agentId}: ${errorMessage(error)}`,
+          { level: 'error' },
+        )
+      }
+      // Phase 5: the GAPS review is an attention item for the root lead,
+      // linked to the flagged tasks it reviewed. Its `patch` decision
+      // re-files any GAP task that is missing.
+      if (!isTeammate()) {
+        await noteAttentionItem(
+          {
+            id: gapItemId(result.agentId),
+            kind: 'gap',
+            source: {
+              agentId: result.agentId,
+              backend: 'local_agent',
+              ...(flaggedIds.length ? { taskListTaskIds: flaggedIds } : {}),
+            },
+            summary: `final reviewer ${result.agentId} found ${parsed.gaps.length} GAP(s): ${parsed.gaps.map(g => `${g.id} ${g.requirement}`).join('; ')}`,
+            transient: false,
+            transientReason: 'a GAP is about the work, not the provider',
+          },
+          { onLost: message => noteLostAttention(result, message) },
+        )
+      }
+    }
     await recordFinalReview({
       agentId: result.agentId,
       result: parsed.result,
@@ -665,6 +742,14 @@ export async function recordFinalReviewIfApplicable(
   } catch (error) {
     result.finalReviewRecorded = false
     result.finalReviewError = errorMessage(error)
+    // No GAPS record was written: a gap item created above has nothing to
+    // decide. Superseded (not deleted) so the attempt stays visible.
+    if (result.finalReview === 'GAPS') {
+      await supersedeAttentionItem(
+        gapItemId(result.agentId),
+        'final review not recorded',
+      ).catch(() => {})
+    }
     logForDebugging(
       `[finalReviews] failed to record final review for ${result.agentId}: ${errorMessage(error)}`,
       { level: 'error' },
@@ -686,19 +771,19 @@ export function formatFinalReviewLine(
     ? ` at commit ${result.finalReviewCommit}`
     : ''
   if (!result.finalReviewRecorded) {
-    return `finalReview: ${result.finalReview} (NOT recorded: ${result.finalReviewError ?? 'unknown error'}; this agentId cannot satisfy requiresFinalReview — run the final reviewer again)`
+    return withAttentionError(result, `finalReview: ${result.finalReview} (NOT recorded: ${result.finalReviewError ?? 'unknown error'}; this agentId cannot satisfy requiresFinalReview — run the final reviewer again)`)
   }
   if (result.finalReview === 'DONE') {
-    return `finalReview: DONE (recorded for this agentId${at}; to complete a task with requiresFinalReview, set metadata.finalReviewedBy: '${result.agentId}' — open GAP tasks from earlier reviews still block it)`
+    return withAttentionError(result, `finalReview: DONE (recorded for this agentId${at}; to complete a task with requiresFinalReview, set metadata.finalReviewedBy: '${result.agentId}' — open GAP tasks from earlier reviews still block it)`)
   }
   if (result.finalReview === 'GAPS') {
     const ids = result.finalReviewGapTaskIds ?? []
     const filed = result.finalReviewGapTaskError
       ? `GAP tasks could NOT all be filed: ${result.finalReviewGapTaskError}`
       : `GAP tasks: ${ids.map(id => `#${id}`).join(', ')} (each blocks every open task with requiresFinalReview until it is completed or cancelled)`
-    return `finalReview: GAPS (recorded for this agentId${at}; ${filed}. Fix the gaps, commit, and run the final reviewer again on the new commit.)`
+    return withAttentionError(result, `finalReview: GAPS (recorded for this agentId${at}; ${filed}. Fix the gaps, commit, and run the final reviewer again on the new commit.)`)
   }
-  return `finalReview: MISSING (recorded for this agentId${at}: ${result.finalReviewReason ?? 'no valid report'}; this agentId cannot satisfy requiresFinalReview — run the final reviewer again)`
+  return withAttentionError(result, `finalReview: MISSING (recorded for this agentId${at}: ${result.finalReviewReason ?? 'no valid report'}; this agentId cannot satisfy requiresFinalReview — run the final reviewer again)`)
 }
 
 /**

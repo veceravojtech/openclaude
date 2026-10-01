@@ -20,6 +20,7 @@ import { createSignal } from './signal.js'
 import { jsonParse, jsonStringify } from './slowOperations.js'
 import { getTeamName } from './teammate.js'
 import { getTeammateContext } from './teammateContext.js'
+import { isHoldActiveIn } from './attentionItemStore.js'
 import { checkCompletionGatesIn } from './finalReviewStore.js'
 import { VerificationGateError } from './verificationVerdictStore.js'
 
@@ -990,9 +991,11 @@ export type ClaimTaskResult = {
     | 'cancelled'
     | 'blocked'
     | 'agent_busy'
+    | 'held_for_decision'
   task?: Task
   busyWithTasks?: string[] // task IDs the agent is busy with (when reason is 'agent_busy')
   blockedByTasks?: string[] // task IDs blocking this task (when reason is 'blocked')
+  attentionItemId?: string // the undecided attention item holding the task (when reason is 'held_for_decision')
 }
 
 /**
@@ -1017,6 +1020,12 @@ async function ensureTaskListLockFile(taskListId: string): Promise<string> {
     // EEXIST or other — file already exists, which is fine.
   }
   return lockPath
+}
+
+/** The task list whose attention store a task's hold refers to. */
+function holdListOf(task: Task, taskListId: string): string {
+  const list = task.metadata?.attentionHoldList
+  return typeof list === 'string' && list !== '' ? list : taskListId
 }
 
 export type ClaimTaskOptions = {
@@ -1081,6 +1090,12 @@ export async function claimTask(
     // Check if already resolved
     if (task.status === 'completed') {
       return { success: false, reason: 'already_resolved', task }
+    }
+
+    // Released by a failed worker and held until the lead decides
+    const hold = await isHoldActiveIn(getTasksDir(holdListOf(task, taskListId)), task.metadata)
+    if (hold) {
+      return { success: false, reason: 'held_for_decision', task, attentionItemId: hold }
     }
 
     // Check for unresolved blockers (open or in_progress tasks block)
@@ -1151,6 +1166,12 @@ async function claimTaskWithBusyCheck(
     // Check if already resolved
     if (task.status === 'completed') {
       return { success: false, reason: 'already_resolved', task }
+    }
+
+    // Released by a failed worker and held until the lead decides
+    const hold = await isHoldActiveIn(getTasksDir(holdListOf(task, taskListId)), task.metadata)
+    if (hold) {
+      return { success: false, reason: 'held_for_decision', task, attentionItemId: hold }
     }
 
     // Check for unresolved blockers (open or in_progress tasks block)
@@ -1327,6 +1348,22 @@ export async function unassignTeammateTasks(
   teammateId: string,
   teammateName: string,
   reason: 'terminated' | 'shutdown' | 'failed',
+  options: {
+    /**
+     * Attention item id to hold the released tasks for: written as
+     * `metadata.attentionHold` in the same locked write that unassigns each
+     * task, so no other teammate can claim it before the lead decides. The
+     * item must already exist (a hold only counts while its item is
+     * undecided).
+     */
+    attentionHold?: string
+    /**
+     * The task list the attention item lives in (the root lead's), when it
+     * is not `teamName`: written as `metadata.attentionHoldList` so a claim
+     * checks the hold against the right store.
+     */
+    attentionHoldList?: string
+  } = {},
 ): Promise<UnassignTasksResult> {
   const tasks = await listTasks(teamName)
   const unresolvedAssignedTasks = tasks.filter(
@@ -1337,9 +1374,25 @@ export async function unassignTeammateTasks(
 
   // Unassign each task and reset status to open. A task cancelled since the
   // listing above is terminal and is left as it is.
+  const hold = options.attentionHold
+  const holdList = options.attentionHoldList
   for (const task of unresolvedAssignedTasks) {
     try {
-      await updateTask(teamName, task.id, { owner: undefined, status: 'pending' })
+      if (hold) {
+        await updateTaskWith(teamName, task.id, current => ({
+          owner: undefined,
+          status: 'pending',
+          metadata: {
+            ...(current.metadata ?? {}),
+            attentionHold: hold,
+            ...(holdList && holdList !== teamName
+              ? { attentionHoldList: holdList }
+              : {}),
+          },
+        }))
+      } else {
+        await updateTask(teamName, task.id, { owner: undefined, status: 'pending' })
+      }
     } catch (e) {
       if (!(e instanceof TaskTransitionError)) throw e
     }

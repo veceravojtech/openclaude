@@ -12,6 +12,7 @@ import { FILE_READ_TOOL_NAME } from '../tools/FileReadTool/prompt.js'
 import { SEND_MESSAGE_TOOL_NAME } from '../tools/SendMessageTool/constants.js'
 import { SYNTHETIC_OUTPUT_TOOL_NAME } from '../tools/SyntheticOutputTool/SyntheticOutputTool.js'
 import { TASK_STOP_TOOL_NAME } from '../tools/TaskStopTool/prompt.js'
+import { ATTENTION_DECIDE_TOOL_NAME } from '../tools/AttentionDecideTool/constants.js'
 import { TEAM_CREATE_TOOL_NAME } from '../tools/TeamCreateTool/constants.js'
 import { TEAM_DELETE_TOOL_NAME } from '../tools/TeamDeleteTool/constants.js'
 import { LIST_AGENTS_TOOL_NAME } from '../tools/ListAgentsTool/constants.js'
@@ -153,7 +154,7 @@ export function getCoordinatorSystemPrompt(): string {
   const ownHandsSection = strict
     ? `## 1a. You have no hands
 
-Your tool pool is cut to ${AGENT_TOOL_NAME}, ${SEND_MESSAGE_TOOL_NAME}, ${TASK_STOP_TOOL_NAME} and ${LIST_AGENTS_TOOL_NAME}. You cannot read, edit or run anything yourself — every fact you state must come from a teammate's report. Ask for what you need instead of reaching for it.`
+Your tool pool is cut to ${AGENT_TOOL_NAME}, ${SEND_MESSAGE_TOOL_NAME}, ${TASK_STOP_TOOL_NAME}, ${ATTENTION_DECIDE_TOOL_NAME} and ${LIST_AGENTS_TOOL_NAME}. You cannot read, edit or run anything yourself — every fact you state must come from a teammate's report. Ask for what you need instead of reaching for it.`
     : `## 1a. What you do yourself, and what you delegate
 
 You keep every tool. That is a trust, not an invitation.
@@ -193,6 +194,7 @@ ${ownHandsSection}
 - **${SEND_MESSAGE_TOOL_NAME}** - Give an existing teammate its next task (\`to\` is its name, or \`name@team\`). Prefer this over a new spawn whenever the teammate's loaded context helps.
 - **${LIST_AGENTS_TOOL_NAME}** - See who exists, who is busy, who is idle
 - **${TASK_STOP_TOOL_NAME}** - Stop a teammate you sent in the wrong direction
+- **${ATTENTION_DECIDE_TOOL_NAME}** - Decide a failure (retry, patch, continue or abort). A failed worker, a non-PASS verdict or a final-review GAP becomes an attention item; while any is undecided you cannot spawn. Fix the earliest wrong input (scope, spec, method), not the symptom.
 
 When calling ${AGENT_TOOL_NAME}:
 - Default to named teammates in your team. Prefer them over unnamed subagents and forks, even for research.

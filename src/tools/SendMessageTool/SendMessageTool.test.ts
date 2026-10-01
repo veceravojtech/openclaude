@@ -941,3 +941,28 @@ test('a shutdown approval that cannot reach the lead is reported and does not ex
   }
   expect(abortController.signal.aborted).toBe(false)
 })
+
+test('Phase 5: an undecided attention item does not block messaging a running teammate, shutdown included', async () => {
+  // The spawn gate covers new work only: SendMessage to a live teammate (and
+  // a shutdown_request) must still go through while a failure is undecided.
+  const { checkAttentionSpawnGate, createAttentionItem } = await import(
+    '../../utils/attentionItems.js'
+  )
+  const { getTaskListId } = await import('../../utils/tasks.js')
+  await createAttentionItem(
+    {
+      id: 'failure-x-0',
+      kind: 'failure',
+      source: { taskId: 'x' },
+      summary: 'worker failed: boom',
+      transient: false,
+    },
+    getTaskListId(),
+  )
+  expect(await checkAttentionSpawnGate()).toContain('Blocked: 1 failure(s)')
+  const lead = contextFor(appStateWith({}, [teammateTask('coder', 'running')]))
+  const plain = await send({ to: 'coder', message: 'status?', summary: 'status' }, lead.context)
+  expect(plain.success).toBe(true)
+  const shutdown = await sendStructured('coder', { type: 'shutdown_request' }, lead.context)
+  expect(shutdown.success).toBe(true)
+})

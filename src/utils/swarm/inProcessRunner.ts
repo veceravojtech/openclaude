@@ -147,6 +147,7 @@ import {
   isTaskResolved,
   listTasks,
   type Task,
+  getTaskListId,
   unassignTeammateTasks,
   updateTask,
 } from '../tasks.js'
@@ -197,6 +198,11 @@ import {
   takeSubLeadHandoff,
   writeSubLeadHandoffFile,
 } from './subLeadHandoff.js'
+import {
+  failureItemId,
+  linkTasksToAttentionItem,
+  noteRunFailure,
+} from '../attentionItems.js'
 import {
   noteSubLeadFailure,
   resolveUpwardInboxTeam,
@@ -1649,6 +1655,8 @@ async function leaveRosterAndUnassignTasks(
   setAppState: SetAppStateFn,
   taskListId: string,
   unassignReason: 'shutdown' | 'failed',
+  /** The attention item (and the list it lives in) to hold the tasks for. */
+  attentionHold?: { id: string; list: string },
 ): Promise<string> {
   try {
     removeMemberByAgentId(identity.teamName, identity.agentId)
@@ -1669,14 +1677,24 @@ async function leaveRosterAndUnassignTasks(
   })
   let notificationMessage = `${identity.agentName} has shut down.`
   try {
-    notificationMessage = (
-      await unassignTeammateTasks(
+    const unassigned = await unassignTeammateTasks(
+      taskListId,
+      identity.agentId,
+      identity.agentName,
+      unassignReason,
+      attentionHold
+        ? { attentionHold: attentionHold.id, attentionHoldList: attentionHold.list }
+        : {},
+    )
+    notificationMessage = unassigned.notificationMessage
+    if (attentionHold && unassigned.unassignedTasks.length > 0) {
+      await linkTasksToAttentionItem(
+        attentionHold.id,
+        unassigned.unassignedTasks.map(t => t.id),
+        attentionHold.list,
         taskListId,
-        identity.agentId,
-        identity.agentName,
-        unassignReason,
       )
-    ).notificationMessage
+    }
   } catch (err) {
     logForDebugging(
       `[inProcessRunner] ${identity.agentId} failed to unassign tasks: ${err}`,
@@ -3243,6 +3261,35 @@ export async function runInProcessTeammate(
       })
     }
 
+    // Phase 5: a root-team member's failure is an attention item the lead
+    // must decide. This path never reaches enqueueAgentNotification (notified
+    // is pre-set above), so it creates the item itself — BEFORE the tasks are
+    // released below, so the hold they get names an item that exists. A
+    // kill (alreadyTerminal) and a sub-team member (whose failure goes to its
+    // sub-lead, not the root lead) create none. Never throws.
+    // The item lives in the root lead's list (getTaskListId() here resolves
+    // to the root team, as it does on the lead); the tasks are released in
+    // this runner's list, which may differ — the hold records both.
+    const attentionHold =
+      !alreadyTerminal && getParentTeamName(identity.teamName) === undefined
+        ? { id: failureItemId(taskId, 0), list: getTaskListId() }
+        : undefined
+    if (attentionHold) {
+      await noteRunFailure(
+        {
+          taskId,
+          runSeq: 0,
+          description: description ?? identity.agentName,
+          error: errorMessage,
+          backend: 'in_process',
+          agentId: identity.agentId,
+          agentName: identity.agentName,
+          teamName: identity.teamName,
+        },
+        attentionHold.list,
+      )
+    }
+
     // Send idle notification with failure via file-based mailbox
     await sendIdleNotification(
       identity.agentName,
@@ -3270,6 +3317,7 @@ export async function runInProcessTeammate(
       setAppState,
       taskListId,
       'failed',
+      attentionHold,
     )
 
     // This is the one terminal path with no sub-team cascade, and that is

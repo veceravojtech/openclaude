@@ -4319,7 +4319,8 @@ export function REPL({
           agentId: task.id,
           prompt: input,
           toolUseContext: getToolUseContext(messagesRef.current, [], new AbortController(), mainLoopModel),
-          canUseTool
+          canUseTool,
+          userInitiated: true
         }).catch(err => {
           logForDebugging(`resumeAgentBackground failed: ${errorMessage(err)}`);
           addNotification({

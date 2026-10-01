@@ -27,6 +27,7 @@ const NULL_RENDERING_TYPES = [
   'budget_usd',
   'critical_system_reminder',
   'supervisor_score',
+  'attention_items',
   'edited_image_file',
   'edited_text_file',
   'opened_file_in_ide',

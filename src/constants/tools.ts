@@ -6,6 +6,7 @@ import { ENTER_PLAN_MODE_TOOL_NAME } from '../tools/EnterPlanModeTool/constants.
 import { AGENT_TOOL_NAME } from '../tools/AgentTool/constants.js'
 import { ASK_USER_QUESTION_TOOL_NAME } from '../tools/AskUserQuestionTool/prompt.js'
 import { TASK_STOP_TOOL_NAME } from '../tools/TaskStopTool/prompt.js'
+import { ATTENTION_DECIDE_TOOL_NAME } from '../tools/AttentionDecideTool/constants.js'
 import { FILE_READ_TOOL_NAME } from '../tools/FileReadTool/prompt.js'
 import { WEB_SEARCH_TOOL_NAME } from '../tools/WebSearchTool/prompt.js'
 import { TODO_WRITE_TOOL_NAME } from '../tools/TodoWriteTool/constants.js'
@@ -43,6 +44,8 @@ export const ALL_AGENT_DISALLOWED_TOOLS = new Set([
   ENTER_PLAN_MODE_TOOL_NAME,
   ASK_USER_QUESTION_TOOL_NAME,
   TASK_STOP_TOOL_NAME,
+  // Phase 5: only the root lead decides attention items.
+  ATTENTION_DECIDE_TOOL_NAME,
   // Prevent recursive workflow execution inside subagents.
   ...(feature('WORKFLOW_SCRIPTS') ? [WORKFLOW_TOOL_NAME] : []),
 ])
@@ -122,6 +125,8 @@ export const IN_PROCESS_TEAMMATE_ALLOWED_TOOLS = new Set([
 export const COORDINATOR_MODE_ALLOWED_TOOLS = new Set([
   AGENT_TOOL_NAME,
   TASK_STOP_TOOL_NAME,
+  // Phase 5: undecided failures block spawning until the lead decides them.
+  ATTENTION_DECIDE_TOOL_NAME,
   SEND_MESSAGE_TOOL_NAME,
   // Read-only peer discovery; SendMessage's description points at it.
   LIST_AGENTS_TOOL_NAME,

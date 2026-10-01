@@ -2633,3 +2633,132 @@ test('a plain-text re-task cancels the pending reap', async () => {
   const result = await mailboxWriteWith('please try again', fakeReapClock())
   expect(result).toEqual({ reaps: 0, pending: false })
 })
+
+// Phase 5: the watchdog's attention-item duties. A dead-pane failure creates
+// the item BEFORE releasing the teammate's tasks (so the hold names an item
+// that exists); a late completion supersedes an UNDECIDED failure item and
+// releases its hold, but never touches a decided one.
+const LEAD_LIST = 'lead-list'
+
+async function withAttentionStore(fn: () => Promise<void>): Promise<void> {
+  await acquireSharedMutationLock(`${LOCK_NAME}#attention`)
+  const dir = mkdtempSync(join(tmpdir(), 'openclaude-pane-attention-'))
+  setClaudeConfigHomeDirForTesting(dir)
+  // The root lead's own list, where items live; the teammate's tasks live in
+  // the team's list ('team').
+  const previousList = process.env.CLAUDE_CODE_TASK_LIST_ID
+  process.env.CLAUDE_CODE_TASK_LIST_ID = LEAD_LIST
+  try {
+    await fn()
+  } finally {
+    if (previousList === undefined) delete process.env.CLAUDE_CODE_TASK_LIST_ID
+    else process.env.CLAUDE_CODE_TASK_LIST_ID = previousList
+    const { settleAttentionWritesForTesting } = await import('../../utils/attentionItems.js')
+    await settleAttentionWritesForTesting()
+    setClaudeConfigHomeDirForTesting(undefined)
+    rmSync(dir, { recursive: true, force: true })
+    releaseSharedMutationLock()
+  }
+}
+
+test('Phase 5: a dead-pane failure creates its attention item first, then releases the tasks held for it', async () => {
+  await withAttentionStore(async () => {
+    const { readAttentionItem } = await import('../../utils/attentionItems.js')
+    const world = makeWorld()
+    const seen: Array<{ hold?: string; list?: string; itemExisted: boolean }> = []
+    const deps: PaneTeammateWatchdogDeps = {
+      ...watchdogDeps(world),
+      unassignMemberTasks: async (teamName, member, options) => {
+        world.unassignCalls.push({ teamName, ...member })
+        seen.push({
+          hold: options?.attentionHold,
+          list: options?.attentionHoldList,
+          itemExisted: options?.attentionHold
+            ? (await readAttentionItem(options.attentionHold)) !== undefined
+            : false,
+        })
+        return ''
+      },
+    }
+    registerTeammate(world, 'worker', deps)
+    worldToDispose.push(...world.handles)
+    world.teamFile.members[1]!.isActive = true
+    await world.handles[0]!.scan()
+    world.probes = ['dead']
+    world.nowMs += PROGRESS_TIMEOUT_MS + 1
+    await world.handles[0]!.scan()
+    expect(taskStatus(world)).toBe('failed')
+    const itemId = `failure-${world.taskId()}-0`
+    expect(seen).toEqual([{ hold: itemId, list: LEAD_LIST, itemExisted: true }])
+    const item = await readAttentionItem(itemId)
+    expect(item).toMatchObject({
+      kind: 'failure',
+      status: 'undecided',
+      transient: true,
+      source: { backend: 'pane', agentName: 'worker', teamName: 'team' },
+    })
+    // The notification's own hook computed the same id: still one item.
+    const { listAttentionItems, settleAttentionWritesForTesting } = await import('../../utils/attentionItems.js')
+    await settleAttentionWritesForTesting()
+    expect((await listAttentionItems()).map(i => i.id)).toEqual([itemId])
+  })
+})
+
+async function failSlowChildThenComplete(
+  world: World,
+  between: (itemId: string) => Promise<void>,
+): Promise<string> {
+  const { settleAttentionWritesForTesting } = await import('../../utils/attentionItems.js')
+  registerTeammate(world)
+  worldToDispose.push(...world.handles)
+  world.teamFile.members[1]!.isActive = true
+  await world.handles[0]!.scan()
+  world.probes = ['alive']
+  world.nowMs += PROGRESS_TIMEOUT_MS + 1
+  await world.handles[0]!.scan()
+  expect(taskStatus(world)).toBe('failed')
+  await settleAttentionWritesForTesting()
+  const itemId = `failure-${world.taskId()}-0`
+  await between(itemId)
+  world.mailbox.push(idleNotification('worker', world.nowMs, 'available', 'slow but finished'))
+  await world.handles[0]!.scan()
+  expect(taskStatus(world)).toBe('completed')
+  return itemId
+}
+
+test('Phase 5: a late completion supersedes an undecided failure item and releases its hold', async () => {
+  await withAttentionStore(async () => {
+    const { readAttentionItem } = await import('../../utils/attentionItems.js')
+    const { createTask, getTask } = await import('../../utils/tasks.js')
+    let held = ''
+    const itemId = await failSlowChildThenComplete(makeWorld(), async id => {
+      expect((await readAttentionItem(id))?.status).toBe('undecided')
+      held = await createTask(LEAD_LIST, {
+        subject: 'held work',
+        description: 'd',
+        status: 'pending',
+        blocks: [],
+        blockedBy: [],
+        metadata: { attentionHold: id },
+      })
+    })
+    expect(await readAttentionItem(itemId)).toMatchObject({
+      status: 'superseded',
+      supersededReason: 'late-completion',
+    })
+    expect((await getTask(LEAD_LIST, held))?.metadata?.attentionHold).toBeUndefined()
+  })
+})
+
+test('Phase 5: a late completion leaves a decided failure item alone', async () => {
+  await withAttentionStore(async () => {
+    const { decideAttentionItem, readAttentionItem } = await import('../../utils/attentionItems.js')
+    const itemId = await failSlowChildThenComplete(makeWorld(), async id => {
+      await decideAttentionItem(id, { choice: 'patch', reason: 'narrow it', rootCause: 'scope' })
+    })
+    expect(await readAttentionItem(itemId)).toMatchObject({
+      status: 'decided',
+      decision: { choice: 'patch' },
+    })
+  })
+})

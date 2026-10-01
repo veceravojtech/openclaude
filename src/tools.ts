@@ -10,6 +10,7 @@ import { GlobTool } from './tools/GlobTool/GlobTool.js'
 import { NotebookEditTool } from './tools/NotebookEditTool/NotebookEditTool.js'
 import { WebFetchTool } from './tools/WebFetchTool/WebFetchTool.js'
 import { TaskStopTool } from './tools/TaskStopTool/TaskStopTool.js'
+import { AttentionDecideTool } from './tools/AttentionDecideTool/AttentionDecideTool.js'
 import { BriefTool } from './tools/BriefTool/BriefTool.js'
 // Dead code elimination: conditional import for internal-only tools
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -208,6 +209,7 @@ export function getAllBaseTools(): Tools {
     TodoWriteTool,
     WebSearchTool,
     TaskStopTool,
+    AttentionDecideTool,
     AskUserQuestionTool,
     SkillTool,
     EnterPlanModeTool,
@@ -285,7 +287,9 @@ export const getTools = (permissionContext: ToolPermissionContext): Tools => {
         coordinatorModeModule?.isCoordinatorMode()
       ) {
         const sendMessageTool = getSendMessageTool()
-        if (sendMessageTool) replSimple.push(TaskStopTool, sendMessageTool)
+        if (sendMessageTool) {
+          replSimple.push(TaskStopTool, AttentionDecideTool, sendMessageTool)
+        }
       }
       return filterToolsByDenyRules(replSimple, permissionContext)
     }
@@ -297,7 +301,7 @@ export const getTools = (permissionContext: ToolPermissionContext): Tools => {
       feature('COORDINATOR_MODE') &&
       coordinatorModeModule?.isCoordinatorMode()
     ) {
-      simpleTools.push(AgentTool, TaskStopTool)
+      simpleTools.push(AgentTool, TaskStopTool, AttentionDecideTool)
       const sendMessageTool = getSendMessageTool()
       if (sendMessageTool) simpleTools.push(sendMessageTool)
     }

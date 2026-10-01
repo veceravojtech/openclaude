@@ -23,6 +23,10 @@ import {
 import { getAPIProvider } from '../model/providers.js'
 import { readDelegatedActivity } from './delegatedActivity.js'
 import { readTeamFile, setMemberActive } from './teamHelpers.js'
+import {
+  TEAMMATE_FAILURE_REASONS,
+  type TeammateFailureKind,
+} from './teammateFailureReasons.js'
 
 // Refreshed by the existing inbox poll. A new turn invalidates an in-flight
 // refresh through the roster's self-active state, without owning a timer.
@@ -236,23 +240,7 @@ export function initializeTeammateHooks(
  * provider errors can contain credentials, proxy URLs, or request bodies and
  * must never enter mailbox text or task metadata.
  */
-export type TeammateFailureKind =
-  | 'provider'
-  | 'runtime'
-  | 'authentication'
-  | 'quota'
-  | 'rate_limit'
-
-const TEAMMATE_FAILURE_REASONS: Record<TeammateFailureKind, string> = {
-  authentication:
-    'Teammate authentication failed (OAuth token revoked or invalid). Run /login for its provider, then retry.',
-  quota:
-    "Teammate provider quota exhausted or not enabled. Pick a model on another provider or wait for the provider's quota to reset.",
-  rate_limit:
-    'Teammate provider rate limit reached. Retry later or pick a model on another provider.',
-  provider: 'Teammate provider request failed before completion.',
-  runtime: 'Teammate runtime failed before completion.',
-}
+export type { TeammateFailureKind }
 
 /**
  * Map a terminal API-error message to a fixed failure category. Only the

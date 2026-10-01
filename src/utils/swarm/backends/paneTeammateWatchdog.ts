@@ -21,6 +21,7 @@ import {
 } from '../../teammateMailbox.js'
 import { TEAM_LEAD_NAME } from '../constants.js'
 import {
+  getParentTeamName,
   readTeamFileAsync,
   recordMemberTmuxSocket,
   removeTeammateFromTeamFile,
@@ -30,7 +31,15 @@ import {
   type ReaperTimers,
 } from '../failedTeammateReaper.js'
 import { retireTeammateFromLeaderView } from '../teammateRetirement.js'
-import { unassignTeammateTasks } from '../../tasks.js'
+import { getTaskListId, unassignTeammateTasks } from '../../tasks.js'
+import {
+  failureItemId,
+  linkTasksToAttentionItem,
+  noteRunFailure,
+  supersedeAttentionItem,
+} from '../../attentionItems.js'
+import { isTeammate } from '../../teammate.js'
+import { classifyTeammateFailureReason } from '../teammateFailureReasons.js'
 import { getBackendByType } from './registry.js'
 import {
   isPaneBackend,
@@ -311,10 +320,15 @@ export type PaneTeammateWatchdogDeps = {
     teamName: string,
     member: { agentId: string },
   ) => boolean
-  /** Unassign a swept teammate's open tasks; returns the lead-facing notice. */
+  /**
+   * Unassign a swept teammate's open tasks; returns the lead-facing notice.
+   * With `attentionHold`, the released tasks are held for that attention
+   * item (and linked to it) until the lead decides.
+   */
   unassignMemberTasks?: (
     teamName: string,
     member: { agentId: string; name: string },
+    options?: { attentionHold?: string; attentionHoldList?: string },
   ) => Promise<string>
   /**
    * The last `lines` lines of this watchdog's pane, or null when none can be
@@ -570,13 +584,23 @@ async function sweepRosterOnce(
 async function defaultUnassignMemberTasks(
   team: string,
   member: { agentId: string; name: string },
+  options: { attentionHold?: string; attentionHoldList?: string } = {},
 ): Promise<string> {
-  const { notificationMessage } = await unassignTeammateTasks(
+  const { notificationMessage, unassignedTasks } = await unassignTeammateTasks(
     team,
     member.agentId,
     member.name,
     'shutdown',
+    options,
   )
+  if (options.attentionHold && unassignedTasks.length > 0) {
+    await linkTasksToAttentionItem(
+      options.attentionHold,
+      unassignedTasks.map(t => t.id),
+      options.attentionHoldList ?? team,
+      team,
+    )
+  }
   return notificationMessage
 }
 
@@ -929,7 +953,11 @@ export function armPaneTeammateWatchdog({
     status: 'completed' | 'failed',
     error?: string,
     finalMessage?: string,
-    options?: { filePrefix?: string; stillCurrent?: () => boolean },
+    options?: {
+      filePrefix?: string
+      stillCurrent?: () => boolean
+      attentionTransient?: { transient: boolean; transientReason: string }
+    },
   ): Promise<void> {
     if (finalMessage) {
       appendTaskOutput(taskId, `${options?.filePrefix ?? ''}${finalMessage}\n`)
@@ -948,7 +976,84 @@ export function armPaneTeammateWatchdog({
       finalMessage,
       setAppState,
       toolUseId,
+      ...(options?.attentionTransient
+        ? { attentionTransient: options.attentionTransient }
+        : {}),
     })
+  }
+
+  /**
+   * Only the root lead decides failures: not a sub-team's pane member, and
+   * nothing inside a teammate (process or in-process context).
+   */
+  function rootLeadOwnsFailure(): boolean {
+    return getParentTeamName(teamName) === undefined && !isTeammate()
+  }
+
+  /** The run of this task a failure belongs to (its resume count), the
+   * same value enqueueAgentNotification reads for the item id. */
+  function currentRunSeq(): number {
+    let runSeq = 0
+    updateTaskState(taskId, setAppState, task => {
+      runSeq = (task as { resumeCount?: number }).resumeCount ?? 0
+      return task
+    })
+    return runSeq
+  }
+
+  /**
+   * Creates the failure item ahead of releasing the dead teammate's tasks
+   * and returns its id to hold them for (undefined when the root lead does
+   * not own this failure). Never throws.
+   */
+  async function noteFailureBeforeRelease(
+    error: string,
+    transient: { transient: boolean; transientReason: string },
+  ): Promise<{ id: string; list: string } | undefined> {
+    if (!rootLeadOwnsFailure()) return undefined
+    // The root lead's list — where its reminder and spawn gate read, and
+    // where enqueueAgentNotification's hook writes the same id.
+    const list = getTaskListId()
+    const runSeq = currentRunSeq()
+    const agentId =
+      (await readTeamFile(teamName).catch(() => null))?.members?.find(
+        m => m.name === teammateName,
+      )?.agentId ?? `${teammateName}@${teamName}`
+    await noteRunFailure(
+      {
+        taskId,
+        runSeq,
+        description,
+        error,
+        backend: 'pane',
+        agentId,
+        agentName: teammateName,
+        teamName,
+        transient,
+      },
+      list,
+    )
+    return { id: failureItemId(taskId, runSeq), list }
+  }
+
+  /**
+   * A late completion repaired the failure: an UNDECIDED failure item for
+   * it is superseded and its holds released. A decided item is left alone
+   * (the lead already acted on it). Never throws.
+   */
+  async function supersedeFailureOnLateCompletion(): Promise<void> {
+    if (!rootLeadOwnsFailure()) return
+    try {
+      await supersedeAttentionItem(
+        failureItemId(taskId, currentRunSeq()),
+        'late-completion',
+      )
+    } catch (error) {
+      logForDebugging(
+        `[PaneWatchdog] could not supersede the failure item of ${teammateName}: ${String(error)}`,
+        { level: 'error' },
+      )
+    }
   }
 
   /**
@@ -1211,13 +1316,21 @@ export function armPaneTeammateWatchdog({
    * so the failure notification still goes out. Runs only inside the
    * finalization lock, so no completion can interleave with it.
    */
-  async function unassignDeadTeammateTasks(): Promise<void> {
+  async function unassignDeadTeammateTasks(
+    attentionHold?: { id: string; list: string },
+  ): Promise<void> {
     try {
       const agentId =
         (await readTeamFile(teamName))?.members?.find(
           m => m.name === teammateName,
         )?.agentId ?? teammateName
-      await unassignMemberTasks(teamName, { agentId, name: teammateName })
+      await unassignMemberTasks(
+        teamName,
+        { agentId, name: teammateName },
+        attentionHold
+          ? { attentionHold: attentionHold.id, attentionHoldList: attentionHold.list }
+          : undefined,
+      )
     } catch (error) {
       logForDebugging(
         `[PaneWatchdog] could not unassign ${teammateName}'s tasks: ${String(error)}`,
@@ -1284,13 +1397,23 @@ export function armPaneTeammateWatchdog({
       // From here the failure is committed: the late-completion watch and the
       // late-after-commit rule apply.
       watchdogFailedTask = true
+      // Phase 5: a dead pane is transient (a respawn can fix it); an alive or
+      // unknown pane that made no progress is not.
+      const attentionTransient = paneDead
+        ? { transient: true, transientReason: 'pane exited (dead pane)' }
+        : { transient: false, transientReason: 'pane alive but made no progress' }
       if (paneDead) {
-        await unassignDeadTeammateTasks()
+        // The attention item is created BEFORE the tasks are released, so
+        // the hold they get names an item that exists. emit's
+        // enqueueAgentNotification computes the same id: a no-op there.
+        const holdId = await noteFailureBeforeRelease(error, attentionTransient)
+        await unassignDeadTeammateTasks(holdId)
         // A kill is not a lock holder: do not write text onto a killed task.
         if (!stillOurFailure(error)) return
       }
       await emit('failed', error, result, {
         stillCurrent: () => stillOurFailure(error),
+        attentionTransient,
       })
     })
     // Do NOT dispose: a merely-slow child was failed spuriously, and its
@@ -1337,7 +1460,9 @@ export function armPaneTeammateWatchdog({
             latestIdle.failureReason ?? 'Teammate reported a failed turn'
           if (!transitionTerminal('failed', reason)) return
           try {
-            await emit('failed', reason, paneTurnResult(latestIdle))
+            await emit('failed', reason, paneTurnResult(latestIdle), {
+              attentionTransient: classifyTeammateFailureReason(reason),
+            })
             // Explicit self-reported failure only (never the deadline path,
             // where a slow child's late completion must still win).
             scheduleFailedReap()
@@ -1381,6 +1506,7 @@ export function armPaneTeammateWatchdog({
         ) {
           return
         }
+        await supersedeFailureOnLateCompletion()
         try {
           await emit('completed', undefined, paneTurnResult(latestIdle), {
             filePrefix: LATE_COMPLETION_SEPARATOR,

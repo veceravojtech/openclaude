@@ -67,6 +67,7 @@ import { getTeammateSpawnCapError, MAX_TEAMMATE_REPLICAS_CEILING } from './teamm
 import { setAgentColor } from './agentColorManager.js';
 import { type AgentToolResult, agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extractPartialResult, clearVerificationVerdictBeforeRun, clearFinalReviewBeforeRun, type FinalReviewTarget, finalizeAgentTool, formatFinalReviewLine, formatVerificationVerdictLine, getLastToolUseName, isBuiltInFinalReviewRun, recordFinalReviewIfApplicable, recordVerificationVerdictIfApplicable, runAsyncAgentLifecycle } from './agentToolUtils.js';
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
+import { checkAttentionSpawnGate } from '../../utils/attentionItems.js';
 import { AGENT_TOOL_NAME, FINAL_REVIEW_AGENT_TYPE, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
 import { buildForkedMessages, buildWorktreeNotice, FORK_AGENT, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
 import { closeForegroundAgentForBackground, createForegroundAgentAbortController } from './foregroundAgentHandoff.js';
@@ -517,6 +518,17 @@ export const AgentTool = buildTool({
     });
     if (capError) {
       throw new Error(capError);
+    }
+
+    // Phase 5 spawn gate: while any failure is undecided, the ROOT lead
+    // cannot start new work — teammates and every subagent, the final
+    // reviewer included. Spawns from inside a teammate (or a subagent) are
+    // not gated: only the root lead decides attention items.
+    if (!toolUseContext.agentId && !isTeammate()) {
+      const blocked = await checkAttentionSpawnGate();
+      if (blocked) {
+        throw new Error(blocked);
+      }
     }
 
     // Check if this is a multi-agent spawn request

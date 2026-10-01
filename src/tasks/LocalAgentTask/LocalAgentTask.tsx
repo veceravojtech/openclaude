@@ -24,6 +24,9 @@ import { PANEL_GRACE_MS, registerTask, updateTaskState } from '../../utils/task/
 import { isRetainedOrWithinGrace } from '../../utils/task/retention.js';
 import { emitTaskProgress } from '../../utils/task/sdkProgress.js';
 import type { TaskState } from '../types.js';
+import { noteRunFailure } from '../../utils/attentionItems.js';
+import { getParentTeamName } from '../../utils/swarm/teamHelpers.js';
+import { isTeammate } from '../../utils/teammate.js';
 export type ToolActivity = {
   toolName: string;
   input: Record<string, unknown>;
@@ -256,7 +259,8 @@ export function enqueueAgentNotification({
   usage,
   toolUseId,
   worktreePath,
-  worktreeBranch
+  worktreeBranch,
+  attentionTransient
 }: {
   taskId: string;
   description: string;
@@ -272,6 +276,12 @@ export function enqueueAgentNotification({
   toolUseId?: string;
   worktreePath?: string;
   worktreeBranch?: string;
+  /** Transient classification of a failure, when the caller knows better
+   * than the error text (the pane watchdog: dead pane, failure kind). */
+  attentionTransient?: {
+    transient: boolean;
+    transientReason: string;
+  };
 }): void {
   // Atomically check and set notified flag to prevent duplicate notifications.
   // If the task was already marked as notified (e.g., by TaskStopTool), skip
@@ -289,6 +299,13 @@ export function enqueueAgentNotification({
   // the stamp below is the only thing that keeps a teammate's background result
   // out of the coordinator's context and in its spawner's.
   let parentAgentId: AgentId | undefined;
+  // Who failed, for the lead's attention item (a pane teammate's task carries
+  // its identity; a local agent's does not).
+  let teammateIdentity: {
+    agentId: string;
+    agentName: string;
+    teamName: string;
+  } | undefined;
   updateTaskState<LocalAgentTaskState>(taskId, setAppState, task => {
     if (task.notified) {
       return task;
@@ -297,6 +314,10 @@ export function enqueueAgentNotification({
     resumeCount = task.resumeCount ?? 0;
     resumedPrompt = task.prompt ?? '';
     parentAgentId = task.parentAgentId;
+    const identity = (task as {
+      identity?: typeof teammateIdentity;
+    }).identity;
+    teammateIdentity = identity?.agentId ? identity : undefined;
     return {
       ...task,
       notified: true
@@ -304,6 +325,30 @@ export function enqueueAgentNotification({
   });
   if (!shouldEnqueue) {
     return;
+  }
+
+  // Phase 5: a failure the ROOT lead must decide becomes an attention item,
+  // created in this branch that won the `notified` test-and-set, so a
+  // duplicate notify never creates a second one. Covers local agents, the
+  // pane watchdog's deadline failure and self-reported pane failures. Not a
+  // teammate's own subagent (parentAgentId), not inside a teammate process,
+  // not a sub-team member. Fire-and-forget: never throws, never blocks.
+  if (status === 'failed' && parentAgentId === undefined && !isTeammate() && (!teammateIdentity || getParentTeamName(teammateIdentity.teamName) === undefined)) {
+    void noteRunFailure({
+      taskId,
+      runSeq: resumeCount,
+      description,
+      error,
+      backend: teammateIdentity ? 'pane' : 'local_agent',
+      ...(teammateIdentity ? {
+        agentId: teammateIdentity.agentId,
+        agentName: teammateIdentity.agentName,
+        teamName: teammateIdentity.teamName
+      } : {}),
+      ...(attentionTransient ? {
+        transient: attentionTransient
+      } : {})
+    });
   }
 
   // Abort any active speculation — background task state changed, so speculated

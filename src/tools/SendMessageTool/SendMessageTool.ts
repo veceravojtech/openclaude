@@ -52,6 +52,7 @@ import {
   writeToMailbox,
 } from '../../utils/teammateMailbox.js'
 import { resumeAgentBackground } from '../AgentTool/resumeAgent.js'
+import { AttentionSpawnBlockedError } from '../../utils/attentionItems.js'
 import { formatRecipientAddress, resolveRecipient } from './addressing.js'
 import { SEND_MESSAGE_TOOL_NAME } from './constants.js'
 import { abortApprovedInProcessTeammate } from './shutdownInterruptionTrace.js'
@@ -1262,6 +1263,9 @@ export const SendMessageTool: Tool<InputSchema, SendMessageToolOutput> =
                 },
               }
             } catch (e) {
+              if (e instanceof AttentionSpawnBlockedError) {
+                return { data: { success: false, message: e.message } }
+              }
               return {
                 data: {
                   success: false,
@@ -1289,6 +1293,9 @@ export const SendMessageTool: Tool<InputSchema, SendMessageToolOutput> =
                 },
               }
             } catch (e) {
+              if (e instanceof AttentionSpawnBlockedError) {
+                return { data: { success: false, message: e.message } }
+              }
               return {
                 data: {
                   success: false,

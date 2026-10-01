@@ -106,11 +106,46 @@ function gapDescription(gap: FinalReviewGap, agentId: string): string {
  * again. Returns the ids of every GAP task of this reviewer for these gaps,
  * in GAP order (existing and newly created).
  */
+/**
+ * Adds `agentId` to `metadata.finalReviewers` of every open task flagged
+ * `requiresFinalReview` and returns their ids. Run BEFORE any GAP task is
+ * created: once a reviewer is listed, the gate also refuses completion while
+ * one of its recorded GAPs has no task (`listUnfiledGapsIn`), so a crash or
+ * a failed `fileGapTasks` cannot leave a GAPS result unenforced.
+ */
+export async function registerFinalReviewer(
+  agentId: string,
+  taskListId: string = getTaskListId(),
+): Promise<string[]> {
+  const flagged = (await listTasks(taskListId)).filter(
+    t =>
+      t.metadata?.requiresFinalReview === true &&
+      !isTaskResolved(t.status) &&
+      typeof t.metadata?.gapOf !== 'string',
+  )
+  for (const task of flagged) {
+    await updateTaskWith(taskListId, task.id, current => {
+      const reviewers = Array.isArray(current.metadata?.finalReviewers)
+        ? (current.metadata.finalReviewers as unknown[])
+        : []
+      if (reviewers.includes(agentId)) return null
+      return {
+        metadata: {
+          ...(current.metadata ?? {}),
+          finalReviewers: [...reviewers, agentId],
+        },
+      }
+    })
+  }
+  return flagged.map(t => t.id)
+}
+
 export async function fileGapTasks(
   agentId: string,
   gaps: readonly FinalReviewGap[],
   taskListId: string = getTaskListId(),
 ): Promise<string[]> {
+  const flaggedIds = await registerFinalReviewer(agentId, taskListId)
   const before = await listTasks(taskListId)
   const existing = new Map<string, string>()
   for (const task of before) {
@@ -145,27 +180,9 @@ export async function fileGapTasks(
     ids.push(id)
   }
 
-  const flagged = (await listTasks(taskListId)).filter(
-    t =>
-      t.metadata?.requiresFinalReview === true &&
-      !isTaskResolved(t.status) &&
-      typeof t.metadata?.gapOf !== 'string',
-  )
-  for (const task of flagged) {
-    await updateTaskWith(taskListId, task.id, current => {
-      const reviewers = Array.isArray(current.metadata?.finalReviewers)
-        ? (current.metadata.finalReviewers as unknown[])
-        : []
-      if (reviewers.includes(agentId)) return null
-      return {
-        metadata: {
-          ...(current.metadata ?? {}),
-          finalReviewers: [...reviewers, agentId],
-        },
-      }
-    })
+  for (const taskId of flaggedIds) {
     for (const gapTaskId of ids) {
-      await blockTask(taskListId, gapTaskId, task.id)
+      await blockTask(taskListId, gapTaskId, taskId)
     }
   }
   return ids

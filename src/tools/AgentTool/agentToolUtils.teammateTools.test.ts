@@ -3,6 +3,7 @@ import { IN_PROCESS_TEAMMATE_ALLOWED_TOOLS } from '../../constants/tools.js'
 import type { Tool, Tools } from '../../Tool.js'
 import { asAgentId } from '../../types/ids.js'
 import { runWithTeammateContext } from '../../utils/teammateContext.js'
+import { ATTENTION_DECIDE_TOOL_NAME } from '../AttentionDecideTool/constants.js'
 import { FILE_READ_TOOL_NAME } from '../FileReadTool/prompt.js'
 import { HANDOFF_TEAM_TOOL_NAME } from '../HandoffTeamTool/constants.js'
 import { LIST_AGENTS_TOOL_NAME } from '../ListAgentsTool/constants.js'
@@ -43,6 +44,7 @@ function stubTools(...toolNames: string[]): Tools {
 // The lead's pool, reduced to the names that matter here.
 const POOL = stubTools(
   FILE_READ_TOOL_NAME,
+  ATTENTION_DECIDE_TOOL_NAME,
   AGENT_TOOL_NAME,
   SEND_MESSAGE_TOOL_NAME,
   LIST_AGENTS_TOOL_NAME,
@@ -132,4 +134,17 @@ test('the teammate allowlist names exactly the three caller-scoped sub-team tool
   ]) {
     expect(IN_PROCESS_TEAMMATE_ALLOWED_TOOLS.has(name)).toBe(true)
   }
+})
+
+test('AttentionDecide is lead-only: no teammate turn and no subagent gets it', () => {
+  // Phase 5: only the root lead decides attention items.
+  const teammate = asTeammateTurn(
+    () => resolveAgentTools(PLAIN_TEAMMATE, POOL, true).resolvedTools,
+  )
+  expect(names(teammate)).not.toContain(ATTENTION_DECIDE_TOOL_NAME)
+  const subagent = resolveAgentTools(PLAIN_TEAMMATE, POOL, true).resolvedTools
+  expect(names(subagent)).not.toContain(ATTENTION_DECIDE_TOOL_NAME)
+  const syncSubagent = resolveAgentTools(PLAIN_TEAMMATE, POOL, false).resolvedTools
+  expect(names(syncSubagent)).not.toContain(ATTENTION_DECIDE_TOOL_NAME)
+  expect(IN_PROCESS_TEAMMATE_ALLOWED_TOOLS.has(ATTENTION_DECIDE_TOOL_NAME)).toBe(false)
 })

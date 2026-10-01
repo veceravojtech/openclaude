@@ -178,6 +178,10 @@ import {
 } from '../bootstrap/state.js'
 import type { QuerySource } from '../constants/querySource.js'
 import {
+  formatAttentionItemsReminder,
+  listUndecidedAttentionItems,
+} from './attentionItems.js'
+import {
   getDeferredToolsDelta,
   isDeferredToolsDeltaEnabled,
   isToolSearchEnabledOptimistic,
@@ -271,6 +275,7 @@ import {
   getAgentId,
   getTeamName,
   isTeamLead,
+  isTeammate,
 } from './teammate.js'
 import { getTeammateContext, isInProcessTeammate } from './teammateContext.js'
 import {
@@ -647,6 +652,12 @@ export type Attachment =
       content: string
     }
   | {
+      /** Phase 5: undecided failures the root lead must decide. */
+      type: 'attention_items'
+      content: string
+      count: number
+    }
+  | {
       type: 'plan_file_reference'
       planFilePath: string
       planContent: string
@@ -983,22 +994,16 @@ export async function getAttachments(
     ),
     ...(isAgentSwarmsEnabled()
       ? [
-          // Skip teammate mailbox for the session_memory forked agent.
-          // It shares AppState.teamContext with the leader, so isTeamLead resolves
-          // true and it reads+marks-as-read the leader's DMs as ephemeral attachments,
-          // silently stealing messages that should be delivered as permanent turns.
-          ...(querySource === 'session_memory'
+          ...(!teamAttachmentsFor(toolUseContext.agentType, querySource)
+            .mailbox
             ? []
             : [
                 maybeAttachment('teammate_mailbox', async () =>
                   getTeammateMailboxAttachments(toolUseContext),
                 ),
               ]),
-          // The final reviewer must see only the request and its checkout.
-          // A subagent spawned inside a teammate's turn inherits the
-          // teammate's ambient team identity, which would otherwise hand it
-          // the team config and task-list paths on its first turn.
-          ...(toolUseContext.agentType === FINAL_REVIEW_AGENT_TYPE
+          ...(!teamAttachmentsFor(toolUseContext.agentType, querySource)
+            .teamContext
             ? []
             : [
                 maybeAttachment('team_context', async () =>
@@ -1062,6 +1067,9 @@ export async function getAttachments(
         ),
         maybeAttachment('unified_tasks', async () =>
           getUnifiedTaskAttachments(toolUseContext),
+        ),
+        maybeAttachment('attention_items', async () =>
+          getAttentionItemsAttachment(toolUseContext, querySource),
         ),
         maybeAttachment('async_hook_responses', async () =>
           getAsyncHookResponseAttachments(),
@@ -1790,6 +1798,60 @@ function getSupervisorScoreAttachment(
     {
       type: 'supervisor_score',
       content: `Delegation score: ${formatDelegationPoints(score.points)}${delta} — ${parts.join(', ')}.`,
+    },
+  ]
+}
+
+/**
+ * Which team attachments a turn may receive.
+ *
+ * - teammate_mailbox: not for the session_memory forked agent — it shares
+ *   AppState.teamContext with the leader, so isTeamLead resolves true and it
+ *   would read and mark-as-read the leader's DMs as ephemeral attachments,
+ *   silently stealing messages that should be delivered as permanent turns.
+ * - neither, for the final reviewer: it must see only the request and its
+ *   checkout. A subagent spawned inside a teammate's turn inherits the
+ *   teammate's ambient team identity, which would otherwise hand it the team
+ *   config, the task-list paths and the team's mail on its first turn.
+ */
+export function teamAttachmentsFor(
+  agentType: string | undefined,
+  querySource?: QuerySource,
+): { mailbox: boolean; teamContext: boolean } {
+  const finalReviewer = agentType === FINAL_REVIEW_AGENT_TYPE
+  return {
+    mailbox: !finalReviewer && querySource !== 'session_memory',
+    teamContext: !finalReviewer,
+  }
+}
+
+/**
+ * Phase 5: every undecided attention item, shown to the ROOT lead each turn
+ * until it is decided. Never inside a teammate — an in-process one has an
+ * agentId, but a pane teammate is its own process whose main thread has
+ * none, hence the isTeammate() check — and never for a forked query
+ * (session_memory, compaction, suggestions). One readdir; nothing when the
+ * store is empty or missing.
+ */
+export async function getAttentionItemsAttachment(
+  toolUseContext: Pick<ToolUseContext, 'agentId'>,
+  querySource?: QuerySource,
+): Promise<Attachment[]> {
+  if (toolUseContext.agentId || isTeammate()) return []
+  if (
+    querySource !== undefined &&
+    querySource !== 'sdk' &&
+    !querySource.startsWith('repl_main_thread')
+  ) {
+    return []
+  }
+  const items = await listUndecidedAttentionItems()
+  if (items.length === 0) return []
+  return [
+    {
+      type: 'attention_items',
+      content: formatAttentionItemsReminder(items),
+      count: items.length,
     },
   ]
 }
