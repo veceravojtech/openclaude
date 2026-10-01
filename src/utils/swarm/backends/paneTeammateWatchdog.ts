@@ -1017,6 +1017,84 @@ export function armPaneTeammateWatchdog({
   }
 
   /**
+   * This teammate's mailbox messages that count as signals: from it, and not
+   * older than the watchdog (minus slack). The mailbox read is NOT consuming —
+   * every read returns the whole inbox — so reading it again (the in-lock
+   * reconcile below) can neither drop a message nor make a later scan see it
+   * twice. Idle reports are applied by task state, never by a read cursor.
+   */
+  function qualifyingMessages(
+    messages: PaneWatchdogMailboxMessage[],
+  ): PaneWatchdogMailboxMessage[] {
+    return messages.filter(m => {
+      if (m.from !== teammateName) {
+        return false
+      }
+      if (!m.timestamp) {
+        return true // Untimestamped: be lenient, never fail on a missing stamp
+      }
+      const at = Date.parse(m.timestamp)
+      return Number.isFinite(at) && at >= armedAt - TIMESTAMP_SLACK_MS
+    })
+  }
+
+  function signalTime(message: PaneWatchdogMailboxMessage): number {
+    return message.timestamp ? Date.parse(message.timestamp) : now()
+  }
+
+  /** Fold qualifying messages into the progress clock: booted, lastSignalAt. */
+  function absorbSignals(qualifying: PaneWatchdogMailboxMessage[]): void {
+    if (qualifying.length === 0) {
+      return
+    }
+    booted = true
+    for (const message of qualifying) {
+      const at = signalTime(message)
+      if (Number.isFinite(at) && at > lastSignalAt) {
+        lastSignalAt = at
+      }
+    }
+  }
+
+  /**
+   * Reconcile progress before a deadline failure commits. Runs inside the
+   * finalization lock, once the failure owns it: the deadline was computed
+   * from a mailbox read made BEFORE the pane probe and capture awaits, and
+   * the teammate may have spoken since. Re-reads the mailbox, folds what it
+   * finds into the progress clock (so an abort restarts the deadline), and
+   * returns the evidence newer than `snapshot` (the progress clock the
+   * deadline was judged from): `idle` when an idle report arrived, `progress`
+   * when anything else did. A mailbox that cannot be read is no evidence.
+   * The one read is a plain file read with no timeout of its own.
+   */
+  async function reconcileProgress(snapshot: {
+    lastSignalAt: number
+    booted: boolean
+  }): Promise<{ idle: boolean; progress: boolean }> {
+    let qualifying: PaneWatchdogMailboxMessage[]
+    try {
+      qualifying = qualifyingMessages(
+        await readLeadMailbox(leadName ?? TEAM_LEAD_NAME, teamName),
+      )
+    } catch (error) {
+      logForDebugging(
+        `[PaneWatchdog] could not re-read ${teammateName}'s mailbox before failing it: ${String(error)}`,
+      )
+      return { idle: false, progress: false }
+    }
+    // Before first contact every qualifying message is new (the scan's own
+    // read found none); after it, only messages newer than the clock are.
+    const fresh = qualifying.filter(
+      m => !snapshot.booted || signalTime(m) > snapshot.lastSignalAt,
+    )
+    absorbSignals(fresh)
+    return {
+      idle: fresh.some(m => isIdleNotification(m.text) !== null),
+      progress: fresh.length > 0,
+    }
+  }
+
+  /**
    * Terminal finalization lock. EVERY terminal decision of this watchdog runs
    * inside it, each from task state read once the lock is held: the deadline
    * failure (failTask), the self-reported failure, the ordinary turn
@@ -1103,13 +1181,25 @@ export function armPaneTeammateWatchdog({
    *
    * The pane capture runs first, outside the finalization lock (it is
    * bounded, and writes nothing). Everything else happens inside the lock:
-   * the decision (watchdog still armed, task still running), the failed
-   * state itself, and every side effect — unassign, output text,
-   * notification. See withFinalization.
+   * the decision (watchdog still armed, task still running, no progress
+   * since the deadline was judged), the failed state itself, and every side
+   * effect — unassign, output text, notification. See withFinalization.
+   *
+   * Rule for a non-idle signal that arrives AFTER the failure committed: it
+   * does not revive the task. The failure was right when it was committed;
+   * the signal only refreshes the progress clock, and only an idle report
+   * repairs the task, through the late-after-commit rule below.
    */
   async function failTask(
     error: string,
-    { paneDead }: { paneDead: boolean },
+    {
+      paneDead,
+      signalSnapshot,
+    }: {
+      paneDead: boolean
+      /** The progress clock the failure was decided from. */
+      signalSnapshot: { lastSignalAt: number; booted: boolean }
+    },
   ): Promise<void> {
     // Built in memory only: nothing is written before finalization is owned.
     const result = paneFailureResult(error, lastIdleSeen, await readPaneTail())
@@ -1121,6 +1211,17 @@ export function armPaneTeammateWatchdog({
       // dispose, so the late-completion watch of a failure committed by
       // another holder survives.
       if (disposed) return
+      // Progress that arrived after the deadline was judged beats the
+      // deadline: nothing is committed, nothing is disposed, and the deadline
+      // restarts from the fresh signal (reconcileProgress folds it in).
+      // - an idle report always aborts; the next scan resolves it through
+      //   finalizeFromIdleReport, whose lock this holder has just released;
+      // - any other signal aborts only an alive/unknown pane: a message
+      //   written before a pane exited does not un-kill it (a confirmed-dead
+      //   pane still fails), but a completion written before it exited does.
+      const fresh = await reconcileProgress(signalSnapshot)
+      if (disposed) return
+      if (fresh.idle || (fresh.progress && !paneDead)) return
       if (!transitionTerminal('failed', error)) return
       // From here the failure is committed: the late-completion watch and the
       // late-after-commit rule apply.
@@ -1276,26 +1377,12 @@ export function armPaneTeammateWatchdog({
     }
 
     // 1. Mailbox signals from this teammate.
-    const messages = await readLeadMailbox(leadName, teamName)
-    const qualifying = messages.filter(m => {
-      if (m.from !== teammateName) {
-        return false
-      }
-      if (!m.timestamp) {
-        return true // Untimestamped: be lenient, never fail on a missing stamp
-      }
-      const at = Date.parse(m.timestamp)
-      return Number.isFinite(at) && at >= armedAt - TIMESTAMP_SLACK_MS
-    })
+    const qualifying = qualifyingMessages(
+      await readLeadMailbox(leadName, teamName),
+    )
 
     if (qualifying.length > 0) {
-      booted = true
-      for (const message of qualifying) {
-        const at = message.timestamp ? Date.parse(message.timestamp) : now()
-        if (Number.isFinite(at) && at > lastSignalAt) {
-          lastSignalAt = at
-        }
-      }
+      absorbSignals(qualifying)
       // The LATEST idle notification in the batch decides the outcome.
       let latestIdle: ReturnType<typeof isIdleNotification> = null
       for (const message of qualifying) {
@@ -1344,6 +1431,7 @@ export function armPaneTeammateWatchdog({
           if (liveness === 'dead') {
             await failTask('Pane exited while waiting for descendants', {
               paneDead: true,
+              signalSnapshot: { lastSignalAt, booted },
             })
           }
           return
@@ -1416,6 +1504,9 @@ export function armPaneTeammateWatchdog({
     if (unknownProbes > 0 && nowMs - lastProbeAt < unknownRetryDelayMs) {
       return
     }
+    // The progress clock this deadline was judged from; failTask reconciles
+    // it against the mailbox once it owns finalization.
+    const signalSnapshot = { lastSignalAt, booted }
     const liveness = await probePane()
     lastProbeAt = nowMs
     const elapsed = nowMs - (booted ? lastSignalAt : armedAt)
@@ -1427,14 +1518,23 @@ export function armPaneTeammateWatchdog({
         )
         return
       }
-      await failTask(noProgressError(elapsed, 'unknown'), { paneDead: false })
+      await failTask(noProgressError(elapsed, 'unknown'), {
+        paneDead: false,
+        signalSnapshot,
+      })
       return
     }
     if (liveness === 'dead') {
-      await failTask('Pane exited without completing', { paneDead: true })
+      await failTask('Pane exited without completing', {
+        paneDead: true,
+        signalSnapshot,
+      })
       return
     }
-    await failTask(noProgressError(elapsed, 'alive'), { paneDead: false })
+    await failTask(noProgressError(elapsed, 'alive'), {
+      paneDead: false,
+      signalSnapshot,
+    })
   }
 
   // Single-flight: at most one scan runs at a time. A call during a running
