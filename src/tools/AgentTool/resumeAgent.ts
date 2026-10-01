@@ -11,8 +11,9 @@ import {
 import { assembleToolPool } from '../../tools.js'
 import { asAgentId } from '../../types/ids.js'
 import { runWithAgentContext } from '../../utils/agentContext.js'
-import { runWithCwdOverride } from '../../utils/cwd.js'
+import { getCwd, runWithCwdOverride } from '../../utils/cwd.js'
 import { logForDebugging } from '../../utils/debug.js'
+import { findCanonicalGitRoot } from '../../utils/git.js'
 import {
   createUserMessage,
   filterOrphanedThinkingOnlyMessages,
@@ -32,7 +33,15 @@ import { getAgentId, getParentSessionId } from '../../utils/teammate.js'
 import { isInProcessTeammate } from '../../utils/teammateContext.js'
 import { reconstructForSubagentResume } from '../../utils/toolResultStorage.js'
 import {
+  createDetachedReviewWorktree,
+  type DetachedReviewWorktree,
+  removeDetachedReviewWorktree,
+} from '../../utils/worktree.js'
+import {
+  clearFinalReviewBeforeRun,
   clearVerificationVerdictBeforeRun,
+  type FinalReviewTarget,
+  isBuiltInFinalReviewRun,
   runAsyncAgentLifecycle,
 } from './agentToolUtils.js'
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js'
@@ -273,24 +282,77 @@ export async function resumeAgentBackground({
     agentType: selectedAgent.agentType,
     isBuiltInAgent: isBuiltInAgent(selectedAgent),
   })
+  // Same for a final reviewer's record.
+  await clearFinalReviewBeforeRun(agentId, {
+    agentType: selectedAgent.agentType,
+    isBuiltInAgent: isBuiltInAgent(selectedAgent),
+  })
+
+  // A resumed final reviewer gets a NEW clean detached checkout of the same
+  // commit it was spawned for (the first one was removed when that run
+  // ended), and runs in it. Removed again when this run ends.
+  let reviewWorktree: DetachedReviewWorktree | null = null
+  let finalReviewTarget: FinalReviewTarget | undefined
+  const cleanupReviewWorktree = async (): Promise<void> => {
+    const created = reviewWorktree
+    reviewWorktree = null
+    if (created) await removeDetachedReviewWorktree(created)
+  }
+  if (
+    isBuiltInFinalReviewRun({
+      agentType: selectedAgent.agentType,
+      isBuiltInAgent: isBuiltInAgent(selectedAgent),
+    })
+  ) {
+    if (!meta?.reviewCommit) {
+      throw new Error(
+        `Cannot resume final reviewer ${agentId}: the commit it reviewed was not recorded. Spawn a new final reviewer with review_commit instead.`,
+      )
+    }
+    const repoBase = resumedCwdOverride ?? getCwd()
+    const gitRoot = findCanonicalGitRoot(repoBase)
+    if (!gitRoot) {
+      throw new Error(
+        `Cannot resume final reviewer ${agentId}: ${repoBase} is not inside a git repository.`,
+      )
+    }
+    const created = await createDetachedReviewWorktree(
+      gitRoot,
+      meta.reviewCommit,
+      { resolveFrom: repoBase },
+    )
+    reviewWorktree = created
+    finalReviewTarget = {
+      commit: created.commit,
+      worktreePath: created.worktreePath,
+    }
+    runAgentParams.reviewCommit = created.commit
+  }
+  const runCwdPath = finalReviewTarget?.worktreePath ?? resumedCwdPath
 
   const spawnerAgentId = isInProcessTeammate() ? getAgentId() : undefined
   const delegationParentId = getAgentId()
-  const agentBackgroundTask = registerAsyncAgent({
-    agentId,
-    description: uiDescription,
-    prompt,
-    selectedAgent,
-    setAppState: rootSetAppState,
-    toolUseId: toolUseContext.toolUseId,
-    resumeCount: priorResumeCount + 1,
-    parentAgentId: spawnerAgentId
-      ? asAgentId(spawnerAgentId)
-      : toolUseContext.agentId,
-    delegationParentId: delegationParentId
-      ? asAgentId(delegationParentId)
-      : undefined,
-  })
+  let agentBackgroundTask: ReturnType<typeof registerAsyncAgent>
+  try {
+    agentBackgroundTask = registerAsyncAgent({
+      agentId,
+      description: uiDescription,
+      prompt,
+      selectedAgent,
+      setAppState: rootSetAppState,
+      toolUseId: toolUseContext.toolUseId,
+      resumeCount: priorResumeCount + 1,
+      parentAgentId: spawnerAgentId
+        ? asAgentId(spawnerAgentId)
+        : toolUseContext.agentId,
+      delegationParentId: delegationParentId
+        ? asAgentId(delegationParentId)
+        : undefined,
+    })
+  } catch (error) {
+    await cleanupReviewWorktree()
+    throw error
+  }
 
   const metadata = {
     prompt,
@@ -299,6 +361,7 @@ export async function resumeAgentBackground({
     startTime,
     agentType: selectedAgent.agentType,
     isAsync: true,
+    finalReview: finalReviewTarget,
   }
 
   const asyncAgentContext = {
@@ -313,9 +376,9 @@ export async function resumeAgentBackground({
   }
 
   const wrapWithCwd = <T>(fn: () => T): T =>
-    resumedCwdPath ? runWithCwdOverride(resumedCwdPath, fn) : fn()
+    runCwdPath ? runWithCwdOverride(runCwdPath, fn) : fn()
 
-  void runWithAgentContext(asyncAgentContext, () =>
+  void Promise.resolve(runWithAgentContext(asyncAgentContext, () =>
     wrapWithCwd(() =>
       runAsyncAgentLifecycle({
         taskId: agentBackgroundTask.agentId,
@@ -339,11 +402,13 @@ export async function resumeAgentBackground({
           isCoordinatorMode() ||
           isForkSubagentEnabled() ||
           getSdkAgentProgressSummariesEnabled(),
-        getWorktreeResult: async () =>
-          resumedWorktreePath ? { worktreePath: resumedWorktreePath } : {},
+        getWorktreeResult: async () => {
+          await cleanupReviewWorktree()
+          return resumedWorktreePath ? { worktreePath: resumedWorktreePath } : {}
+        },
       }),
     ),
-  )
+  )).finally(cleanupReviewWorktree)
 
   return {
     agentId,

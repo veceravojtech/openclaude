@@ -44,13 +44,17 @@ NOTE that you should not use this tool if there is only one trivial task to do. 
 - **subject**: A brief, actionable title in imperative form (e.g., "Fix authentication bug in login flow")
 - **description**: What needs to be done
 - **activeForm** (optional): Present continuous form shown in the spinner when the task is in_progress (e.g., "Fixing authentication bug"). If omitted, the spinner shows the subject instead.
-- **metadata** (optional): Arbitrary key/value data attached to the task. Set \`requiresVerification: true\` to require an independent verification before the task can be completed (see below).
+- **metadata** (optional): Arbitrary key/value data attached to the task. Set \`requiresVerification: true\` to require an independent verification before the task can be completed, and/or \`requiresFinalReview: true\` to require a fresh-context final review of the delivered request (see below).
 
 All tasks are created with status \`pending\`.
 
 ## Verification-Gated Tasks
 
 A task created with \`metadata: {"requiresVerification": true}\` can only be marked \`completed\` via TaskUpdate when \`metadata.verifiedBy\` is the agentId of a verification agent run (subagent_type "verification") whose recorded verdict is PASS. The verifier agentId comes from the Agent tool result: the \`agentId: <id>\` line of a synchronous run (followed by a \`verificationVerdict: <verdict>\` line), or the agentId returned when a background run launches. FAIL, PARTIAL or a missing verdict blocks completion. Use this for work that must not be marked done on a worker's word alone.
+
+## Final-Review-Gated Tasks
+
+A task created with \`metadata: {"requiresFinalReview": true}\` can only be marked \`completed\` via TaskUpdate when \`metadata.finalReviewedBy\` is the agentId of a final reviewer run (subagent_type "final-reviewer") that recorded DONE, and every GAP task a final reviewer filed against it is resolved. Run the final reviewer with \`review_commit\` set to the commit to review and \`prompt\` set to the original user request verbatim — no plans, reports or task list. A GAPS result files one task per GAP (\`metadata.gapOf\` = the reviewer's agentId), and those tasks block completion until they are completed or cancelled. Use this on the task that represents the whole user request.
 
 ## Tips
 

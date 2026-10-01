@@ -5,6 +5,7 @@ import { isEnvTruthy } from '../../utils/envUtils.js'
 import { CLAUDE_CODE_GUIDE_AGENT } from './built-in/claudeCodeGuideAgent.js'
 import { CODE_REVIEWER_AGENT } from './built-in/codeReviewerAgent.js'
 import { EXPLORE_AGENT } from './built-in/exploreAgent.js'
+import { FINAL_REVIEWER_AGENT } from './built-in/finalReviewerAgent.js'
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js'
 import { PLAN_AGENT } from './built-in/planAgent.js'
 import { STATUSLINE_SETUP_AGENT } from './built-in/statuslineSetup.js'
@@ -47,6 +48,9 @@ export function getBuiltInAgents(): AgentDefinition[] {
     GENERAL_PURPOSE_AGENT,
     STATUSLINE_SETUP_AGENT,
     CODE_REVIEWER_AGENT,
+    // Unconditional (not behind the VERIFICATION_AGENT flag): tasks flagged
+    // requiresFinalReview can only complete through it.
+    FINAL_REVIEWER_AGENT,
   ]
 
   if (areExplorePlanAgentsEnabled()) {
@@ -77,6 +81,7 @@ const BUILT_IN_AGENT_TYPES = new Set([
   GENERAL_PURPOSE_AGENT.agentType,
   STATUSLINE_SETUP_AGENT.agentType,
   CODE_REVIEWER_AGENT.agentType,
+  FINAL_REVIEWER_AGENT.agentType,
   EXPLORE_AGENT.agentType,
   PLAN_AGENT.agentType,
   CLAUDE_CODE_GUIDE_AGENT.agentType,

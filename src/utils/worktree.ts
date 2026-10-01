@@ -4,12 +4,16 @@ import { spawnSync } from 'child_process'
 import {
   copyFile,
   mkdir,
+  mkdtemp,
   readdir,
   readFile,
+  realpath,
+  rm,
   stat,
   symlink,
   utimes,
 } from 'fs/promises'
+import { tmpdir } from 'os'
 import ignore from 'ignore'
 import { basename, dirname, join } from 'path'
 import { saveCurrentProjectConfig } from './config.js'
@@ -1198,6 +1202,118 @@ export async function removeAgentWorktree(
     }
     return true
   })
+}
+
+export type DetachedReviewWorktree = {
+  /** Real path of the checkout the reviewer runs in. */
+  worktreePath: string
+  /** Full sha the checkout is at (the resolved review_commit). */
+  commit: string
+  /** Canonical git root the worktree was added from (needed to remove it). */
+  gitRoot: string
+}
+
+/**
+ * Creates a clean, detached worktree of one commit for the final reviewer.
+ *
+ * - `commit` (a sha or any ref) is resolved with
+ *   `git rev-parse --verify <ref>^{commit}` in `resolveFrom` (default
+ *   `gitRoot`), so `HEAD` means the caller's HEAD.
+ * - `git worktree add --detach` puts it in a fresh temp directory: no branch,
+ *   no post-creation setup (no settings copy, no symlinked dirs, no
+ *   .worktreeinclude files), and repository hooks are disabled for the add.
+ *   Only committed state is there: the caller's uncommitted or untracked
+ *   files never enter it.
+ * Throws when the ref cannot be resolved or the worktree cannot be added.
+ */
+export async function createDetachedReviewWorktree(
+  gitRoot: string,
+  commit: string,
+  options?: { resolveFrom?: string },
+): Promise<DetachedReviewWorktree> {
+  const ref = commit.trim()
+  if (ref === '' || ref.startsWith('-')) {
+    throw new Error(`Invalid review_commit '${commit}': expected a commit sha or ref.`)
+  }
+  const { stdout, code, stderr } = await _testDeps.execFileNoThrowWithCwd(
+    gitExe(),
+    ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`],
+    { cwd: options?.resolveFrom ?? gitRoot },
+  )
+  const sha = stdout.trim()
+  if (code !== 0 || !/^[0-9a-f]{40,64}$/.test(sha)) {
+    throw new Error(
+      `Cannot resolve review_commit '${commit}' to a commit${stderr.trim() ? `: ${stderr.trim()}` : ''}. Commit the work first, then pass its sha.`,
+    )
+  }
+  const parent = await realpath(
+    await mkdtemp(join(tmpdir(), 'openclaude-final-review-')),
+  )
+  const worktreePath = join(parent, 'checkout')
+  const added = await withGitWorktreeMutationLock(gitRoot, () =>
+    _testDeps.execFileNoThrowWithCwd(
+      gitExe(),
+      [
+        '-c',
+        'core.hooksPath=/dev/null',
+        'worktree',
+        'add',
+        '--detach',
+        worktreePath,
+        sha,
+      ],
+      { cwd: gitRoot, env: { ...process.env, ...GIT_NO_PROMPT_ENV } },
+    ),
+  )
+  if (added.code !== 0) {
+    await rm(parent, { recursive: true, force: true }).catch(() => {})
+    throw new Error(
+      `Cannot create the final-review worktree at ${sha}: ${added.stderr.trim() || `git exited with ${added.code}`}`,
+    )
+  }
+  logForDebugging(`Created detached final-review worktree at ${worktreePath} (${sha})`)
+  return { worktreePath, commit: sha, gitRoot }
+}
+
+/**
+ * Removes a worktree made by createDetachedReviewWorktree, and its temp
+ * parent directory. Never throws; returns false when git could not remove
+ * it (the directory is still deleted and the worktree list pruned).
+ */
+export async function removeDetachedReviewWorktree(
+  worktree: Pick<DetachedReviewWorktree, 'worktreePath' | 'gitRoot'>,
+): Promise<boolean> {
+  const { worktreePath, gitRoot } = worktree
+  try {
+    return await withGitWorktreeMutationLock(gitRoot, async () => {
+      const { code, stderr } = await _testDeps.execFileNoThrowWithCwd(
+        gitExe(),
+        ['worktree', 'remove', '--force', worktreePath],
+        { cwd: gitRoot },
+      )
+      if (code !== 0) {
+        logForDebugging(
+          `Failed to remove final-review worktree ${worktreePath}: ${stderr}`,
+          { level: 'error' },
+        )
+      }
+      await rm(dirname(worktreePath), { recursive: true, force: true }).catch(
+        () => {},
+      )
+      if (code !== 0) {
+        await _testDeps.execFileNoThrowWithCwd(gitExe(), ['worktree', 'prune'], {
+          cwd: gitRoot,
+        })
+      }
+      return code === 0
+    })
+  } catch (error) {
+    logForDebugging(
+      `Failed to remove final-review worktree ${worktreePath}: ${errorMessage(error)}`,
+      { level: 'error' },
+    )
+    return false
+  }
 }
 
 /**

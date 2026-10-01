@@ -56,7 +56,8 @@ import { isInProcessTeammate } from '../../utils/teammateContext.js';
 import { isInProcessEnabled } from '../../utils/swarm/backends/registry.js';
 import { getAssistantMessageContentLength } from '../../utils/tokens.js';
 import { createAgentId } from '../../utils/uuid.js';
-import { createAgentWorktree, hasWorktreeChanges, removeAgentWorktree } from '../../utils/worktree.js';
+import { createAgentWorktree, createDetachedReviewWorktree, type DetachedReviewWorktree, hasWorktreeChanges, removeAgentWorktree, removeDetachedReviewWorktree } from '../../utils/worktree.js';
+import { findCanonicalGitRoot } from '../../utils/git.js';
 import { BASH_TOOL_NAME } from '../BashTool/toolName.js';
 import { BackgroundHint } from '../BashTool/UI.js';
 import { FILE_READ_TOOL_NAME } from '../FileReadTool/prompt.js';
@@ -64,9 +65,9 @@ import { spawnTeammate, generateUniqueTeammateName } from '../shared/spawnMultiA
 import { PROVIDER_PROFILE_IN_PROCESS_ERROR, resolveProviderProfileEnv } from './providerProfileBinding.js';
 import { getTeammateSpawnCapError, MAX_TEAMMATE_REPLICAS_CEILING } from './teammateReplicas.js';
 import { setAgentColor } from './agentColorManager.js';
-import { type AgentToolResult, agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extractPartialResult, clearVerificationVerdictBeforeRun, finalizeAgentTool, formatVerificationVerdictLine, getLastToolUseName, recordVerificationVerdictIfApplicable, runAsyncAgentLifecycle } from './agentToolUtils.js';
+import { type AgentToolResult, agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extractPartialResult, clearVerificationVerdictBeforeRun, clearFinalReviewBeforeRun, type FinalReviewTarget, finalizeAgentTool, formatFinalReviewLine, formatVerificationVerdictLine, getLastToolUseName, isBuiltInFinalReviewRun, recordFinalReviewIfApplicable, recordVerificationVerdictIfApplicable, runAsyncAgentLifecycle } from './agentToolUtils.js';
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
-import { AGENT_TOOL_NAME, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
+import { AGENT_TOOL_NAME, FINAL_REVIEW_AGENT_TYPE, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
 import { buildForkedMessages, buildWorktreeNotice, FORK_AGENT, isForkSubagentEnabled, isInForkChild } from './forkSubagent.js';
 import { closeForegroundAgentForBackground, createForegroundAgentAbortController } from './foregroundAgentHandoff.js';
 import type { AgentDefinition } from './loadAgentsDir.js';
@@ -119,7 +120,8 @@ export const fullInputSchema = lazySchema(() => {
   });
   return baseInputSchema().merge(multiAgentInputSchema).extend({
     isolation: z.enum(['worktree']).optional().describe('Isolation mode. "worktree" creates a temporary git worktree so the agent works on an isolated copy of the repo. When the session is outside a git repository (for example a parent of multiple repos), pass cwd set to the target repository root so the worktree is created from that repo.'),
-    cwd: z.string().optional().describe('Absolute path to run the agent in. Overrides the working directory for all filesystem and shell operations within this agent. When isolation is "worktree", cwd selects which git repository to create the worktree from — use this when the session cwd is not itself a git repo (for example a folder parenting multiple repos).')
+    cwd: z.string().optional().describe('Absolute path to run the agent in. Overrides the working directory for all filesystem and shell operations within this agent. When isolation is "worktree", cwd selects which git repository to create the worktree from — use this when the session cwd is not itself a git repo (for example a folder parenting multiple repos).'),
+    review_commit: z.string().trim().min(1, 'review_commit cannot be empty').optional().describe(`Required with subagent_type "${FINAL_REVIEW_AGENT_TYPE}", and only valid there: the commit sha or ref to review. The final reviewer runs in a clean detached checkout of exactly that commit (uncommitted work is not reviewed), and its prompt must be the original user request verbatim and nothing else.`)
   }).refine(input => input.cwd === undefined || isAbsolute(input.cwd), {
     path: ['cwd'],
     message: 'cwd must be an absolute path.',
@@ -162,8 +164,14 @@ type AgentToolInput = z.infer<ReturnType<typeof baseInputSchema>> & {
   isolation?: 'worktree';
   cwd?: string;
   provider_profile?: string;
+  review_commit?: string;
 };
 type AgentToolIsolation = AgentToolInput['isolation'];
+
+export const FINAL_REVIEWER_TEAMMATE_ERROR =
+  `The final reviewer (subagent_type "${FINAL_REVIEW_AGENT_TYPE}") must run as a subagent: omit name and team_name. Teammates ignore cwd and isolation, so a teammate reviewer would not run in the clean review checkout.`;
+export const FINAL_REVIEW_COMMIT_REQUIRED_ERROR =
+  `The final reviewer (subagent_type "${FINAL_REVIEW_AGENT_TYPE}") requires review_commit: the commit sha or ref to review. Commit the work first; only committed state is reviewed.`;
 
 export const IDLE_TEAMMATE_PROMPT_REQUIRED_ERROR =
   'prompt is required unless name is given (idle teammate)';
@@ -407,7 +415,8 @@ export const AgentTool = buildTool({
     replicas,
     isolation,
     cwd,
-    provider_profile: providerProfileRef
+    provider_profile: providerProfileRef,
+    review_commit
   }: AgentToolInput, toolUseContext, canUseTool, assistantMessage, onProgress?) {
     const startTime = Date.now();
     // The supervisor picks models per teammate on purpose — cheap models for
@@ -433,6 +442,13 @@ export const AgentTool = buildTool({
     const missingPromptError = getMissingPromptError({ prompt, name });
     if (missingPromptError) {
       throw new Error(missingPromptError);
+    }
+
+    // The final reviewer's isolation (clean detached checkout as cwd, no
+    // shared context) only exists on the subagent path: the teammate path
+    // ignores cwd/isolation. Refuse before any teammate routing.
+    if (subagent_type === FINAL_REVIEW_AGENT_TYPE && (name !== undefined || team_name !== undefined)) {
+      throw new Error(FINAL_REVIEWER_TEAMMATE_ERROR);
     }
 
     // Check if user is trying to use agent teams without access
@@ -826,7 +842,9 @@ export const AgentTool = buildTool({
           activeAgents,
           allowedAgentTypes
         } = toolUseContext.options.agentDefinitions;
-        const offeredAgents = filterDeniedAgents(allowedAgentTypes ? activeAgents.filter(a => allowedAgentTypes.includes(a.agentType)) : activeAgents, appState.toolPermissionContext, AGENT_TOOL_NAME);
+        // The final reviewer needs an explicit review_commit and a verbatim
+        // request, so it is never picked implicitly.
+        const offeredAgents = filterDeniedAgents((allowedAgentTypes ? activeAgents.filter(a => allowedAgentTypes.includes(a.agentType)) : activeAgents).filter(a => a.agentType !== FINAL_REVIEW_AGENT_TYPE), appState.toolPermissionContext, AGENT_TOOL_NAME);
         const earlyModelIsExplicit = model !== undefined || !!process.env.CLAUDE_CODE_SUBAGENT_MODEL || hasNamedAgentRouting(name, undefined, earlySettings);
         earlySubagentDecision = await chooseTeammateRoute({
           description,
@@ -880,6 +898,20 @@ export const AgentTool = buildTool({
         throw new Error(`Agent type '${effectiveType}' not found. Available agents: ${agents.map(a => a.agentType).join(', ')}`);
       }
       selectedAgent = found;
+    }
+
+    // Only the genuine built-in final reviewer gets the detached review
+    // checkout and can record a final review; it requires review_commit,
+    // and review_commit means nothing to any other agent.
+    const isFinalReview = isBuiltInFinalReviewRun({
+      agentType: selectedAgent.agentType,
+      isBuiltInAgent: isBuiltInAgent(selectedAgent)
+    });
+    if (isFinalReview && review_commit === undefined) {
+      throw new Error(FINAL_REVIEW_COMMIT_REQUIRED_ERROR);
+    }
+    if (!isFinalReview && review_commit !== undefined) {
+      throw new Error(`review_commit is only valid with the built-in final reviewer (subagent_type "${FINAL_REVIEW_AGENT_TYPE}").`);
     }
 
     // Same lifecycle constraint as the run_in_background guard above, but for
@@ -1106,6 +1138,9 @@ export const AgentTool = buildTool({
       selectedAgent.isolation,
     );
     assertAgentToolCwdAllowed(cwd, effectiveIsolation);
+    if (isFinalReview && effectiveIsolation === 'worktree') {
+      throw new Error(`The final reviewer always runs in its own detached checkout of review_commit; do not pass isolation.`);
+    }
     // System prompt + prompt messages: branch on fork path.
     //
     // Fork path: child inherits the PARENT's system prompt (not FORK_AGENT's)
@@ -1168,7 +1203,9 @@ export const AgentTool = buildTool({
       isBuiltInAgent: isBuiltInAgent(selectedAgent),
       startTime,
       agentType: selectedAgent.agentType,
-      isAsync: shouldRunAsync
+      isAsync: shouldRunAsync,
+      // Set once the detached review checkout exists (final reviewer only).
+      finalReview: undefined as FinalReviewTarget | undefined
     };
     // (isCoordinator / forceAsync / assistantForceAsync already computed
     // above; shouldRunAsync is the single source of truth for the launch
@@ -1216,6 +1253,8 @@ export const AgentTool = buildTool({
     // existing record before anything runs (throws, refusing to launch, if
     // a stale record cannot be removed).
     await clearVerificationVerdictBeforeRun(earlyAgentId, metadata);
+    // Same for a final reviewer's record.
+    await clearFinalReviewBeforeRun(earlyAgentId, metadata);
 
     // Set up worktree isolation if requested
     let worktreeInfo: {
@@ -1289,7 +1328,7 @@ export const AgentTool = buildTool({
       // returns the override path.
       override: isForkPath ? {
         systemPrompt: forkParentSystemPrompt
-      } : enhancedSystemPrompt && !worktreeInfo && !cwd ? {
+      } : enhancedSystemPrompt && !worktreeInfo && !cwd && !isFinalReview ? {
         systemPrompt: asSystemPrompt(enhancedSystemPrompt)
       } : undefined,
       availableTools: isForkPath ? toolUseContext.options.tools : workerTools,
@@ -1310,8 +1349,36 @@ export const AgentTool = buildTool({
 
     // Helper to wrap execution with a cwd override. Worktree wins if present;
     // otherwise an explicit cwd pins the agent to a child repo / directory.
-    const cwdOverridePath = resolveAgentToolCwdOverride(cwd, worktreeInfo);
+    let cwdOverridePath = resolveAgentToolCwdOverride(cwd, worktreeInfo);
     const wrapWithCwd = <T,>(fn: () => T): T => cwdOverridePath ? runWithCwdOverride(cwdOverridePath, fn) : fn();
+
+    // Final reviewer: a clean detached worktree of review_commit, created
+    // last so nothing can throw between its creation and the run's cleanup.
+    // Removed when the run ends on every path (sync finally, sync throw,
+    // background end); idempotent.
+    let reviewWorktree: DetachedReviewWorktree | null = null;
+    const cleanupReviewWorktree = async (): Promise<void> => {
+      const created = reviewWorktree;
+      reviewWorktree = null;
+      if (created) await removeDetachedReviewWorktree(created);
+    };
+    if (isFinalReview) {
+      const repoBase = cwd ?? getCwd();
+      const gitRoot = findCanonicalGitRoot(repoBase);
+      if (!gitRoot) {
+        throw new Error(`The final reviewer needs a git repository, but ${repoBase} is not inside one. Pass cwd set to the repository root.`);
+      }
+      const created = await createDetachedReviewWorktree(gitRoot, review_commit!, {
+        resolveFrom: repoBase
+      });
+      reviewWorktree = created;
+      metadata.finalReview = {
+        commit: created.commit,
+        worktreePath: created.worktreePath
+      };
+      runAgentParams.reviewCommit = created.commit;
+      cwdOverridePath = created.worktreePath;
+    }
 
     // Helper to clean up worktree after agent completes
     const cleanupWorktreeIfNeeded = async (): Promise<{
@@ -1385,19 +1452,25 @@ export const AgentTool = buildTool({
       // teammates (dynamicTeamContext), whose main-thread turn otherwise has no
       // toolUseContext.agentId to link the helper by.
       const delegationParentId = getAgentId();
-      const agentBackgroundTask = registerAsyncAgent({
-        agentId: asyncAgentId,
-        description,
-        prompt,
-        selectedAgent,
-        setAppState: rootSetAppState,
-        // Don't link to parent's abort controller -- background agents should
-        // survive when the user presses ESC to cancel the main thread.
-        // They are killed explicitly via chat:killAgents.
-        toolUseId: toolUseContext.toolUseId,
-        parentAgentId: spawnerAgentId ? asAgentId(spawnerAgentId) : toolUseContext.agentId,
-        delegationParentId: delegationParentId ? asAgentId(delegationParentId) : undefined
-      });
+      let agentBackgroundTask: ReturnType<typeof registerAsyncAgent>;
+      try {
+        agentBackgroundTask = registerAsyncAgent({
+          agentId: asyncAgentId,
+          description,
+          prompt,
+          selectedAgent,
+          setAppState: rootSetAppState,
+          // Don't link to parent's abort controller -- background agents should
+          // survive when the user presses ESC to cancel the main thread.
+          // They are killed explicitly via chat:killAgents.
+          toolUseId: toolUseContext.toolUseId,
+          parentAgentId: spawnerAgentId ? asAgentId(spawnerAgentId) : toolUseContext.agentId,
+          delegationParentId: delegationParentId ? asAgentId(delegationParentId) : undefined
+        });
+      } catch (error) {
+        await cleanupReviewWorktree();
+        throw error;
+      }
 
       // Register name → agentId for SendMessage routing. Post-registerAsyncAgent
       // so we don't leave a stale entry if spawn fails. Sync agents skipped —
@@ -1432,7 +1505,7 @@ export const AgentTool = buildTool({
       // invocation time — when this `void` fires — and survives every await
       // inside. No capture/restore needed; the detached closure sees the
       // parent turn's workload automatically, isolated from its finally.
-      void runWithAgentContext(asyncAgentContext, () => wrapWithCwd(() => runAsyncAgentLifecycle({
+      void Promise.resolve(runWithAgentContext(asyncAgentContext, () => wrapWithCwd(() => runAsyncAgentLifecycle({
         taskId: agentBackgroundTask.agentId,
         abortController: agentBackgroundTask.abortController!,
         makeStream: onCacheSafeParams => runAgent({
@@ -1450,8 +1523,11 @@ export const AgentTool = buildTool({
         rootSetAppState,
         agentIdForCleanup: asyncAgentId,
         enableSummarization: isCoordinator || isForkSubagentEnabled() || getSdkAgentProgressSummariesEnabled(),
-        getWorktreeResult: cleanupWorktreeIfNeeded
-      })));
+        getWorktreeResult: async () => {
+          await cleanupReviewWorktree();
+          return cleanupWorktreeIfNeeded();
+        }
+      })))).finally(cleanupReviewWorktree);
       const canReadOutputFile = toolUseContext.options.tools.some(t => toolMatchesName(t, FILE_READ_TOOL_NAME) || toolMatchesName(t, BASH_TOOL_NAME));
       return {
         data: buildAsyncLaunchedToolData({
@@ -1657,6 +1733,7 @@ export const AgentTool = buildTool({
                     }
                     const agentResult = finalizeAgentTool(agentMessages, backgroundedTaskId, metadata);
                     await recordVerificationVerdictIfApplicable(agentResult, metadata);
+                    await recordFinalReviewIfApplicable(agentResult, metadata);
 
                     // Mark task completed FIRST so TaskOutput(block=true)
                     // unblocks immediately. classifyHandoffIfNeeded and
@@ -1671,6 +1748,10 @@ export const AgentTool = buildTool({
                     const verdictLine = formatVerificationVerdictLine(agentResult);
                     if (verdictLine) {
                       finalMessage = `${finalMessage}\n\n${verdictLine}`;
+                    }
+                    const finalReviewLine = formatFinalReviewLine(agentResult);
+                    if (finalReviewLine) {
+                      finalMessage = `${finalMessage}\n\n${finalReviewLine}`;
                     }
                     if (feature('TRANSCRIPT_CLASSIFIER')) {
                       const backgroundedAppState = toolUseContext.getAppState();
@@ -1743,6 +1824,8 @@ export const AgentTool = buildTool({
                     });
                   } finally {
                     stopBackgroundedSummarization?.();
+                    // The backgrounded continuation owns the review checkout.
+                    await cleanupReviewWorktree();
                     // Defensive cleanup: wrap each call so one failure doesn't
                     // prevent the other from running. Without this, if
                     // clearInvokedSkillsForAgent throws, clearDumpState is
@@ -1896,6 +1979,7 @@ export const AgentTool = buildTool({
               }
               if (syncAgentResult) {
                 await recordVerificationVerdictIfApplicable(syncAgentResult, metadata);
+                await recordFinalReviewIfApplicable(syncAgentResult, metadata);
               }
             }
           }
@@ -1941,6 +2025,7 @@ export const AgentTool = buildTool({
           // Skip if backgrounded — the background continuation is still running in it
           if (!wasBackgrounded) {
             worktreeResult = await cleanupWorktreeIfNeeded();
+            await cleanupReviewWorktree();
           }
         }
 
@@ -2004,7 +2089,12 @@ export const AgentTool = buildTool({
             ...(worktreeIsolationFallback && { worktreeIsolationFallback: true as const }),
           }
         };
-      }));
+      })).catch(async (error: unknown) => {
+        // A throw before the run's own finally (e.g. while registering the
+        // foreground task) must not leave the review checkout behind.
+        await cleanupReviewWorktree();
+        throw error;
+      });
     }
   },
   isReadOnly() {
@@ -2102,7 +2192,8 @@ The agent is now running and will receive instructions via mailbox.${spawnData.d
       // it, so a requiresVerification task can be completed via verifiedBy.
       // Says NOT recorded (and why) when the write failed.
       const verdictLine = formatVerificationVerdictLine(data);
-      const verdictText = verdictLine ? `\n${verdictLine}` : '';
+      const finalReviewLine = formatFinalReviewLine(data);
+      const verdictText = `${verdictLine ? `\n${verdictLine}` : ''}${finalReviewLine ? `\n${finalReviewLine}` : ''}`;
       // If the subagent completes with no content, the tool_result is just the
       // agentId/usage trailer below — a metadata-only block at the prompt tail.
       // Some models read that as "nothing to act on" and end their turn

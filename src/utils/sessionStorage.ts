@@ -601,6 +601,9 @@ export type AgentMetadata = {
   /** Source of the agent definition (e.g. 'built-in', 'projectSettings').
    * Used on resume to verify the resolved definition matches the original. */
   source?: string
+  /** Final reviewer only: the resolved sha it reviewed, so a resume can
+   * recreate the detached review checkout at the same commit. */
+  reviewCommit?: string
 }
 
 /**

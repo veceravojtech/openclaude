@@ -20,10 +20,8 @@ import { createSignal } from './signal.js'
 import { jsonParse, jsonStringify } from './slowOperations.js'
 import { getTeamName } from './teammate.js'
 import { getTeammateContext } from './teammateContext.js'
-import {
-  checkVerificationGateIn,
-  VerificationGateError,
-} from './verificationVerdictStore.js'
+import { checkCompletionGatesIn } from './finalReviewStore.js'
+import { VerificationGateError } from './verificationVerdictStore.js'
 
 // Listeners for task list updates (used for immediate UI refresh in same process)
 const tasksUpdated = createSignal()
@@ -421,18 +419,21 @@ async function updateTaskUnsafe(
       `Task #${taskId} can only be cancelled through cancelTask (TaskUpdate status 'cancelled'), which also updates the tasks that depend on it.`,
     )
   }
-  // Authoritative verification gate: checked against the task as read under
-  // the caller's lock, so a flag added by a concurrent write (or by a
-  // TaskCompleted hook) is honored and no caller can complete a flagged task
-  // without a PASS verdict. Only the transition into 'completed' is gated.
+  // Authoritative completion gates (verification, then final review):
+  // checked against the task as read under the caller's lock, so a flag
+  // added by a concurrent write (or by a TaskCompleted hook) is honored and
+  // no caller can complete a flagged task without a PASS verdict / a DONE
+  // final review with no open GAP tasks. Only the transition into
+  // 'completed' is gated. Throws VerificationGateError or
+  // FinalReviewGateError.
   if (existing.status !== 'completed' && updated.status === 'completed') {
-    const gateError = await checkVerificationGateIn(
+    const gateError = await checkCompletionGatesIn(
       getTasksDir(taskListId),
       existing.metadata,
       updated.metadata,
     )
     if (gateError) {
-      throw new VerificationGateError(gateError)
+      throw gateError
     }
   }
   const path = getTaskPath(taskListId, taskId)
@@ -458,6 +459,35 @@ export async function updateTask(
   let release: (() => Promise<void>) | undefined
   try {
     release = await lockfile.lock(path, LOCK_OPTIONS)
+    return await updateTaskUnsafe(taskListId, taskId, updates)
+  } finally {
+    await release?.()
+  }
+}
+
+/**
+ * Like updateTask, but the updates are computed from the task as read under
+ * its lock, so a read-modify-write (e.g. appending to a metadata list) cannot
+ * lose a concurrent write. `compute` returning null writes nothing. The
+ * completion gates and transition rules of updateTask apply unchanged.
+ */
+export async function updateTaskWith(
+  taskListId: string,
+  taskId: string,
+  compute: (existing: Task) => Partial<Omit<Task, 'id'>> | null,
+): Promise<Task | null> {
+  const path = getTaskPath(taskListId, taskId)
+  const taskBeforeLock = await getTask(taskListId, taskId)
+  if (!taskBeforeLock) {
+    return null
+  }
+  let release: (() => Promise<void>) | undefined
+  try {
+    release = await lockfile.lock(path, LOCK_OPTIONS)
+    const current = await getTask(taskListId, taskId)
+    if (!current) return null
+    const updates = compute(current)
+    if (!updates) return current
     return await updateTaskUnsafe(taskListId, taskId, updates)
   } finally {
     await release?.()
@@ -511,6 +541,63 @@ export async function deleteTask(
   } catch {
     return false
   }
+}
+
+/**
+ * The completion-gate metadata a replacement inherits from a superseded
+ * task: the requiresVerification / requiresFinalReview flags and the
+ * finalReviewers list, never verifiedBy / finalReviewedBy. Undefined when
+ * the task carries no gate.
+ */
+function inheritedGateMetadata(
+  metadata: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  const inherited: Record<string, unknown> = {}
+  if (metadata?.requiresVerification === true) {
+    inherited.requiresVerification = true
+  }
+  if (metadata?.requiresFinalReview === true) {
+    inherited.requiresFinalReview = true
+  }
+  const reviewers = Array.isArray(metadata?.finalReviewers)
+    ? (metadata.finalReviewers as unknown[]).filter(
+        (r): r is string => typeof r === 'string',
+      )
+    : []
+  if (reviewers.length > 0) inherited.finalReviewers = reviewers
+  return Object.keys(inherited).length > 0 ? inherited : undefined
+}
+
+/**
+ * The replacement's metadata with `inherited` merged in, or undefined when
+ * nothing changes.
+ */
+function mergeInheritedGateMetadata(
+  current: Record<string, unknown> | undefined,
+  inherited: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+  if (!inherited) return undefined
+  const merged: Record<string, unknown> = { ...(current ?? {}) }
+  let changed = false
+  for (const flag of ['requiresVerification', 'requiresFinalReview']) {
+    if (inherited[flag] === true && merged[flag] !== true) {
+      merged[flag] = true
+      changed = true
+    }
+  }
+  if (Array.isArray(inherited.finalReviewers)) {
+    const existing = Array.isArray(merged.finalReviewers)
+      ? (merged.finalReviewers as unknown[])
+      : []
+    const added = (inherited.finalReviewers as string[]).filter(
+      r => !existing.includes(r),
+    )
+    if (added.length > 0) {
+      merged.finalReviewers = [...existing, ...added]
+      changed = true
+    }
+  }
+  return changed ? merged : undefined
 }
 
 // Caller holds the list lock and every task lock (withTaskListAndTaskLocks).
@@ -640,8 +727,11 @@ function blocksPathExists(
  *   `X.blocks`, so dependents stay blocked until X completes. The old task
  *   records `supersededBy: X`.
  *
- * If the cancelled task has `metadata.requiresVerification: true`, the
- * replacement inherits the flag (but not `verifiedBy`).
+ * If the cancelled task has `metadata.requiresVerification: true` or
+ * `metadata.requiresFinalReview: true`, the replacement inherits the flag
+ * (but not `verifiedBy` / `finalReviewedBy`), plus the cancelled task's
+ * `finalReviewers`, so GAP tasks filed against it still block the
+ * replacement.
  *
  * Runs under the task-list lock plus every task file's lock. Everything is
  * validated before anything is written: a validation failure throws
@@ -706,22 +796,21 @@ async function cancelTaskLocked(
         `Cannot supersede task #${taskId}: replacement task #${supersededBy} is cancelled`,
       )
     }
-    // The replacement inherits the verification requirement (below). The
-    // completion gate only runs on a transition INTO 'completed', so an
-    // already-completed replacement would never be checked: it must pass the
-    // gate now, on its current metadata, or superseding would skip it.
-    if (
-      task.metadata?.requiresVerification === true &&
-      replacement.status === 'completed'
-    ) {
-      const gateError = await checkVerificationGateIn(
+    // The replacement inherits the completion gates (below). The gates only
+    // run on a transition INTO 'completed', so an already-completed
+    // replacement would never be checked: it must pass them now, on its
+    // current metadata, or superseding would skip them.
+    const inherited = inheritedGateMetadata(task.metadata)
+    if (inherited && replacement.status === 'completed') {
+      const gateError = await checkCompletionGatesIn(
         getTasksDir(taskListId),
-        { requiresVerification: true },
+        inherited,
         replacement.metadata,
       )
       if (gateError) {
+        const isVerification = gateError instanceof VerificationGateError
         throw new TaskCancelError(
-          `Cannot supersede task #${taskId} with #${supersededBy}: #${taskId} requires verification and #${supersededBy} is already completed without passing it. ${gateError.replace(/^Cannot complete task: /, 'Verification check on the replacement: ')}`,
+          `Cannot supersede task #${taskId} with #${supersededBy}: #${taskId} requires ${isVerification ? 'verification' : 'final review'} and #${supersededBy} is already completed without passing it. ${gateError.message.replace(/^Cannot complete task: /, isVerification ? 'Verification check on the replacement: ' : 'Final-review check on the replacement: ')}`,
         )
       }
     }
@@ -754,24 +843,20 @@ async function cancelTaskLocked(
   if (supersededBy !== undefined) {
     const replacement = current(supersededBy)
     const blocks = uniq([...replacement.blocks, ...dependents])
-    // The replacement inherits the verification requirement, so
-    // superseding cannot be used to drop the gate. verifiedBy is NOT
-    // copied: the replacement needs its own PASS verdict.
-    const inheritGate =
-      task.metadata?.requiresVerification === true &&
-      replacement.metadata?.requiresVerification !== true
-    if (dependents.length > 0 || inheritGate) {
+    // The replacement inherits the completion-gate flags (and the
+    // cancelled task's final reviewers, whose open GAP tasks keep blocking),
+    // so superseding cannot be used to drop a gate. verifiedBy and
+    // finalReviewedBy are NOT copied: the replacement needs its own PASS
+    // verdict and its own DONE final review.
+    const mergedMetadata = mergeInheritedGateMetadata(
+      replacement.metadata,
+      inheritedGateMetadata(task.metadata),
+    )
+    if (dependents.length > 0 || mergedMetadata) {
       next.set(supersededBy, {
         ...replacement,
         blocks,
-        ...(inheritGate
-          ? {
-              metadata: {
-                ...(replacement.metadata ?? {}),
-                requiresVerification: true,
-              },
-            }
-          : {}),
+        ...(mergedMetadata ? { metadata: mergedMetadata } : {}),
       })
     }
   }

@@ -136,7 +136,10 @@ import {
 } from './file.js'
 import type { AgentDefinition } from '../tools/AgentTool/loadAgentsDir.js'
 import { filterAgentsByMcpRequirements } from '../tools/AgentTool/loadAgentsDir.js'
-import { AGENT_TOOL_NAME } from '../tools/AgentTool/constants.js'
+import {
+  AGENT_TOOL_NAME,
+  FINAL_REVIEW_AGENT_TYPE,
+} from '../tools/AgentTool/constants.js'
 import {
   formatAgentLine,
   shouldInjectAgentListInMessages,
@@ -991,9 +994,17 @@ export async function getAttachments(
                   getTeammateMailboxAttachments(toolUseContext),
                 ),
               ]),
-          maybeAttachment('team_context', async () =>
-            getTeamContextAttachment(messages ?? []),
-          ),
+          // The final reviewer must see only the request and its checkout.
+          // A subagent spawned inside a teammate's turn inherits the
+          // teammate's ambient team identity, which would otherwise hand it
+          // the team config and task-list paths on its first turn.
+          ...(toolUseContext.agentType === FINAL_REVIEW_AGENT_TYPE
+            ? []
+            : [
+                maybeAttachment('team_context', async () =>
+                  getTeamContextAttachment(messages ?? []),
+                ),
+              ]),
         ]
       : []),
     maybeAttachment('agent_pending_messages', async () =>

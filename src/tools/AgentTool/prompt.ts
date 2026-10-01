@@ -10,7 +10,7 @@ import { LIST_AGENTS_TOOL_NAME } from '../ListAgentsTool/constants.js'
 import { SEND_MESSAGE_TOOL_NAME } from '../SendMessageTool/constants.js'
 import { TASK_STOP_TOOL_NAME } from '../TaskStopTool/prompt.js'
 import { TEAM_CREATE_TOOL_NAME } from '../TeamCreateTool/constants.js'
-import { AGENT_TOOL_NAME } from './constants.js'
+import { AGENT_TOOL_NAME, FINAL_REVIEW_AGENT_TYPE } from './constants.js'
 import { isForkSubagentEnabled } from './forkSubagent.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
 
@@ -199,6 +199,15 @@ const TEAMMATE_OBJECTIVE_RULES = `
 - Re-wording the objective, renaming the agent, changing its model or role, or splitting the same work under a new label does not make it a new objective.
 - A teammate parked on a usage limit is idle, not finished: it still owns its objective, and the continuation goes to it, not to a replacement.
 - These rules bind whoever delegates. If you lead a sub-team they apply unchanged to the objectives you hand out; delegating one level down does not reset the count. Splitting an objective you were given and putting two agents on the same split is still the two-agent case and still needs the user's approval — you cannot approve your own overlap, and a lead cannot grant one on the user's behalf.`
+
+/**
+ * How to run the final reviewer. Isolation is enforced in code (a detached
+ * checkout of review_commit as its cwd, no team context, a read-and-run tool
+ * allow-list); what the lead puts in `prompt` is the one input it cannot
+ * enforce, hence the verbatim rule.
+ */
+export const FINAL_REVIEW_RULES = `
+- To run the final reviewer (subagent_type "${FINAL_REVIEW_AGENT_TYPE}"), pass \`review_commit\`: the commit sha or ref to review. It is required for that agent and rejected for every other one. The reviewer runs in a clean, detached checkout of exactly that commit, created for the run and removed when it ends, so commit the work first: uncommitted changes are not reviewed. Its \`prompt\` must be the ORIGINAL USER REQUEST VERBATIM and nothing else — no plans, reports, summaries, task list or hints about what was done. Spawn it as a subagent: \`name\` and \`team_name\` are refused. Its report ends with \`FINAL REVIEW: DONE\` or \`FINAL REVIEW: GAPS\`; the result is recorded for tasks with \`requiresFinalReview\` and each GAP becomes a task. Isolation is by omission (working directory, prompt, tools), not a sandbox: a reviewer with Bash could still read files outside its checkout, such as the task directory in the config home.`
 
 export async function getPrompt(
   agentDefinitions: AgentDefinition[],
@@ -420,6 +429,10 @@ Usage notes:
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result.
 - When the current session is outside a git repository (for example a parent folder that contains multiple git repos), set \`cwd\` to the absolute path of the target child repository. You can combine \`cwd\` with \`isolation: "worktree"\` so the worktree is created from that child repo. If worktree creation fails only because no git repository is available, the agent still runs with that \`cwd\` override instead of failing, and the tool result notes that worktree isolation was unavailable.${
     teammateSpawnAvailable ? TEAMMATE_SPAWN_RULES : ''
+  }${
+    effectiveAgents.some(a => a.agentType === FINAL_REVIEW_AGENT_TYPE)
+      ? FINAL_REVIEW_RULES
+      : ''
   }${
     teammateSpawnAvailable && backgroundAgentsAvailable
       ? TEAMMATE_BACKGROUND_RULE

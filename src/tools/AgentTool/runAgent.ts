@@ -81,6 +81,7 @@ import {
 import type { ContentReplacementState } from '../../utils/toolResultStorage.js'
 import { createAgentId } from '../../utils/uuid.js'
 import { resolveAgentTools } from './agentToolUtils.js'
+import { FINAL_REVIEW_AGENT_TYPE } from './constants.js'
 import { type AgentDefinition, isBuiltInAgent } from './loadAgentsDir.js'
 import {
   canDescendantShowPermissionPrompts,
@@ -272,6 +273,7 @@ export async function* runAgent({
   worktreePath,
   cwd,
   description,
+  reviewCommit,
   transcriptSubdir,
   onQueryProgress,
   agentName,
@@ -333,6 +335,9 @@ export async function* runAgent({
   /** Original task description from AgentTool input. Persisted to metadata
    * so a resumed agent's notification can show the original description. */
   description?: string
+  /** Final reviewer only: the resolved sha it reviews. Persisted so a
+   * resume can recreate the detached review checkout at the same commit. */
+  reviewCommit?: string
   /** Optional subdirectory under subagents/ to group this agent's transcript
    * with related ones (e.g. workflows/<runId> for workflow subagents). */
   transcriptSubdir?: string
@@ -481,12 +486,15 @@ export async function* runAgent({
   // Explore/Plan are read-only search agents — the parent-session-start
   // gitStatus (up to 40KB, explicitly labeled stale) is dead weight. If they
   // need git info they run `git status` themselves and get fresh data.
-  // Saves ~1-3 Gtok/week fleet-wide.
+  // Saves ~1-3 Gtok/week fleet-wide. The final reviewer must not see it at
+  // all: it describes the parent's checkout (branch, dirty files, recent
+  // commit messages), not the clean review checkout it judges.
   const { gitStatus: _omittedGitStatus, ...systemContextNoGit } =
     baseSystemContext
   const resolvedSystemContext =
     agentDefinition.agentType === 'Explore' ||
-    agentDefinition.agentType === 'Plan'
+    agentDefinition.agentType === 'Plan' ||
+    agentDefinition.agentType === FINAL_REVIEW_AGENT_TYPE
       ? systemContextNoGit
       : baseSystemContext
 
@@ -865,6 +873,7 @@ export async function* runAgent({
       // to the child repo if the worktree is later removed.
       ...(cwd && { cwd }),
       ...(description && { description }),
+      ...(reviewCommit && { reviewCommit }),
     })
     metadataWritten = true
   } catch (_err) {

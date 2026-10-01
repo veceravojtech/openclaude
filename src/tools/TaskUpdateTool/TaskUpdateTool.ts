@@ -33,9 +33,10 @@ import { logForDebugging } from '../../utils/debug.js'
 import { errorMessage } from '../../utils/errors.js'
 import { writeToMailbox } from '../../utils/teammateMailbox.js'
 import {
-  checkVerificationGateIn,
-  VerificationGateError,
-} from '../../utils/verificationVerdictStore.js'
+  checkCompletionGatesIn,
+  FinalReviewGateError,
+} from '../../utils/finalReviewStore.js'
+import { VerificationGateError } from '../../utils/verificationVerdictStore.js'
 import { VERIFICATION_AGENT_TYPE } from '../AgentTool/constants.js'
 import { TASK_UPDATE_TOOL_NAME } from './constants.js'
 import { DESCRIPTION, PROMPT } from './prompt.js'
@@ -303,13 +304,15 @@ export const TaskUpdateTool = buildTool({
         }
       } else if (status !== existingTask.status) {
         // For regular status updates, validate and apply if different
-        // Verification gate (opt-in): a task flagged requiresVerification can
+        // Completion gates (opt-in): a task flagged requiresVerification can
         // only complete when metadata.verifiedBy names a verifier whose
-        // recorded verdict is PASS. This early check gives a fast answer
-        // before TaskCompleted hooks run; updateTask re-checks under the task
-        // lock and is the authority.
+        // recorded verdict is PASS, and one flagged requiresFinalReview only
+        // when metadata.finalReviewedBy names a final reviewer that recorded
+        // DONE and no GAP task filed against it is open. This early check
+        // gives a fast answer before TaskCompleted hooks run; updateTask
+        // re-checks under the task lock and is the authority.
         if (status === 'completed') {
-          const gateError = await checkVerificationGateIn(
+          const gateError = await checkCompletionGatesIn(
             getTasksDir(taskListId),
             existingTask.metadata,
             updates.metadata ?? existingTask.metadata,
@@ -320,7 +323,7 @@ export const TaskUpdateTool = buildTool({
                 success: false,
                 taskId,
                 updatedFields: [],
-                error: gateError,
+                error: gateError.message,
               },
             }
           }
@@ -371,10 +374,11 @@ export const TaskUpdateTool = buildTool({
       try {
         await updateTask(taskListId, taskId, updates)
       } catch (error) {
-        // The locked write re-checks the verification gate against the
+        // The locked write re-checks the completion gates against the
         // current task, so a flag added since our read still blocks it.
         if (
           error instanceof VerificationGateError ||
+          error instanceof FinalReviewGateError ||
           error instanceof TaskTransitionError
         ) {
           return {

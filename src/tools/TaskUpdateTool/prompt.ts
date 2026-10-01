@@ -61,6 +61,17 @@ A task whose metadata has \`requiresVerification: true\` can only be marked \`co
 - Starting or resuming a verifier clears its earlier verdict; only a run that finishes records a new one. If the result says the verdict was NOT recorded, run the verification again.
 - This gate is a guardrail against mistakes, not a security boundary: the flag can still be removed in a separate, earlier update, one PASS can be cited for more than one task, and anything with file-write access could forge a record. Do not use it to work around a real verification.
 
+## Final-Review-Gated Tasks
+
+A task whose metadata has \`requiresFinalReview: true\` can only be marked \`completed\` when \`metadata.finalReviewedBy\` is the agentId of a final reviewer run (subagent_type "final-reviewer") that recorded DONE, and no GAP task filed by a final reviewer of this task is still open. Otherwise the update is rejected and nothing is changed. When both flags are set, the verification gate is checked first.
+
+- Run the final reviewer with the Agent tool: \`review_commit\` is the commit to review, and \`prompt\` is the original user request verbatim and nothing else. It reviews a clean, detached checkout of that commit, so only committed work counts.
+- Its report ends with \`FINAL REVIEW: DONE\` or \`FINAL REVIEW: GAPS\`. The result is recorded under its agentId; the Agent tool result shows it on a \`finalReview: <result>\` line.
+- Every GAP becomes a pending task (\`metadata.gapOf\` = the reviewer's agentId) that blocks each open final-review-gated task. While any of them is open, completion is rejected even with a DONE review. Complete each GAP task when it is fixed, or cancel it if it no longer applies, then run the final reviewer again on the new commit.
+- GAPS, MISSING (a report that does not follow the format, or that reviewed the wrong checkout), or an agentId with nothing recorded all block completion.
+- \`finalReviewedBy\` can be set in the same call that completes the task. The \`requiresFinalReview\` flag cannot be cleared in that call to skip the check. A task that replaces it via \`supersededBy\` inherits the flag and its open GAP tasks, but not \`finalReviewedBy\`.
+- Same limits as verification: a guardrail, not a security boundary. The reviewer is isolated by what it is given (a clean checkout, the request, read-and-run tools), not by a sandbox.
+
 ## Staleness
 
 Make sure to read a task's latest state using \`TaskGet\` before updating it.
@@ -105,5 +116,10 @@ Set up task dependencies:
 Complete a verification-gated task, citing the verifier whose verdict was PASS:
 \`\`\`json
 {"taskId": "3", "status": "completed", "metadata": {"verifiedBy": "<verifier agentId>"}}
+\`\`\`
+
+Complete a final-review-gated task, citing the final reviewer that recorded DONE:
+\`\`\`json
+{"taskId": "4", "status": "completed", "metadata": {"finalReviewedBy": "<final reviewer agentId>"}}
 \`\`\`
 `

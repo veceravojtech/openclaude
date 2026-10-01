@@ -78,6 +78,22 @@ test('teammate addendum keeps the pre-existing communication guidance', () => {
   )
 })
 
+test('teammate addendum asks final reports to say what was left undone', () => {
+  expect(TEAMMATE_SYSTEM_PROMPT_ADDENDUM).toContain('# Reporting back')
+  expect(TEAMMATE_SYSTEM_PROMPT_ADDENDUM).toContain(
+    "Final reports include a 'Left undone' section",
+  )
+  expect(TEAMMATE_SYSTEM_PROMPT_ADDENDUM).toContain("'Left undone: none'")
+  // It sits between the communication and the delegation sections.
+  const at = TEAMMATE_SYSTEM_PROMPT_ADDENDUM.indexOf('# Reporting back')
+  expect(at).toBeGreaterThan(
+    TEAMMATE_SYSTEM_PROMPT_ADDENDUM.indexOf('# Agent Teammate Communication'),
+  )
+  expect(at).toBeLessThan(
+    TEAMMATE_SYSTEM_PROMPT_ADDENDUM.indexOf('# Delegating Work to Other Agents'),
+  )
+})
+
 test('both teammate backends inject this one constant', () => {
   // Pane/tmux teammates: src/main.tsx appends it to appendSystemPrompt.
   const mainSource = readFileSync(join(import.meta.dir, '../../main.tsx'), 'utf8')

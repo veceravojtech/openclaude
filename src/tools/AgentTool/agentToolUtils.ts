@@ -57,6 +57,14 @@ import { emitTaskProgress as emitTaskProgressEvent } from '../../utils/task/sdkP
 import { isInProcessTeammate } from '../../utils/teammateContext.js'
 import { getTokenCountFromUsage } from '../../utils/tokens.js'
 import {
+  clearFinalReview,
+  fileGapTasks,
+  type ParsedFinalReview,
+  parseFinalReview,
+  parseReviewIdentity,
+  recordFinalReview,
+} from '../../utils/finalReviews.js'
+import {
   clearVerdict,
   parseVerdict,
   recordVerdict,
@@ -64,6 +72,7 @@ import {
 import { EXIT_PLAN_MODE_V2_TOOL_NAME } from '../ExitPlanModeTool/constants.js'
 import {
   AGENT_TOOL_NAME,
+  FINAL_REVIEW_AGENT_TYPE,
   LEGACY_AGENT_TOOL_NAME,
   VERIFICATION_AGENT_TYPE,
 } from './constants.js'
@@ -249,6 +258,19 @@ export const agentToolResultSchema = lazySchema(() =>
     // write failed and the gate will see no verdict for this agentId.
     verificationVerdictRecorded: z.boolean().optional(),
     verificationVerdictError: z.string().optional(),
+    // Set only for built-in final-reviewer runs: the result parsed from the
+    // final text (after the checkout self-check) and recorded for
+    // TaskUpdate's requiresFinalReview gate.
+    finalReview: z.enum(['DONE', 'GAPS', 'MISSING']).optional(),
+    finalReviewRecorded: z.boolean().optional(),
+    finalReviewError: z.string().optional(),
+    // Why the result is MISSING (format or checkout self-check failure).
+    finalReviewReason: z.string().optional(),
+    // The resolved sha the reviewer's checkout was at.
+    finalReviewCommit: z.string().optional(),
+    // Ids of the tasks filed for the GAPs of a GAPS result.
+    finalReviewGapTaskIds: z.array(z.string()).optional(),
+    finalReviewGapTaskError: z.string().optional(),
     content: z.array(z.object({ type: z.literal('text'), text: z.string() })),
     totalToolUseCount: z.number(),
     totalDurationMs: z.number(),
@@ -320,6 +342,9 @@ export function finalizeAgentTool(
     startTime: number
     agentType: string
     isAsync: boolean
+    // Final-reviewer runs only: the checkout the reviewer was given, used
+    // by recordFinalReviewIfApplicable's self-check.
+    finalReview?: FinalReviewTarget
   },
 ): AgentToolResult {
   const {
@@ -489,6 +514,191 @@ export function formatVerificationVerdictLine(
     return `verificationVerdict: ${result.verificationVerdict} (recorded for this agentId; to complete a task with requiresVerification, set metadata.verifiedBy: '${result.agentId}' — only PASS allows completion)`
   }
   return `verificationVerdict: ${result.verificationVerdict} (NOT recorded: ${result.verificationVerdictError ?? 'unknown error'}; this agentId cannot satisfy requiresVerification — run the verification again)`
+}
+
+/** The detached checkout a final-reviewer run was given. */
+export type FinalReviewTarget = {
+  /** Resolved full sha of review_commit. */
+  commit: string
+  /** Real path of the detached worktree (the run's cwd). */
+  worktreePath: string
+}
+
+/**
+ * True only for the genuine built-in final reviewer. Project, user, plugin
+ * or SDK agents can override a built-in by name, so the agentType alone must
+ * not be able to mint a final-review record.
+ */
+export function isBuiltInFinalReviewRun(identity: {
+  agentType: string | undefined
+  isBuiltInAgent: boolean
+}): boolean {
+  return (
+    identity.agentType === FINAL_REVIEW_AGENT_TYPE && identity.isBuiltInAgent
+  )
+}
+
+/**
+ * Called before a built-in final-reviewer run starts (fresh or resumed):
+ * deletes any record already on file for this agentId, so an old DONE can
+ * never outlive a newer run that finds gaps, errors, or cannot record.
+ *
+ * Throws when the old record exists but cannot be removed; the caller must
+ * then refuse to start the run.
+ */
+export async function clearFinalReviewBeforeRun(
+  agentId: string,
+  identity: { agentType: string | undefined; isBuiltInAgent: boolean },
+): Promise<void> {
+  if (!isBuiltInFinalReviewRun(identity)) return
+  try {
+    await clearFinalReview(agentId)
+  } catch (error) {
+    throw new Error(
+      `Cannot start final reviewer ${agentId}: its previous record could not be cleared (${errorMessage(error)}). Refusing to run while a possibly stale final review is on file.`,
+    )
+  }
+}
+
+function normalizeReviewPath(path: string): string {
+  return path.length > 1 ? path.replace(/[\\/]+$/, '') : path
+}
+
+/**
+ * The self-check: the report must echo the checkout it was given. Returns
+ * why it does not, or undefined when every `REVIEW CWD:` line equals the
+ * worktree path and every `REVIEW HEAD:` line equals the resolved sha.
+ */
+export function checkFinalReviewIdentity(
+  text: string,
+  target: FinalReviewTarget,
+): string | undefined {
+  const { cwds, heads } = parseReviewIdentity(text)
+  if (heads.length === 0) return 'the report has no "REVIEW HEAD: <sha>" line'
+  if (cwds.length === 0) return 'the report has no "REVIEW CWD: <path>" line'
+  const wrongHead = heads.find(h => h !== target.commit)
+  if (wrongHead !== undefined) {
+    return `REVIEW HEAD ${wrongHead} is not the reviewed commit ${target.commit}`
+  }
+  const expectedCwd = normalizeReviewPath(target.worktreePath)
+  const wrongCwd = cwds.find(c => normalizeReviewPath(c) !== expectedCwd)
+  if (wrongCwd !== undefined) {
+    return `REVIEW CWD ${wrongCwd} is not the review checkout ${target.worktreePath}`
+  }
+  return undefined
+}
+
+/**
+ * For a successfully finished run of the built-in final reviewer, parse its
+ * report, self-check the checkout it echoed, and persist the result under
+ * its agentId so a task flagged `requiresFinalReview` can cite it via
+ * `metadata.finalReviewedBy`. A GAPS result also files one task per GAP
+ * (idempotent) that blocks every open flagged task. Call it only on the
+ * success path (after finalizeAgentTool).
+ *
+ * The self-check never trusts the model: a report whose `REVIEW HEAD:` is
+ * not the resolved sha, or whose `REVIEW CWD:` is not the worktree, is
+ * recorded as MISSING with the reason, as is a run with no checkout.
+ *
+ * Never throws: failures are logged and reported on the result.
+ */
+export async function recordFinalReviewIfApplicable(
+  result: AgentToolResult,
+  identity: {
+    isBuiltInAgent: boolean
+    finalReview?: FinalReviewTarget
+    resolvedAgentModel?: string
+  },
+): Promise<void> {
+  if (
+    !isBuiltInFinalReviewRun({
+      agentType: result.agentType,
+      isBuiltInAgent: identity.isBuiltInAgent,
+    })
+  ) {
+    return
+  }
+  const target = identity.finalReview
+  try {
+    const text = extractTextContent(result.content, '\n')
+    let parsed: ParsedFinalReview = parseFinalReview(text)
+    if (!target) {
+      parsed = {
+        result: 'MISSING',
+        reason: 'the run had no review checkout (review_commit)',
+      }
+    } else if (parsed.result !== 'MISSING') {
+      const mismatch = checkFinalReviewIdentity(text, target)
+      if (mismatch) parsed = { result: 'MISSING', reason: mismatch }
+    }
+    result.finalReview = parsed.result
+    result.finalReviewCommit = target?.commit
+    if (parsed.result === 'MISSING') result.finalReviewReason = parsed.reason
+    await recordFinalReview({
+      agentId: result.agentId,
+      result: parsed.result,
+      gaps: parsed.result === 'GAPS' ? parsed.gaps : [],
+      commit: target?.commit ?? '',
+      ...(identity.resolvedAgentModel
+        ? { model: identity.resolvedAgentModel }
+        : {}),
+      ...(parsed.result === 'MISSING' ? { reason: parsed.reason } : {}),
+    })
+    result.finalReviewRecorded = true
+    logForDebugging(
+      `[finalReviews] recorded ${parsed.result} for reviewer ${result.agentId}`,
+    )
+    if (parsed.result === 'GAPS') {
+      try {
+        result.finalReviewGapTaskIds = await fileGapTasks(
+          result.agentId,
+          parsed.gaps,
+        )
+      } catch (error) {
+        result.finalReviewGapTaskError = errorMessage(error)
+        logForDebugging(
+          `[finalReviews] failed to file GAP tasks for ${result.agentId}: ${errorMessage(error)}`,
+          { level: 'error' },
+        )
+      }
+    }
+  } catch (error) {
+    result.finalReviewRecorded = false
+    result.finalReviewError = errorMessage(error)
+    logForDebugging(
+      `[finalReviews] failed to record final review for ${result.agentId}: ${errorMessage(error)}`,
+      { level: 'error' },
+    )
+    await clearFinalReview(result.agentId).catch(() => {})
+  }
+}
+
+/**
+ * One line describing a final-reviewer run's result for the caller: whether
+ * it was recorded, how to cite it, and the GAP tasks it filed. Undefined for
+ * other runs.
+ */
+export function formatFinalReviewLine(
+  result: AgentToolResult,
+): string | undefined {
+  if (!result.finalReview) return undefined
+  const at = result.finalReviewCommit
+    ? ` at commit ${result.finalReviewCommit}`
+    : ''
+  if (!result.finalReviewRecorded) {
+    return `finalReview: ${result.finalReview} (NOT recorded: ${result.finalReviewError ?? 'unknown error'}; this agentId cannot satisfy requiresFinalReview — run the final reviewer again)`
+  }
+  if (result.finalReview === 'DONE') {
+    return `finalReview: DONE (recorded for this agentId${at}; to complete a task with requiresFinalReview, set metadata.finalReviewedBy: '${result.agentId}' — open GAP tasks from earlier reviews still block it)`
+  }
+  if (result.finalReview === 'GAPS') {
+    const ids = result.finalReviewGapTaskIds ?? []
+    const filed = result.finalReviewGapTaskError
+      ? `GAP tasks could NOT all be filed: ${result.finalReviewGapTaskError}`
+      : `GAP tasks: ${ids.map(id => `#${id}`).join(', ')} (each blocks every open task with requiresFinalReview until it is completed or cancelled)`
+    return `finalReview: GAPS (recorded for this agentId${at}; ${filed}. Fix the gaps, commit, and run the final reviewer again on the new commit.)`
+  }
+  return `finalReview: MISSING (recorded for this agentId${at}: ${result.finalReviewReason ?? 'no valid report'}; this agentId cannot satisfy requiresFinalReview — run the final reviewer again)`
 }
 
 /**
@@ -733,6 +943,7 @@ export async function runAsyncAgentLifecycle({
     // Record before completion is signalled, so a caller woken by the
     // completion can already cite this verifier in metadata.verifiedBy.
     await recordVerificationVerdictIfApplicable(agentResult, metadata)
+    await recordFinalReviewIfApplicable(agentResult, metadata)
 
     // Mark task completed FIRST so TaskOutput(block=true) unblocks
     // immediately. classifyHandoffIfNeeded (API call) and getWorktreeResult
@@ -744,6 +955,10 @@ export async function runAsyncAgentLifecycle({
     const verdictLine = formatVerificationVerdictLine(agentResult)
     if (verdictLine) {
       finalMessage = `${finalMessage}\n\n${verdictLine}`
+    }
+    const finalReviewLine = formatFinalReviewLine(agentResult)
+    if (finalReviewLine) {
+      finalMessage = `${finalMessage}\n\n${finalReviewLine}`
     }
 
     if (feature('TRANSCRIPT_CLASSIFIER')) {
