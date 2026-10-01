@@ -1026,20 +1026,55 @@ export function armPaneTeammateWatchdog({
   function qualifyingMessages(
     messages: PaneWatchdogMailboxMessage[],
   ): PaneWatchdogMailboxMessage[] {
-    return messages.filter(m => {
+    const out: PaneWatchdogMailboxMessage[] = []
+    const occurrences = new Map<string, number>()
+    const present = new Set<string>()
+    for (const m of messages) {
       if (m.from !== teammateName) {
-        return false
+        continue
       }
       if (!m.timestamp) {
-        return true // Untimestamped: be lenient, never fail on a missing stamp
+        // Untimestamped: be lenient, never fail on a missing stamp. Its time
+        // is when THIS watchdog first saw it, remembered, so every later
+        // read of the same durable entry (the scan, the in-lock reconcile)
+        // gets the same time. Re-evaluating now() on each read would make
+        // one old entry look like fresh progress forever.
+        const nth = occurrences.get(m.text) ?? 0
+        occurrences.set(m.text, nth + 1)
+        const key = `${nth}:${m.text}`
+        present.add(key)
+        let seenAt = untimestampedFirstSeen.get(key)
+        if (seenAt === undefined) {
+          seenAt = now()
+          untimestampedFirstSeen.set(key, seenAt)
+        }
+        out.push({ ...m, timestamp: new Date(seenAt).toISOString() })
+        continue
       }
       const at = Date.parse(m.timestamp)
-      return Number.isFinite(at) && at >= armedAt - TIMESTAMP_SLACK_MS
-    })
+      if (Number.isFinite(at) && at >= armedAt - TIMESTAMP_SLACK_MS) {
+        out.push(m)
+      }
+    }
+    // Bounded: forget entries that left the mailbox (the lead consumed them).
+    for (const key of untimestampedFirstSeen.keys()) {
+      if (!present.has(key)) {
+        untimestampedFirstSeen.delete(key)
+      }
+    }
+    return out
   }
 
+  /**
+   * First-seen time of each untimestamped mailbox entry, keyed by its content
+   * and its occurrence among identical entries. Pruned on every read to the
+   * entries still present, and collected with the watchdog.
+   */
+  const untimestampedFirstSeen = new Map<string, number>()
+
+  /** The stable time of a message returned by qualifyingMessages. */
   function signalTime(message: PaneWatchdogMailboxMessage): number {
-    return message.timestamp ? Date.parse(message.timestamp) : now()
+    return Date.parse(message.timestamp!)
   }
 
   /** Fold qualifying messages into the progress clock: booted, lastSignalAt. */
@@ -1065,13 +1100,20 @@ export function armPaneTeammateWatchdog({
    * returns the evidence newer than `snapshot` (the progress clock the
    * deadline was judged from): `idle` when an idle report arrived, `progress`
    * when anything else did. A mailbox that cannot be read is no evidence.
-   * The one read is a plain file read with no timeout of its own.
+   *
+   * Before first contact the team file's turn-start `isActive` write is a
+   * progress signal too, and it can land with no mail at all, so for a pane
+   * that is not confirmed dead it is re-read here as well: a flip to true
+   * since the snapshot counts as progress, sets `booted` and restarts the
+   * clock. A confirmed-dead pane ignores it (a started teammate whose pane
+   * then died is still dead). Both reads are plain file reads with no
+   * timeout of their own; a read that throws is no evidence.
    */
-  async function reconcileProgress(snapshot: {
-    lastSignalAt: number
-    booted: boolean
-  }): Promise<{ idle: boolean; progress: boolean }> {
-    let qualifying: PaneWatchdogMailboxMessage[]
+  async function reconcileProgress(
+    snapshot: { lastSignalAt: number; booted: boolean },
+    paneDead: boolean,
+  ): Promise<{ idle: boolean; progress: boolean }> {
+    let qualifying: PaneWatchdogMailboxMessage[] = []
     try {
       qualifying = qualifyingMessages(
         await readLeadMailbox(leadName ?? TEAM_LEAD_NAME, teamName),
@@ -1080,7 +1122,6 @@ export function armPaneTeammateWatchdog({
       logForDebugging(
         `[PaneWatchdog] could not re-read ${teammateName}'s mailbox before failing it: ${String(error)}`,
       )
-      return { idle: false, progress: false }
     }
     // Before first contact every qualifying message is new (the scan's own
     // read found none); after it, only messages newer than the clock are.
@@ -1088,9 +1129,26 @@ export function armPaneTeammateWatchdog({
       m => !snapshot.booted || signalTime(m) > snapshot.lastSignalAt,
     )
     absorbSignals(fresh)
+    let activeFlip = false
+    if (!snapshot.booted && !paneDead) {
+      try {
+        activeFlip =
+          (await readTeamFile(teamName))?.members?.find(
+            m => m.name === teammateName,
+          )?.isActive === true
+      } catch (error) {
+        logForDebugging(
+          `[PaneWatchdog] could not re-read ${teammateName}'s team file before failing it: ${String(error)}`,
+        )
+      }
+      if (activeFlip) {
+        booted = true
+        lastSignalAt = Math.max(lastSignalAt, now())
+      }
+    }
     return {
       idle: fresh.some(m => isIdleNotification(m.text) !== null),
-      progress: fresh.length > 0,
+      progress: fresh.length > 0 || activeFlip,
     }
   }
 
@@ -1219,7 +1277,7 @@ export function armPaneTeammateWatchdog({
       // - any other signal aborts only an alive/unknown pane: a message
       //   written before a pane exited does not un-kill it (a confirmed-dead
       //   pane still fails), but a completion written before it exited does.
-      const fresh = await reconcileProgress(signalSnapshot)
+      const fresh = await reconcileProgress(signalSnapshot, paneDead)
       if (disposed) return
       if (fresh.idle || (fresh.progress && !paneDead)) return
       if (!transitionTerminal('failed', error)) return

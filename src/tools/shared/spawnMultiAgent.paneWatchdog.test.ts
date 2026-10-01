@@ -1047,6 +1047,153 @@ test('a non-idle signal after a committed failure does not revive the task; a la
   expect(statusesOf(world)).toEqual(['failed', 'completed'])
 })
 
+function untimestampedDm(from: string): PaneWatchdogMailboxMessage {
+  return { from, text: JSON.stringify({ type: 'permission_request', from, tool: 'Read' }) }
+}
+
+test('an untimestamped message absorbed before the deadline is not fresh progress: the failure commits once', async () => {
+  const world = makeWorld()
+  registerTeammate(world)
+  const handle = world.handles[0]!
+  worldToDispose.push(handle)
+
+  const seenAt = world.nowMs
+  world.mailbox.push(untimestampedDm('worker'))
+  await handle.scan() // absorbed here, at seenAt
+  expect(taskStatus(world)).toBe('running')
+
+  // One full silent window later the same durable entry is still in the
+  // mailbox. Re-reading it must not look like progress at the later time.
+  world.nowMs = seenAt + PROGRESS_TIMEOUT_MS + 1
+  world.probes = ['alive']
+  await handle.scan()
+
+  expect(taskStatus(world)).toBe('failed')
+  expect(statusesOf(world)).toEqual(['failed'])
+})
+
+for (const awaiting of ['probe', 'capture'] as const) {
+  test(`a NEW untimestamped message during the failure ${awaiting} aborts once; the same entry re-read later does not keep aborting`, async () => {
+    const world = makeWorld()
+    const probe = gatedDep<'alive'>('alive')
+    const capture = gatedDep<string | null>(null)
+    registerTeammate(world, 'worker', {
+      ...watchdogDeps(world),
+      probePane: awaiting === 'probe' ? probe.dep : async () => 'alive',
+      capturePaneTail: awaiting === 'capture' ? capture.dep : async () => null,
+    })
+    const handle = world.handles[0]!
+    worldToDispose.push(handle)
+    const gate = awaiting === 'probe' ? probe.gate : capture.gate
+
+    world.nowMs += FIRST_CONTACT_TIMEOUT_MS + 1
+    const scanning = handle.scan()
+    await waitUntil(gate.started, `${awaiting} started`)
+    const arrivedAt = world.nowMs
+    world.mailbox.push(untimestampedDm('worker'))
+    gate.release()
+    await scanning
+    expect(taskStatus(world)).toBe('running')
+    expect(world.notifications()).toEqual([])
+    expect(handle.disposed).toBe(false)
+
+    // The entry stays in the mailbox. A later silent window fails once.
+    world.nowMs = arrivedAt + PROGRESS_TIMEOUT_MS + 1
+    await handle.scan()
+    expect(taskStatus(world)).toBe('failed')
+    expect(statusesOf(world)).toEqual(['failed'])
+  })
+}
+
+for (const awaiting of ['probe', 'capture'] as const) {
+  test(`isActive flipping to true during the failure ${awaiting} (alive pane, no mail) aborts the first-contact failure and restarts the clock`, async () => {
+    const world = makeWorld()
+    const probe = gatedDep<'alive'>('alive')
+    const capture = gatedDep<string | null>(null)
+    registerTeammate(world, 'worker', {
+      ...watchdogDeps(world),
+      probePane: awaiting === 'probe' ? probe.dep : async () => 'alive',
+      capturePaneTail: awaiting === 'capture' ? capture.dep : async () => null,
+    })
+    const handle = world.handles[0]!
+    worldToDispose.push(handle)
+    const gate = awaiting === 'probe' ? probe.gate : capture.gate
+
+    world.nowMs += FIRST_CONTACT_TIMEOUT_MS + 1
+    const scanning = handle.scan()
+    await waitUntil(gate.started, `${awaiting} started`)
+    const flippedAt = world.nowMs
+    world.teamFile.members[1]!.isActive = true
+    gate.release()
+    await scanning
+
+    expect(taskStatus(world)).toBe('running')
+    expect(world.notifications()).toEqual([])
+    expect(world.unassignCalls).toEqual([])
+    expect(handle.disposed).toBe(false)
+
+    // Booted now, with the progress clock restarted at the flip: nothing fails
+    // soon after, and one silent progress window later it fails once.
+    world.nowMs = flippedAt + PROGRESS_TIMEOUT_MS - 1
+    world.probes = ['alive']
+    await handle.scan()
+    expect(taskStatus(world)).toBe('running')
+    world.nowMs = flippedAt + PROGRESS_TIMEOUT_MS + 1
+    await handle.scan()
+    expect(taskStatus(world)).toBe('failed')
+    expect(statusesOf(world)).toEqual(['failed'])
+  })
+}
+
+test('isActive flipping during the capture of an unknown-pane failure aborts it too', async () => {
+  const world = makeWorld()
+  const capture = gatedDep<string | null>(null)
+  registerTeammate(world, 'worker', {
+    ...watchdogDeps(world),
+    capturePaneTail: capture.dep,
+  })
+  const handle = world.handles[0]!
+  worldToDispose.push(handle)
+
+  world.nowMs += FIRST_CONTACT_TIMEOUT_MS + 1
+  // Every probe answers unknown; the bounded deferral runs out at the last scan.
+  let last: Promise<void> = Promise.resolve()
+  for (let i = 0; i <= MAX_UNKNOWN_RETRIES + 1; i++) {
+    last = handle.scan()
+    if (i <= MAX_UNKNOWN_RETRIES) {
+      await last
+      world.nowMs += UNKNOWN_RETRY_DELAY_MS
+    }
+  }
+  await waitUntil(capture.gate.started, 'capture started')
+  world.teamFile.members[1]!.isActive = true
+  capture.gate.release()
+  await last
+
+  expect(taskStatus(world)).toBe('running')
+  expect(world.notifications()).toEqual([])
+  expect(handle.disposed).toBe(false)
+})
+
+test('isActive flipping during the probe of a confirmed-dead pane does not stop the failure', async () => {
+  const world = makeWorld()
+  const probe = gatedDep<'dead'>('dead')
+  registerTeammate(world, 'worker', { ...watchdogDeps(world), probePane: probe.dep })
+  const handle = world.handles[0]!
+  worldToDispose.push(handle)
+
+  world.nowMs += FIRST_CONTACT_TIMEOUT_MS + 1
+  const scanning = handle.scan()
+  await waitUntil(probe.gate.started, 'probe started')
+  world.teamFile.members[1]!.isActive = true
+  probe.gate.release()
+  await scanning
+
+  expect(taskStatus(world)).toBe('failed')
+  expect(world.unassignCalls.length).toBe(1)
+  expect(statusesOf(world)).toEqual(['failed'])
+})
+
 test('a failure whose unassign throws still notifies the lead', async () => {
   const world = makeWorld()
   registerTeammate(world, 'worker', {
