@@ -34,8 +34,10 @@ import { retireTeammateFromLeaderView } from '../teammateRetirement.js'
 import { getTaskListId, unassignTeammateTasks } from '../../tasks.js'
 import {
   failureItemId,
+  findUndecidedFailureItemFor,
   linkTasksToAttentionItem,
   noteRunFailure,
+  readAttentionItem,
   supersedeAttentionItem,
 } from '../../attentionItems.js'
 import { isTeammate } from '../../teammate.js'
@@ -417,6 +419,7 @@ type SweepDeps = {
   unassignMemberTasks: (
     teamName: string,
     member: { agentId: string; name: string },
+    options?: { attentionHold?: string; attentionHoldList?: string },
   ) => Promise<string>
   setAppState: SetAppState
   now: () => number
@@ -552,10 +555,15 @@ async function sweepRosterOnce(
     // Roster first, by agentId ONLY — removeTeammateFromTeamFile's name match
     // is an OR, and a respawned member reusing the ghost's name must survive.
     if (!deps.removeMember(deps.teamName, { agentId: member.agentId })) continue
-    const notificationMessage = await deps.unassignMemberTasks(
-      deps.teamName,
-      swept,
-    )
+    // A member whose auto-reap could not close its pane ends here once the
+    // pane is gone: its tasks stay held for its undecided failure item.
+    const hold = await ghostFailureHold(deps.teamName, swept)
+    const notificationMessage = hold
+      ? await deps.unassignMemberTasks(deps.teamName, swept, {
+          attentionHold: hold.id,
+          attentionHoldList: hold.list,
+        })
+      : await deps.unassignMemberTasks(deps.teamName, swept)
     retireTeammateFromLeaderView({
       teammateId: swept.agentId,
       notificationMessage,
@@ -572,6 +580,30 @@ async function sweepRosterOnce(
     if (!rosterIds.has(key)) {
       absentPaneScans.delete(key)
     }
+  }
+}
+
+/**
+ * The undecided failure item of a swept ghost member, when the root lead
+ * owns it (root team, not inside a teammate). Never throws.
+ */
+async function ghostFailureHold(
+  teamName: string,
+  member: { agentId: string; name: string },
+): Promise<{ id: string; list: string } | undefined> {
+  if (getParentTeamName(teamName) !== undefined || isTeammate()) return undefined
+  try {
+    const list = getTaskListId()
+    const item = await findUndecidedFailureItemFor(
+      { ...member, teamName },
+      list,
+    )
+    return item ? { id: item.id, list } : undefined
+  } catch (error) {
+    logForDebugging(
+      `[PaneWatchdog] could not look up a failure item for ${member.name}: ${String(error)}`,
+    )
+    return undefined
   }
 }
 
@@ -1094,8 +1126,43 @@ export function armPaneTeammateWatchdog({
         logForDebugging(
           `[PaneWatchdog] auto-reaped failed teammate ${teammateName} (killed=${killed})`,
         )
+        // The pane is confirmed dead: its open tasks go back on the board,
+        // held for the self-reported failure's item while it is undecided.
+        // A pane that survived the kill keeps its roster member, and the
+        // ghost sweep reconciles it later.
+        if (killed) {
+          await withFinalization(async () =>
+            unassignDeadTeammateTasks(
+              await undecidedFailureHold(),
+              member.agentId,
+            ),
+          )
+        }
       },
     })
+  }
+
+  /**
+   * The hold for this run's failure item: its deterministic id in the root
+   * lead's list, only while that item exists and is undecided (a decided or
+   * superseded item must not hold anything). Undefined when the root lead
+   * does not own the failure. Never throws.
+   */
+  async function undecidedFailureHold(): Promise<
+    { id: string; list: string } | undefined
+  > {
+    if (!rootLeadOwnsFailure()) return undefined
+    try {
+      const list = getTaskListId()
+      const id = failureItemId(taskId, currentRunSeq())
+      const item = await readAttentionItem(id, list)
+      return item?.status === 'undecided' ? { id, list } : undefined
+    } catch (error) {
+      logForDebugging(
+        `[PaneWatchdog] could not read the failure item of ${teammateName}: ${String(error)}`,
+      )
+      return undefined
+    }
   }
 
   function noProgressError(elapsedMs: number, liveness: PaneLiveness): string {
@@ -1318,12 +1385,16 @@ export function armPaneTeammateWatchdog({
    */
   async function unassignDeadTeammateTasks(
     attentionHold?: { id: string; list: string },
+    /** Known when the roster member is already gone (the auto-reap). */
+    knownAgentId?: string,
   ): Promise<void> {
     try {
       const agentId =
+        knownAgentId ??
         (await readTeamFile(teamName))?.members?.find(
           m => m.name === teammateName,
-        )?.agentId ?? teammateName
+        )?.agentId ??
+        teammateName
       await unassignMemberTasks(
         teamName,
         { agentId, name: teammateName },
@@ -1459,9 +1530,14 @@ export function armPaneTeammateWatchdog({
           const reason =
             latestIdle.failureReason ?? 'Teammate reported a failed turn'
           if (!transitionTerminal('failed', reason)) return
+          const attentionTransient = classifyTeammateFailureReason(reason)
           try {
+            // Written now, not by emit's fire-and-forget hook (same id, a
+            // no-op there): the auto-reap holds the released tasks for this
+            // item, so it must exist by then.
+            await noteFailureBeforeRelease(reason, attentionTransient)
             await emit('failed', reason, paneTurnResult(latestIdle), {
-              attentionTransient: classifyTeammateFailureReason(reason),
+              attentionTransient,
             })
             // Explicit self-reported failure only (never the deadline path,
             // where a slow child's late completion must still win).

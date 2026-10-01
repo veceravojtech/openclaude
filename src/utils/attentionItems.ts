@@ -41,6 +41,7 @@ import {
   getTasksDir,
   isTaskResolved,
   listTasks,
+  type Task,
   TaskCancelError,
   updateTaskWith,
 } from './tasks.js'
@@ -94,14 +95,49 @@ export async function listUndecidedAttentionItems(
 }
 
 /**
- * Under `bun test`, the failure hooks write only into an isolated config
- * home (the testing override or an explicit config-dir env). Many existing
- * tests drive failed notifications without isolating it, and their items
- * would otherwise land in the developer's real ~/.openclaude task lists —
- * where an undecided item would block that developer's own spawns.
+ * The newest undecided FAILURE item of one worker (matched by agent id, or
+ * by name within its team), or undefined. Used where tasks are released
+ * without a run id at hand (the ghost sweep).
  */
-function hookWritesAllowed(): boolean {
-  if (process.env.NODE_ENV !== 'test') return true
+export async function findUndecidedFailureItemFor(
+  agent: { agentId: string; name: string; teamName: string },
+  taskListId: string = getTaskListId(),
+): Promise<AttentionItem | undefined> {
+  const matches = (await listUndecidedAttentionItems(taskListId)).filter(
+    item =>
+      item.kind === 'failure' &&
+      (item.source.agentId === agent.agentId ||
+        (item.source.agentName === agent.name &&
+          item.source.teamName === agent.teamName)),
+  )
+  return matches.at(-1)
+}
+
+/**
+ * Whether this process is the `bun test` runner. Bun sets no runner-only
+ * environment variable (only NODE_ENV=test, which any shell or child process
+ * can inherit), but the runner points `Bun.main` at the test file it is
+ * executing — the built CLI never runs with a test file as its entry point.
+ */
+export function isBunTestRunner(
+  main: string | undefined = (globalThis as { Bun?: { main?: string } }).Bun
+    ?.main,
+): boolean {
+  return typeof main === 'string' && /\.(test|spec)\.[cm]?[jt]sx?$/.test(main)
+}
+
+/**
+ * Under the `bun test` runner, the failure hooks write only into an isolated
+ * config home (the testing override or an explicit config-dir env). Many
+ * existing tests drive failed notifications without isolating it, and their
+ * items would otherwise land in the developer's real ~/.openclaude task
+ * lists — where an undecided item would block that developer's own spawns.
+ * Keyed on the runner itself, never on NODE_ENV: a real session started with
+ * NODE_ENV=test must still record its failures.
+ */
+export function attentionHookWritesAllowed(runnerMain?: string): boolean {
+  // An undefined runnerMain falls back to the real Bun.main.
+  if (!isBunTestRunner(runnerMain)) return true
   return (
     getClaudeConfigHomeDirOverrideForTesting() !== undefined ||
     Boolean(process.env.OPENCLAUDE_CONFIG_DIR) ||
@@ -118,7 +154,7 @@ export function noteAttentionItem(
   input: NewAttentionItem,
   options: { taskListId?: string; onLost?: (message: string) => void } = {},
 ): Promise<void> {
-  if (!hookWritesAllowed()) return Promise.resolve()
+  if (!attentionHookWritesAllowed()) return Promise.resolve()
   let taskListId: string
   try {
     taskListId = options.taskListId ?? getTaskListId()
@@ -360,8 +396,9 @@ async function abortTargets(
  *   satisfies a requiresVerification or requiresFinalReview gate.
  * - patch on a `gap` item also re-files any GAP task of that review that is
  *   missing (the recovery path for a GAPS record whose GAP tasks were lost).
- * - abort: cancel every linked non-terminal task (TaskCancelError is caught
- *   and reported), then release the holds. Nothing is killed.
+ * - abort: cancel every linked non-terminal task, then release the holds.
+ *   A task that cannot be cancelled (any error) is reported in
+ *   `cancelErrors` and the rest are still cancelled. Nothing is killed.
  */
 export async function decideAttentionItem(
   id: string,
@@ -371,6 +408,8 @@ export async function decideAttentionItem(
     rootCause?: AttentionRootCause
   },
   taskListId: string = getTaskListId(),
+  /** Test seam: the per-task cancel the abort applies. */
+  deps: { cancelTask?: typeof cancelTask } = {},
 ): Promise<AttentionDecisionOutcome> {
   const tasksDir = getTasksDir(taskListId)
   const item = await decideAttentionItemIn(tasksDir, id, decision)
@@ -380,17 +419,37 @@ export async function decideAttentionItem(
   let refileError: string | undefined
 
   if (decision.choice === 'abort') {
-    for (const [list, ids] of await abortTargets(item, taskListId)) {
-      const byId = new Map((await listTasks(list)).map(t => [t.id, t]))
+    // The decision is already recorded, so nothing below may throw: a
+    // half-applied abort would leave the rest of the tasks uncancelled and
+    // the holds in place. Every error — a TaskCancelError or an I/O failure
+    // on one task or one list — is recorded and the abort carries on.
+    const cancel = deps.cancelTask ?? cancelTask
+    let targets: Map<string, Set<string>> = new Map()
+    try {
+      targets = await abortTargets(item, taskListId)
+    } catch (error) {
+      cancelErrors.push(`listing the tasks to cancel: ${errorMessage(error)}`)
+    }
+    for (const [list, ids] of targets) {
+      let byId: Map<string, Task>
+      try {
+        byId = new Map((await listTasks(list)).map(t => [t.id, t]))
+      } catch (error) {
+        cancelErrors.push(
+          `task list '${list}' (${[...ids].map(i => `#${i}`).join(', ')}): ${errorMessage(error)}`,
+        )
+        continue
+      }
       for (const taskId of ids) {
         const task = byId.get(taskId)
         if (!task || isTaskResolved(task.status)) continue
         try {
-          await cancelTask(list, taskId)
+          await cancel(list, taskId)
           cancelled.push(taskId)
         } catch (error) {
-          if (!(error instanceof TaskCancelError)) throw error
-          cancelErrors.push(`#${taskId}: ${error.message}`)
+          cancelErrors.push(
+            `#${taskId}: ${error instanceof TaskCancelError ? error.message : errorMessage(error)}`,
+          )
         }
       }
     }

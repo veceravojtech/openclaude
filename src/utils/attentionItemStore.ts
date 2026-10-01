@@ -369,50 +369,100 @@ export async function decideAttentionItemIn(
   if (decision.rootCause && !ATTENTION_ROOT_CAUSES.includes(decision.rootCause)) {
     throw new AttentionDecisionError(`Unknown root_cause '${decision.rootCause}'.`)
   }
-  const others =
-    decision.choice === 'retry' ? await listAttentionItemsIn(tasksDir) : []
-  return mutateAttentionItemIn(tasksDir, id, current => {
-    if (current.status === 'decided') {
+  if (decision.choice !== 'retry') {
+    return mutateAttentionItemIn(tasksDir, id, current =>
+      decidedItem(id, current, decision, []),
+    )
+  }
+  // The retry cap spans items: "no other item with this retryKey has a
+  // retry decision" must be checked and the retry recorded as one atomic
+  // step, or two concurrent retries of the same worker both pass. Both run
+  // under a per-retryKey lock, taken BEFORE the item lock. Lock order is
+  // always retry-key → item, and nothing takes them the other way round, so
+  // the pair cannot deadlock. The retryKey is fixed at creation, so reading
+  // it before the lock is safe.
+  const retryKey = (await readAttentionItemIn(tasksDir, id))?.retryKey
+  if (!retryKey) {
+    return mutateAttentionItemIn(tasksDir, id, current =>
+      decidedItem(id, current, decision, []),
+    )
+  }
+  const keyPath = retryKeyLockTargetIn(tasksDir, retryKey)
+  await mkdir(attentionDirIn(tasksDir), { recursive: true })
+  await writeFile(keyPath, '', { flag: 'a' })
+  const release = await lockfile.lock(keyPath, LOCK_OPTIONS)
+  try {
+    // Read under the retry-key lock: every retry decision for this key is
+    // recorded while holding it, so this listing cannot miss one.
+    const others = await listAttentionItemsIn(tasksDir)
+    return await mutateAttentionItemIn(tasksDir, id, current =>
+      decidedItem(id, current, decision, others),
+    )
+  } finally {
+    await release()
+  }
+}
+
+/**
+ * The lock target serialising retry decisions for one retryKey: a hidden
+ * non-JSON file in the items directory (listings skip it).
+ */
+function retryKeyLockTargetIn(tasksDir: string, retryKey: string): string {
+  const hash = createHash('sha256').update(retryKey).digest('hex').slice(0, 16)
+  return join(attentionDirIn(tasksDir), `.retry-${hash}`)
+}
+
+/** Applies one decision to the current (locked) item, or throws. */
+function decidedItem(
+  id: string,
+  current: AttentionItem,
+  decision: {
+    choice: AttentionChoice
+    reason: string
+    rootCause?: AttentionRootCause
+  },
+  others: AttentionItem[],
+): AttentionItem {
+  if (current.status === 'decided') {
+    throw new AttentionDecisionError(
+      `Attention item '${id}' is already decided: ${current.decision?.choice ?? 'unknown'}.`,
+    )
+  }
+  if (current.status === 'superseded') {
+    throw new AttentionDecisionError(
+      `Attention item '${id}' was superseded (${current.supersededReason ?? 'no reason'}); nothing to decide.`,
+    )
+  }
+  if (decision.choice === 'retry') {
+    if (!current.transient) {
       throw new AttentionDecisionError(
-        `Attention item '${id}' is already decided: ${current.decision?.choice ?? 'unknown'}.`,
+        `Cannot retry '${id}': it is not a transient failure${current.transientReason ? ` (${current.transientReason})` : ''}. Decide patch (fix the earliest wrong input), continue or abort.`,
       )
     }
-    if (current.status === 'superseded') {
+    const retried = current.retryKey
+      ? others.find(
+          o =>
+            o.id !== id &&
+            o.retryKey === current.retryKey &&
+            o.decision?.choice === 'retry',
+        )
+      : undefined
+    if (retried) {
       throw new AttentionDecisionError(
-        `Attention item '${id}' was superseded (${current.supersededReason ?? 'no reason'}); nothing to decide.`,
+        `Cannot retry '${id}': this worker was already retried once (${retried.id}). Decide patch, continue or abort.`,
       )
     }
-    if (decision.choice === 'retry') {
-      if (!current.transient) {
-        throw new AttentionDecisionError(
-          `Cannot retry '${id}': it is not a transient failure${current.transientReason ? ` (${current.transientReason})` : ''}. Decide patch (fix the earliest wrong input), continue or abort.`,
-        )
-      }
-      const retried = current.retryKey
-        ? others.find(
-            o =>
-              o.id !== id &&
-              o.retryKey === current.retryKey &&
-              o.decision?.choice === 'retry',
-          )
-        : undefined
-      if (retried) {
-        throw new AttentionDecisionError(
-          `Cannot retry '${id}': this worker was already retried once (${retried.id}). Decide patch, continue or abort.`,
-        )
-      }
-    }
-    return {
-      ...current,
-      status: 'decided',
-      decision: {
-        choice: decision.choice,
-        reason: decision.reason.trim(),
-        ...(decision.rootCause ? { rootCause: decision.rootCause } : {}),
-        decidedAt: new Date().toISOString(),
-      },
-    }
-  })
+  }
+  return {
+    ...current,
+    status: 'decided',
+    decision: {
+      choice: decision.choice,
+      reason: decision.reason.trim(),
+      ...(decision.rootCause ? { rootCause: decision.rootCause } : {}),
+      decidedAt: new Date().toISOString(),
+    },
+  }
 }
 
 /**
@@ -493,8 +543,16 @@ export function classifyFailureText(text: string | undefined): {
   if (/quota exhausted|insufficient_quota|exceeded your current quota/i.test(t)) {
     return { transient: true, transientReason: 'provider quota' }
   }
-  if (/rate limit|\b429\b/i.test(t)) {
+  if (/rate limit/i.test(t) || HTTP_429.test(t)) {
     return { transient: true, transientReason: 'provider rate limit' }
   }
   return { transient: false, transientReason: 'unrecognised error' }
 }
+
+/**
+ * A 429 that reads as an HTTP status: next to `status`, `HTTP`, `Too Many
+ * Requests` or `rate`. A bare 429 (a line number, a count, an id) is not a
+ * rate limit.
+ */
+const HTTP_429 =
+  /\b(?:status(?:[ _-]?code)?|HTTP(?:\/\d(?:\.\d)?)?|rate)\W{0,3}429\b|\b429\W{0,3}(?:Too Many Requests|rate)\b/i

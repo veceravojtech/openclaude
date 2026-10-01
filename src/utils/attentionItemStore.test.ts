@@ -224,3 +224,42 @@ test('classifyFailureText: rate limit and quota are transient; auth and unknown 
   expect(classifyFailureText('TypeError: x is undefined').transient).toBe(false)
   expect(classifyFailureText(undefined).transient).toBe(false)
 })
+
+describe('hardening', () => {
+  test('the retry cap is atomic: two concurrent retries on one retryKey give one success and one cap rejection', async () => {
+    for (let round = 0; round < 5; round++) {
+      const roundDir = join(dir, `round-${round}`)
+      const a = failure({ id: failureItemId('t1', 0) })
+      const b = failure({ id: failureItemId('t1', 1) })
+      await createAttentionItemIn(roundDir, a)
+      await createAttentionItemIn(roundDir, b)
+      const results = await Promise.allSettled([
+        decideAttentionItemIn(roundDir, a.id, { choice: 'retry', reason: 'flaky' }),
+        decideAttentionItemIn(roundDir, b.id, { choice: 'retry', reason: 'flaky too' }),
+      ])
+      const won = results.filter(r => r.status === 'fulfilled')
+      const lost = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+      expect(won).toHaveLength(1)
+      expect(lost).toHaveLength(1)
+      expect(String(lost[0]!.reason)).toMatch(/already retried once/)
+      const retried = (await listAttentionItemsIn(roundDir)).filter(
+        i => i.decision?.choice === 'retry',
+      )
+      expect(retried).toHaveLength(1)
+      // The lock target is not an item: listings are unaffected by it.
+      expect((await listAttentionItemsIn(roundDir)).map(i => i.id).sort()).toEqual(
+        [a.id, b.id].sort(),
+      )
+    }
+  })
+
+  test('a bare 429 (a line number, a count) is not a rate limit; a 429 status is', () => {
+    expect(classifyFailureText('TypeError at src/query.ts:429:12').transient).toBe(false)
+    expect(classifyFailureText('Expected 429 rows, got 12').transient).toBe(false)
+    expect(classifyFailureText('API Error: status 429').transient).toBe(true)
+    expect(classifyFailureText('HTTP 429 from provider').transient).toBe(true)
+    expect(classifyFailureText('HTTP/1.1 429').transient).toBe(true)
+    expect(classifyFailureText('429: Too Many Requests').transient).toBe(true)
+    expect(classifyFailureText('status_code=429').transient).toBe(true)
+  })
+})

@@ -2762,3 +2762,146 @@ test('Phase 5: a late completion leaves a decided failure item alone', async () 
     })
   })
 })
+
+// Hardening: a SELF-REPORTED failure (the child's failed turn) releases the
+// teammate's tasks through the auto-reap, not through failTask. They must be
+// held for the same deterministic failure item until the lead decides it.
+test('hardening: the auto-reap after a self-reported failure holds the released tasks until the item is decided', async () => {
+  await withAttentionStore(async () => {
+    const { claimTask, createTask, getTask } = await import('../../utils/tasks.js')
+    const { decideAttentionItem, readAttentionItem } = await import('../../utils/attentionItems.js')
+    const world = makeWorld()
+    const reaper = fakeReapClock()
+    const owned = await createTask('team', {
+      subject: 'worker task',
+      description: 'd',
+      status: 'in_progress',
+      owner: 'worker',
+      blocks: [],
+      blockedBy: [],
+    })
+    registerTeammate(world, 'worker', {
+      ...watchdogDeps(world),
+      // The REAL unassign, against the isolated tasks dir.
+      unassignMemberTasks: undefined,
+      reapTimers: reaper.clock,
+      killFailedTeammate: async () => {
+        world.teamFile.members = world.teamFile.members.filter(m => m.name !== 'worker')
+        return true
+      },
+    })
+    worldToDispose.push(...world.handles)
+    world.mailbox.push(
+      idleNotification('worker', world.nowMs, 'failed', undefined, 'provider 400'),
+    )
+    await world.handles[0]!.scan()
+    expect(taskStatus(world)).toBe('failed')
+    const itemId = `failure-${world.taskId()}-0`
+    // The item exists before the reap (created inside finalization, not only
+    // by the notification's fire-and-forget hook).
+    expect((await readAttentionItem(itemId))?.status).toBe('undecided')
+    expect((await getTask('team', owned))?.owner).toBe('worker')
+
+    await reaper.fire()
+    // The reap runs off the timer: wait for its last step (linking the
+    // released ids into the item), bounded.
+    for (let i = 0; i < 300; i++) {
+      if ((await readAttentionItem(itemId))?.source.taskListTaskIds) break
+      await new Promise(r => setTimeout(r, 10))
+    }
+    const released = await getTask('team', owned)
+    expect(released?.status).toBe('pending')
+    expect(released?.owner).toBeUndefined()
+    expect(released?.metadata).toMatchObject({
+      attentionHold: itemId,
+      attentionHoldList: LEAD_LIST,
+    })
+    expect((await readAttentionItem(itemId))?.source.taskListTaskIds).toEqual([owned])
+
+    const blocked = await claimTask('team', owned, 'someone-else')
+    expect(blocked).toMatchObject({ success: false, reason: 'held_for_decision', attentionItemId: itemId })
+
+    await decideAttentionItem(itemId, { choice: 'continue', reason: 'accept it' })
+    expect((await claimTask('team', owned, 'someone-else')).success).toBe(true)
+  })
+})
+
+test('hardening: the auto-reap releases without a hold once the failure item is decided', async () => {
+  await withAttentionStore(async () => {
+    const { createTask, getTask } = await import('../../utils/tasks.js')
+    const { decideAttentionItem } = await import('../../utils/attentionItems.js')
+    const world = makeWorld()
+    const reaper = fakeReapClock()
+    const owned = await createTask('team', {
+      subject: 'worker task',
+      description: 'd',
+      status: 'in_progress',
+      owner: 'worker',
+      blocks: [],
+      blockedBy: [],
+    })
+    registerTeammate(world, 'worker', {
+      ...watchdogDeps(world),
+      unassignMemberTasks: undefined,
+      reapTimers: reaper.clock,
+      killFailedTeammate: async () => true,
+    })
+    worldToDispose.push(...world.handles)
+    world.mailbox.push(idleNotification('worker', world.nowMs, 'failed', undefined, 'boom'))
+    await world.handles[0]!.scan()
+    await decideAttentionItem(`failure-${world.taskId()}-0`, { choice: 'continue', reason: 'accepted' })
+    await reaper.fire()
+    for (let i = 0; i < 300; i++) {
+      if ((await getTask('team', owned))?.owner === undefined) break
+      await new Promise(r => setTimeout(r, 10))
+    }
+    const released = await getTask('team', owned)
+    expect(released?.owner).toBeUndefined()
+    expect(released?.metadata?.attentionHold).toBeUndefined()
+  })
+})
+
+// Hardening: when the auto-reap could not close a failed member's pane, the
+// member stays on the roster and the ghost sweep releases its tasks once the
+// pane is gone — still held for its undecided failure item.
+test('hardening: the ghost sweep holds a swept member’s tasks for its undecided failure item', async () => {
+  acquireSharedMutationLock(LOCK_NAME)
+  const dir = seedDiskRoster([
+    rosterMember('team-lead', '', '', undefined),
+    rosterMember('worker', WORKER_PANE, 'tmux', false),
+    rosterMember('ghost', GHOST_PANE, 'tmux', false, 'default'),
+  ])
+  const previousList = process.env.CLAUDE_CODE_TASK_LIST_ID
+  process.env.CLAUDE_CODE_TASK_LIST_ID = LEAD_LIST
+  try {
+    const { createAttentionItem, runFailureItem } = await import('../../utils/attentionItems.js')
+    const { claimTask, getTask } = await import('../../utils/tasks.js')
+    const item = runFailureItem({
+      taskId: GHOST_TASK_ID,
+      runSeq: 0,
+      description: 'ghost',
+      backend: 'pane',
+      agentId: GHOST_ID,
+      agentName: 'ghost',
+      teamName: 'team',
+    })
+    await createAttentionItem(item)
+    const world = makeSweepWorld()
+    world.memberPresence.set(GHOST_PANE, 'absent')
+    await world.handles[0]!.scan()
+    await world.handles[0]!.scan()
+    const task = await getTask('team', '7')
+    expect(task?.owner).toBeUndefined()
+    expect(task?.metadata).toMatchObject({ attentionHold: item.id, attentionHoldList: LEAD_LIST })
+    expect(await claimTask('team', '7', 'someone-else')).toMatchObject({
+      success: false,
+      reason: 'held_for_decision',
+    })
+  } finally {
+    if (previousList === undefined) delete process.env.CLAUDE_CODE_TASK_LIST_ID
+    else process.env.CLAUDE_CODE_TASK_LIST_ID = previousList
+    releaseSharedMutationLock()
+    setClaudeConfigHomeDirForTesting(undefined)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

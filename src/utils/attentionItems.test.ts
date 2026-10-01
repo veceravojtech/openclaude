@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 // Load the tool graph first (import-cycle TDZ, as in the Phase 1/4 tests).
 import '../constants/tools.js'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
@@ -16,10 +16,13 @@ import {
 } from '../tools/AttentionDecideTool/AttentionDecideTool.js'
 import { asAgentId } from '../types/ids.js'
 import {
+  attentionHookWritesAllowed,
   checkAttentionSpawnGate,
   createAttentionItem,
   decideAttentionItem,
   failureItemId,
+  findUndecidedFailureItemFor,
+  isBunTestRunner,
   formatAttentionItemsReminder,
   gapItemId,
   listUndecidedAttentionItems,
@@ -372,4 +375,115 @@ describe('AttentionDecide tool', () => {
 test('failure item ids are deterministic per task and run', () => {
   expect(failureItemId('t', 2)).toBe('failure-t-2')
   expect(runFailureItem({ taskId: 't', runSeq: 2, description: 'd', backend: 'pane', agentId: 'x@y' }).retryKey).toBe('agent:x@y')
+})
+
+describe('hardening', () => {
+  test('abort: one task failing to cancel does not stop the others; holds are released and the error is reported', async () => {
+    const taskIds = [
+      await newTask('a', { owner: WORKER.agentId }),
+      await newTask('b', { owner: WORKER.agentId }),
+      await newTask('c', { owner: WORKER.agentId }),
+    ]
+    const item = runFailureItem({
+      taskId: 'in-proc-3',
+      runSeq: 0,
+      description: 'builder',
+      error: 'boom',
+      backend: 'in_process',
+      ...WORKER,
+      teamName: 'team',
+    })
+    await createAttentionItem(item)
+    await unassignTeammateTasks(LIST, WORKER.agentId, WORKER.agentName, 'failed', {
+      attentionHold: item.id,
+    })
+    const broken = taskIds[1]!
+    const { cancelTask } = await import('./tasks.js')
+    const outcome = await decideAttentionItem(
+      item.id,
+      { choice: 'abort', reason: 'wrong approach' },
+      LIST,
+      {
+        cancelTask: async (list, id) => {
+          if (id === broken) throw new Error('injected EIO')
+          return cancelTask(list, id)
+        },
+      },
+    )
+    expect(outcome.item.decision?.choice).toBe('abort')
+    expect(outcome.cancelled.sort()).toEqual([taskIds[0]!, taskIds[2]!].sort())
+    expect(outcome.cancelErrors).toEqual([`#${broken}: injected EIO`])
+    expect((await getTask(LIST, taskIds[0]!))?.status).toBe('cancelled')
+    expect((await getTask(LIST, taskIds[2]!))?.status).toBe('cancelled')
+    // The one that could not be cancelled is not left held.
+    const left = await getTask(LIST, broken)
+    expect(left?.status).toBe('pending')
+    expect(left?.metadata?.attentionHold).toBeUndefined()
+    expect(outcome.released).toContain(broken)
+  })
+
+  test('hook writes are keyed on the test runner, not on NODE_ENV', async () => {
+    // Bun's runner sets no runner-only env var; it points Bun.main at the
+    // test file. That is what marks this process as the runner.
+    expect(process.env.NODE_ENV).toBe('test')
+    expect(isBunTestRunner()).toBe(true)
+    expect(isBunTestRunner('/usr/lib/openclaude/dist/cli.mjs')).toBe(false)
+    // Under the runner: an isolated config home allows writes (this suite
+    // sets one), the real one does not.
+    expect(attentionHookWritesAllowed()).toBe(true)
+    setClaudeConfigHomeDirForTesting(undefined)
+    const saved = {
+      claude: process.env.CLAUDE_CONFIG_DIR,
+      openclaude: process.env.OPENCLAUDE_CONFIG_DIR,
+    }
+    delete process.env.CLAUDE_CONFIG_DIR
+    delete process.env.OPENCLAUDE_CONFIG_DIR
+    try {
+      expect(attentionHookWritesAllowed()).toBe(false)
+      // NODE_ENV=test without the runner marker (a session started with it):
+      // writes are allowed.
+      expect(attentionHookWritesAllowed('/usr/lib/openclaude/dist/cli.mjs')).toBe(true)
+    } finally {
+      if (saved.claude !== undefined) process.env.CLAUDE_CONFIG_DIR = saved.claude
+      if (saved.openclaude !== undefined) process.env.OPENCLAUDE_CONFIG_DIR = saved.openclaude
+      setClaudeConfigHomeDirForTesting(configDir)
+    }
+  })
+
+  test('a process run with NODE_ENV=test outside the runner records its failure item', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'openclaude-attention-home-'))
+    const script = join(home, 'note.ts')
+    try {
+      writeFileSync(
+        script,
+        `import { noteAttentionItem } from ${JSON.stringify(join(import.meta.dir, 'attentionItems.ts'))}\n` +
+          `await noteAttentionItem({ id: 'failure-envtest-0', kind: 'failure', source: { taskId: 'envtest' }, summary: 's', transient: false })\n`,
+      )
+      const env: Record<string, string> = {}
+      for (const [k, v] of Object.entries(process.env)) {
+        if (v !== undefined && k !== 'CLAUDE_CONFIG_DIR' && k !== 'OPENCLAUDE_CONFIG_DIR') env[k] = v
+      }
+      env.NODE_ENV = 'test'
+      env.HOME = home
+      env.CLAUDE_CODE_TASK_LIST_ID = 'envtest-list'
+      const proc = Bun.spawn([process.execPath, script], { env, stdout: 'pipe', stderr: 'pipe' })
+      expect(await proc.exited).toBe(0)
+      const written = readdirSync(join(home, '.openclaude', 'tasks', 'envtest-list', '.attention'))
+      expect(written.some(f => f.startsWith('failure-envtest-0'))).toBe(true)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  test('findUndecidedFailureItemFor matches a worker by agent id or by name in its team, undecided only', async () => {
+    const mine = runFailureItem({ taskId: 'p1', runSeq: 0, description: 'w', backend: 'pane', agentId: 'w@team', agentName: 'w', teamName: 'team' })
+    const other = runFailureItem({ taskId: 'p2', runSeq: 0, description: 'x', backend: 'pane', agentId: 'x@team', agentName: 'x', teamName: 'team' })
+    await createAttentionItem(mine)
+    await createAttentionItem(other)
+    expect((await findUndecidedFailureItemFor({ agentId: 'w@team', name: 'w', teamName: 'team' }))?.id).toBe(mine.id)
+    expect((await findUndecidedFailureItemFor({ agentId: 'w-other-id', name: 'w', teamName: 'team' }))?.id).toBe(mine.id)
+    expect(await findUndecidedFailureItemFor({ agentId: 'w-other-id', name: 'w', teamName: 'elsewhere' })).toBeUndefined()
+    await decideAttentionItem(mine.id, { choice: 'continue', reason: 'ok' })
+    expect(await findUndecidedFailureItemFor({ agentId: 'w@team', name: 'w', teamName: 'team' })).toBeUndefined()
+  })
 })
