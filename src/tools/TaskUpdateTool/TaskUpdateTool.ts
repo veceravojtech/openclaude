@@ -398,8 +398,13 @@ export const TaskUpdateTool = buildTool({
     // already saved, so a failed notification does not fail the tool; it is
     // reported in the result instead, so the caller can tell the owner itself.
     let ownerNotificationError: string | undefined
-    if (updates.owner && isAgentSwarmsEnabled()) {
-      const senderName = getAgentName() || 'team-lead'
+    const senderName = getAgentName() || 'team-lead'
+    // Claiming a task for yourself is not an assignment anyone needs to be
+    // told about: the claimant would only receive its own task back as a
+    // fresh "assigned by <itself>" message and spend a turn on it.
+    const selfAssigned =
+      updates.owner === senderName || updates.owner === getAgentId()
+    if (updates.owner && isAgentSwarmsEnabled() && !selfAssigned) {
       const senderColor = getTeammateColor()
       const assignmentMessage = JSON.stringify({
         type: 'task_assignment',

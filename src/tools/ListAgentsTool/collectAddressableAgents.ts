@@ -52,7 +52,11 @@ export const ADDRESSABLE_AGENT_STATUSES = [
 export type AddressableAgentStatus =
   (typeof ADDRESSABLE_AGENT_STATUSES)[number]
 
-export const ADDRESSABLE_AGENT_SOURCES = ['task', 'team_file'] as const
+export const ADDRESSABLE_AGENT_SOURCES = [
+  'task',
+  'team_file',
+  'attention_item',
+] as const
 /**
  * Where a row's liveness comes from.
  * - `task`: a task in this session's AppState — the live, authoritative fact.
@@ -60,6 +64,10 @@ export const ADDRESSABLE_AGENT_SOURCES = ['task', 'team_file'] as const
  *   at spawn and never corrected when a child dies, so such a row proves only
  *   that the member was once written down: it may be dead, or it may belong to
  *   a different session. Its status is reported `unknown`, never busy or idle.
+ *
+ * - `attention_item`: an UNDECIDED failure item of a pane teammate the lead
+ *   has already retired (its pane is gone). Status `failed`, kept on the
+ *   roster until the lead decides it, so a crash never just vanishes.
  *
  * Absent on the derived `team_lead` rows, which are addresses rather than
  * observations and carry no liveness either way.
@@ -83,6 +91,21 @@ export type AddressableAgent = {
   source?: AddressableAgentSource
   /** The AppState task id — what TaskStop takes. Only on task-backed rows. */
   taskId?: string
+  /** The undecided attention item behind an `attention_item` row. */
+  attentionItemId?: string
+}
+
+/**
+ * A pane teammate with an undecided failure item (read by the tool from the
+ * root lead's attention store; passed in so this module stays I/O-free).
+ */
+export type FailedTeammate = {
+  agentId: string
+  agentName: string
+  teamName: string
+  taskId: string
+  itemId: string
+  summary: string
 }
 
 /**
@@ -119,6 +142,11 @@ export type CollectAddressableAgentsInput = {
   tree?: TeamNeighbourhood
   delegatedTeams?: readonly TeamFile[]
   delegatedByAgentId?: ReadonlyMap<string, DelegatedActivity>
+  /**
+   * Pane teammates with an undecided failure item. Listed `failed` when no
+   * live row covers the same agent (a respawn under the same id wins).
+   */
+  failedTeammates?: readonly FailedTeammate[]
 }
 
 const KIND_ORDER: Record<AddressableAgentKind, number> = {
@@ -382,6 +410,27 @@ export function collectAddressableAgents(
     }
   }
 
+  // (e) crashed or failed pane teammates the lead already retired: their
+  // undecided failure item keeps them on the list as `failed` until the lead
+  // decides. After (a)/(b), so a live respawn with the same agentId wins.
+  for (const failed of input.failedTeammates ?? []) {
+    if (!isNeighbour(failed.teamName)) {
+      continue
+    }
+    add({
+      name: failed.agentName,
+      agentId: failed.agentId,
+      kind: 'teammate',
+      status: 'failed',
+      description: `${failed.summary} (undecided: ${failed.itemId})`,
+      team: failed.teamName,
+      to: formatRecipientAddress(failed.agentName, failed.teamName),
+      source: 'attention_item',
+      taskId: failed.taskId,
+      attentionItemId: failed.itemId,
+    })
+  }
+
   // (d) the lead of the caller's own team, addressable only from inside a
   // team. Inside a sub-team that lead is the teammate leading it, which is
   // what `team-lead` resolves to from down there — the root lead needs the
@@ -436,6 +485,11 @@ export const SEND_MESSAGE_HINT =
 
 export const TEAM_FILE_ONLY_MARKER = '(team file; no live local task)'
 
+/** Marks a row kept only by an undecided failure item: gone, not reachable. */
+export function attentionItemMarker(itemId: string): string {
+  return `(pane gone; decide ${itemId} with AttentionDecide)`
+}
+
 /** Compact model-facing rendering: one line per agent plus the hint. */
 export function renderAddressableAgents(
   agents: readonly AddressableAgent[],
@@ -454,6 +508,9 @@ export function renderAddressableAgents(
     }
     if (agent.source === 'team_file') {
       parts.push(TEAM_FILE_ONLY_MARKER)
+    }
+    if (agent.source === 'attention_item' && agent.attentionItemId) {
+      parts.push(attentionItemMarker(agent.attentionItemId))
     }
     if (agent.delegatedActivity) {
       const activity = agent.delegatedActivity

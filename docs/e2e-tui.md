@@ -401,3 +401,28 @@ otherwise make the expected row depend on the previous scenario.
   `~/.openclaude*` config, onboarding state and session history are never read
   or written. The temp directories are removed only after the tmux server is
   dead, because the CLI flushes config on shutdown.
+
+## Pane-crash harness
+
+`scripts/e2e/pane-crash.ts` is a second opt-in harness on the same terms
+(skips with exit code 0 without `OPENCLAUDE_E2E=1`, without `tmux`, or with
+tmux older than 3.2; throwaway config home; never collected by `bun test`):
+
+```bash
+bun run build
+OPENCLAUDE_E2E=1 bun run e2e:pane-crash
+```
+
+It launches `bin/openclaude` as a lead with `teammateMode: 'tmux'` on a private
+tmux server and a fake Messages API, and the lead spawns a real **pane**
+teammate that creates and claims team task #1. Two scenarios:
+
+| Scenario | What happens | Expected |
+| --- | --- | --- |
+| crash | `tmux kill-pane` on the teammate while it runs a Bash heartbeat loop — no shutdown was requested | a `<status>failed</status>` task-notification, exactly one undecided transient attention item `failure-<taskId>-0`, task #1 pending, unowned and held for it (`metadata.attentionHold`), no "has shut down" |
+| shutdown | the lead sends a `shutdown_request`, the teammate approves it | "has shut down", task #1 released without a hold, no attention item, no failed notification |
+
+The deterministic counterparts that `bun test` does run are
+`src/utils/swarm/backends/paneCrashPath.test.ts` (real files, real watchdog and
+sweeper) and `src/hooks/useInboxPoller.paneCrash.test.tsx` (the lead's real
+inbox poller over real mailbox files).

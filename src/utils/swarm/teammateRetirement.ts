@@ -46,6 +46,12 @@ import { TEAMMATE_GRACE_MS } from '../task/framework.js'
  * teammate is not a map this function should be rewriting, and a second
  * retirement of the same teammate is a no-op rather than a second system
  * message.
+ *
+ * A FAILED row is left as it is: it is the record of a failure the lead must
+ * still decide (a crashed pane, a self-reported failure being reaped), and
+ * rewriting it to completed would tell the lead the opposite. Without a
+ * `notificationMessage` no system message is appended — the crash path,
+ * whose failed task-notification is the lead's report.
  */
 export function retireTeammateFromLeaderView({
   teammateId,
@@ -54,7 +60,7 @@ export function retireTeammateFromLeaderView({
   now = Date.now,
 }: {
   teammateId: string
-  notificationMessage: string
+  notificationMessage?: string
   setAppState: (updater: (prev: AppState) => AppState) => void
   /** Injectable clock, so tests can pin the retention window. */
   now?: () => number
@@ -70,7 +76,8 @@ export function retireTeammateFromLeaderView({
     for (const [tid, task] of Object.entries(updatedTasks)) {
       if (
         isInProcessTeammateTask(task) &&
-        task.identity.agentId === teammateId
+        task.identity.agentId === teammateId &&
+        task.status !== 'failed'
       ) {
         const at = now()
         updatedTasks[tid] = {
@@ -91,21 +98,24 @@ export function retireTeammateFromLeaderView({
         ...prev.teamContext,
         teammates: remainingTeammates,
       },
-      inbox: {
-        messages: [
-          ...prev.inbox.messages,
-          {
-            id: randomUUID(),
-            from: 'system',
-            text: jsonStringify({
-              type: 'teammate_terminated',
-              message: notificationMessage,
-            }),
-            timestamp: new Date().toISOString(),
-            status: 'pending' as const,
-          },
-        ],
-      },
+      inbox:
+        notificationMessage === undefined
+          ? prev.inbox
+          : {
+              messages: [
+                ...prev.inbox.messages,
+                {
+                  id: randomUUID(),
+                  from: 'system',
+                  text: jsonStringify({
+                    type: 'teammate_terminated',
+                    message: notificationMessage,
+                  }),
+                  timestamp: new Date().toISOString(),
+                  status: 'pending' as const,
+                },
+              ],
+            },
     }
   })
 }

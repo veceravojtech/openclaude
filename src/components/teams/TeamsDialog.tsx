@@ -645,6 +645,11 @@ async function removeGhostTeammate(teamName: string, teammate: TeammateStatus, s
   logForDebugging(`[TeamsDialog] Removed ghost ${teammate.agentId} from team ${teamName}`);
 }
 async function killTeammate(paneId: string, backendType: PaneBackendType | undefined, teamName: string, teammateId: string, teammateName: string, setAppState: (f: (prev: AppState) => AppState) => void): Promise<void> {
+  // Off the roster BEFORE the pane dies, as the shutdown-approval handlers do:
+  // the ghost sweep treats a roster member whose pane vanished with no
+  // shutdown on record as a crash, and this kill is the user's own request.
+  removeMemberFromTeam(teamName, paneId);
+
   // Kill the pane using the backend that created it (handles -s / -L flags correctly).
   // Wrapped in try/catch so cleanup (removeMemberFromTeam, unassignTeammateTasks,
   // setAppState) always runs — matches useInboxPoller.ts error isolation.
@@ -664,8 +669,6 @@ async function killTeammate(paneId: string, backendType: PaneBackendType | undef
     // teammates have no pane to kill, so this is correct for them.
     logForDebugging(`[TeamsDialog] Skipping pane kill for ${paneId}: no backendType recorded`);
   }
-  // Remove from team config file
-  removeMemberFromTeam(teamName, paneId);
 
   // Unassign tasks and build notification message
   const {

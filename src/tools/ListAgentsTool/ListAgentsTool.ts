@@ -12,7 +12,7 @@ import {
 } from '../../utils/swarm/teamHelpers.js'
 import { readDelegatedActivity } from '../../utils/swarm/delegatedActivity.js'
 import { getTeammateStatuses } from '../../utils/teamDiscovery.js'
-import { getTeamName } from '../../utils/teammate.js'
+import { getTeamName, isTeammate } from '../../utils/teammate.js'
 import {
   getRootTeamName,
   resolveCallerTeamName,
@@ -22,9 +22,11 @@ import {
   ADDRESSABLE_AGENT_SOURCES,
   ADDRESSABLE_AGENT_STATUSES,
   collectAddressableAgents,
+  type FailedTeammate,
   renderAddressableAgents,
   type TeamNeighbourhood,
 } from './collectAddressableAgents.js'
+import { listUndecidedAttentionItems } from '../../utils/attentionItems.js'
 import { LIST_AGENTS_TOOL_NAME } from './constants.js'
 import { DESCRIPTION, getPrompt } from './prompt.js'
 
@@ -89,10 +91,50 @@ const outputSchema = lazySchema(() =>
           unknownDescendants: z.array(z.string()),
         }).optional(),
         taskId: z.string().optional(),
+        attentionItemId: z.string().optional(),
       }),
     ),
   }),
 )
+
+/**
+ * Pane teammates with an undecided failure item, for the ROOT lead only —
+ * the one whose list holds the items and who decides them. A store that
+ * cannot be read lists none: the per-turn reminder still names the item.
+ */
+async function readFailedTeammates(
+  callerIsRootLead: boolean,
+): Promise<FailedTeammate[]> {
+  if (!callerIsRootLead) return []
+  try {
+    const items = await listUndecidedAttentionItems()
+    return items.flatMap(item => {
+      const { source } = item
+      if (
+        item.kind !== 'failure' ||
+        source.backend !== 'pane' ||
+        !source.agentId ||
+        !source.agentName ||
+        !source.teamName ||
+        !source.taskId
+      ) {
+        return []
+      }
+      return [
+        {
+          agentId: source.agentId,
+          agentName: source.agentName,
+          teamName: source.teamName,
+          taskId: source.taskId,
+          itemId: item.id,
+          summary: item.summary,
+        },
+      ]
+    })
+  } catch {
+    return []
+  }
+}
 type OutputSchema = ReturnType<typeof outputSchema>
 
 export type Output = z.infer<OutputSchema>
@@ -159,7 +201,11 @@ export const ListAgentsTool = buildTool({
       ...Object.values(appState.tasks).flatMap(task => task.type === 'in_process_teammate' ? [task.identity] : []),
     ]
     const delegatedByAgentId = new Map(owners.map(owner => [owner.agentId, readDelegatedActivity(owner, appState.tasks)]))
+    const failedTeammates = await readFailedTeammates(
+      callerIsLead && !tree.root && !isTeammate(),
+    )
     const agents = collectAddressableAgents({
+      failedTeammates,
       delegatedByAgentId,
       tasks: appState.tasks,
       agentNameRegistry: appState.agentNameRegistry,

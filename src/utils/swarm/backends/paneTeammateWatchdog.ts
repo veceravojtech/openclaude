@@ -1,5 +1,6 @@
 import type { SetAppState } from '../../../Task.js'
 import { getSessionId } from '../../../bootstrap/state.js'
+import { isInProcessTeammateTask } from '../../../tasks/InProcessTeammateTask/types.js'
 import { enqueueAgentNotification } from '../../../tasks/LocalAgentTask/LocalAgentTask.js'
 import {
   appendTaskOutput,
@@ -16,6 +17,9 @@ import {
   formatTeammateReportResult,
   type IdleNotificationMessage,
   isIdleNotification,
+  isShutdownApproved,
+  isShutdownRejected,
+  isShutdownRequest,
   isTeammateStartupNotification,
   truncateTeammateReport,
 } from '../../teammateMailbox.js'
@@ -96,8 +100,10 @@ import {
  * A healthy `idleReason: 'available'`/`'interrupted'` from a living pane marks
  * the task idle but does NOT terminal-complete it — the pane is alive and
  * resumable, so the row stays 'running' and addressable for follow-ups; it
- * only reaches terminal on a confirmed dead pane (the ghost sweep) or an
- * approved shutdown (killInProcessTeammate's abort). `idleReason: 'parked'`
+ * only reaches terminal on a confirmed dead pane (the ghost sweep: a crash
+ * when no shutdown was requested — failed through this watchdog, see
+ * failOnPaneGone — else a clean retirement) or an approved shutdown
+ * (killInProcessTeammate's abort). `idleReason: 'parked'`
  * (account-wide usage limit) is proof of life, not completion: the failure
  * deadlines stand down while the teammate waits out the window, because a
  * parked teammate is alive and resumable.
@@ -221,6 +227,14 @@ export const LATE_COMPLETION_SEPARATOR =
 export const PANE_GONE_LINE =
   'Pane is gone or unreadable; no output could be captured.'
 
+/**
+ * The failure reason of a teammate whose pane disappeared (tmux kill-pane, a
+ * closed window, a dead tmux server) with no shutdown requested or approved:
+ * the ghost sweep's crash verdict, committed by the teammate's own watchdog.
+ */
+export const PANE_CLOSED_WITHOUT_SHUTDOWN_ERROR =
+  'Pane was closed without a shutdown request (crash): the teammate process is gone'
+
 /** Keep the END of a pane tail — its most recent lines matter most. */
 function keepTail(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text
@@ -279,6 +293,8 @@ export type PaneWatchdogTeamFile = {
     tmuxPaneId?: string
     /** tmux socket the pane was spawned on; absent on legacy rows. */
     tmuxSocket?: string
+    /** Spawn time (ms): shutdown evidence older than this is a former run's. */
+    joinedAt?: number
   }>
 }
 
@@ -291,7 +307,25 @@ export type PaneTeammateWatchdogDeps = {
     leadName: string,
     teamName: string,
   ) => Promise<PaneWatchdogMailboxMessage[]>
-  readTeamFile?: (teamName: string) => Promise<PaneWatchdogTeamFile | null>
+  /**
+   * Any team member's inbox, read by the ghost sweep for shutdown evidence
+   * (the lead's for a teammate's approval, the teammate's for the lead's
+   * request). Defaults to the real mailbox file.
+   */
+  readMemberMailbox?: (
+    agentName: string,
+    teamName: string,
+  ) => Promise<PaneWatchdogMailboxMessage[]>
+  /**
+   * Fail a crashed member's running task (the ghost sweep's crash verdict).
+   * Defaults to the task's own watchdog ({@link failPaneTeammateOnPaneGone});
+   * resolves true once the failure is committed.
+   */
+  failCrashedTeammate?: (
+    taskId: string,
+    member: { agentId: string; name: string },
+  ) => Promise<boolean>
+  readTeamFile?:(teamName: string) => Promise<PaneWatchdogTeamFile | null>
   probePane?: () => Promise<PaneLiveness>
   /** Probe for any pane of the team, used by the ghost sweep. */
   probeMemberPane?: (
@@ -373,9 +407,55 @@ export type PaneTeammateWatchdogHandle = {
    * independent of {@link scan}'s single-flight guard (defence in depth).
    */
   scanUnserialized(): Promise<void>
+  /**
+   * The ghost sweep's crash verdict: the pane is confirmed gone and no
+   * shutdown was requested. Fails the task if it is still running, inside the
+   * finalization lock, even after a delivered turn disarmed the deadlines (an
+   * idle teammate whose pane is killed has crashed too). Resolves true when
+   * this call committed the failure.
+   */
+  failOnPaneGone(knownAgentId: string): Promise<boolean>
   /** Disarm: stop the interval, ignore every future signal. */
   dispose(): void
   readonly disposed: boolean
+}
+
+/**
+ * Every armed watchdog by task id, so the team sweeper can hand a crashed
+ * member to its own watchdog. Kept past dispose(): a watchdog disarms after a
+ * delivered turn, but its idle teammate can still crash. Dropped when the
+ * task leaves AppState, is aborted (killed), or its member is retired.
+ */
+const paneWatchdogsByTask = new Map<string, PaneTeammateWatchdogHandle>()
+
+/**
+ * Fail a crashed pane teammate's running task through its own watchdog.
+ * Resolves false (nothing done) when no watchdog is registered for it.
+ */
+export async function failPaneTeammateOnPaneGone(
+  taskId: string,
+  member: { agentId: string; name: string },
+): Promise<boolean> {
+  const handle = paneWatchdogsByTask.get(taskId)
+  if (!handle) {
+    logForDebugging(
+      `[PaneWatchdog] no watchdog registered for ${member.name}'s task ${taskId}; its crash cannot be reported as a failure`,
+      { level: 'error' },
+    )
+    return false
+  }
+  try {
+    return await handle.failOnPaneGone(member.agentId)
+  } finally {
+    paneWatchdogsByTask.delete(taskId)
+  }
+}
+
+/** The watchdog registered for `taskId`, if any (test seam). */
+export function getPaneWatchdogForTask(
+  taskId: string,
+): PaneTeammateWatchdogHandle | undefined {
+  return paneWatchdogsByTask.get(taskId)
 }
 
 function envPositiveInt(name: string): number | undefined {
@@ -421,6 +501,14 @@ type SweepDeps = {
     member: { agentId: string; name: string },
     options?: { attentionHold?: string; attentionHoldList?: string },
   ) => Promise<string>
+  readMemberMailbox: (
+    agentName: string,
+    teamName: string,
+  ) => Promise<PaneWatchdogMailboxMessage[]>
+  failCrashedTeammate: (
+    taskId: string,
+    member: { agentId: string; name: string },
+  ) => Promise<boolean>
   setAppState: SetAppState
   now: () => number
   /**
@@ -552,9 +640,45 @@ async function sweepRosterOnce(
     if (deps.isDisposed()) return
 
     const swept = { agentId: member.agentId, name: member.name }
+    // Requested end or crash, decided from evidence before anything mutates.
+    const death = await classifyPaneDeath(deps, teamFile, {
+      ...swept,
+      joinedAt: member.joinedAt,
+    })
+    if (deps.isDisposed()) return
     // Roster first, by agentId ONLY — removeTeammateFromTeamFile's name match
     // is an OR, and a respawned member reusing the ghost's name must survive.
     if (!deps.removeMember(deps.teamName, { agentId: member.agentId })) continue
+    if (death.verdict === 'crash') {
+      // Nobody asked this teammate to stop: its own watchdog fails the
+      // running task — attention item, held tasks, failed notification with
+      // the pane's last words — exactly as a dead pane at a deadline does.
+      let failed = false
+      try {
+        failed = await deps.failCrashedTeammate(death.taskId, swept)
+      } catch (error) {
+        logForDebugging(
+          `[PaneWatchdog] could not fail crashed teammate ${swept.name}: ${String(error)}`,
+          { level: 'error' },
+        )
+      }
+      if (failed) {
+        // The failed notification IS the lead's report; a second "has shut
+        // down" message would contradict it, and the failed row must stay.
+        retireTeammateFromLeaderView({
+          teammateId: swept.agentId,
+          setAppState: deps.setAppState,
+          now: deps.now,
+        })
+        logForDebugging(
+          `[PaneWatchdog] ${swept.name}'s pane ${tmuxPaneId} is gone with no shutdown requested: failed task ${death.taskId} as a crash`,
+        )
+        continue
+      }
+      // Not committed (the task finished meanwhile, or a failure by another
+      // holder already owns it): the retirement below, which still holds the
+      // tasks for an undecided failure item of this member.
+    }
     // A member whose auto-reap could not close its pane ends here once the
     // pane is gone: its tasks stay held for its undecided failure item.
     const hold = await ghostFailureHold(deps.teamName, swept)
@@ -581,6 +705,105 @@ async function sweepRosterOnce(
       absentPaneScans.delete(key)
     }
   }
+}
+
+/** Slack on a member's spawn time when dating shutdown evidence. */
+const SHUTDOWN_EVIDENCE_SLACK_MS = 1_000
+
+/**
+ * Why a swept member's pane is gone, from evidence the lead holds — never
+ * from timing:
+ *
+ * - `requested`: the lead ended it or was asked to. Its task row was killed
+ *   (TaskStop, TeamsDialog) or carries `shutdownRequested`, the lead's inbox
+ *   holds this member's `shutdown_approved`, or the member's inbox holds the
+ *   lead's `shutdown_request`, dated from this spawn on. The approval
+ *   handlers normally remove the member before its pane dies, so a sweep only
+ *   sees a requested end that the lead has not processed yet.
+ * - `crash`: a RUNNING task row (idle or mid-turn) and none of the above:
+ *   someone closed the pane, tmux died, or the window went away.
+ * - `no-run`: no running row in this session (already failed or completed,
+ *   or never this session's): nothing to fail, the plain retirement applies.
+ *
+ * A mailbox that cannot be read is no evidence of a request, so the verdict
+ * leans to crash: a spurious failure item costs the lead a decision, a crash
+ * misread as a clean exit silently loses the work.
+ */
+async function classifyPaneDeath(
+  deps: SweepDeps,
+  teamFile: PaneWatchdogTeamFile,
+  member: { agentId: string; name: string; joinedAt?: number },
+): Promise<
+  { verdict: 'requested' | 'no-run' } | { verdict: 'crash'; taskId: string }
+> {
+  let runningTaskId: string | undefined
+  let requestedByState = false
+  deps.setAppState(prev => {
+    for (const task of Object.values(prev.tasks)) {
+      if (
+        !isInProcessTeammateTask(task) ||
+        task.identity.agentId !== member.agentId
+      ) {
+        continue
+      }
+      if (task.status === 'killed' || task.shutdownRequested) {
+        requestedByState = true
+      }
+      if (task.status === 'running') runningTaskId = task.id
+    }
+    return prev
+  })
+  if (requestedByState) return { verdict: 'requested' }
+  if (runningTaskId === undefined) return { verdict: 'no-run' }
+
+  const since = (member.joinedAt ?? 0) - SHUTDOWN_EVIDENCE_SLACK_MS
+  const current = (timestamp: string | undefined): boolean => {
+    if (!timestamp) return true
+    const at = Date.parse(timestamp)
+    return !Number.isFinite(at) || at >= since
+  }
+  const leadName =
+    teamFile.members?.find(m => m.agentId === teamFile.leadAgentId)?.name ??
+    TEAM_LEAD_NAME
+  // Requests this member turned down: it kept working, so they are not why
+  // its pane is gone.
+  const rejected = new Set<string>()
+  try {
+    const leadInbox = await deps.readMemberMailbox(leadName, deps.teamName)
+    let approved = false
+    for (const m of leadInbox) {
+      if (m.from !== member.name) continue
+      const approval = isShutdownApproved(m.text)
+      if (approval && current(approval.timestamp ?? m.timestamp)) {
+        approved = true
+      }
+      const rejection = isShutdownRejected(m.text)
+      if (rejection) rejected.add(rejection.requestId)
+    }
+    if (approved) return { verdict: 'requested' }
+  } catch (error) {
+    logForDebugging(
+      `[PaneWatchdog] could not read ${leadName}'s inbox for ${member.name}'s shutdown approval: ${String(error)}`,
+    )
+  }
+  try {
+    const ownInbox = await deps.readMemberMailbox(member.name, deps.teamName)
+    const asked = ownInbox.some(m => {
+      const request = isShutdownRequest(m.text)
+      return (
+        request !== null &&
+        (m.from === leadName || m.from === TEAM_LEAD_NAME) &&
+        !rejected.has(request.requestId) &&
+        current(request.timestamp ?? m.timestamp)
+      )
+    })
+    if (asked) return { verdict: 'requested' }
+  } catch (error) {
+    logForDebugging(
+      `[PaneWatchdog] could not read ${member.name}'s inbox for a shutdown request: ${String(error)}`,
+    )
+  }
+  return { verdict: 'crash', taskId: runningTaskId }
 }
 
 /**
@@ -705,6 +928,11 @@ export function ensureTeamSweeper({
       removeTeammateFromTeamFile(team, member))
   const unassignMemberTasks =
     deps?.unassignMemberTasks ?? defaultUnassignMemberTasks
+  const readMemberMailbox =
+    deps?.readMemberMailbox ??
+    ((name: string, team: string) => readMailbox(name, team))
+  const failCrashedTeammate =
+    deps?.failCrashedTeammate ?? failPaneTeammateOnPaneGone
   const scanInterval =
     deps?.scanIntervalMs === undefined
       ? PANE_TEAMMATE_WATCHDOG_SCAN_INTERVAL_MS
@@ -728,6 +956,8 @@ export function ensureTeamSweeper({
     recordMemberSocket,
     removeMember,
     unassignMemberTasks,
+    readMemberMailbox,
+    failCrashedTeammate,
     setAppState,
     now,
     isDisposed: () => disposed,
@@ -937,7 +1167,15 @@ export function armPaneTeammateWatchdog({
   function transitionTerminal(
     status: 'completed' | 'failed',
     error?: string,
-    options?: { fromWatchdogFailure?: boolean },
+    options?: {
+      fromWatchdogFailure?: boolean
+      /**
+       * Re-arm `notified` on the running → terminal transition: an idle
+       * teammate's delivered turn already set it, and this is a NEW terminal
+       * event of the task that must reach the lead (the pane-gone crash).
+       */
+      rearmNotification?: boolean
+    },
   ): boolean {
     let transitioned = false
     updateTaskState(taskId, setAppState, task => {
@@ -967,6 +1205,7 @@ export function armPaneTeammateWatchdog({
         ...task,
         status,
         ...(error !== undefined ? { error } : {}),
+        ...(options?.rearmNotification ? { notified: false } : {}),
         endTime: at,
         retain: false,
         evictAfter: at + TEAMMATE_GRACE_MS,
@@ -1041,6 +1280,8 @@ export function armPaneTeammateWatchdog({
   async function noteFailureBeforeRelease(
     error: string,
     transient: { transient: boolean; transientReason: string },
+    /** Known when the roster member is already gone (the ghost sweep). */
+    knownAgentId?: string,
   ): Promise<{ id: string; list: string } | undefined> {
     if (!rootLeadOwnsFailure()) return undefined
     // The root lead's list — where its reminder and spawn gate read, and
@@ -1048,6 +1289,7 @@ export function armPaneTeammateWatchdog({
     const list = getTaskListId()
     const runSeq = currentRunSeq()
     const agentId =
+      knownAgentId ??
       (await readTeamFile(teamName).catch(() => null))?.members?.find(
         m => m.name === teammateName,
       )?.agentId ?? `${teammateName}@${teamName}`
@@ -1492,6 +1734,74 @@ export function armPaneTeammateWatchdog({
   }
 
   /**
+   * The ghost sweep's crash verdict (see the handle's `failOnPaneGone`): the
+   * pane is confirmed gone with no shutdown requested, so a task still
+   * running — mid-turn or idle at its prompt — has crashed. The same commit
+   * as failTask's dead-pane branch, under the same lock: item first, then
+   * the teammate's tasks released and HELD for it, then the failed
+   * notification whose output file carries the reason, the teammate's last
+   * text and the pane tail (or the line saying none could be captured).
+   *
+   * Not gated on `disposed`: a watchdog disarms once a turn is delivered,
+   * and the teammate it watched can still crash afterwards. Gated instead on
+   * the task itself being running, read inside the lock — a completion,
+   * kill or failure that finalized first leaves nothing to do. An armed
+   * watchdog keeps watching after the commit, so an idle report written just
+   * before the pane died still repairs the task (late-after-commit rule).
+   */
+  async function failOnPaneGone(knownAgentId: string): Promise<boolean> {
+    const error = PANE_CLOSED_WITHOUT_SHUTDOWN_ERROR
+    // The teammate's latest delivered report, newer than the scan's: its
+    // last text survives the pane. A mailbox that cannot be read is skipped.
+    try {
+      for (const message of qualifyingMessages(
+        await readLeadMailbox(leadName ?? (await resolveLeadName()), teamName),
+      )) {
+        const idle = isIdleNotification(message.text)
+        if (idle) lastIdleSeen = idle
+      }
+    } catch (readError) {
+      logForDebugging(
+        `[PaneWatchdog] could not read ${teammateName}'s last report before failing it: ${String(readError)}`,
+      )
+    }
+    const result = paneFailureResult(error, lastIdleSeen, await readPaneTail())
+    let committed = false
+    await withFinalization(async () => {
+      if (!transitionTerminal('failed', error, { rearmNotification: true })) {
+        return
+      }
+      committed = true
+      watchdogFailedTask = true
+      const attentionTransient = {
+        transient: true,
+        transientReason: 'pane exited (dead pane)',
+      }
+      const hold = await noteFailureBeforeRelease(
+        error,
+        attentionTransient,
+        knownAgentId,
+      )
+      await unassignDeadTeammateTasks(hold, knownAgentId)
+      if (!stillOurFailure(error)) return
+      await emit('failed', error, result, {
+        stillCurrent: () => stillOurFailure(error),
+        attentionTransient,
+      })
+    })
+    return committed
+  }
+
+  /** The lead's mailbox name, from the team file the child reads it from. */
+  async function resolveLeadName(): Promise<string> {
+    const teamFile = await readTeamFile(teamName)
+    leadName =
+      teamFile?.members?.find(m => m.agentId === teamFile?.leadAgentId)
+        ?.name ?? TEAM_LEAD_NAME
+    return leadName
+  }
+
+  /**
    * Resolve the teammate's terminal idle report (anything but waiting /
    * parked) into ONE outcome, decided inside the finalization lock from a
    * fresh read of the task. Never from a snapshot taken before an await: an
@@ -1616,6 +1926,7 @@ export function armPaneTeammateWatchdog({
     })
     if (!taskSeen) {
       dispose()
+      paneWatchdogsByTask.delete(taskId)
       return
     }
     // A snapshot, used only to decide whether this scan has anything left to
@@ -1629,17 +1940,10 @@ export function armPaneTeammateWatchdog({
 
     // Resolve the lead's mailbox name once, from the same team file the
     // child's Stop hook reads its lead's name from.
-    if (leadName === null) {
-      const teamFile = await readTeamFile(teamName)
-      leadName =
-        teamFile?.members?.find(m => m.agentId === teamFile?.leadAgentId)
-          ?.name ?? TEAM_LEAD_NAME
-    }
+    const lead = leadName ?? (await resolveLeadName())
 
     // 1. Mailbox signals from this teammate.
-    const qualifying = qualifyingMessages(
-      await readLeadMailbox(leadName, teamName),
-    )
+    const qualifying = qualifyingMessages(await readLeadMailbox(lead, teamName))
 
     if (qualifying.length > 0) {
       absorbSignals(qualifying)
@@ -1825,7 +2129,15 @@ export function armPaneTeammateWatchdog({
     return scanQueued
   }
 
-  signal?.addEventListener('abort', () => dispose(), { once: true })
+  signal?.addEventListener(
+    'abort',
+    () => {
+      dispose()
+      // Killed by the lead: a requested end, never the sweep's crash.
+      paneWatchdogsByTask.delete(taskId)
+    },
+    { once: true },
+  )
 
   // The ghost sweep is owned by a team-scoped sweeper, not this watchdog — a
   // teammate that self-reports a failure disposes its own watchdog in the same
@@ -1846,12 +2158,15 @@ export function armPaneTeammateWatchdog({
     ;(timer as { unref?: () => void }).unref?.()
   }
 
-  return {
+  const handle: PaneTeammateWatchdogHandle = {
     scan,
     scanUnserialized,
+    failOnPaneGone,
     dispose,
     get disposed() {
       return disposed
     },
   }
+  if (!signal?.aborted) paneWatchdogsByTask.set(taskId, handle)
+  return handle
 }

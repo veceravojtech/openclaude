@@ -6,6 +6,7 @@ import type { LocalAgentTaskState } from '../../tasks/LocalAgentTask/LocalAgentT
 import type { AgentId } from '../../types/ids.js'
 import type { TeammateStatus } from '../../utils/teamDiscovery.js'
 import {
+  attentionItemMarker,
   type CollectAddressableAgentsInput,
   collectAddressableAgents,
   NO_ADDRESSABLE_AGENTS_MESSAGE,
@@ -669,5 +670,57 @@ test('the `to` address is identical whether a row is task-backed or file-only', 
   })
   expect(child.map(a => [a.to, a.status, a.source])).toEqual([
     [`child@${SUB_TEAM}`, 'unknown', 'team_file'],
+  ])
+})
+
+const crashed = {
+  agentId: `crasher@${TEAM}`,
+  agentName: 'crasher',
+  teamName: TEAM,
+  taskId: 't-crasher',
+  itemId: 'failure-t-crasher-0',
+  summary: 'crasher failed: Pane was closed without a shutdown request (crash)',
+}
+
+test('a pane teammate with an undecided failure item stays listed as failed (not dropped) until the lead decides', () => {
+  const agents = collectAddressableAgents({
+    ...state([]),
+    teamMembers: [],
+    teamName: TEAM,
+    includeTeamLead: false,
+    failedTeammates: [crashed],
+  })
+  expect(agents).toEqual([
+    {
+      name: 'crasher',
+      agentId: `crasher@${TEAM}`,
+      kind: 'teammate',
+      status: 'failed',
+      description: `${crashed.summary} (undecided: failure-t-crasher-0)`,
+      team: TEAM,
+      to: `crasher@${TEAM}`,
+      source: 'attention_item',
+      taskId: 't-crasher',
+      attentionItemId: 'failure-t-crasher-0',
+    },
+  ])
+  const text = renderAddressableAgents(agents)
+  expect(text).toContain(`crasher  teammate  failed  to=crasher@${TEAM}  task=t-crasher`)
+  expect(text).toContain(attentionItemMarker('failure-t-crasher-0'))
+})
+
+test('a live respawn under the same agent id wins over the failure row; other teams are not neighbours', () => {
+  const agents = collectAddressableAgents({
+    ...state([teammate('crasher', { isIdle: true })]),
+    teamMembers: [],
+    teamName: TEAM,
+    includeTeamLead: false,
+    failedTeammates: [
+      crashed,
+      { ...crashed, agentId: 'other@beta', agentName: 'other', teamName: 'beta' },
+    ],
+  })
+  expect(agents.map(a => [a.name, a.status, a.source])).toEqual([
+    ['crasher', 'idle', 'task'],
   ])
 })
