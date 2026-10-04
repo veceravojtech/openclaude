@@ -644,21 +644,28 @@ The develop checklist has two flows:
 - **Full flow** (multi-file or non-trivial): an umbrella task
   `Deliver: <request>` with `requiresVerification` and `requiresFinalReview`;
   implementers in their own git worktrees; a code review by a reviewer on a
-  different model family; the implementers' worktree commits merged into the
-  target branch as one delivery commit; the `verification` agent on that
+  different model family; the implementers' worktree commits merged in a
+  separate delivery worktree as one delivery commit; the `verification` agent on that
   commit and `verifiedBy` (after a FAIL, the fixes are integrated and
   verified again); the `final-reviewer` on the newest delivery commit (never a
   partial worktree commit) and `finalReviewedBy`, with every GAP resolved;
   then the repository's own validation, a plain fast-forward push only if you
   asked for one, and teammate shutdown.
 - **Light flow** (a small change confined to one file): one implementer in its
-  own worktree, its commit merged into the target branch, the verifier always
-  on that merged result, no separate code review and no final
+  own worktree, its commit the delivery commit, the verifier always on that
+  commit before it lands, no separate code review and no final
   review; the umbrella task gets `requiresVerification` only. A change small
   enough for the lead to make itself is still develop (light): the lead may
   make the edit without spawning an implementer, but the `verification` agent
   still runs before the commit. If the change grows beyond one file, the lead
   escalates to the full flow.
+
+`/develop` works on any branch: the lead records the branch you have checked
+out and its HEAD, bases every worktree (and the delivery commit) on that HEAD,
+and lands fast-forward only into that same branch — re-verifying if it moved,
+stopping if you switched branches or detached HEAD. It never touches your
+working tree otherwise: no stash, reset, clean or checkout, and a push only
+when you ask, to that branch's own upstream.
 
 The checklist never names a model: which models review and verify comes from
 the dispatcher and your `agentRouting` settings.

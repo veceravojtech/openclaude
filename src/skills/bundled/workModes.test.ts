@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 
 import type { CommandBase, PromptCommand } from '../../types/command.js'
@@ -151,15 +151,15 @@ describe('the develop checklist', () => {
     const steps = [
       '`Deliver: <the user request verbatim>`',
       '`metadata.requiresFinalReview: true`',
-      'its own git worktree, never in the user\'s checkout',
+      'its own git worktree from the base, never in the user\'s checkout',
       'on a different model family than the implementer',
-      '**Integrate.** Merge the implementers\' worktree commits into the target branch as one delivery commit',
+      "**Integrate.** In a delivery worktree from the base sha, never the user's checkout, merge the implementers' worktree commits as one delivery commit",
       'Run the `verification` agent on the delivery commit',
       '`metadata.verifiedBy`',
       'Spawn `final-reviewer` as a subagent',
       '`review_commit` set to the newest delivery commit',
       '`metadata.finalReviewedBy`',
-      'Push only if the user asked for a push',
+      'then land, push and clean up as in Target branch',
     ]
     let at = -1
     for (const step of steps) {
@@ -188,7 +188,7 @@ describe('the develop checklist', () => {
       'A change you could make yourself under §1a is still develop (light), because it gets committed',
     )
     expect(DEVELOP_CHECKLIST).toContain(
-      'you may make the edit yourself instead of spawning an implementer, but the `verification` agent still runs before the commit',
+      "you may make the edit yourself instead of spawning an implementer, in a worktree from the base, never the user's checkout, but the `verification` agent still runs before it lands",
     )
   })
 
@@ -209,10 +209,10 @@ describe('the develop checklist', () => {
     )
   })
 
-  it('merges the light-flow implementer commit before verifying', () => {
+  it('verifies the light-flow delivery commit before it lands', () => {
     const light = DEVELOP_CHECKLIST.slice(DEVELOP_CHECKLIST.indexOf('## Light flow'))
     expect(light).toContain(
-      "Merge the implementer's worktree commit into the target branch first; the verifier runs on that merged result.",
+      "The implementer's commit on the base is the delivery commit: the verifier runs on it, then it lands as in Target branch.",
     )
   })
 
@@ -227,5 +227,119 @@ describe('the develop checklist', () => {
     for (const text of [DEVELOP_CHECKLIST, ASK_MODE_PROMPT]) {
       expect(text).not.toMatch(/\b(gpt-|claude-|gemini-|sonnet|opus|haiku|o[34]-)/i)
     }
+  })
+})
+
+/** The text from `heading` up to the next `## ` heading. */
+function section(text: string, heading: string): string {
+  const start = text.indexOf(heading)
+  expect(start).toBeGreaterThan(-1)
+  const end = text.indexOf('\n## ', start + heading.length)
+  return end === -1 ? text.slice(start) : text.slice(start, end)
+}
+
+describe('/develop is branch-safe', () => {
+  let prompt = ''
+  let target = ''
+  beforeEach(async () => {
+    registerWorkModeSkills()
+    prompt = await promptText('develop')
+    target = section(prompt, '## Target branch')
+  })
+
+  it('records the branch and base first, and stops on a detached HEAD', () => {
+    // Recorded before either flow starts, i.e. before any spawn.
+    expect(prompt.indexOf('## Target branch')).toBeLessThan(prompt.indexOf('## Full flow'))
+    expect(target).toContain('Both flows do this first, before any spawn.')
+    expect(target).toContain('its branch (`git symbolic-ref --short HEAD`)')
+    expect(target).toContain('its HEAD sha as the base')
+    expect(target).toContain('its upstream if any (`git rev-parse --abbrev-ref @{u}`)')
+    expect(target).toContain('Write the branch and base into the `Deliver:` task description.')
+    expect(target).toContain(
+      '**Stop and ask** if HEAD is detached, or a merge, rebase, cherry-pick or bisect is in progress.',
+    )
+    expect(target).toContain('local changes there do not block')
+  })
+
+  it('bases every worktree on the recorded base, never on a hard-coded branch', () => {
+    expect(target).toContain(
+      'branch from the base sha, never from `main` or the default branch: `git worktree add <path> -b <branch> <base-sha>`',
+    )
+    expect(target).toContain('put that exact command in every brief')
+    // Every worktree command in the prompt starts from the base sha …
+    const adds = prompt.match(/git worktree add[^`]*/g) ?? []
+    expect(adds.length).toBeGreaterThan(0)
+    for (const add of adds) expect(add).toEndWith('<base-sha>')
+    // … and nothing tells the lead to branch off main/master.
+    expect(prompt).not.toMatch(/-b\s+\S+\s+(main|master|origin\/\S+)\b/)
+    expect(section(prompt, '## Full flow')).toContain(
+      'its own git worktree from the base, never in the user\'s checkout',
+    )
+  })
+
+  it("integrates in a delivery worktree, not the user's checkout", () => {
+    const full = section(prompt, '## Full flow')
+    const integrate = full.slice(full.indexOf('**Integrate.**'), full.indexOf('5. **Verify.**'))
+    expect(integrate).toContain("In a delivery worktree from the base sha, never the user's checkout")
+    expect(integrate).not.toContain('into the target branch')
+    expect(prompt).not.toContain('merged result')
+  })
+
+  it('lands fast-forward only, and re-verifies or stops when the branch changed', () => {
+    const land = target.slice(target.indexOf('**Land.**'), target.indexOf('**Push**'))
+    expect(land).toContain('`git merge-base --is-ancestor <tip> <delivery>`')
+    expect(land).toContain('`git -C <checkout> merge --ff-only <delivery>`')
+    expect(land).toContain('if git refuses, stop and report, never force it')
+    expect(land).toContain(
+      'Branch moved: rebase the delivery commit onto the new tip in the delivery worktree and verify again before landing',
+    )
+    expect(land).toContain('on a conflict, stop and ask')
+    expect(land).toContain('Switched branches or detached: stop and report.')
+    // The only merge into the user's checkout is the fast-forward.
+    expect(prompt.match(/git -C <checkout> \S+/g)).toEqual(['git -C <checkout> merge'])
+    expect(section(prompt, '## Full flow')).toContain(
+      'then land, push and clean up as in Target branch',
+    )
+  })
+
+  it("pushes only to the target branch's own upstream", () => {
+    expect(target).toContain(
+      "**Push** only if the user asked: `git push <remote> <delivery>:<upstream-branch>` — a plain fast-forward to the target branch's own upstream",
+    )
+    expect(target).toContain('no upstream, or another branch wanted: ask')
+    expect(target).toContain("Never push to `main` or any branch the user didn't name.")
+    expect(prompt.match(/git push/g)).toHaveLength(1)
+    expect(prompt).not.toMatch(/--force|push -f\b/)
+  })
+
+  it("never stashes, resets or cleans the user's checkout", () => {
+    expect(target).toContain(
+      "Never stash, reset, clean or check out anything in the user's checkout",
+    )
+    expect(prompt).not.toMatch(/git (stash|reset|clean|checkout|switch|restore)\b/)
+  })
+
+  it('cleans up the worktrees after landing', () => {
+    expect(target).toContain(
+      '**Clean up** after landing: remove the delivery and implementer worktrees and their branches.',
+    )
+  })
+
+  it('holds the light flow to the same rules', () => {
+    const light = section(prompt, '## Light flow')
+    expect(light).toContain('one implementer in its own worktree from the base')
+    expect(light).toContain('the verifier runs on it, then it lands as in Target branch')
+    expect(light).toContain("in a worktree from the base, never the user's checkout")
+    expect(light).not.toContain('into the target branch first')
+  })
+
+  it('is documented in the lead work modes section', () => {
+    const docs = readFileSync(
+      new URL('../../../docs/agent-routing.md', import.meta.url),
+      'utf8',
+    )
+    const modes = section(docs, '## Lead work modes')
+    expect(modes).toContain('`/develop` works on any branch')
+    expect(modes).toContain('fast-forward only')
   })
 })
