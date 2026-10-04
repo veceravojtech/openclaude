@@ -656,14 +656,16 @@ The develop checklist has two flows:
   commit before it lands, no separate code review and no final
   review; the umbrella task gets `requiresVerification` only. A change small
   enough for the lead to make itself is still develop (light): the lead may
-  make the edit without spawning an implementer, but the `verification` agent
-  still runs before the commit. If the change grows beyond one file, the lead
-  escalates to the full flow.
+  make the edit without spawning an implementer, in a worktree from the base,
+  and the `verification` agent still runs before it lands. If the change grows
+  beyond one file, the lead escalates to the full flow.
 
 `/develop` works on any branch: the lead records the branch you have checked
 out and its HEAD, bases every worktree (and the delivery commit) on that HEAD,
-and lands fast-forward only into that same branch — re-verifying if it moved,
-stopping if you switched branches or detached HEAD. It never touches your
+and lands fast-forward only into that same branch, and only while its tip is
+still that HEAD. If the branch moved, the lead rebases the delivery onto it and
+verifies (and, in the full flow, final-reviews) again before landing; if you
+switched branches or detached HEAD, it stops. It never touches your
 working tree otherwise: no stash, reset, clean or checkout, and a push only
 when you ask, to that branch's own upstream.
 

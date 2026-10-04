@@ -23,13 +23,16 @@ Start your reply with \`Mode: develop\`. Pick the flow, say which, then follow i
 
 ## Target branch
 
-Both flows do this first, before any spawn. Never stash, reset, clean or check out anything in the user's checkout; local changes there do not block.
+Both flows record the target first, before any spawn; the rest applies when landing. Never stash, reset, clean or check out anything in the user's checkout; local changes there do not block.
 
-- **Record** the checkout path, its branch (\`git symbolic-ref --short HEAD\`), its HEAD sha as the base, and its upstream if any (\`git rev-parse --abbrev-ref @{u}\`). Write the branch and base into the \`Deliver:\` task description.
-- **Stop and ask** if HEAD is detached, or a merge, rebase, cherry-pick or bisect is in progress.
+- **Record** the checkout path, its branch (\`git symbolic-ref --short HEAD\`), its HEAD sha as the base, and its upstream if any (\`git rev-parse --abbrev-ref @{u}\`). Write branch and base into the \`Deliver:\` task description.
+- **Stop and ask** if HEAD is detached, or a merge, rebase, cherry-pick or bisect is in progress (\`git status\` shows all of these).
 - **Worktrees** branch from the base sha, never from \`main\` or the default branch: \`git worktree add <path> -b <branch> <base-sha>\`. Teammates get no worktree on their own: put that exact command in every brief.
-- **Land.** Re-check the checkout. Still on the target branch and its tip an ancestor of the delivery commit (\`git merge-base --is-ancestor <tip> <delivery>\`): \`git -C <checkout> merge --ff-only <delivery>\`; if git refuses, stop and report, never force it. Branch moved: rebase the delivery commit onto the new tip in the delivery worktree and verify again before landing; on a conflict, stop and ask. Switched branches or detached: stop and report.
-- **Push** only if the user asked: \`git push <remote> <delivery>:<upstream-branch>\` — a plain fast-forward to the target branch's own upstream; no upstream, or another branch wanted: ask. Never push to \`main\` or any branch the user didn't name.
+- **Land.** Re-check the checkout first.
+  - Still on the target branch and its tip still the recorded base: \`git -C <checkout> merge --ff-only <delivery>\`. If git refuses (e.g. local files it would overwrite), stop and report; never force it.
+  - Branch moved, either way (new commits, or reset/amended): in the delivery worktree, \`git rebase --onto <new-tip> <base-sha> <delivery-branch>\`; the new tip is now the base. Re-run the verification on the new delivery commit — in the full flow also the final review and the repository's own validation — before landing. On a conflict, stop and ask.
+  - Switched branches or detached HEAD: stop and report.
+- **Push** only if the user asked: \`git push <remote> <delivery>:<upstream-branch>\`, a plain fast-forward to the target branch's own upstream. Split the recorded upstream on its first slash: \`origin/feat/x\` is remote \`origin\`, branch \`feat/x\`. No upstream, or the user wants another branch: ask. Never force, and never push anywhere but that upstream.
 - **Clean up** after landing: remove the delivery and implementer worktrees and their branches.
 
 ## Full flow
@@ -40,13 +43,13 @@ Both flows do this first, before any spawn. Never stash, reset, clean or check o
 4. **Integrate.** In a delivery worktree from the base sha, never the user's checkout, merge the implementers' worktree commits as one delivery commit. Everything after this step works on that commit, never on a partial worktree commit.
 5. **Verify.** Run the \`verification\` agent on the delivery commit with the original request, the changed files and the approach. On PASS set \`metadata.verifiedBy\` on the umbrella task. FAIL or PARTIAL is an attention item: decide it, fix the earliest wrong input, integrate the fixes, verify again.
 6. **Final review.** Spawn \`final-reviewer\` as a subagent (no \`name\`, no \`team_name\`) with \`review_commit\` set to the newest delivery commit — after any post-FAIL fixes are integrated and re-verified — and \`prompt\` set to the original request verbatim — nothing else. On DONE set \`metadata.finalReviewedBy\`. Every GAP becomes a task: resolve them all, then review again.
-7. **Land.** Run the repository's own validation (e.g. its \`bun run check\`-style pre-push checks) on the delivery commit, then land, push and clean up as in Target branch. Shut teammates down and confirm with ListAgents.
+7. **Land.** Run the repository's own validation (e.g. its \`bun run check\`) on the delivery commit, then land, push and clean up as in Target branch. Shut teammates down and confirm with ListAgents.
 
 ## Light flow
 
 - Single file and small: one implementer in its own worktree from the base, then the \`verification\` agent — always. Skip the separate code review and the final review.
 - The implementer's commit on the base is the delivery commit: the verifier runs on it, then it lands as in Target branch.
-- A change you could make yourself under §1a is still develop (light), because it gets committed: you may make the edit yourself instead of spawning an implementer, in a worktree from the base, never the user's checkout, but the \`verification\` agent still runs before it lands.
+- A change you could make yourself under §1a is still develop (light), because it gets committed: you may make the edit yourself instead of spawning an implementer, in a worktree from the base, but the \`verification\` agent still runs before it lands.
 - The umbrella task gets \`metadata.requiresVerification: true\` only.
 - If the change grows beyond one file, escalate to the full flow: say so, add \`requiresFinalReview\`, and run the code review and the final review.
 

@@ -151,15 +151,15 @@ describe('the develop checklist', () => {
     const steps = [
       '`Deliver: <the user request verbatim>`',
       '`metadata.requiresFinalReview: true`',
-      'its own git worktree from the base, never in the user\'s checkout',
+      'its own git worktree from the base',
       'on a different model family than the implementer',
-      "**Integrate.** In a delivery worktree from the base sha, never the user's checkout, merge the implementers' worktree commits as one delivery commit",
+      '**Integrate.**',
       'Run the `verification` agent on the delivery commit',
       '`metadata.verifiedBy`',
       'Spawn `final-reviewer` as a subagent',
       '`review_commit` set to the newest delivery commit',
       '`metadata.finalReviewedBy`',
-      'then land, push and clean up as in Target branch',
+      'as in Target branch',
     ]
     let at = -1
     for (const step of steps) {
@@ -184,12 +184,15 @@ describe('the develop checklist', () => {
   })
 
   it('keeps a §1a edit the lead makes itself in develop, and verified', () => {
-    expect(DEVELOP_CHECKLIST).toContain(
-      'A change you could make yourself under §1a is still develop (light), because it gets committed',
-    )
-    expect(DEVELOP_CHECKLIST).toContain(
-      "you may make the edit yourself instead of spawning an implementer, in a worktree from the base, never the user's checkout, but the `verification` agent still runs before it lands",
-    )
+    const selfEdit = bullet(section(DEVELOP_CHECKLIST, '## Light flow'), 'A change you could make yourself')
+    for (const fragment of [
+      'under §1a is still develop (light), because it gets committed',
+      'make the edit yourself instead of spawning an implementer',
+      'in a worktree from the base',
+      'the `verification` agent still runs before it lands',
+    ]) {
+      expect(selfEdit).toContain(fragment)
+    }
   })
 
   it('never lets the final review see a partial worktree commit', () => {
@@ -210,9 +213,11 @@ describe('the develop checklist', () => {
   })
 
   it('verifies the light-flow delivery commit before it lands', () => {
-    const light = DEVELOP_CHECKLIST.slice(DEVELOP_CHECKLIST.indexOf('## Light flow'))
-    expect(light).toContain(
-      "The implementer's commit on the base is the delivery commit: the verifier runs on it, then it lands as in Target branch.",
+    const delivery = bullet(section(DEVELOP_CHECKLIST, '## Light flow'), "The implementer's commit")
+    expect(delivery).toContain('on the base is the delivery commit')
+    expect(delivery.indexOf('the verifier runs on it')).toBeGreaterThan(-1)
+    expect(delivery.indexOf('then it lands')).toBeGreaterThan(
+      delivery.indexOf('the verifier runs on it'),
     )
   })
 
@@ -238,6 +243,23 @@ function section(text: string, heading: string): string {
   return end === -1 ? text.slice(start) : text.slice(start, end)
 }
 
+/** The top-level `- ` bullet starting with `lead` (bold or not), sub-bullets included. */
+function bullet(text: string, lead: string): string {
+  const starts = [`\n- **${lead}`, `\n- ${lead}`].map(s => text.indexOf(s))
+  const start = starts.find(i => i > -1) ?? -1
+  expect(start).toBeGreaterThan(-1)
+  const end = text.indexOf('\n- ', start + 1)
+  const stop = [end, text.indexOf('\n\n', start + 1)].filter(i => i > -1)
+  return text.slice(start + 1, stop.length ? Math.min(...stop) : undefined)
+}
+
+/** The nested `  - ` sub-bullet of `parent` that contains `marker`. */
+function subBullet(parent: string, marker: string): string {
+  const found = parent.split('\n  - ').slice(1).filter(sub => sub.includes(marker))
+  expect(found).toHaveLength(1)
+  return found[0]!
+}
+
 describe('/develop is branch-safe', () => {
   let prompt = ''
   let target = ''
@@ -250,22 +272,34 @@ describe('/develop is branch-safe', () => {
   it('records the branch and base first, and stops on a detached HEAD', () => {
     // Recorded before either flow starts, i.e. before any spawn.
     expect(prompt.indexOf('## Target branch')).toBeLessThan(prompt.indexOf('## Full flow'))
-    expect(target).toContain('Both flows do this first, before any spawn.')
-    expect(target).toContain('its branch (`git symbolic-ref --short HEAD`)')
-    expect(target).toContain('its HEAD sha as the base')
-    expect(target).toContain('its upstream if any (`git rev-parse --abbrev-ref @{u}`)')
-    expect(target).toContain('Write the branch and base into the `Deliver:` task description.')
-    expect(target).toContain(
-      '**Stop and ask** if HEAD is detached, or a merge, rebase, cherry-pick or bisect is in progress.',
-    )
+    expect(target).toContain('record the target first, before any spawn')
+    expect(target).toContain('the rest applies when landing')
     expect(target).toContain('local changes there do not block')
+
+    const record = bullet(target, 'Record')
+    for (const fragment of [
+      '`git symbolic-ref --short HEAD`',
+      'HEAD sha as the base',
+      '`git rev-parse --abbrev-ref @{u}`',
+      'into the `Deliver:` task description',
+    ]) {
+      expect(record).toContain(fragment)
+    }
+
+    const stop = bullet(target, 'Stop and ask')
+    expect(stop).toContain('HEAD is detached')
+    for (const op of ['merge', 'rebase', 'cherry-pick', 'bisect']) {
+      expect(stop).toContain(op)
+    }
+    expect(stop).toContain('in progress')
+    expect(stop).toContain('`git status`')
   })
 
   it('bases every worktree on the recorded base, never on a hard-coded branch', () => {
-    expect(target).toContain(
-      'branch from the base sha, never from `main` or the default branch: `git worktree add <path> -b <branch> <base-sha>`',
-    )
-    expect(target).toContain('put that exact command in every brief')
+    const worktrees = bullet(target, 'Worktrees')
+    expect(worktrees).toContain('from the base sha, never from `main` or the default branch')
+    expect(worktrees).toContain('`git worktree add <path> -b <branch> <base-sha>`')
+    expect(worktrees).toContain('that exact command in every brief')
     // Every worktree command in the prompt starts from the base sha …
     const adds = prompt.match(/git worktree add[^`]*/g) ?? []
     expect(adds.length).toBeGreaterThan(0)
@@ -280,34 +314,63 @@ describe('/develop is branch-safe', () => {
   it("integrates in a delivery worktree, not the user's checkout", () => {
     const full = section(prompt, '## Full flow')
     const integrate = full.slice(full.indexOf('**Integrate.**'), full.indexOf('5. **Verify.**'))
-    expect(integrate).toContain("In a delivery worktree from the base sha, never the user's checkout")
+    for (const fragment of [
+      'delivery worktree',
+      'from the base sha',
+      "never the user's checkout",
+      'one delivery commit',
+    ]) {
+      expect(integrate).toContain(fragment)
+    }
     expect(integrate).not.toContain('into the target branch')
     expect(prompt).not.toContain('merged result')
   })
 
-  it('lands fast-forward only, and re-verifies or stops when the branch changed', () => {
-    const land = target.slice(target.indexOf('**Land.**'), target.indexOf('**Push**'))
-    expect(land).toContain('`git merge-base --is-ancestor <tip> <delivery>`')
-    expect(land).toContain('`git -C <checkout> merge --ff-only <delivery>`')
-    expect(land).toContain('if git refuses, stop and report, never force it')
-    expect(land).toContain(
-      'Branch moved: rebase the delivery commit onto the new tip in the delivery worktree and verify again before landing',
-    )
-    expect(land).toContain('on a conflict, stop and ask')
-    expect(land).toContain('Switched branches or detached: stop and report.')
-    // The only merge into the user's checkout is the fast-forward.
+  it('lands fast-forward only, while the tip is still the recorded base', () => {
+    const land = bullet(target, 'Land.')
+    const ff = subBullet(land, 'merge --ff-only')
+    expect(ff).toContain('tip still the recorded base')
+    expect(ff).toContain('`git -C <checkout> merge --ff-only <delivery>`')
+    expect(ff).toContain('stop and report')
+    expect(ff).toContain('never force')
+    // An ancestor check would let a branch the user reset backward
+    // fast-forward to commits they discarded.
+    expect(prompt).not.toContain('is-ancestor')
+    // The only command run in the user's checkout is that fast-forward.
     expect(prompt.match(/git -C <checkout> \S+/g)).toEqual(['git -C <checkout> merge'])
-    expect(section(prompt, '## Full flow')).toContain(
-      'then land, push and clean up as in Target branch',
-    )
+    expect(section(prompt, '## Full flow')).toContain('then land, push and clean up as in Target branch')
+  })
+
+  it('rebases a moved branch and re-verifies and re-reviews before landing', () => {
+    const moved = subBullet(bullet(target, 'Land.'), 'Branch moved')
+    expect(moved).toContain('either way')
+    expect(moved).toContain('in the delivery worktree')
+    expect(moved).toContain('`git rebase --onto <new-tip> <base-sha> <delivery-branch>`')
+    const rebase = moved.indexOf('rebase --onto')
+    const verify = moved.indexOf('Re-run the verification')
+    expect(verify).toBeGreaterThan(rebase)
+    expect(moved.indexOf('final review')).toBeGreaterThan(verify)
+    expect(moved).toContain("repository's own validation")
+    expect(moved).toContain('before landing')
+    expect(moved).toContain('On a conflict, stop and ask')
+
+    const gone = subBullet(bullet(target, 'Land.'), 'Switched branches')
+    expect(gone).toContain('detached HEAD')
+    expect(gone).toContain('stop and report')
   })
 
   it("pushes only to the target branch's own upstream", () => {
-    expect(target).toContain(
-      "**Push** only if the user asked: `git push <remote> <delivery>:<upstream-branch>` — a plain fast-forward to the target branch's own upstream",
-    )
-    expect(target).toContain('no upstream, or another branch wanted: ask')
-    expect(target).toContain("Never push to `main` or any branch the user didn't name.")
+    const push = bullet(target, 'Push')
+    expect(push).toContain('only if the user asked')
+    expect(push).toContain('`git push <remote> <delivery>:<upstream-branch>`')
+    expect(push).toContain("the target branch's own upstream")
+    expect(push).toContain('first slash')
+    expect(push).toContain('`origin/feat/x` is remote `origin`, branch `feat/x`')
+    expect(push).toContain('No upstream')
+    expect(push).toContain('Never force')
+    expect(push).toContain('never push anywhere but that upstream')
+    // On main, main's upstream is the right target: no blanket ban on it.
+    expect(prompt).not.toMatch(/push to `?main/i)
     expect(prompt.match(/git push/g)).toHaveLength(1)
     expect(prompt).not.toMatch(/--force|push -f\b/)
   })
@@ -320,17 +383,17 @@ describe('/develop is branch-safe', () => {
   })
 
   it('cleans up the worktrees after landing', () => {
-    expect(target).toContain(
-      '**Clean up** after landing: remove the delivery and implementer worktrees and their branches.',
-    )
+    const cleanUp = bullet(target, 'Clean up')
+    expect(cleanUp).toContain('after landing')
+    expect(cleanUp).toContain('delivery and implementer worktrees and their branches')
   })
 
   it('holds the light flow to the same rules', () => {
     const light = section(prompt, '## Light flow')
     expect(light).toContain('one implementer in its own worktree from the base')
-    expect(light).toContain('the verifier runs on it, then it lands as in Target branch')
-    expect(light).toContain("in a worktree from the base, never the user's checkout")
-    expect(light).not.toContain('into the target branch first')
+    expect(light).toContain('lands as in Target branch')
+    expect(bullet(light, 'A change you could make yourself')).toContain('in a worktree from the base')
+    expect(light).not.toContain('into the target branch')
   })
 
   it('is documented in the lead work modes section', () => {
@@ -341,5 +404,7 @@ describe('/develop is branch-safe', () => {
     const modes = section(docs, '## Lead work modes')
     expect(modes).toContain('`/develop` works on any branch')
     expect(modes).toContain('fast-forward only')
+    expect(modes).toContain('still runs before it lands')
+    expect(modes).not.toContain('still runs before the commit')
   })
 })
