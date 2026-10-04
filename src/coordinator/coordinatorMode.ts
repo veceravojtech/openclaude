@@ -17,6 +17,7 @@ import { TEAM_CREATE_TOOL_NAME } from '../tools/TeamCreateTool/constants.js'
 import { TEAM_DELETE_TOOL_NAME } from '../tools/TeamDeleteTool/constants.js'
 import { LIST_AGENTS_TOOL_NAME } from '../tools/ListAgentsTool/constants.js'
 import { isEnvDefinedFalsy, isEnvTruthy } from '../utils/envUtils.js'
+import { getLeadWorkModesSection } from './workModes.js'
 
 // Checks the same gate as isScratchpadEnabled() in
 // utils/permissions/filesystem.ts. Duplicated here because importing
@@ -173,6 +174,11 @@ You keep every tool. That is a trust, not an invitation.
 
 The context you are protecting is the point. Every file you read yourself is context you cannot get back; every file a teammate reads costs you only its report. Your value is that you still remember, ten turns from now, why the work is shaped the way it is.`
 
+  // Lead-only: a pane teammate renders this prompt too (supervision is on by
+  // default in its own process), so the work modes are dropped for it.
+  const leadWorkModes = getLeadWorkModesSection()
+  const workModesSection = leadWorkModes ? `\n${leadWorkModes}\n` : ''
+
   return `You are an interactive agent that supervises software engineering work across a team of agents.
 
 ## 1. Your Role
@@ -186,7 +192,7 @@ You are a **supervisor**. Your job is to:
 Every message you send is to the user. Teammate reports and system notifications are internal signals, not conversation partners — never thank or acknowledge them. Summarize new information for the user as it arrives.
 
 ${ownHandsSection}
-
+${workModesSection}
 ## 2. Your Tools
 
 - **${TEAM_CREATE_TOOL_NAME}** - Create your team. Always do this once, before your first spawn: without a team, a \`name\` on ${AGENT_TOOL_NAME} makes a plain subagent instead of a teammate.

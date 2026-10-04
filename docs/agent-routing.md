@@ -609,6 +609,59 @@ Teams is off, because it names `SendMessage` and `ListAgents`, which are not
 registered then, and the teammate-side text reaches teammates, which only exist
 with Agent Teams on.
 
+## Lead work modes
+
+With supervision on (the default), the lead picks a work mode for every request
+and states it on the first line of its reply — `Mode: answer`, `Mode: ask` or
+`Mode: develop` — so you can correct it before any work starts.
+
+| Mode | When | Flow |
+|---|---|---|
+| `answer` | Quick questions, reading a file or two | The lead answers directly. No task, no teammate. |
+| `ask` | Research, investigation, ops; nothing is committed | One task, one teammate, the result delivered. No verifier, no final review. |
+| `develop` | Anything that will be committed | The develop checklist (below). |
+
+The lead escalates and never quietly downgrades: an `ask` that turns into a
+code change switches to `develop`, and the lead says so, before anything is
+committed. The same prompt section tells the lead to monitor cheaply (wait for
+reports, check a quiet teammate with `ListAgents` or `git status` rather than
+pulling its transcript), to check quotas with the `Usage` tool before a long
+or parallel job, and to stop and ask on a rate or usage limit instead of
+switching models on its own.
+
+The lead decides the mode itself. Two bundled slash commands are available as
+an override:
+
+- `/develop [request]` loads the develop checklist. The lead also loads it on
+  its own whenever it picks develop mode, so the long checklist costs nothing
+  until a change is actually headed for a commit.
+- `/ask [request]` forces ask mode.
+
+The develop checklist has two flows:
+
+- **Full flow** (multi-file or non-trivial): an umbrella task
+  `Deliver: <request>` with `requiresVerification` and `requiresFinalReview`;
+  implementers in their own git worktrees; a code review by a reviewer on a
+  different model family; the `verification` agent and `verifiedBy`; the
+  `final-reviewer` on the commit and `finalReviewedBy`, with every GAP
+  resolved; then the repository's own validation, a plain fast-forward push
+  only if you asked for one, and teammate shutdown.
+- **Light flow** (a small change confined to one file): the verifier always,
+  no separate code review and no final review; the umbrella task gets
+  `requiresVerification` only. If the change grows beyond one file, the lead
+  escalates to the full flow.
+
+The checklist never names a model: which models review and verify comes from
+the dispatcher and your `agentRouting` settings.
+
+The work-modes section and both commands are lead-only. Teammates — in-process
+or in their own pane — and typed subagents never see the section, and
+`/develop` and `/ask` are not offered to teammates. The one exception is a
+fork: it reuses the lead's already-rendered system prompt byte for byte, so it
+shares the lead's prompt cache, and its own fork directive tells it to do the
+task rather than supervise. Turning supervision off
+(`CLAUDE_CODE_COORDINATOR_MODE=0` or `/supervisor off`) removes both.
+
 ## Sub-agent permission prompts
 
 In an interactive session, an ordinary foreground or background Agent tool

@@ -8,6 +8,7 @@ import { registerLoopSkill } from './loop.js'
 import { registerPdfSkill } from './pdf.js'
 import { registerSimplifySkill } from './simplify.js'
 import { registerUpdateConfigSkill } from './updateConfig.js'
+import { registerWorkModeSkills } from './workModes.js'
 
 /**
  * Initialize all bundled skills.
@@ -25,6 +26,9 @@ export function initBundledSkills(): void {
   registerSimplifySkill()
   registerPdfSkill()
   registerBatchSkill()
+  // /develop and /ask: lead work modes. Registered unconditionally; their
+  // isEnabled limits them to a supervising lead (never a teammate).
+  registerWorkModeSkills()
   if (feature('KAIROS') || feature('KAIROS_DREAM')) {
     /* eslint-disable @typescript-eslint/no-require-imports */
     const { registerDreamSkill } = require('./dream.js')
