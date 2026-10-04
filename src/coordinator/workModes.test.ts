@@ -75,11 +75,14 @@ describe('lead work modes — the lead', () => {
     expect(tools).toBeGreaterThan(modes)
   })
 
-  it('reconciles §1a self-edits with develop: still verified before commit', () => {
+  it('reconciles §1a self-edits with develop: still verified before it lands', () => {
     const prompt = getCoordinatorSystemPrompt()
     expect(WORK_MODES_SECTION).toContain(
-      'anything that will be committed, even a §1a edit you make yourself: it is still verified before commit',
+      'anything that will be committed, even a §1a edit you make yourself — it still gets verified before it lands',
     )
+    // Not a general "verified before commit" rule: the full flow verifies
+    // after Integrate, i.e. after the delivery commit exists.
+    expect(WORK_MODES_SECTION).not.toContain('it is still verified before commit')
     // §1a's self-work bullet no longer reads as "skip the flow".
     expect(prompt).toContain(
       '- A one-line, single-file change you can describe in a sentence (in develop mode it still gets verified before commit)',
@@ -95,6 +98,22 @@ describe('lead work modes — the lead', () => {
       'One task; one teammate per independent angle (often just one).',
     )
     expect(WORK_MODES_SECTION).not.toContain('One task, one teammate')
+  })
+
+  it('keeps a catch-all for answer mode', () => {
+    expect(WORK_MODES_SECTION).toContain(
+      '**answer** — quick questions, reading a file or two, anything quicker than briefing a teammate.',
+    )
+  })
+
+  it('makes the model check a standing rule, not a rate-limit one', () => {
+    const lines = WORK_MODES_SECTION.split('\n')
+    const check = lines.find(line =>
+      line.includes('Check which model served a teammate in its transcript'),
+    )
+    expect(check).toBeDefined()
+    expect(check).not.toContain('rate or usage limit')
+    expect(check?.startsWith('- ')).toBe(true)
   })
 
   it('stays small — the long checklist is not always on', () => {

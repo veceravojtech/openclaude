@@ -71,6 +71,16 @@ describe('/develop and /ask registration', () => {
     expect(ASK_MODE_PROMPT).toContain('No verifier and no final review')
     expect(ASK_MODE_PROMPT).toContain('escalating to develop')
   })
+
+  it('/ask lets ask mode cover several angles, in the prompt and the description', () => {
+    registerWorkModeSkills()
+    const angle = 'one teammate per independent angle (often just one)'
+    expect(ASK_MODE_PROMPT).toContain(angle)
+    expect(findSkill('ask').description).toContain(angle)
+    for (const text of [ASK_MODE_PROMPT, findSkill('ask').description]) {
+      expect(text).not.toContain('to one teammate')
+    }
+  })
 })
 
 describe('/develop and /ask scoping', () => {
@@ -80,11 +90,16 @@ describe('/develop and /ask scoping', () => {
     expect(isWorkModeSkillEnabled(() => false, () => false)).toBe(false)
   })
 
-  it('hides both commands from a pane teammate and an in-process teammate', () => {
-    registerWorkModeSkills()
+  it('offers both commands to a supervising lead, never to a teammate', () => {
+    // bun test does not compile COORDINATOR_MODE in, so the real supervision
+    // gate is always off here and a teammate check would pass vacuously.
+    // Register with supervision on so the teammate check is what decides.
+    registerWorkModeSkills(() => true)
     for (const name of ['develop', 'ask']) {
       const skill = findSkill(name)
       expect(typeof skill.isEnabled).toBe('function')
+      // The lead: supervision on, no teammate context.
+      expect(skill.isEnabled?.()).toBe(true)
 
       const inProcess = runWithTeammateContext(
         {
@@ -114,9 +129,20 @@ describe('/develop and /ask scoping', () => {
     }
   })
 
-  it('wires isEnabled to the lead gate on both commands', () => {
-    const source = readFileSync(new URL('./workModes.ts', import.meta.url), 'utf8')
-    expect(source.match(/isEnabled: \(\) => isWorkModeSkillEnabled\(\)/g)).toHaveLength(2)
+  it('hides both commands when supervision is off', () => {
+    registerWorkModeSkills(() => false)
+    for (const name of ['develop', 'ask']) {
+      expect(findSkill(name).isEnabled?.()).toBe(false)
+    }
+  })
+
+  it('uses the real supervision gate by default', () => {
+    // Under bun test COORDINATOR_MODE is not compiled in, so the default gate
+    // is off: an unparameterised registration must hide both commands.
+    registerWorkModeSkills()
+    for (const name of ['develop', 'ask']) {
+      expect(findSkill(name).isEnabled?.()).toBe(false)
+    }
   })
 })
 
@@ -131,7 +157,7 @@ describe('the develop checklist', () => {
       'Run the `verification` agent on the delivery commit',
       '`metadata.verifiedBy`',
       'Spawn `final-reviewer` as a subagent',
-      '`review_commit` set to the delivery commit',
+      '`review_commit` set to the newest delivery commit',
       '`metadata.finalReviewedBy`',
       'Push only if the user asked for a push',
     ]
@@ -172,6 +198,22 @@ describe('the develop checklist', () => {
     expect(integrate).toBeGreaterThan(-1)
     expect(finalReview).toBeGreaterThan(integrate)
     expect(DEVELOP_CHECKLIST).toContain('never on a partial worktree commit')
+  })
+
+  it('reviews the newest delivery commit after post-FAIL fixes', () => {
+    expect(DEVELOP_CHECKLIST).toContain(
+      'fix the earliest wrong input, integrate the fixes, verify again',
+    )
+    expect(DEVELOP_CHECKLIST).toContain(
+      '`review_commit` set to the newest delivery commit — after any post-FAIL fixes are integrated and re-verified',
+    )
+  })
+
+  it('merges the light-flow implementer commit before verifying', () => {
+    const light = DEVELOP_CHECKLIST.slice(DEVELOP_CHECKLIST.indexOf('## Light flow'))
+    expect(light).toContain(
+      "Merge the implementer's worktree commit into the target branch first; the verifier runs on that merged result.",
+    )
   })
 
   it('states the escalation rule', () => {

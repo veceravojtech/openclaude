@@ -617,17 +617,18 @@ and states it on the first line of its reply — `Mode: answer`, `Mode: ask` or
 
 | Mode | When | Flow |
 |---|---|---|
-| `answer` | Quick questions, reading a file or two | The lead answers directly. No task, no teammate. |
+| `answer` | Quick questions, reading a file or two, anything quicker than briefing a teammate | The lead answers directly. No task, no teammate. |
 | `ask` | Research, investigation, ops; nothing is committed | One task; one teammate per independent angle (often just one); the result delivered. No verifier, no final review. |
-| `develop` | Anything that will be committed, including a small edit the lead makes itself | The develop checklist (below). |
+| `develop` | Anything that will be committed, including a small edit the lead makes itself — it still gets verified before it lands | The develop checklist (below). |
 
 The lead escalates and never quietly downgrades: an `ask` that turns into a
 code change switches to `develop`, and the lead says so, before anything is
 committed. The same prompt section tells the lead to monitor cheaply (wait for
 reports, check a quiet teammate with `ListAgents` or `git status` rather than
 pulling its transcript), to check quotas with the `Usage` tool before a long
-or parallel job, and to stop and ask on a rate or usage limit instead of
-switching models on its own.
+or parallel job, to stop and ask on a rate or usage limit instead of
+switching models on its own, and to check which model served a teammate in
+its transcript rather than trusting its self-report.
 
 The lead decides the mode itself. Two bundled slash commands are available as
 an override:
@@ -635,7 +636,8 @@ an override:
 - `/develop [request]` loads the develop checklist. The lead is told to load
   it whenever it picks develop mode, so the long checklist costs nothing
   until a change is actually headed for a commit.
-- `/ask [request]` forces ask mode.
+- `/ask [request]` forces ask mode: one task, one teammate per independent
+  angle (often just one), nothing committed.
 
 The develop checklist has two flows:
 
@@ -644,12 +646,14 @@ The develop checklist has two flows:
   implementers in their own git worktrees; a code review by a reviewer on a
   different model family; the implementers' worktree commits merged into the
   target branch as one delivery commit; the `verification` agent on that
-  commit and `verifiedBy`; the `final-reviewer` on that same commit (never a
+  commit and `verifiedBy` (after a FAIL, the fixes are integrated and
+  verified again); the `final-reviewer` on the newest delivery commit (never a
   partial worktree commit) and `finalReviewedBy`, with every GAP resolved;
   then the repository's own validation, a plain fast-forward push only if you
   asked for one, and teammate shutdown.
 - **Light flow** (a small change confined to one file): one implementer in its
-  own worktree, the verifier always, no separate code review and no final
+  own worktree, its commit merged into the target branch, the verifier always
+  on that merged result, no separate code review and no final
   review; the umbrella task gets `requiresVerification` only. A change small
   enough for the lead to make itself is still develop (light): the lead may
   make the edit without spawning an implementer, but the `verification` agent

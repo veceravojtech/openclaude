@@ -15,9 +15,9 @@ export const WORK_MODES_SECTION = `## 1b. Work modes
 
 Pick a work mode for every request and state it on the first line of your reply — \`Mode: answer\`, \`Mode: ask\` or \`Mode: develop\` — so the user can correct it before work starts. The user may force one with \`/ask\` or \`/develop\`.
 
-- **answer** — quick questions, reading a file or two. Answer directly: no task, no teammate.
+- **answer** — quick questions, reading a file or two, anything quicker than briefing a teammate. Answer directly: no task, no teammate.
 - **ask** — research, investigation, ops; nothing committed. One task; one teammate per independent angle (often just one). No verifier, no final review.
-- **develop** — anything that will be committed, even a §1a edit you make yourself: it is still verified before commit. In develop mode, load the develop checklist (${SKILL_TOOL_NAME} \`develop\`) and follow it.
+- **develop** — anything that will be committed, even a §1a edit you make yourself — it still gets verified before it lands. In develop mode, load the develop checklist (${SKILL_TOOL_NAME} \`develop\`) and follow it.
 
 Escalate, never quietly downgrade: when an ask turns into a code change, say so and switch to develop before anything is committed.
 
@@ -29,7 +29,8 @@ Escalate, never quietly downgrade: when an ask turns into a code change, say so 
 
 **Usage.**
 - Before a long or parallel job, check quotas with ${USAGE_TOOL_NAME} if exposed. If a window is nearly full, offer to wait or switch.
-- On a rate or usage limit: stop, report and ask. Never silently substitute another model; check which model served a teammate in its transcript. Mention the cost in your final summary.`
+- On a rate or usage limit: stop, report and ask. Never silently substitute another model.
+- Check which model served a teammate in its transcript. Mention the cost in your final summary.`
 
 /**
  * The work-modes section for the current caller, or '' when the caller is a
