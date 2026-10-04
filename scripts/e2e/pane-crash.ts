@@ -11,7 +11,11 @@
  *   runs `tmux kill-pane` on its pane — the user's manual test. Expected: a
  *   failed task-notification reaches the lead, exactly one undecided transient
  *   attention item `failure-<taskId>-0` exists, task #1 is pending, unowned
- *   and HELD for it, and no "has shut down" message is sent.
+ *   and HELD for it, and no "has shut down" message is sent. The failed
+ *   notification's `<result>` carries "Last pane output (captured Ns before
+ *   the pane closed):" with a heartbeat line the loop printed before the
+ *   kill (the lead's rolling pane-tail capture; the killed pane itself can
+ *   no longer be read).
  * - shutdown: the lead sends a shutdown_request, the teammate approves it.
  *   Expected: "has shut down", task #1 released WITHOUT a hold, no attention
  *   item, no failed notification.
@@ -50,6 +54,17 @@ const MATE = 'crasher'
 const TEAMMATE_MARKER = '# Agent Teammate Communication'
 const STEP_TIMEOUT_MS = 90_000
 const SETTLE_TIMEOUT_MS = 30_000
+/** Echoed by the teammate's heartbeat loop; must reach the crash report. */
+const HEARTBEAT_MARKER = 'e2e-pane-heartbeat'
+/** A line the loop PRINTED (numbered), not the command line that echoes `$i`. */
+const HEARTBEAT_LINE = new RegExp(`${HEARTBEAT_MARKER} \\d+`)
+/**
+ * How long the heartbeat runs before the kill: longer than the rolling
+ * pane-tail capture interval (10s) plus one sweeper tick (5s), so at least
+ * one capture of the looping pane exists when the pane dies.
+ */
+const PRE_KILL_HEARTBEAT_MS = 18_000
+const CACHED_TAIL_HEADING = /Last pane output \(captured \d+s before the pane closed\):/
 
 type Mode = 'crash' | 'shutdown'
 type Block =
@@ -114,6 +129,32 @@ function sse(id: string, model: string, step: Step): string {
     }) +
     ev('message_stop', {})
   )
+}
+
+/**
+ * The first failed `<task-notification>` in the lead's requests, decoded from
+ * the request JSON (each entry of `leadTexts` is a JSON-encoded messages
+ * array, whose text blocks hold the notification).
+ */
+function failedNotificationText(leadTexts: string[]): string | undefined {
+  const texts: string[] = []
+  const collect = (value: unknown): void => {
+    if (typeof value === 'string') texts.push(value)
+    else if (Array.isArray(value)) value.forEach(collect)
+    else if (value && typeof value === 'object') Object.values(value).forEach(collect)
+  }
+  for (const raw of leadTexts) {
+    try {
+      collect(JSON.parse(raw))
+    } catch {
+      // Not JSON: nothing to decode.
+    }
+  }
+  for (const t of texts) {
+    const match = /<task-notification>[\s\S]*?<\/task-notification>/.exec(t)
+    if (match && match[0].includes('<status>failed</status>')) return match[0]
+  }
+  return undefined
 }
 
 /** One scenario: its own config home, tmux server and fake API. */
@@ -193,7 +234,7 @@ async function runScenario(mode: Mode): Promise<{ passed: boolean; details: stri
       if (mode === 'shutdown') return text('Claimed task #1; idle now.')
       mateLooping = true
       return toolUse('toolu_bash', 'Bash', {
-        command: 'for i in $(seq 1 600); do echo "beat $i"; sleep 1; done',
+        command: `for i in $(seq 1 600); do echo "${HEARTBEAT_MARKER} $i"; sleep 1; done`,
         description: 'heartbeat',
         timeout: 600000,
       })
@@ -297,7 +338,19 @@ async function runScenario(mode: Mode): Promise<{ passed: boolean; details: stri
       if (!(await waitFor('the teammate heartbeat loop', () => mateLooping, STEP_TIMEOUT_MS))) {
         return { passed, details }
       }
-      await sleep(3_000)
+      // Wait until the heartbeat is visibly running in the pane, then long
+      // enough for the lead's rolling capture to have read it.
+      if (
+        !(await waitFor(
+          'the heartbeat marker in the teammate pane',
+          () => HEARTBEAT_LINE.test(pane(matePane)),
+          STEP_TIMEOUT_MS,
+        ))
+      ) {
+        details.push(pane(matePane))
+        return { passed, details }
+      }
+      await sleep(PRE_KILL_HEARTBEAT_MS)
       tmux('kill-pane', '-t', matePane)
       const settled = await waitFor(
         'the failed notification, the item and the hold',
@@ -311,8 +364,18 @@ async function runScenario(mode: Mode): Promise<{ passed: boolean; details: stri
       const task = taskFile()
       details.push(`items: ${JSON.stringify(items.map(i => ({ id: i.id, status: i.status, transient: i.transient })))}`)
       details.push(`task #1: ${JSON.stringify(task)}`)
+      // The failed notification as the lead's model received it (decoded
+      // from the request JSON). It must carry the pane's last lines, captured
+      // while the pane was alive: the killed pane itself can't be read.
+      const notification = failedNotificationText(leadTexts)
+      details.push(`notification:\n${notification ?? '(none)'}`)
+      const tailSection = notification?.split(CACHED_TAIL_HEADING)[1] ?? ''
       passed =
         settled &&
+        notification !== undefined &&
+        CACHED_TAIL_HEADING.test(notification) &&
+        HEARTBEAT_LINE.test(tailSection) &&
+        !notification.includes('no output could be captured') &&
         leadSaw('Pane was closed without a shutdown request') &&
         !leadSaw('has shut down') &&
         items.length === 1 &&

@@ -153,6 +153,17 @@ export const PANE_TEAMMATE_PROGRESS_TIMEOUT_MS = 1_800_000
 export const PANE_TEAMMATE_WATCHDOG_SCAN_INTERVAL_MS = 5_000
 
 /**
+ * Minimum spacing between two rolling pane-tail captures of one live
+ * teammate. The capture rides the team sweeper's tick (every
+ * PANE_TEAMMATE_WATCHDOG_SCAN_INTERVAL_MS), so a teammate's pane is captured
+ * about every 10s: one bounded `tmux capture-pane` of 40 lines, a few ms, per
+ * teammate. A crash report's tail is therefore at most ~15s old. It exists
+ * because `tmux kill-pane` destroys the pane before the ghost sweep can
+ * confirm the death, so the pane cannot be read on the crash path itself.
+ */
+export const PANE_TAIL_CAPTURE_INTERVAL_MS = 10_000
+
+/**
  * Consecutive scans that must confirm a roster member's pane is GONE before
  * the ghost sweep retires it.
  *
@@ -246,16 +257,30 @@ function keepTail(text: string, maxChars: number): string {
 }
 
 /**
+ * A pane tail captured while the pane was alive, kept so a crash report still
+ * has the pane's last lines once the pane itself can no longer be read.
+ */
+export type CachedPaneTail = {
+  text: string
+  /** When the capture completed (watchdog clock, ms). */
+  capturedAt: number
+}
+
+/**
  * The `<result>` of a task the watchdog failed (deadline, or a pane that
  * exited without reporting): the reason, the teammate's last text from its
  * latest idle notification when there is one (same formatting as a
- * completion), and the last ~40 lines of the pane — or a line saying none
- * could be captured. Bounded by TEAMMATE_REPORT_MAX_CHARS.
+ * completion), and the last ~40 lines of the pane. When the pane can no
+ * longer be read, the rolling capture taken while it was alive stands in
+ * (`cachedTail`, with its age at the moment the failure is reported); with
+ * neither, a line saying none could be captured. Bounded by
+ * TEAMMATE_REPORT_MAX_CHARS, each section by PANE_FAILURE_SECTION_MAX_CHARS.
  */
 export function paneFailureResult(
   reason: string,
   latestIdle: IdleNotificationMessage | null | undefined,
   paneTail: string | null,
+  cachedTail?: { text: string; ageMs: number } | null,
 ): string {
   const parts = [reason]
   const lastText = latestIdle ? paneTurnResult(latestIdle) : undefined
@@ -264,11 +289,18 @@ export function paneFailureResult(
       `Last assistant text:\n${truncateTeammateReport(lastText, PANE_FAILURE_SECTION_MAX_CHARS)}`,
     )
   }
-  parts.push(
-    paneTail === null
-      ? PANE_GONE_LINE
-      : `Last ~${PANE_FAILURE_TAIL_LINES} lines of the pane:\n${keepTail(paneTail, PANE_FAILURE_SECTION_MAX_CHARS)}`,
-  )
+  if (paneTail !== null) {
+    parts.push(
+      `Last ~${PANE_FAILURE_TAIL_LINES} lines of the pane:\n${keepTail(paneTail, PANE_FAILURE_SECTION_MAX_CHARS)}`,
+    )
+  } else if (cachedTail) {
+    const seconds = Math.max(0, Math.round(cachedTail.ageMs / 1000))
+    parts.push(
+      `Last pane output (captured ${seconds}s before the pane closed):\n${keepTail(cachedTail.text, PANE_FAILURE_SECTION_MAX_CHARS)}`,
+    )
+  } else {
+    parts.push(PANE_GONE_LINE)
+  }
   return truncateTeammateReport(parts.join('\n\n'))
 }
 
@@ -390,6 +422,8 @@ export type PaneTeammateWatchdogDeps = {
   ) => Promise<boolean>
   /** null disables the interval — tests drive scan() manually. */
   scanIntervalMs?: number | null
+  /** Rolling pane-tail capture spacing (default PANE_TAIL_CAPTURE_INTERVAL_MS). */
+  paneTailCaptureIntervalMs?: number
   firstContactTimeoutMs?: number
   progressTimeoutMs?: number
   unknownRetryDelayMs?: number
@@ -417,6 +451,14 @@ export type PaneTeammateWatchdogHandle = {
    * this call committed the failure.
    */
   failOnPaneGone(knownAgentId: string): Promise<boolean>
+  /**
+   * One rolling pane-tail capture, run by the team sweeper's tick: captures
+   * the pane's last lines into this task's cache while the crash watch is
+   * live and the task is running. No-op while a capture is in flight, within
+   * PANE_TAIL_CAPTURE_INTERVAL_MS of the previous attempt, or once disposed.
+   * A failed capture keeps the previous tail. Never throws.
+   */
+  refreshPaneTail(): Promise<void>
   /** Disarm: stop the interval, ignore every future signal. */
   dispose(): void
   readonly disposed: boolean
@@ -439,6 +481,45 @@ const paneWatchdogsByTask = new Map<
 >()
 
 /**
+ * The latest rolling pane-tail capture of each registered watchdog, by task
+ * id, tagged with the watchdog that took it. One entry per task, dropped
+ * whenever the task leaves {@link paneWatchdogsByTask} (dispose, prune, the
+ * crash hand-off). Keyed by task id — never by teammate name — so a respawn
+ * under the same name (a new task) cannot read its predecessor's tail.
+ */
+const paneTailsByTask = new Map<
+  string,
+  CachedPaneTail & { owner: PaneTeammateWatchdogHandle }
+>()
+
+/** Drop a task's registry entry and its cached pane tail together. */
+function forgetPaneWatchdog(taskId: string): void {
+  paneWatchdogsByTask.delete(taskId)
+  paneTailsByTask.delete(taskId)
+}
+
+/** The cached rolling pane tail of `taskId`, if any (test seam). */
+export function getCachedPaneTailForTask(
+  taskId: string,
+): CachedPaneTail | undefined {
+  const entry = paneTailsByTask.get(taskId)
+  return entry ? { text: entry.text, capturedAt: entry.capturedAt } : undefined
+}
+
+/**
+ * Run one rolling pane-tail capture for every live watchdog of `teamName`,
+ * concurrently. Each handle rate-limits and single-flights itself, and each
+ * capture is bounded by the backend (TMUX_CAPTURE_TIMEOUT_MS), so this
+ * settles within that bound. Never throws.
+ */
+async function refreshTeamPaneTails(teamName: string): Promise<void> {
+  const handles = [...paneWatchdogsByTask.values()]
+    .filter(entry => entry.teamName === teamName)
+    .map(entry => entry.handle)
+  await Promise.allSettled(handles.map(handle => handle.refreshPaneTail()))
+}
+
+/**
  * Drop `teamName`'s entries whose watchdog is disposed and whose task is no
  * longer running (retired, killed, completed) or gone; with `all`, every
  * entry of the team (its team file is gone). Run by the team sweeper.
@@ -453,7 +534,7 @@ function prunePaneWatchdogRegistry(
   )
   if (ours.length === 0) return
   if (all) {
-    for (const [taskId] of ours) paneWatchdogsByTask.delete(taskId)
+    for (const [taskId] of ours) forgetPaneWatchdog(taskId)
     return
   }
   let running = new Set<string>()
@@ -467,7 +548,7 @@ function prunePaneWatchdogRegistry(
   })
   for (const [taskId, entry] of ours) {
     if (entry.handle.disposed && !running.has(taskId)) {
-      paneWatchdogsByTask.delete(taskId)
+      forgetPaneWatchdog(taskId)
     }
   }
 }
@@ -491,7 +572,7 @@ export async function failPaneTeammateOnPaneGone(
   try {
     return await handle.failOnPaneGone(member.agentId)
   } finally {
-    paneWatchdogsByTask.delete(taskId)
+    forgetPaneWatchdog(taskId)
   }
 }
 
@@ -1081,7 +1162,15 @@ export function ensureTeamSweeper({
         dispose()
         return
       }
-      await sweepRosterOnce(sweepDeps, absentPaneScans)
+      // The rolling pane-tail capture rides this tick, beside the sweep and
+      // never in front of it: a crash verdict this sweep reaches reads the
+      // tail cached by an EARLIER tick (the pane it reports is already gone).
+      const tails = refreshTeamPaneTails(teamName)
+      try {
+        await sweepRosterOnce(sweepDeps, absentPaneScans)
+      } finally {
+        await tails
+      }
       prunePaneWatchdogRegistry(teamName, setAppState)
     } finally {
       scanning = false
@@ -1244,6 +1333,13 @@ export function armPaneTeammateWatchdog({
   let unknownProbes = 0
   let lastProbeAt = Number.NEGATIVE_INFINITY
   let disposed = false
+  // Set by a full dispose (never by the delivered-turn disarm, whose idle
+  // teammate can still crash): ends the rolling pane-tail capture for good.
+  let crashWatchEnded = false
+  let tailCaptureInFlight = false
+  let lastTailAttemptAt = Number.NEGATIVE_INFINITY
+  const paneTailCaptureIntervalMs =
+    deps?.paneTailCaptureIntervalMs ?? PANE_TAIL_CAPTURE_INTERVAL_MS
   let leadName: string | null = null
   let timer: ReturnType<typeof setInterval> | undefined
 
@@ -1254,7 +1350,12 @@ export function armPaneTeammateWatchdog({
    * already-disarmed watchdog still unregisters.
    */
   function dispose(options?: { keepCrashWatch?: boolean }): void {
-    if (!options?.keepCrashWatch) unregister()
+    if (!options?.keepCrashWatch) {
+      // The crash watch is over: no rolling capture may run or land again,
+      // and unregister() drops the cached tail with the registry entry.
+      crashWatchEnded = true
+      unregister()
+    }
     if (disposed) {
       return
     }
@@ -1271,7 +1372,7 @@ export function armPaneTeammateWatchdog({
       registered !== undefined &&
       paneWatchdogsByTask.get(taskId)?.handle === registered
     ) {
-      paneWatchdogsByTask.delete(taskId)
+      forgetPaneWatchdog(taskId)
     }
   }
 
@@ -1567,6 +1668,60 @@ export function armPaneTeammateWatchdog({
     }
   }
 
+  /** True while this watchdog is the registered crash watch of its task. */
+  function ownsCrashWatch(): boolean {
+    return (
+      !crashWatchEnded &&
+      registered !== undefined &&
+      paneWatchdogsByTask.get(taskId)?.handle === registered
+    )
+  }
+
+  /**
+   * The rolling capture (see the handle's `refreshPaneTail`). Same bounded
+   * capture and line count as a failure's live tail. The result is stored
+   * only if this watchdog still owns the crash watch once the capture
+   * settles, so a capture that lands after dispose or after the crash
+   * hand-off leaves nothing behind. Never blocks finalization: it takes no
+   * lock, and the crash path reads whatever the last completed capture left.
+   */
+  async function refreshPaneTail(): Promise<void> {
+    if (tailCaptureInFlight || !ownsCrashWatch()) return
+    const startedAt = now()
+    if (startedAt - lastTailAttemptAt < paneTailCaptureIntervalMs) return
+    // Only a running task can still crash: a task already terminal (the
+    // deadline failure's late-completion watch included) has no use for it.
+    let running = false
+    updateTaskState(taskId, setAppState, task => {
+      running = task.status === 'running'
+      return task
+    })
+    if (!running) return
+    tailCaptureInFlight = true
+    lastTailAttemptAt = startedAt
+    try {
+      const text = await readPaneTail()
+      // A failed, timed-out or blank capture keeps the previous tail.
+      if (text === null || text.trim() === '' || !ownsCrashWatch()) return
+      paneTailsByTask.set(taskId, {
+        text,
+        capturedAt: now(),
+        owner: registered!,
+      })
+    } finally {
+      tailCaptureInFlight = false
+    }
+  }
+
+  /** This watchdog's own cached tail, aged against now(); null when none. */
+  function cachedTailForReport(): { text: string; ageMs: number } | null {
+    const entry = paneTailsByTask.get(taskId)
+    if (!entry || registered === undefined || entry.owner !== registered) {
+      return null
+    }
+    return { text: entry.text, ageMs: now() - entry.capturedAt }
+  }
+
   /**
    * This teammate's mailbox messages that count as signals: from it, and not
    * older than the watchdog (minus slack). The mailbox read is NOT consuming —
@@ -1823,7 +1978,14 @@ export function armPaneTeammateWatchdog({
     },
   ): Promise<void> {
     // Built in memory only: nothing is written before finalization is owned.
-    const result = paneFailureResult(error, lastIdleSeen, await readPaneTail())
+    // A dead pane that can no longer be read falls back to the rolling tail.
+    const liveTail = await readPaneTail()
+    const result = paneFailureResult(
+      error,
+      lastIdleSeen,
+      liveTail,
+      paneDead && liveTail === null ? cachedTailForReport() : null,
+    )
     await withFinalization(async () => {
       // The decision is made here, from state read inside the lock. A holder
       // that already committed a terminal outcome and disarmed (disposed), or
@@ -1877,7 +2039,9 @@ export function armPaneTeammateWatchdog({
    * as failTask's dead-pane branch, under the same lock: item first, then
    * the teammate's tasks released and HELD for it, then the failed
    * notification whose output file carries the reason, the teammate's last
-   * text and the pane tail (or the line saying none could be captured).
+   * text and the pane tail: the rolling capture taken while the pane was
+   * alive (refreshPaneTail), since a killed pane can no longer be read — or
+   * the line saying none could be captured when no capture exists yet.
    *
    * Not gated on `disposed`: a watchdog disarms once a turn is delivered,
    * and the teammate it watched can still crash afterwards. Gated instead on
@@ -1902,7 +2066,16 @@ export function armPaneTeammateWatchdog({
         `[PaneWatchdog] could not read ${teammateName}'s last report before failing it: ${String(readError)}`,
       )
     }
-    const result = paneFailureResult(error, lastIdleSeen, await readPaneTail())
+    // The pane is gone (tmux kill-pane destroys it before the sweep can
+    // confirm the death), so the live capture normally reads nothing: the
+    // tail the rolling capture took while the pane was alive stands in.
+    const liveTail = await readPaneTail()
+    const result = paneFailureResult(
+      error,
+      lastIdleSeen,
+      liveTail,
+      liveTail === null ? cachedTailForReport() : null,
+    )
     let committed = false
     try {
       await withFinalization(async () => {
@@ -2305,6 +2478,7 @@ export function armPaneTeammateWatchdog({
     scan,
     scanUnserialized,
     failOnPaneGone,
+    refreshPaneTail,
     dispose: () => dispose(),
     get disposed() {
       return disposed

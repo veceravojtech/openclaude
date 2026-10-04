@@ -37,6 +37,7 @@ import { getTeamFilePath, readTeamFile } from '../../utils/swarm/teamHelpers.js'
 import { getTaskOutputPath } from '../../utils/task/diskOutput.js'
 import { claimTask, createTask, getTask } from '../../utils/tasks.js'
 import { writeToMailbox } from '../../utils/teammateMailbox.js'
+import { escapeXml } from '../../utils/xml.js'
 
 export const CRASH_TEAM = 'crashteam'
 export const CRASH_MATE = 'crasher'
@@ -242,9 +243,20 @@ function onRoster(): boolean {
  * (claim refused, spawn gate closed), off the roster with no contradictory
  * "has shut down", and still listed by ListAgents as failed.
  */
-export async function expectCrashOutcome(state: () => AppState): Promise<{
+export async function expectCrashOutcome(
+  state: () => AppState,
+  options: {
+    /**
+     * The rolling tail the report must carry instead of PANE_GONE_LINE: its
+     * age in seconds and its text (raw in the output file, XML-escaped in
+     * the notification's `<result>`).
+     */
+    cachedTail?: { ageSeconds: number; text: string }
+  } = {},
+): Promise<{
   taskId: string
   output: string
+  notification: string
 }> {
   const taskId = crasherTaskId(state())
   const itemId = `failure-${taskId}-0`
@@ -258,7 +270,19 @@ export async function expectCrashOutcome(state: () => AppState): Promise<{
   expect(failed[0]).toContain(`<output-file>${getTaskOutputPath(taskId)}`)
   const output = readFileSync(getTaskOutputPath(taskId), 'utf8')
   expect(output).toContain(PANE_CLOSED_WITHOUT_SHUTDOWN_ERROR)
-  expect(output).toContain(PANE_GONE_LINE)
+  if (options.cachedTail) {
+    const heading = `Last pane output (captured ${options.cachedTail.ageSeconds}s before the pane closed):`
+    expect(output).toContain(`${heading}\n${options.cachedTail.text}`)
+    expect(output).not.toContain(PANE_GONE_LINE)
+    expect(failed[0]).toContain(
+      `${heading}\n${escapeXml(options.cachedTail.text)}`,
+    )
+    expect(failed[0]).not.toContain(PANE_GONE_LINE)
+  } else {
+    expect(output).toContain(PANE_GONE_LINE)
+    expect(failed[0]).toContain(PANE_GONE_LINE)
+    expect(output).not.toContain('Last pane output (captured')
+  }
 
   const items = await listAttentionItems(CRASH_LEAD_LIST)
   expect(items.map(i => i.id)).toEqual([itemId])
@@ -299,7 +323,44 @@ export async function expectCrashOutcome(state: () => AppState): Promise<{
     taskId,
     attentionItemId: itemId,
   })
-  return { taskId, output }
+  return { taskId, output, notification: failed[0]! }
+}
+
+/**
+ * An injected `capturePaneTail` that behaves like tmux's: it reads the
+ * scripted pane text while the pane is present and nothing once it is gone.
+ * `next` scripts the coming captures (a string, `null` for a failed or
+ * timed-out capture, `'throw'`); `calls` counts every capture.
+ */
+export function scriptedPaneTail(
+  pane: { state: PanePresence },
+  text: string | null,
+): {
+  dep: (lines: number) => Promise<string | null>
+  next: Array<string | null | 'throw'>
+  text: string | null
+  /** When set, a present pane's capture waits on it (an in-flight capture). */
+  gate: (() => Promise<string | null>) | null
+  calls: number
+  lines: number[]
+} {
+  const probe = {
+    next: [] as Array<string | null | 'throw'>,
+    text,
+    gate: null as (() => Promise<string | null>) | null,
+    calls: 0,
+    lines: [] as number[],
+    dep: async (lines: number): Promise<string | null> => {
+      probe.calls++
+      probe.lines.push(lines)
+      if (pane.state === 'absent') return null
+      if (probe.gate) return probe.gate()
+      const scripted = probe.next.length > 0 ? probe.next.shift()! : probe.text
+      if (scripted === 'throw') throw new Error('tmux capture-pane exploded')
+      return scripted
+    },
+  }
+  return probe
 }
 
 /**
