@@ -420,6 +420,20 @@ async function updateTaskUnsafe(
       `Task #${taskId} can only be cancelled through cancelTask (TaskUpdate status 'cancelled'), which also updates the tasks that depend on it.`,
     )
   }
+  // Attention hold: a task a failed worker released stays unclaimable until
+  // the lead decides the item. Every owner write goes through here (claimTask,
+  // TaskUpdate, the in-process auto-claim), so this is the one authority,
+  // checked against the task as read under the caller's lock. Unassigning,
+  // completing, cancelling and other field edits stay allowed.
+  if (touchesAttentionHold(existing, updated)) {
+    const hold = await isHoldActiveIn(
+      getTasksDir(holdListOf(existing, taskListId)),
+      existing.metadata,
+    )
+    if (hold) {
+      throw new AttentionHoldError(taskId, hold)
+    }
+  }
   // Authoritative completion gates (verification, then final review):
   // checked against the task as read under the caller's lock, so a flag
   // added by a concurrent write (or by a TaskCompleted hook) is honored and
@@ -662,6 +676,41 @@ export class TaskTransitionError extends Error {
     super(message)
     this.name = 'TaskTransitionError'
   }
+}
+
+/**
+ * Thrown when an update would claim a task (give it a new non-empty owner or
+ * move it to in_progress) or clear its hold metadata while the task is held
+ * by an undecided attention item. Nothing was written. A TaskTransitionError,
+ * so callers that skip refused transitions skip this too.
+ */
+export class AttentionHoldError extends TaskTransitionError {
+  constructor(
+    readonly taskId: string,
+    readonly attentionItemId: string,
+  ) {
+    super(
+      `Task #${taskId} is held by attention item ${attentionItemId} until the lead decides it. Decide it with AttentionDecide first; until then nobody can claim it, assign it or move it to in_progress.`,
+    )
+    this.name = 'AttentionHoldError'
+  }
+}
+
+/**
+ * Whether going from `existing` to `updated` is something an active
+ * attention hold forbids: a new non-empty owner, a move into in_progress, or
+ * a change to the hold metadata itself (removing the hold by hand would be a
+ * way around it). Clearing the owner is always allowed.
+ */
+function touchesAttentionHold(existing: Task, updated: Task): boolean {
+  if (updated.owner && updated.owner !== existing.owner) return true
+  if (updated.status === 'in_progress' && existing.status !== 'in_progress') {
+    return true
+  }
+  return (
+    updated.metadata?.attentionHold !== existing.metadata?.attentionHold ||
+    updated.metadata?.attentionHoldList !== existing.metadata?.attentionHoldList
+  )
 }
 
 /**
@@ -1116,6 +1165,11 @@ export async function claimTask(
     })
     return { success: true, task: updated! }
   } catch (error) {
+    // A hold set between our check and the write (the locked write is the
+    // authority) is a refusal, not a lost task.
+    if (error instanceof AttentionHoldError) {
+      return { success: false, reason: 'held_for_decision', attentionItemId: error.attentionItemId }
+    }
     logForDebugging(
       `[Tasks] Failed to claim task ${taskId}: ${errorMessage(error)}`,
     )
@@ -1207,6 +1261,11 @@ async function claimTaskWithBusyCheck(
     })
     return { success: true, task: updated! }
   } catch (error) {
+    // A hold set between our check and the write (the locked write is the
+    // authority) is a refusal, not a lost task.
+    if (error instanceof AttentionHoldError) {
+      return { success: false, reason: 'held_for_decision', attentionItemId: error.attentionItemId }
+    }
     logForDebugging(
       `[Tasks] Failed to claim task ${taskId} with busy check: ${errorMessage(error)}`,
     )

@@ -866,15 +866,17 @@ async function sendIdleNotification(
 }
 
 /**
- * Find an available task from the team's task list.
+ * The available tasks in the team's task list, in list order.
  * A task is available if it's pending, has no owner, and is not blocked.
+ * An attention hold is not visible here (it needs the item store); claimTask
+ * refuses a held task, and the caller moves on to the next candidate.
  */
-function findAvailableTask(tasks: Task[]): Task | undefined {
+function findAvailableTasks(tasks: Task[]): Task[] {
   const unresolvedTaskIds = new Set(
     tasks.filter(t => !isTaskResolved(t.status)).map(t => t.id),
   )
 
-  return tasks.find(task => {
+  return tasks.filter(task => {
     if (task.status !== 'pending') return false
     if (task.owner) return false
     return task.blockedBy.every(id => !unresolvedTaskIds.has(id))
@@ -904,7 +906,7 @@ function formatTaskAsPrompt(task: Task): string {
  * in the runner loop). Without the id there is nothing to release and the task
  * would be stranded `in_progress` under an owner that has exited.
  */
-async function tryClaimNextTask(
+export async function tryClaimNextTask(
   taskListId: string,
   agentName: string,
 ): Promise<{ prompt: string; taskId: string } | undefined> {
@@ -917,18 +919,25 @@ async function tryClaimNextTask(
 
   try {
     const tasks = await listTasks(taskListId)
-    const availableTask = findAvailableTask(tasks)
-
-    if (!availableTask) {
-      return undefined
+    let availableTask: Task | undefined
+    for (const candidate of findAvailableTasks(tasks)) {
+      const result = await claimTask(taskListId, candidate.id, agentName)
+      if (result.success) {
+        availableTask = candidate
+        break
+      }
+      logForDebugging(
+        `[inProcessRunner] Failed to claim task #${candidate.id}: ${result.reason}`,
+      )
+      // A task held for the lead's decision must not stop this teammate from
+      // taking the next free one; any other refusal ends this attempt as
+      // before (the list changed under us, try again next poll).
+      if (result.reason !== 'held_for_decision') {
+        return undefined
+      }
     }
 
-    const result = await claimTask(taskListId, availableTask.id, agentName)
-
-    if (!result.success) {
-      logForDebugging(
-        `[inProcessRunner] Failed to claim task #${availableTask.id}: ${result.reason}`,
-      )
+    if (!availableTask) {
       return undefined
     }
 
