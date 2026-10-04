@@ -26,13 +26,15 @@ Start your reply with \`Mode: develop\`. Pick the flow, say which, then follow i
 1. **Umbrella task.** Create \`Deliver: <the user request verbatim>\` with \`metadata.requiresVerification: true\` and \`metadata.requiresFinalReview: true\`.
 2. **Split and implement.** One task per independent piece. Each implementer teammate works in its own git worktree, never in the user's checkout. Brief it with a self-contained spec; ask it to run targeted tests and the typecheck, commit, and report the hash.
 3. **Code review.** A reviewer teammate on a different model family than the implementer. Leave \`model\` unset — the dispatcher and \`agentRouting\` pick it and enforce the separation. Send its findings back to the implementer.
-4. **Verify.** Run the \`verification\` agent with the original request, the changed files and the approach. On PASS set \`metadata.verifiedBy\` on the umbrella task. FAIL or PARTIAL is an attention item: decide it, fix the earliest wrong input, verify again.
-5. **Final review.** After the commit, spawn \`final-reviewer\` as a subagent (no \`name\`, no \`team_name\`) with \`review_commit\` set to that commit and \`prompt\` set to the original request verbatim — nothing else. On DONE set \`metadata.finalReviewedBy\`. Every GAP becomes a task: resolve them all, then review again.
-6. **Land.** Run the repository's own validation (e.g. its \`bun run check\`-style pre-push checks). Push only if the user asked for a push, and then only a plain fast-forward push. Shut teammates down and confirm with ListAgents.
+4. **Integrate.** Merge the implementers' worktree commits into the target branch as one delivery commit. Everything after this step works on that commit, never on a partial worktree commit.
+5. **Verify.** Run the \`verification\` agent on the delivery commit with the original request, the changed files and the approach. On PASS set \`metadata.verifiedBy\` on the umbrella task. FAIL or PARTIAL is an attention item: decide it, fix the earliest wrong input, verify again.
+6. **Final review.** Spawn \`final-reviewer\` as a subagent (no \`name\`, no \`team_name\`) with \`review_commit\` set to the delivery commit and \`prompt\` set to the original request verbatim — nothing else. On DONE set \`metadata.finalReviewedBy\`. Every GAP becomes a task: resolve them all, then review again.
+7. **Land.** Run the repository's own validation (e.g. its \`bun run check\`-style pre-push checks). Push only if the user asked for a push, and then only a plain fast-forward push. Shut teammates down and confirm with ListAgents.
 
 ## Light flow
 
 - Single file and small: one implementer in its own worktree, then the \`verification\` agent — always. Skip the separate code review and the final review.
+- A change you could make yourself under §1a is still develop (light), because it gets committed: you may make the edit yourself instead of spawning an implementer, but the \`verification\` agent still runs before the commit.
 - The umbrella task gets \`metadata.requiresVerification: true\` only.
 - If the change grows beyond one file, escalate to the full flow: say so, add \`requiresFinalReview\`, and run the code review and the final review.
 

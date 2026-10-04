@@ -618,8 +618,8 @@ and states it on the first line of its reply — `Mode: answer`, `Mode: ask` or
 | Mode | When | Flow |
 |---|---|---|
 | `answer` | Quick questions, reading a file or two | The lead answers directly. No task, no teammate. |
-| `ask` | Research, investigation, ops; nothing is committed | One task, one teammate, the result delivered. No verifier, no final review. |
-| `develop` | Anything that will be committed | The develop checklist (below). |
+| `ask` | Research, investigation, ops; nothing is committed | One task; one teammate per independent angle (often just one); the result delivered. No verifier, no final review. |
+| `develop` | Anything that will be committed, including a small edit the lead makes itself | The develop checklist (below). |
 
 The lead escalates and never quietly downgrades: an `ask` that turns into a
 code change switches to `develop`, and the lead says so, before anything is
@@ -632,8 +632,8 @@ switching models on its own.
 The lead decides the mode itself. Two bundled slash commands are available as
 an override:
 
-- `/develop [request]` loads the develop checklist. The lead also loads it on
-  its own whenever it picks develop mode, so the long checklist costs nothing
+- `/develop [request]` loads the develop checklist. The lead is told to load
+  it whenever it picks develop mode, so the long checklist costs nothing
   until a change is actually headed for a commit.
 - `/ask [request]` forces ask mode.
 
@@ -642,13 +642,18 @@ The develop checklist has two flows:
 - **Full flow** (multi-file or non-trivial): an umbrella task
   `Deliver: <request>` with `requiresVerification` and `requiresFinalReview`;
   implementers in their own git worktrees; a code review by a reviewer on a
-  different model family; the `verification` agent and `verifiedBy`; the
-  `final-reviewer` on the commit and `finalReviewedBy`, with every GAP
-  resolved; then the repository's own validation, a plain fast-forward push
-  only if you asked for one, and teammate shutdown.
-- **Light flow** (a small change confined to one file): the verifier always,
-  no separate code review and no final review; the umbrella task gets
-  `requiresVerification` only. If the change grows beyond one file, the lead
+  different model family; the implementers' worktree commits merged into the
+  target branch as one delivery commit; the `verification` agent on that
+  commit and `verifiedBy`; the `final-reviewer` on that same commit (never a
+  partial worktree commit) and `finalReviewedBy`, with every GAP resolved;
+  then the repository's own validation, a plain fast-forward push only if you
+  asked for one, and teammate shutdown.
+- **Light flow** (a small change confined to one file): one implementer in its
+  own worktree, the verifier always, no separate code review and no final
+  review; the umbrella task gets `requiresVerification` only. A change small
+  enough for the lead to make itself is still develop (light): the lead may
+  make the edit without spawning an implementer, but the `verification` agent
+  still runs before the commit. If the change grows beyond one file, the lead
   escalates to the full flow.
 
 The checklist never names a model: which models review and verify comes from

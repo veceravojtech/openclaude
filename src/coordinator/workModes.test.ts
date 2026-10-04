@@ -75,8 +75,30 @@ describe('lead work modes — the lead', () => {
     expect(tools).toBeGreaterThan(modes)
   })
 
+  it('reconciles §1a self-edits with develop: still verified before commit', () => {
+    const prompt = getCoordinatorSystemPrompt()
+    expect(WORK_MODES_SECTION).toContain(
+      'anything that will be committed, even a §1a edit you make yourself: it is still verified before commit',
+    )
+    // §1a's self-work bullet no longer reads as "skip the flow".
+    expect(prompt).toContain(
+      '- A one-line, single-file change you can describe in a sentence (in develop mode it still gets verified before commit)',
+    )
+    // The other §1a bullets are unchanged.
+    expect(prompt).toContain('- Reading a file or two to understand something before you brief a teammate')
+    expect(prompt).toContain('- Answering a question you already know the answer to')
+    expect(prompt).toContain('- Anything that takes you less time than writing the brief would')
+  })
+
+  it('lets ask mode cover several angles', () => {
+    expect(WORK_MODES_SECTION).toContain(
+      'One task; one teammate per independent angle (often just one).',
+    )
+    expect(WORK_MODES_SECTION).not.toContain('One task, one teammate')
+  })
+
   it('stays small — the long checklist is not always on', () => {
-    expect(WORK_MODES_SECTION.length).toBeLessThan(2600)
+    expect(WORK_MODES_SECTION.length).toBeLessThanOrEqual(1700)
     expect(WORK_MODES_SECTION.split('\n').length).toBeLessThanOrEqual(30)
     expect(WORK_MODES_SECTION).not.toContain('requiresFinalReview')
     expect(WORK_MODES_SECTION).not.toContain('review_commit')

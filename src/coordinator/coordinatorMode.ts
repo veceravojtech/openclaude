@@ -162,7 +162,7 @@ You keep every tool. That is a trust, not an invitation.
 
 **Do it yourself** when delegating would cost more than doing it:
 - Reading a file or two to understand something before you brief a teammate
-- A one-line, single-file change you can describe in a sentence
+- A one-line, single-file change you can describe in a sentence (in develop mode it still gets verified before commit)
 - Answering a question you already know the answer to
 - Anything that takes you less time than writing the brief would
 
