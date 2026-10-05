@@ -704,6 +704,94 @@ test('auto-routes gpt-6-astra to /responses on api.openai.com with tools and nes
   expect(capturedBody).not.toHaveProperty('reasoning_effort')
 })
 
+test('no base URL + API key + concrete GPT-6 model dispatches to api.openai.com/v1/responses with the API key, never Codex auth', async () => {
+  // Regression: a concrete Codex-alias id with no base URL used to pick the
+  // codex_responses transport while the endpoint stayed api.openai.com, sending
+  // the Codex bearer token + chatgpt-account-id to the public OpenAI API.
+  delete process.env.OPENAI_BASE_URL
+  delete process.env.OPENAI_API_BASE
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_MODEL = 'gpt-6-astra'
+  process.env.OPENAI_API_KEY = 'sk-test-key'
+  let capturedUrl = ''
+  let capturedHeaders: Headers | undefined
+
+  globalThis.fetch = (async (input, init) => {
+    capturedUrl = String(input)
+    capturedHeaders = new Headers(init?.headers)
+    return new Response(
+      JSON.stringify({
+        id: 'resp-1',
+        model: 'gpt-6-astra',
+        output: [
+          { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] },
+        ],
+        usage: { input_tokens: 8, output_tokens: 3, total_tokens: 11 },
+      }),
+      { headers: { 'Content-Type': 'application/json' } },
+    )
+  }) as unknown as FetchType
+
+  const client = createOpenAIShimClient({}) as OpenAIShimClient
+  await client.beta.messages.create({
+    model: 'gpt-6-astra',
+    messages: [{ role: 'user', content: 'hello' }],
+    max_tokens: 64,
+    stream: false,
+  })
+
+  expect(capturedUrl).toBe('https://api.openai.com/v1/responses')
+  expect(capturedHeaders?.get('authorization')).toBe('Bearer sk-test-key')
+  expect(capturedHeaders?.has('chatgpt-account-id')).toBe(false)
+})
+
+test('providerOverride with the default OpenAI URL is authoritative: a session OPENAI_MODEL=codexplan does not redirect it to Codex', async () => {
+  // Regression: the in-process provider override's URL used to be judged like an
+  // ordinary env URL, so the session's own codexplan shortcut rewrote it to the
+  // Codex backend and sent Codex credentials to (or instead of) the override.
+  delete process.env.OPENAI_BASE_URL
+  delete process.env.OPENAI_API_BASE
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  process.env.OPENAI_MODEL = 'codexplan'
+  process.env.OPENAI_API_KEY = 'sk-session-key'
+  let capturedUrl = ''
+  let capturedHeaders: Headers | undefined
+
+  globalThis.fetch = (async (input, init) => {
+    capturedUrl = String(input)
+    capturedHeaders = new Headers(init?.headers)
+    return new Response(
+      JSON.stringify({
+        id: 'resp-1',
+        model: 'gpt-5.6-sol',
+        output: [
+          { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] },
+        ],
+        usage: { input_tokens: 8, output_tokens: 3, total_tokens: 11 },
+      }),
+      { headers: { 'Content-Type': 'application/json' } },
+    )
+  }) as unknown as FetchType
+
+  const client = createOpenAIShimClient({
+    providerOverride: {
+      model: 'gpt-5.6-sol',
+      baseURL: 'https://api.openai.com/v1',
+      apiKey: 'sk-override-key',
+    },
+  }) as OpenAIShimClient
+  await client.beta.messages.create({
+    model: 'gpt-5.6-sol',
+    messages: [{ role: 'user', content: 'hello' }],
+    max_tokens: 64,
+    stream: false,
+  })
+
+  expect(capturedUrl).toBe('https://api.openai.com/v1/responses')
+  expect(capturedHeaders?.get('authorization')).toBe('Bearer sk-override-key')
+  expect(capturedHeaders?.has('chatgpt-account-id')).toBe(false)
+})
+
 test('gpt-5.6 chat-completions escape hatch omits reasoning effort with tools', async () => {
   process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'
   process.env.OPENAI_API_KEY = 'test-key'

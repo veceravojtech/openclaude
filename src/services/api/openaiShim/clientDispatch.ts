@@ -281,6 +281,9 @@ export function createShimRequest(
       const request = resolveProviderRequest({
         model: providerOverride?.model ?? params.model,
         baseUrl: providerOverride?.baseURL,
+        // A provider override's URL is authoritative: the session's own
+        // OPENAI_MODEL shortcut must not redirect it to the Codex backend.
+        baseUrlIsOverride: Boolean(providerOverride?.baseURL),
         reasoningEffortOverride: reasoningEffort,
         processEnv,
       })

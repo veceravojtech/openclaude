@@ -23,11 +23,15 @@ import {
   resolveRouteIdFromBaseUrl,
   normalizeComparableBaseUrl,
   getRouteDefaultBaseUrl,
+  getRouteDefaultModel,
 } from '../../integrations/routeMetadata.js'
 import { resolveProfileRoute } from '../../integrations/profileResolver.js'
 import {
+  canonicalizeOverrideModel,
+  isCodexBackendRoute,
   isCodexBaseUrl,
-  shouldUseCodexTransport,
+  normalizeModelBaseId,
+  resolveProviderRequest,
 } from '../../services/api/providerConfig.js'
 import { LEGACY_PROVIDER_MODEL_CONFIGS, CLAUDE_FABLE_5_1_CONFIG,
   CLAUDE_SONNET_5_5_CONFIG, CLAUDE_SONNET_5_CONFIG, CLAUDE_OPUS_5_5_CONFIG } from './configs.js'
@@ -76,7 +80,13 @@ export const TEAMMATE_MODEL_MATRIX = {
   },
   'gpt-6': {
     label: 'GPT-6',
-    entries: onRoutes(['openai', 'codex'], 'gpt-6-astra'),
+    // Ordered: the first entry per route is the one the dispatcher picks.
+    entries: [
+      ...onRoutes(['openai', 'codex'], 'gpt-6.1-sol'),
+      ...onRoutes(['openai', 'codex'], 'gpt-6-astra'),
+      ...onRoutes(['openai', 'codex'], 'gpt-6-sol'),
+      ...onRoutes(['openai', 'codex'], 'gpt-6-luna'),
+    ],
   },
   'deepseek-v4-pro': {
     label: 'DeepSeek V4 Pro',
@@ -151,8 +161,8 @@ export const TEAMMATE_MODEL_ALLOWLIST_WILDCARD = '*'
  * model on the wire as `claude-opus-5-5`.
  */
 export function normalizeTeammateModelId(model: string): string {
-  const trimmed = model.trim().replace(/\[1m]$/i, '')
-  return (trimmed.split('?', 1)[0] ?? trimmed).toLowerCase()
+  // Strips the `?query` and the `[1m]` tag in either order, and lowercases.
+  return normalizeModelBaseId(model)
 }
 
 /**
@@ -185,7 +195,10 @@ const EXTRA_KNOWN_MODEL_IDS_BY_ROUTE: Readonly<Record<string, readonly string[]>
   // descriptors rather than a measured endpoint list. Verify before relying on
   // them as a hard guarantee.
   codex: [
+    'gpt-6.1-sol',
+    'gpt-6-sol',
     'gpt-6-astra',
+    'gpt-6-luna',
     'gpt-5.6-sol',
     'gpt-5.6-terra',
     'gpt-5.6-luna',
@@ -199,7 +212,10 @@ const EXTRA_KNOWN_MODEL_IDS_BY_ROUTE: Readonly<Record<string, readonly string[]>
     'gpt-5-mini',
   ],
   openai: [
+    'gpt-6.1-sol',
+    'gpt-6-sol',
     'gpt-6-astra',
+    'gpt-6-luna',
     'gpt-5.6-sol',
     'gpt-5.6-terra',
     'gpt-5.6-luna',
@@ -361,15 +377,36 @@ export function assertKnownTeammateModel(
 
 const GENERIC_OPENAI_ROUTES = new Set(['openai', 'custom', 'unknown-fallback'])
 
+/**
+ * 'codex' when the generic OpenAI route's request would go to the Codex
+ * backend — decided by resolveProviderRequest (the one routing decision), never
+ * re-derived here. `env` is the environment the teammate's child will run with
+ * (the leader's own env, or a profile/override emulated as one); with no model
+ * the resolver uses that environment's effective model.
+ */
 function codexOr(
   route: string,
   model: string | undefined,
   baseUrl: string | undefined,
+  env: NodeJS.ProcessEnv | undefined,
 ): string {
   if (!GENERIC_OPENAI_ROUTES.has(route)) return route
   if (isCodexBaseUrl(baseUrl)) return 'codex'
-  if (model && shouldUseCodexTransport(model, baseUrl)) return 'codex'
-  return route
+  // A profile/override with no model names no shortcut: only its URL decides.
+  if (!env) return route
+  try {
+    return isCodexBackendRoute(resolveProviderRequest({
+        model,
+        baseUrl,
+        processEnv: env,
+        // A session with no model runs the openai route's default model.
+        fallbackModel: getRouteDefaultModel('openai'),
+      }))
+      ? 'codex'
+      : route
+  } catch {
+    return route
+  }
 }
 
 function routeFromOpenAIBaseUrl(baseUrl: string | undefined): string {
@@ -395,11 +432,12 @@ function routeFromOpenAIBaseUrl(baseUrl: string | undefined): string {
  *    live process env, which startup has already populated from the active
  *    provider profile (the same source getAPIProvider() reads).
  *
- * openai/custom resolves to 'codex' when the Codex transport would be used:
- * a Codex base URL, or — with no explicit base URL — a Codex alias such as
- * gpt-6-astra or codexplan (shouldUseCodexTransport). That matches
- * resolveProviderRequest, which picks the codex_responses transport in the
- * same cases, and Codex OAuth serves a different model set than OpenAI.
+ * openai/custom resolves to 'codex' when resolveProviderRequest — the single
+ * routing decision — sends that request to the Codex backend: a Codex base
+ * URL, or a codexplan/codexspark shortcut with no user-set URL, including a
+ * model the leader's session reaches through its own shortcut. With no model,
+ * the session's effective model decides (the same route getAPIProvider() and
+ * startup validation report).
  */
 export function resolveTeammateProviderRoute({
   model,
@@ -417,15 +455,28 @@ export function resolveTeammateProviderRoute({
     const baseRoute = GENERIC_OPENAI_ROUTES.has(route)
       ? routeFromOpenAIBaseUrl(profile.baseUrl)
       : route
-    return codexOr(baseRoute, model, profile.baseUrl)
+    // The child's env is the profile's: its URL and the requested model, not
+    // the leader's session.
+    return codexOr(baseRoute, model, profile.baseUrl, model ? { OPENAI_MODEL: model } : undefined)
   }
   if (overrideBaseUrl) {
-    return codexOr(routeFromOpenAIBaseUrl(overrideBaseUrl), model, overrideBaseUrl)
+    // The override's shortcut model is made concrete first (the child and the
+    // in-process run get the same id), so only the URL decides the route.
+    const concrete = model ? canonicalizeOverrideModel(model, overrideBaseUrl) : model
+    return codexOr(
+      routeFromOpenAIBaseUrl(overrideBaseUrl),
+      concrete,
+      overrideBaseUrl,
+      concrete ? { OPENAI_MODEL: concrete } : undefined,
+    )
   }
   if (isEnvTruthy(env.CLAUDE_CODE_USE_FOUNDRY)) return 'foundry'
   const route = resolveActiveRouteIdFromEnv(env as NodeJS.ProcessEnv) ?? 'anthropic'
   const baseUrl = env.OPENAI_BASE_URL || env.OPENAI_API_BASE || undefined
-  return codexOr(route, model, baseUrl)
+  // The inherited env carries the leader's session (OPENAI_MODEL=codexplan
+  // keeps a teammate on its resolved model on Codex); a profile or agentModels
+  // override above runs on its own URL with no session shortcut.
+  return codexOr(route, model, baseUrl, env as NodeJS.ProcessEnv)
 }
 
 /**
@@ -453,8 +504,9 @@ export function assertKnownSubagentModel({
   ) {
     return
   }
-  const route = resolveTeammateProviderRoute({ model, overrideBaseUrl })
-  assertKnownTeammateModel(model, route, requestedModel)
+  const checked = overrideBaseUrl ? canonicalizeOverrideModel(model, overrideBaseUrl) : model
+  const route = resolveTeammateProviderRoute({ model: checked, overrideBaseUrl })
+  assertKnownTeammateModel(checked, route, requestedModel)
 }
 
 // ---------------------------------------------------------------------------

@@ -79,7 +79,7 @@ for (const codex of [false, true]) for (const streaming of [false, true]) {
     const data = { status: 'completed', output: [item] }
     const frame = (event: string, payload: unknown) => `event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`
     const sse = frame('response.output_item.added', { item: { ...item, arguments: '' } }) + frame('response.output_item.done', { item }) + frame('response.completed', { response: data })
-    const params = { ...makeParams(streaming, codex ? 'gpt-5.6-sol' : 'test-model'), tools: [{ name: 'probe', input_schema: { type: 'object', properties: { optional: { type: 'string' } } } }] }
+    const params = { ...makeParams(streaming, codex ? 'codexplan' : 'test-model'), tools: [{ name: 'probe', input_schema: { type: 'object', properties: { optional: { type: 'string' } } } }] }
     const dependencies = makeDependencies(responseAt('https://provider.example/v1/responses', streaming ? sse : JSON.stringify(data), { headers: { 'content-type': streaming ? 'text/event-stream' : 'application/json' } }), [], {
       ...(codex ? { providerOverride: undefined } : {}), processEnv: {}, codexStreamToAnthropic, convertCodexResponseToAnthropicMessage, collectCodexCompletedResponse: async () => data,
     })
@@ -355,7 +355,7 @@ test('dispatches Responses JSON with output through the injected Codex converter
 
 test('dispatches a Codex response through the injected collector', async () => {
   const result = await createShimRequest(
-    makeParams(false, 'gpt-5.6-sol'),
+    makeParams(false, 'codexplan'),
     undefined,
     makeDependencies(
       responseAt('https://api.openai.com/v1/chat/completions'),

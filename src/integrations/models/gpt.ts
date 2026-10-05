@@ -28,12 +28,21 @@ function gptModel(
   })
 }
 
-export default [
+// The ChatGPT/Codex backend reports a 272k window for every GPT-6 model, but
+// that is a compaction hint, not the real window: all GPT-6 models are 1.05M
+// context / 128k output, like gpt-6-astra.
+const gpt6Model = (id: string, label: string) =>
   defineModel({
-    ...gptModel('gpt-6-astra', 'GPT-6 Astra', 1_050_000, 128_000),
+    ...gptModel(id, label, 1_050_000, 128_000),
     classification: ['chat', 'vision', 'coding', 'reasoning'],
     capabilities: { ...gptCapabilities, supportsReasoning: true },
-  }),
+  })
+
+export default [
+  gpt6Model('gpt-6.1-sol', 'GPT-6.1 Sol'),
+  gpt6Model('gpt-6-sol', 'GPT-6 Sol'),
+  gpt6Model('gpt-6-astra', 'GPT-6 Astra'),
+  gpt6Model('gpt-6-luna', 'GPT-6 Luna'),
   // gpt-5.6 (sol/terra/luna) reject /v1/chat/completions when function tools
   // are combined with reasoning_effort — they must use /v1/responses. The
   // openai-vendor catalog carries their reasoning metadata; the responses

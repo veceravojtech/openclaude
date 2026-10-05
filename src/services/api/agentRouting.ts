@@ -15,6 +15,8 @@ import {
   findProviderProfileRouteForModel,
 } from '../../utils/providerProfiles.js'
 import type { ProviderProfile } from '../../utils/config.js'
+import { isModelAllowedAsOverride } from '../../utils/model/modelAllowlist.js'
+import { canonicalizeOverrideModel } from './providerConfig.js'
 
 /**
  * Provider override resolved from agent routing config.
@@ -27,6 +29,12 @@ export interface ProviderOverride {
   baseURL: string
   /** API key for this provider */
   apiKey: string
+  /**
+   * The configured model when `model` was canonicalized from a shortcut
+   * (codexplan -> gpt-5.6-sol), so the org allowlist can also be checked against
+   * what the user wrote. Not a wire value.
+   */
+  originalModel?: string
 }
 
 /** A saved provider profile route. The child resolves credentials by id. */
@@ -339,6 +347,14 @@ export function resolveModelOnlyModel(
   return model
 }
 
+/** A cross-provider override with any shortcut model made concrete (see canonicalizeOverrideModel). */
+function canonicalizeProviderOverride(override: ProviderOverride): ProviderOverride {
+  const model = canonicalizeOverrideModel(override.model, override.baseURL)
+  return model === override.model
+    ? override
+    : { ...override, model, originalModel: override.model }
+}
+
 export function resolveAgentRunModelRouting({
   resolvedAgentModel,
   parentModel,
@@ -368,7 +384,8 @@ export function resolveAgentRunModelRouting({
     })
     if (!route) return { mainLoopModel: resolvedAgentModel }
     if (isProviderOverride(route)) {
-      return { mainLoopModel: route.model, providerOverride: route }
+      const override = canonicalizeProviderOverride(route)
+      return { mainLoopModel: override.model, providerOverride: override }
     }
     if (isProviderProfileRoute(route)) {
       throw new Error(
@@ -385,7 +402,8 @@ export function resolveAgentRunModelRouting({
     resolveAgentModelProvider(agentDefinitionModel, settings)
   if (!route) return { mainLoopModel: resolvedAgentModel }
   if (isProviderOverride(route)) {
-    return { mainLoopModel: route.model, providerOverride: route }
+    const override = canonicalizeProviderOverride(route)
+    return { mainLoopModel: override.model, providerOverride: override }
   }
   if (isProviderProfileRoute(route)) {
     throw new Error(
@@ -394,6 +412,52 @@ export function resolveAgentRunModelRouting({
   }
   return {
     mainLoopModel: resolveModelOnlyModel(route.model, parentModel, permissionMode),
+  }
+}
+
+/**
+ * The org-allowlist gate for an in-process agent run (runAgent): when routing
+ * changed the model or set an override, the effective model — or, for a
+ * canonicalized shortcut override, the model the user configured — must pass
+ * availableModels. runAgent calls this directly.
+ */
+export function assertAgentRunModelAllowed(
+  resolvedAgentModel: string,
+  effectiveModel: string,
+  providerOverride: ProviderOverride | undefined,
+): void {
+  if (
+    shouldEnforceModelAllowlist(
+      resolvedAgentModel,
+      effectiveModel,
+      providerOverride !== undefined,
+    ) &&
+    !isModelAllowedAsOverride(effectiveModel, providerOverride?.originalModel, undefined, {
+      allowEscalationModel: true,
+    })
+  ) {
+    throw new Error(
+      `Model '${effectiveModel}' is not available. Your organization restricts model selection.`,
+    )
+  }
+}
+
+/**
+ * The org-allowlist gate for a routed pane/window teammate (AgentTool's spawn
+ * preflight): the override's model or, for a canonicalized shortcut, the model
+ * the user configured. AgentTool calls this directly.
+ */
+export function assertRoutedTeammateProviderAllowed(
+  routedProvider: ProviderOverride,
+): void {
+  if (
+    !isModelAllowedAsOverride(routedProvider.model, routedProvider.originalModel, undefined, {
+      allowEscalationModel: true,
+    })
+  ) {
+    throw new Error(
+      `Model '${routedProvider.model}' is not available. Your organization restricts model selection.`,
+    )
   }
 }
 
@@ -482,7 +546,7 @@ export function resolveOutOfProcessTeammateProvider({
   ...input
 }: OutOfProcessTeammateRouteInput): ProviderOverride | null {
   const route = resolveOutOfProcessTeammateRoute(input)
-  return route && isProviderOverride(route) ? route : null
+  return route && isProviderOverride(route) ? canonicalizeProviderOverride(route) : null
 }
 
 /**
@@ -595,7 +659,8 @@ export function applyAgentProviderOverrideToEnv(
   }
 
   env.CLAUDE_CODE_USE_OPENAI = '1'
-  env.OPENAI_MODEL = providerOverride.model
+  // A shortcut model on an override that pins a URL is written as its concrete id.
+  env.OPENAI_MODEL = canonicalizeOverrideModel(providerOverride.model, providerOverride.baseURL)
   env.OPENAI_BASE_URL = providerOverride.baseURL
   env.OPENAI_API_KEY = providerOverride.apiKey
   if (resolveRouteIdFromBaseUrl(providerOverride.baseURL) === 'commandcode') {

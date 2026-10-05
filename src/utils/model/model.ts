@@ -6,6 +6,7 @@
  * during dead code elimination
  */
 import { getCyberMode, getMainLoopModelOverride } from '../../bootstrap/state.js'
+import { normalizeModelBaseId } from '../../services/api/providerConfig.js'
 import {
   getSubscriptionType,
   isClaudeAISubscriber,
@@ -824,6 +825,13 @@ export function renderModelSetting(setting: ModelName | ModelAlias): string {
  * if the model is not recognized as a public model.
  */
 export function getPublicModelDisplayName(model: ModelName): string | null {
+  // A GPT id carrying a `?query` and/or `[1m]` tag (e.g. a URL-pinned override's
+  // `gpt-5.6-sol?reasoning=low[1m]`) is shown as its base model: the query and
+  // the tag are request options, not part of the display name.
+  if (/^gpt-[^?[]*[?[]/i.test(model)) {
+    const base = normalizeModelBaseId(model)
+    if (base !== model) return getPublicModelDisplayName(base)
+  }
   // For OpenAI-compatible/non-Anthropic providers, show the actual model name
   // instead of interpreting provider-specific defaults as Claude aliases.
   if (
@@ -839,7 +847,10 @@ export function getPublicModelDisplayName(model: ModelName): string | null {
   ) {
     // Return display names for known GitHub Copilot models
     const copilotModelNames: Record<string, string> = {
+      'gpt-6.1-sol': 'GPT-6.1 Sol',
+      'gpt-6-sol': 'GPT-6 Sol',
       'gpt-6-astra': 'GPT-6 Astra',
+      'gpt-6-luna': 'GPT-6 Luna',
       'gpt-5.6-sol': 'GPT-5.6 Sol',
       'gpt-5.6-terra': 'GPT-5.6 Terra',
       'gpt-5.6-luna': 'GPT-5.6 Luna',
@@ -891,8 +902,14 @@ export function getPublicModelDisplayName(model: ModelName): string | null {
     return `${formatFableMarketingName(fableVersion)}${has1m ? ' (1M context)' : ''}`
   }
   switch (model) {
+    case 'gpt-6.1-sol':
+      return 'GPT-6.1 Sol'
+    case 'gpt-6-sol':
+      return 'GPT-6 Sol'
     case 'gpt-6-astra':
       return 'GPT-6 Astra'
+    case 'gpt-6-luna':
+      return 'GPT-6 Luna'
     case 'gpt-5.6-sol':
       return 'GPT-5.6 Sol'
     case 'gpt-5.6-terra':

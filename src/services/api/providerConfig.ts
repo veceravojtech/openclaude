@@ -36,6 +36,7 @@ import {
 } from '../../integrations/runtimeMetadata.js'
 
 export const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1'
+
 export const DEFAULT_CODEX_BASE_URL = 'https://chatgpt.com/backend-api/codex'
 export const DEFAULT_MISTRAL_BASE_URL = 'https://api.mistral.ai/v1'
 export const DEFAULT_OPENCODE_BASE_URL = 'https://opencode.ai/zen/v1'
@@ -81,7 +82,10 @@ const CODEX_ALIAS_MODELS: Record<
     reasoningEffort?: ReasoningEffort
   }
 > = {
+  'gpt-6.1-sol': { model: 'gpt-6.1-sol', reasoningEffort: 'high' },
+  'gpt-6-sol': { model: 'gpt-6-sol', reasoningEffort: 'high' },
   'gpt-6-astra': { model: 'gpt-6-astra', reasoningEffort: 'high' },
+  'gpt-6-luna': { model: 'gpt-6-luna', reasoningEffort: 'high' },
   codexplan: {
     model: 'gpt-5.6-sol',
     reasoningEffort: 'high',
@@ -151,6 +155,9 @@ type CodexAlias = keyof typeof CODEX_ALIAS_MODELS
 type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 type ThinkingType = 'enabled' | 'disabled'
 
+// The Codex shortcuts: with no user-set base URL they select the ChatGPT Codex
+// backend (see resolveProviderRequest). Concrete ids never do, bare
+// `gpt-5.3-codex-spark` included — it is not Codex-exclusive.
 const OPENAI_CODEX_SHORTCUT_ALIASES = new Set(['codexplan', 'codexspark'])
 const KIMI_K3_REASONING_ALIASES: Record<ReasoningEffort, ReasoningEffort> = {
   low: 'low',
@@ -441,24 +448,82 @@ function parseModelDescriptor(model: string): ModelDescriptor {
   }
 }
 
-export function isCodexAlias(model: string): boolean {
-  const normalized = model.trim().toLowerCase()
-  const base = normalized.split('?', 1)[0] ?? normalized
-  return Object.hasOwn(CODEX_ALIAS_MODELS, base)
+/**
+ * The comparable base id of a user-specified model: lowercased, with the
+ * `?query` options and the `[1m]` context tag removed, whichever order
+ * they come in (`gpt-6-sol?reasoning=high[1m]` and `gpt-6-sol[1m]?reasoning=high`
+ * both → `gpt-6-sol`). Shared by every id lookup that must treat a tagged or
+ * queried id the same as the bare one.
+ */
+export function normalizeModelBaseId(model: string): string {
+  // Only the supported `[1m]` tag, exactly what parseModelDescriptor strips —
+  // any other bracket suffix stays part of the (unrecognised) id.
+  const stripTag = (value: string): string => value.trim().replace(/\[1m]$/i, '').trim()
+  const withoutTag = stripTag(model.toLowerCase())
+  return stripTag(withoutTag.split('?', 1)[0] ?? withoutTag)
 }
 
-function isOpenAICodexShortcutAlias(model: string): boolean {
-  const normalized = model.trim().toLowerCase()
-  const base = normalized.split('?', 1)[0] ?? normalized
-  return OPENAI_CODEX_SHORTCUT_ALIASES.has(base)
+/** Every Codex alias id the request resolver knows (used by invariant tests). */
+export function listCodexAliasIds(): string[] {
+  return Object.keys(CODEX_ALIAS_MODELS)
 }
 
-export function shouldUseCodexTransport(
+/**
+ * An agentModels/teammate override that pins a base URL and names a
+ * `codexplan`/`codexspark` shortcut is converted to the shortcut's concrete id
+ * BEFORE it is written anywhere (child env, in-process route, parent guards).
+ * The child then holds a plain concrete model plus its URL, which resolves
+ * correctly on its own — concrete id + api.openai.com is public Responses,
+ * concrete id + the Codex URL is Codex — so no extra state has to survive a
+ * profile clear or reach a grandchild.
+ *
+ * Only the shortcut's BASE ID is replaced. The model string is an identity
+ * (allowlist, pricing, usage buckets and the known-id guards match it exactly),
+ * so nothing is synthesized: the user's own `?query` and `[1m]` tag pass
+ * through, normalized to one canonical order — base, `?query`, `[1m]` last. An
+ * override with no base URL keeps the shortcut, which still routes to Codex.
+ */
+export function canonicalizeOverrideModel(
   model: string,
   baseUrl: string | undefined,
+): string {
+  if (!asEnvUrl(baseUrl)) return model
+  const base = normalizeModelBaseId(model)
+  if (!OPENAI_CODEX_SHORTCUT_ALIASES.has(base) || !Object.hasOwn(CODEX_ALIAS_MODELS, base)) {
+    return model
+  }
+  const concrete = (CODEX_ALIAS_MODELS[base as CodexAlias] as { model: string }).model
+  const trimmed = model.trim()
+  // The query may sit before or after the tag: strip the tag from either end.
+  const hasTag = /\[1m]/i.test(trimmed)
+  const withoutTag = trimmed.replace(/\[1m]/gi, '')
+  const queryIndex = withoutTag.indexOf('?')
+  const query = queryIndex === -1 ? '' : withoutTag.slice(queryIndex)
+  return `${concrete}${query}${hasTag ? '[1m]' : ''}`
+}
+
+export function isCodexAlias(model: string): boolean {
+  return Object.hasOwn(CODEX_ALIAS_MODELS, normalizeModelBaseId(model))
+}
+
+// Normalized like isCodexAlias so the endpoint choice (DEFAULT_CODEX_BASE_URL
+// vs the OpenAI default) can never disagree with the transport choice for a
+// `[1m]`-tagged or `?query` shortcut.
+function isOpenAICodexShortcutAlias(model: string): boolean {
+  return OPENAI_CODEX_SHORTCUT_ALIASES.has(normalizeModelBaseId(model))
+}
+
+/**
+ * Whether a resolved request goes to the ChatGPT Codex backend. The transport
+ * follows the chosen base URL (resolveProviderRequest), so this is a pure
+ * function of the request: every caller that needs "is this Codex?" (provider
+ * label, teammate route, startup validation, effort metadata) asks
+ * resolveProviderRequest and then this, instead of re-deriving the decision.
+ */
+export function isCodexBackendRoute(
+  request: Pick<ResolvedProviderRequest, 'transport' | 'baseUrl'>,
 ): boolean {
-  const explicitBaseUrl = asEnvUrl(baseUrl)
-  return isCodexBaseUrl(explicitBaseUrl) || (!explicitBaseUrl && isCodexAlias(model))
+  return request.transport === 'codex_responses' && isCodexBaseUrl(request.baseUrl)
 }
 
 function shouldUseGithubResponsesApi(model: string): boolean {
@@ -476,6 +541,13 @@ function shouldUseGithubResponsesApi(model: string): boolean {
   return true
 }
 
+// The GPT-6 family (astra, sol, luna, and the 6.1 sol refresh): 1.05M-context
+// reasoning models with a 'max' effort level, served on /v1/responses.
+const GPT6_MODEL_RE = /^gpt-6(?:-(?:astra|sol|luna)|\.1-sol)$/
+export function isGpt6Model(model: string): boolean {
+  return GPT6_MODEL_RE.test(normalizeModelBaseId(model))
+}
+
 // GPT-5.4/5.5/5.6 (incl. sol/terra/luna suffixes) reject function tools +
 // reasoning_effort on /v1/chat/completions and must use /v1/responses. An
 // agent CLI always sends tools, so plain OpenAI/Azure users can't otherwise
@@ -486,10 +558,22 @@ function shouldUseGithubResponsesApi(model: string): boolean {
 // (gpt-5.10+) are deliberately unmatched: auto-routing unverified future
 // models is the exact risk this predicate exists to avoid. Bare gpt-5,
 // gpt-5-mini, gpt-4.x, o-series, and claude-* stay on chat/completions.
+// The Codex-branded ids in the alias map: Responses-only on the public API. An
+// explicit list, not a pattern, so unverified ids (gpt-6.2-codex-...) and
+// gateway ids stay on chat/completions.
+const RESPONSES_ONLY_CODEX_IDS = new Set([
+  'gpt-5.3-codex',
+  'gpt-5.3-codex-spark',
+  'gpt-5.2-codex',
+  'gpt-5.1-codex-max',
+  'gpt-5.1-codex-mini',
+])
+
 export function modelRequiresResponsesApi(model: string): boolean {
   const normalized = model.trim().toLowerCase().split('?', 1)[0] ?? ''
-  // Astra uses Responses for agent tool calls as recommended by OpenAI.
-  if (normalized === 'gpt-6-astra') return true
+  // GPT-6 models use Responses for agent tool calls as recommended by OpenAI.
+  if (isGpt6Model(normalized)) return true
+  if (RESPONSES_ONLY_CODEX_IDS.has(normalizeModelBaseId(normalized))) return true
   return /^gpt-5\.[4-6](?!\d)/.test(normalized) &&
     !GPT5_MINI_NANO_RE.test(normalized)
 }
@@ -784,7 +868,13 @@ export function isCodexBaseUrl(baseUrl: string | undefined): boolean {
   if (!baseUrl) return false
   try {
     const parsed = new URL(baseUrl)
+    // HTTPS on the default port only: Codex OAuth bearer tokens and account ids
+    // are sent to whatever this matches, so a cleartext http:// URL or another
+    // port must not qualify. (WHATWG URL drops an explicit :443 for https, so
+    // `port === ''` covers both the omitted and the explicit default port.)
     return (
+      parsed.protocol === 'https:' &&
+      parsed.port === '' &&
       parsed.hostname === 'chatgpt.com' &&
       parsed.pathname.replace(/\/+$/, '') === '/backend-api/codex'
     )
@@ -936,6 +1026,8 @@ export function buildGithubEnterpriseCopilotBaseUrl(
   }
 }
 
+// Callers with no model of their own must pass `fallbackModel`: a bare call
+// still defaults to `codexplan`.
 export function resolveProviderRequest(options?: {
   model?: string
   baseUrl?: string
@@ -943,6 +1035,14 @@ export function resolveProviderRequest(options?: {
   reasoningEffortOverride?: ReasoningEffort
   apiFormat?: OpenAICompatibleApiFormat | string
   processEnv?: NodeJS.ProcessEnv
+  /**
+   * `baseUrl` is an authoritative override (an in-process provider override,
+   * i.e. a profile or agentModels route): it wins over every Codex shortcut and
+   * suppresses the session's own OPENAI_MODEL shortcut. Without it `baseUrl`
+   * is just the explicit endpoint, and a Codex shortcut still overrides an
+   * explicit default api.openai.com URL.
+   */
+  baseUrlIsOverride?: boolean
 }): ResolvedProviderRequest {
   const processEnv = options?.processEnv ?? process.env
   const isGithubMode = isEnvTruthy(processEnv.CLAUDE_CODE_USE_GITHUB)
@@ -1062,17 +1162,25 @@ export function resolveProviderRequest(options?: {
 
   const rawBaseUrl = explicitBaseUrl ?? envBaseUrl
 
-  const shellModel = processEnv.OPENAI_MODEL?.trim() ?? ''
-  const envIsCodexShortcut = isOpenAICodexShortcutAlias(shellModel)
-  const envResolvedCodexModel = envIsCodexShortcut
-    ? parseModelDescriptor(shellModel).baseModel
+  // THE routing decision. Precedence: (1) an authoritative override URL;
+  // (2) GitHub/GHE; (3) a codexplan/codexspark shortcut — the requested model's
+  // own, or, for an explicit request for the model the session's shortcut
+  // resolves to, the session's (OPENAI_MODEL=codexplan then gpt-5.6-sol) — which
+  // selects the Codex URL even over an explicit default api.openai.com URL;
+  // (4) an explicit OPENAI_BASE_URL; (5) the default api.openai.com. The
+  // transport below follows the chosen URL, and every other caller derives its
+  // answer from this result (isCodexBackendRoute).
+  const baseUrlIsOverride = Boolean(options?.baseUrlIsOverride && explicitBaseUrl)
+  const sessionModel = processEnv.OPENAI_MODEL?.trim() ?? ''
+  const sessionShortcutModel = isOpenAICodexShortcutAlias(sessionModel)
+    ? parseModelDescriptor(sessionModel).baseModel
     : null
-  const requestedMatchesEnvCodexShortcut =
-    Boolean(options?.model) &&
-    Boolean(envResolvedCodexModel) &&
-    descriptor.baseModel === envResolvedCodexModel
   const isCodexAliasModel =
-    isOpenAICodexShortcutAlias(requestedModel) || requestedMatchesEnvCodexShortcut
+    !baseUrlIsOverride &&
+    (isOpenAICodexShortcutAlias(requestedModel) ||
+      (Boolean(options?.model) &&
+        sessionShortcutModel !== null &&
+        descriptor.baseModel === sessionShortcutModel))
   const hasUserSetBaseUrl = rawBaseUrl && rawBaseUrl !== DEFAULT_OPENAI_BASE_URL
   const finalBaseUrlRaw =
     !isGithubMode && isCodexAliasModel && !hasUserSetBaseUrl
@@ -1173,14 +1281,14 @@ export function resolveProviderRequest(options?: {
       resolvedModel,
     )
   const transport: ProviderTransport =
-    shouldUseCodexTransport(requestedModel, finalBaseUrl) ||
+    isCodexBaseUrl(finalBaseUrl) ||
       (isGithubCopilotLike && shouldUseGithubResponsesApi(githubResolvedModel))
       ? 'codex_responses'
       : (requestedApiFormat === 'responses' || requestedApiFormat === 'responses_compat') && supportsRequestedApiFormat
         ? requestedApiFormat
         : 'chat_completions'
 
-  // Explicit GPT-5.6 and Astra alias defaults are Codex-transport-only: off the Codex
+  // Explicit GPT-5.6 and GPT-6 alias defaults are Codex-transport-only: off the Codex
   // transport their effort metadata is owned by the route catalog
   // (#1961), and an OPENAI_API_BASE gateway must not inherit the first-party
   // default. Explicit picks (the /effort override or a ?reasoning= query)
@@ -1190,7 +1298,8 @@ export function resolveProviderRequest(options?: {
     ? { effort: options.reasoningEffortOverride }
     : descriptor.reasoningFromAlias &&
         transport !== 'codex_responses' &&
-        /^(?:gpt-5\.6(?:-|$|[?[])|gpt-6-astra(?:$|[?[]))/i.test(requestedModel.trim())
+        (/^gpt-5\.6(?:-|$)/.test(normalizeModelBaseId(requestedModel)) ||
+          isGpt6Model(requestedModel))
       ? undefined
       : descriptor.reasoning
   const catalogReasoningLevels =
@@ -1206,7 +1315,7 @@ export function resolveProviderRequest(options?: {
       : requestedReasoning
   const supportsMaxReasoning =
     catalogReasoningLevels?.includes('max') === true ||
-    (resolvedModel === 'gpt-6-astra' &&
+    (isGpt6Model(resolvedModel) &&
       (transport === 'codex_responses' || baseUrlSupportsResponsesAutoRoute(finalBaseUrl, processEnv)))
   const reasoning =
     (normalizedReasoning?.effort === 'max' && !supportsMaxReasoning) ||

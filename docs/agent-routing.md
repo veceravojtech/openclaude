@@ -112,7 +112,7 @@ binding) and the provider the teammate will actually run on:
 | `fable-5.1` | Anthropic / Vertex / Foundry `claude-fable-5-1`; Bedrock `us.anthropic.claude-fable-5-1` |
 | `sonnet-5` | Anthropic / Vertex / Foundry `claude-sonnet-5`; Bedrock `us.anthropic.claude-sonnet-5` |
 | `glm-5.3` | Z.ai `glm-5.3`, `glm-5.3-flash`; CommandCode `z-ai/glm-5.3-flash` |
-| `gpt-6` | OpenAI and Codex (OAuth) `gpt-6-astra` |
+| `gpt-6` | OpenAI and Codex (OAuth) `gpt-6.1-sol` (preferred), `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna` |
 | `deepseek-v4-pro` | DeepSeek, OpenCode, OpenCode Go, HiCap `deepseek-v4-pro`; NVIDIA NIM, Atlas Cloud `deepseek-ai/deepseek-v4-pro`; Fireworks `accounts/fireworks/models/deepseek-v4-pro`; Ollama `deepseek-v4-pro:cloud`; llmtr, CommandCode `deepseek/deepseek-v4-pro`; ClinePass `cline-pass/deepseek-v4-pro` |
 | `deepseek-v4.1-flash` | DeepSeek `deepseek-flash`; Fireworks `accounts/fireworks/models/deepseek-v4p1-flash` |
 
@@ -120,9 +120,27 @@ Aliases are resolved first, so `opus` is judged as the model it names. The
 provider is the one the teammate will actually run on: a `provider_profile`
 binding, then an `agentModels` cross-provider route, then the leader's own
 provider. An OpenAI-compatible session counts as Codex when it uses a Codex
-base URL, or has no explicit base URL and a Codex alias model such as
-`gpt-6-astra` or `codexplan`; Codex's `codexplan` resolves to `gpt-5.6-sol`,
-which is not in the matrix, so pin `gpt-6-astra` for Codex teammates.
+base URL, or the model is a Codex shortcut (`codexplan` or `codexspark`) and no
+base URL was set. A shortcut overrides even an explicit default
+`https://api.openai.com/v1` URL, and a teammate inherits the leader's shortcut:
+with `OPENAI_MODEL=codexplan`, a teammate on `gpt-5.6-sol` (the model `codexplan`
+resolves to) is on Codex too. Any other concrete model, such as `gpt-6.1-sol`,
+`gpt-6-astra` or `gpt-5.3-codex-spark` (whose availability on the public API is
+unverified and account-dependent), goes to `api.openai.com` with your API key
+when no base URL is set, so it is an `openai` teammate; point `OPENAI_BASE_URL`
+at the Codex backend (or use a Codex OAuth profile) to run it on Codex. An
+`agentModels` override that pins a base URL pins the route: a `codexplan` or
+`codexspark` model on such an override is converted to its concrete model
+(`gpt-5.6-sol`, `gpt-5.3-codex-spark`; your own `[1m]` tag and `?query` are kept,
+and nothing is appended, so the model id still matches `availableModels` and
+custom `modelPricing` entries)
+before it reaches the child or the in-process run, so pane, in-process and the
+parent guards all send it to that URL (public Responses on api.openai.com, Codex
+on the Codex URL). With no override URL the shortcut still routes to Codex, and a
+bound saved profile is judged on its own URL. This
+applies to the OpenAI/Codex path; GitHub Copilot sessions use their own endpoint.
+Codex's `codexplan` resolves to `gpt-5.6-sol`, which is not in the matrix, so
+pin a `gpt-6*` model for Codex teammates.
 
 A teammate that simply inherits the leader's own model and provider (no
 `model`, `inherit`, or the leader's exact model, with no routing and no

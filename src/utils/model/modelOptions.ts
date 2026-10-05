@@ -491,7 +491,10 @@ function getCodexSparkOption(): ModelOption {
 
 function getCodexModelOptions(): ModelOption[] {
   return [
+    { value: 'gpt-6.1-sol', label: 'gpt-6.1-sol', description: 'GPT-6.1 Sol · Flagship for complex work, high reasoning' },
+    { value: 'gpt-6-sol', label: 'gpt-6-sol', description: 'GPT-6 Sol · Flagship for complex work, high reasoning' },
     { value: 'gpt-6-astra', label: 'gpt-6-astra', description: 'GPT-6 Astra · Complex reasoning and coding' },
+    { value: 'gpt-6-luna', label: 'gpt-6-luna', description: 'GPT-6 Luna · Faster, cost-efficient reasoning' },
     {
       value: 'gpt-5.6-sol',
       label: 'gpt-5.6-sol',

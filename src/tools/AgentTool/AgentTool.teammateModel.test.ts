@@ -155,6 +155,11 @@ async function importAgentToolWithSpawnMock(): Promise<{
   mock.module('../../utils/model/modelAllowlist.js', () => ({
     ...originalModelAllowlistModule!,
     isModelAllowed: (model: string) => allowedModelsForTest.has(model.trim()),
+    // The override-aware gate consults the same allowlist stub for the model and,
+    // when a shortcut was canonicalized, the model the user configured.
+    isModelAllowedAsOverride: (model: string, original?: string) =>
+      allowedModelsForTest.has(model.trim()) ||
+      (original !== undefined && allowedModelsForTest.has(original.trim())),
   }))
   mock.module('../../utils/settings/settings.js', () => ({
     ...originalSettingsModule!,

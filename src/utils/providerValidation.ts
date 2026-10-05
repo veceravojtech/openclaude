@@ -27,12 +27,14 @@ import {
   resolveRouteIdFromBaseUrl,
 } from '../integrations/routeMetadata.js'
 import {
+  DEFAULT_CODEX_BASE_URL,
   getGithubEndpointType,
+  isCodexAlias,
+  isCodexBackendRoute,
   isLikelyOllamaEndpoint,
   isLocalProviderUrl,
   resolveCodexApiCredentials,
   resolveProviderRequest,
-  shouldUseCodexTransport,
 } from '../services/api/providerConfig.js'
 import { hasUsableOpenAICredential } from '../services/api/credentialPool.js'
 import { getGlobalClaudeFile } from './env.js'
@@ -113,15 +115,30 @@ function checkGithubTokenStatus(
   return 'valid'
 }
 
-function getOpenAIMissingKeyMessage(): string {
+// A concrete Codex-alias id (gpt-6-astra, gpt-5.6-sol, ...) with no base URL
+// goes to api.openai.com with an API key, not to ChatGPT/Codex. Users who set
+// such a model expecting Codex sign-in need to be told how to get it. (Only
+// reached off the Codex route: a codexplan/codexspark shortcut with no base
+// URL is the Codex route and returns its own credential error earlier.)
+function getCodexSignInHint(env: NodeJS.ProcessEnv): string | null {
+  const model = env.OPENAI_MODEL?.trim()
+  const hasBaseUrl = Boolean(env.OPENAI_BASE_URL?.trim() || env.OPENAI_API_BASE?.trim())
+  if (!model || hasBaseUrl || !isCodexAlias(model)) {
+    return null
+  }
+  return `${model.split('?', 1)[0]} is served on api.openai.com with an API key when no base URL is set. To use ChatGPT/Codex sign-in instead, set OPENAI_BASE_URL=${DEFAULT_CODEX_BASE_URL} or select a Codex OAuth profile with /provider.`
+}
+
+function getOpenAIMissingKeyMessage(env: NodeJS.ProcessEnv = process.env): string {
   const globalConfigPath = getGlobalClaudeFile()
   const profilePath = resolve(process.cwd(), PROFILE_FILE_NAME)
 
   return [
     'OPENAI_API_KEYS or OPENAI_API_KEY is required when CLAUDE_CODE_USE_OPENAI=1 and OPENAI_BASE_URL is not local.',
+    getCodexSignInHint(env),
     `To recover, run /provider and switch provider, or set CLAUDE_CODE_USE_OPENAI=0 in your shell environment.`,
     `Saved startup settings can come from ${globalConfigPath} or ${profilePath}.`,
-  ].join('\n')
+  ].filter((line): line is string => line !== null).join('\n')
 }
 
 function hasNonEmptyEnvValue(
@@ -602,6 +619,7 @@ export async function getProviderValidationError(
     model: env.OPENAI_MODEL,
     baseUrl: env.OPENAI_BASE_URL,
     fallbackModel: getRouteDefaultModel('openai'),
+    processEnv: env,
   })
   const genericRouteValidation = getGenericRouteCredentialValidationError(
     env,
@@ -610,12 +628,10 @@ export async function getProviderValidationError(
 
   // Codex auth depends on transport resolution plus local auth/account state,
   // so it intentionally stays procedural instead of moving into descriptors.
-  const explicitBaseUrl =
-    env.OPENAI_BASE_URL?.trim() || env.OPENAI_API_BASE?.trim()
-  const hasExplicitCodexIntent =
-    (env.OPENAI_MODEL?.trim()
-      ? shouldUseCodexTransport(env.OPENAI_MODEL, explicitBaseUrl)
-      : false) || Boolean(explicitBaseUrl && shouldUseCodexTransport('', explicitBaseUrl))
+  // Codex credentials are required iff the effective request goes to the Codex
+  // backend — resolveProviderRequest's decision, the same one the transport and
+  // the provider label use.
+  const hasExplicitCodexIntent = isCodexBackendRoute(request)
 
   if (hasExplicitCodexIntent) {
     const credentials = resolveCodexApiCredentials(env)
@@ -672,7 +688,7 @@ export async function getProviderValidationError(
           !isLocalProviderUrl(request.baseUrl) &&
           !isLikelyOllamaEndpoint(request.baseUrl)
         ) {
-          return getOpenAIMissingKeyMessage()
+          return getOpenAIMissingKeyMessage(env)
         }
 
         return descriptorValidationError
@@ -704,7 +720,7 @@ export async function getProviderValidationError(
       return null
     }
 
-    return getOpenAIMissingKeyMessage()
+    return getOpenAIMissingKeyMessage(env)
   }
 
   return null

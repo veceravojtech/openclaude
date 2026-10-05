@@ -60,8 +60,7 @@ import { clearSessionHooks } from '../../utils/hooks/sessionHooks.js'
 import { executeSubagentStartHooks } from '../../utils/hooks.js'
 import { createUserMessage } from '../../utils/messages.js'
 import { getAgentModel } from '../../utils/model/agent.js'
-import { isModelAllowed } from '../../utils/model/modelAllowlist.js'
-import { resolveAgentRunModelRouting, shouldEnforceModelAllowlist } from '../../services/api/agentRouting.js'
+import { assertAgentRunModelAllowed, resolveAgentRunModelRouting } from '../../services/api/agentRouting.js'
 import { getInitialSettings } from '../../utils/settings/settings.js'
 import { getAgentContext } from '../../utils/agentContext.js'
 import {
@@ -422,18 +421,7 @@ export async function* runAgent({
       : undefined
   }
 
-  if (
-    shouldEnforceModelAllowlist(
-      resolvedAgentModel,
-      effectiveModel,
-      providerOverride !== undefined,
-    ) &&
-    !isModelAllowed(effectiveModel, undefined, { allowEscalationModel: true })
-  ) {
-    throw new Error(
-      `Model '${effectiveModel}' is not available. Your organization restricts model selection.`,
-    )
-  }
+  assertAgentRunModelAllowed(resolvedAgentModel, effectiveModel, providerOverride)
 
   const agentId = override?.agentId ? override.agentId : createAgentId()
 

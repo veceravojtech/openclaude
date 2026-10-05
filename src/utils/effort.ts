@@ -11,7 +11,7 @@ import { getFeatureValue_CACHED_MAY_BE_STALE } from 'src/services/analytics/grow
 import { getAPIProvider } from './model/providers.js'
 import { get3PModelCapabilityOverride } from './model/modelSupportOverrides.js'
 import { getAntModelOverrideConfig, resolveAntModel } from './model/antModels.js'
-import { baseUrlSupportsResponsesAutoRoute, supportsCodexReasoningEffort } from '../services/api/providerConfig.js'
+import { baseUrlSupportsResponsesAutoRoute, isCodexBackendRoute, normalizeModelBaseId, resolveProviderRequest, supportsCodexReasoningEffort } from '../services/api/providerConfig.js'
 import {
   ensureIntegrationsLoaded,
   getCatalogEntriesForRoute,
@@ -346,7 +346,7 @@ function resolveCatalogReasoningMetadata(
   }
 
   ensureIntegrationsLoaded()
-  const normalizedModel = model.trim().split('?', 1)[0]!.trim().toLowerCase()
+  const normalizedModel = normalizeModelBaseId(model)
   const matchesModel = (catalogEntry: ModelCatalogEntry): boolean =>
     catalogEntry.apiName.trim().toLowerCase() === normalizedModel ||
     catalogEntry.id.trim().toLowerCase() === normalizedModel ||
@@ -361,7 +361,10 @@ function resolveCatalogReasoningMetadata(
   if (
     !entry &&
     routeId === 'custom' &&
-    baseUrlSupportsResponsesAutoRoute(fallbackBaseUrl, context?.processEnv ?? process.env)
+    (baseUrlSupportsResponsesAutoRoute(fallbackBaseUrl, context?.processEnv ?? process.env) ||
+      isCodexBackendRoute(
+        resolveProviderRequest({ model, baseUrl: context?.baseUrl, processEnv }),
+      ))
   ) {
     // Azure and regional/first-party OpenAI surfaces resolve to route 'custom'
     // (their host is not a registered route; see resolveActiveRouteIdFromEnv),
@@ -371,7 +374,11 @@ function resolveCatalogReasoningMetadata(
     // same verified OpenAI/Azure surfaces the Responses auto-route uses, NOT
     // arbitrary OpenAI-compatible gateways that also resolve to route 'custom' —
     // those keep their pre-PR chat_completions behavior with no injected
-    // reasoning_effort default.
+    // reasoning_effort default. The ChatGPT Codex backend also resolves to
+    // 'custom' and serves the openai catalog's models, so it gets the same
+    // metadata: gated on the resolver's effective route (isCodexBackendRoute) —
+    // the Codex base URL, or a codexplan/codexspark shortcut with no user-set
+    // URL — never on the model name alone.
     entry = getCatalogEntriesForRoute('openai').find(matchesModel)
   }
 

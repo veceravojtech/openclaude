@@ -391,7 +391,7 @@ test('Codex route: a Codex base URL puts gpt-6-astra on codex, and codexplan is 
       context(),
     ),
   ).rejects.toThrow(
-    "Model 'codexplan' (resolves to 'gpt-5.6-sol') is not allowed for teammates on provider 'codex'. Allowed here: gpt-6-astra.",
+    "Model 'codexplan' (resolves to 'gpt-5.6-sol') is not allowed for teammates on provider 'codex'. Allowed here: gpt-6.1-sol, gpt-6-astra, gpt-6-sol, gpt-6-luna.",
   )
 })
 

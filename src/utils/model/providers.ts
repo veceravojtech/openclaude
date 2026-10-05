@@ -1,6 +1,10 @@
 import type { AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS } from '../../services/analytics/index.js'
-import { shouldUseCodexTransport } from '../../services/api/providerConfig.js'
 import {
+  isCodexBackendRoute,
+  resolveProviderRequest,
+} from '../../services/api/providerConfig.js'
+import {
+  getRouteDefaultModel,
   getTransportKindForRoute,
   resolveActiveRouteIdFromEnv,
 } from '../../integrations/routeMetadata.js'
@@ -111,11 +115,18 @@ export function isGithubNativeAnthropicMode(resolvedModel?: string): boolean {
   const model = resolvedModel?.trim() || process.env.OPENAI_MODEL?.trim() || ''
   return model.toLowerCase().includes('claude-')
 }
+// 'codex' iff the effective request (the session's model and endpoint, as
+// resolveProviderRequest decides them) goes to the Codex backend. A session
+// with no model of its own runs the openai route's default model, exactly as
+// startup validation resolves it.
 function isCodexModel(): boolean {
-  return shouldUseCodexTransport(
-    process.env.OPENAI_MODEL || '',
-    process.env.OPENAI_BASE_URL ?? process.env.OPENAI_API_BASE,
-  )
+  try {
+    return isCodexBackendRoute(
+      resolveProviderRequest({ fallbackModel: getRouteDefaultModel('openai') }),
+    )
+  } catch {
+    return false
+  }
 }
 
 export function getAPIProviderForStatsig(): AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS {

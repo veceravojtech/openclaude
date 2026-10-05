@@ -13,7 +13,7 @@ import { startAgentSummarization } from '../../services/AgentSummary/agentSummar
 import { getFeatureValue_CACHED_MAY_BE_STALE } from '../../services/analytics/growthbook.js';
 import { type AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS, logEvent } from '../../services/analytics/index.js';
 import { clearDumpState } from '../../services/api/dumpPrompts.js';
-import { resolveAgentRunModelRouting, resolveOutOfProcessTeammateProvider, resolveOutOfProcessTeammateProviderProfile, resolveOutOfProcessTeammateModelOnly } from '../../services/api/agentRouting.js';
+import { assertRoutedTeammateProviderAllowed, resolveAgentRunModelRouting, resolveOutOfProcessTeammateProvider, resolveOutOfProcessTeammateProviderProfile, resolveOutOfProcessTeammateModelOnly } from '../../services/api/agentRouting.js';
 import { completeAgentTask as completeAsyncAgent, createActivityDescriptionResolver, createProgressTracker, enqueueAgentNotification, failAgentTask as failAsyncAgent, getProgressUpdate, getTokenCountFromTracker, isLocalAgentTask, killAsyncAgent, registerAgentForeground, registerAsyncAgent, unregisterAgentForeground, updateAgentProgress as updateAsyncAgentProgress, updateProgressFromMessage } from '../../tasks/LocalAgentTask/LocalAgentTask.js';
 import { assembleToolPool } from '../../tools.js';
 import { isBuiltInAgentType } from './builtInAgents.js';
@@ -628,8 +628,8 @@ export const AgentTool = buildTool({
             settings
           })
         : null;
-      if (routedTeammateProvider && !isModelAllowed(routedTeammateProvider.model, undefined, { allowEscalationModel: true })) {
-        throw new Error(`Model '${routedTeammateProvider.model}' is not available. Your organization restricts model selection.`);
+      if (routedTeammateProvider) {
+        assertRoutedTeammateProviderAllowed(routedTeammateProvider);
       }
       // A model-only agentRouting route (no cross-provider creds) is dropped by the
       // provider resolver above, so resolve it separately and apply it on the next

@@ -62,9 +62,12 @@ Before adding `reasoning` metadata for a model:
 
 Do not use `supportsReasoning: true` alone as evidence that `reasoning_effort` or any other effort field is accepted.
 
-## OpenAI GPT-6 Astra
+## OpenAI GPT-6 (Astra, Sol, Luna)
 
-Select `gpt-6-astra` in the OpenAI provider catalog or the Codex model picker.
+Select `gpt-6-astra` (or `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`) in the OpenAI
+provider catalog or the Codex model picker. All four share the Astra limits and
+effort levels described below; the ChatGPT/Codex backend reports a 272k window
+for them, but that is a compaction hint, so OpenClaude uses the full 1.05M.
 The model has a 1,050,000-token context window and a 128,000-token output limit,
 with text/image input, streaming, function calling, and structured output support.
 OpenClaude defaults its effort to `high`; `/effort` offers `low`, `medium`, `high`,

@@ -987,7 +987,7 @@ describe('usage-aware dispatch', () => {
     setDeps({ providerProfiles: () => allProfiles, routeUsage: usageOf({ anthropic: 0.85 }) })
     const review = await chooseTeammateRoute({ description: 'Review the diff', settings: settings() })
     expect(review.family).toBe('gpt-6')
-    expect(review.model).toBe('gpt-6-astra')
+    expect(review.model).toBe('gpt-6.1-sol')
     expect(review.providerProfile).toBe('prof_codex')
     expect(review.reason).toContain('model tier: anthropic at 85% (7d) → gpt-6')
     expect(review.routeUsage).toEqual({ anthropic: 0.85, codex: 'unknown', deepseek: 'unknown', zai: 'unknown' })

@@ -442,23 +442,32 @@ test('resolveProviderRequest ignores ApiSmart model when explicit OPENAI_BASE_UR
 })
 
 test('resolveProviderRequest resolves the GPT-5.6 family Codex aliases', () => {
-  const sol = resolveProviderRequest({ model: 'gpt-5.6-sol', processEnv: {} })
+  // On the Codex backend (explicit URL) the alias defaults apply.
+  const processEnv = { OPENAI_BASE_URL: 'https://chatgpt.com/backend-api/codex' }
+  const sol = resolveProviderRequest({ model: 'gpt-5.6-sol', processEnv })
   expect(sol.resolvedModel).toBe('gpt-5.6-sol')
   expect(sol.transport).toBe('codex_responses')
   expect(sol.reasoning).toEqual({ effort: 'high' })
 
-  const terra = resolveProviderRequest({ model: 'gpt-5.6-terra', processEnv: {} })
+  const terra = resolveProviderRequest({ model: 'gpt-5.6-terra', processEnv })
   expect(terra.resolvedModel).toBe('gpt-5.6-terra')
   expect(terra.reasoning).toEqual({ effort: 'medium' })
 
-  const luna = resolveProviderRequest({ model: 'gpt-5.6-luna', processEnv: {} })
+  const luna = resolveProviderRequest({ model: 'gpt-5.6-luna', processEnv })
   expect(luna.resolvedModel).toBe('gpt-5.6-luna')
   expect(luna.reasoning).toEqual({ effort: 'medium' })
 
   // Bare version resolves to the flagship tier, like the Codex CLI.
-  const bare = resolveProviderRequest({ model: 'gpt-5.6', processEnv: {} })
+  const bare = resolveProviderRequest({ model: 'gpt-5.6', processEnv })
   expect(bare.resolvedModel).toBe('gpt-5.6-sol')
   expect(bare.reasoning).toEqual({ effort: 'high' })
+
+  // With no base URL a concrete id goes to api.openai.com with the API key
+  // over plain Responses — never the Codex transport (that needs the Codex URL
+  // or a codexplan/codexspark shortcut).
+  const noBase = resolveProviderRequest({ model: 'gpt-5.6-sol', processEnv: {} })
+  expect(noBase.transport).toBe('responses')
+  expect(noBase.baseUrl).toBe('https://api.openai.com/v1')
 })
 
 test('resolveProviderRequest keeps the implicit Codex fallback on Sol with high reasoning', () => {

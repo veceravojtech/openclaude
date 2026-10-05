@@ -107,16 +107,17 @@ describe('resolveTeammateProviderRoute', () => {
   })
 
   // Mirrors the runtime: with no explicit base URL, resolveProviderRequest
-  // sends a Codex alias (gpt-6-astra, codexplan) over the codex_responses
+  // sends a Codex shortcut (codexplan) over the codex_responses
   // transport (shouldUseCodexTransport), so the teammate is on Codex, not
   // on plain OpenAI — and must be checked against Codex's ids.
   test('a Codex alias with no explicit base URL is "codex", matching the transport', () => {
     expect(
-      resolveTeammateProviderRoute({ model: 'gpt-6-astra', env: { CLAUDE_CODE_USE_OPENAI: '1' } }),
-    ).toBe('codex')
-    expect(
       resolveTeammateProviderRoute({ model: 'codexplan', env: { CLAUDE_CODE_USE_OPENAI: '1' } }),
     ).toBe('codex')
+    // A concrete id with no base URL goes to api.openai.com, not Codex.
+    expect(
+      resolveTeammateProviderRoute({ model: 'gpt-6-astra', env: { CLAUDE_CODE_USE_OPENAI: '1' } }),
+    ).not.toBe('codex')
   })
 
   test('a custom (unknown) base URL stays "custom", even for a Codex alias', () => {

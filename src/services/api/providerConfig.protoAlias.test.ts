@@ -2,8 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import {
   getReasoningEffortForModel,
   isCodexAlias,
+  isCodexBackendRoute,
   resolveProviderRequest,
-  shouldUseCodexTransport,
   supportsCodexReasoningEffort,
 } from './providerConfig.js'
 
@@ -12,7 +12,7 @@ import {
 // from Object.prototype resolved through the prototype chain, so `key in map`
 // and `map[key]` reported a match for strings that are NOT Codex aliases. That
 // made `isCodexAlias('constructor')` return true and, with no explicit base
-// URL, `shouldUseCodexTransport` misroute the request through the Codex
+// URL, the routing decision (resolveProviderRequest) would misroute the request through the Codex
 // transport. The lookups must only see own enumerable aliases.
 //
 // The lookups lower-case the model string first, so the reachable inherited
@@ -27,8 +27,8 @@ describe('providerConfig — Codex alias lookup is prototype-safe', () => {
       expect(isCodexAlias(name)).toBe(false)
     })
 
-    test(`shouldUseCodexTransport('${name}', undefined) does not misroute`, () => {
-      expect(shouldUseCodexTransport(name, undefined)).toBe(false)
+    test(`resolveProviderRequest('${name}') does not route to Codex`, () => {
+      expect(isCodexBackendRoute(resolveProviderRequest({ model: name, processEnv: {} }))).toBe(false)
     })
   }
 
@@ -36,13 +36,13 @@ describe('providerConfig — Codex alias lookup is prototype-safe', () => {
   test('genuine aliases are still recognized', () => {
     expect(isCodexAlias('codexplan')).toBe(true)
     expect(isCodexAlias('gpt-5.5')).toBe(true)
-    expect(shouldUseCodexTransport('codexplan', undefined)).toBe(true)
+    expect(isCodexBackendRoute(resolveProviderRequest({ model: 'codexplan', processEnv: {} }))).toBe(true)
   })
 
   // Non-aliases (real model ids that aren't Codex) stay false.
   test('non-Codex model ids are not treated as aliases', () => {
     expect(isCodexAlias('claude-opus-4-8')).toBe(false)
-    expect(shouldUseCodexTransport('claude-opus-4-8', undefined)).toBe(false)
+    expect(isCodexBackendRoute(resolveProviderRequest({ model: 'claude-opus-4-8', processEnv: {} }))).toBe(false)
   })
 
   // getReasoningEffortForModel indexes the same map (feeds supportsCodexReasoningEffort,

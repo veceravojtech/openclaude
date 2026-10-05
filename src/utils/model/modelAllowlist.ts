@@ -175,3 +175,25 @@ export function isModelAllowed(
 
   return false
 }
+
+/**
+ * A URL-pinned agentModels override whose `codexplan`/`codexspark` shortcut was
+ * made concrete (providerConfig.canonicalizeOverrideModel) must keep passing the
+ * allowlist the user wrote against the model they configured. The canonical id
+ * is an internal rename, so an allowlist naming only `codexplan` still admits it.
+ *
+ * Only the explicit `originalModel` the routing step attached counts: with it
+ * undefined this is exactly isModelAllowed(model), so a route configured directly
+ * as the concrete id stays refused. isModelAllowed itself is unchanged.
+ */
+export function isModelAllowedAsOverride(
+  model: string,
+  originalModel: string | undefined,
+  cyberScope?: string,
+  options?: Parameters<typeof isModelAllowed>[2],
+): boolean {
+  return (
+    isModelAllowed(model, cyberScope, options) ||
+    (originalModel !== undefined && isModelAllowed(originalModel, cyberScope, options))
+  )
+}
