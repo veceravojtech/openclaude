@@ -312,10 +312,27 @@ export function getSonnet46_1MOption(): ModelOption {
 }
 
 /**
- * Explicit Opus 4.6 with the 1M context window. Unlike the `opus[1m]` rows,
- * which follow the current default Opus, this always pins Opus 4.6 so it stays
- * selectable after the default moves on. Shown right after the Default row on
- * first-party pickers.
+ * Explicit Opus 4.8 with the 1M context window. Unlike the `opus[1m]` rows,
+ * which follow the current default Opus, this always pins Opus 4.8 so it stays
+ * selectable after the default moves on (and is reachable now without relying
+ * on the `opus` alias). Shown right after the Default row on first-party
+ * pickers, directly before the pinned Opus 4.6 row (newest first).
+ */
+export function getOpus48Pinned1MOption(fastMode = false): ModelOption {
+  const model = getModelStrings().opus48
+  return {
+    value: model + '[1m]',
+    label: 'Opus 4.8 (1M context)',
+    description: `Opus 4.8 with 1M context · Long sessions with large codebases${getOpus46PricingSuffix(fastMode, model)}`,
+    descriptionForModel:
+      'Opus 4.8 with 1M context window - for long sessions with large codebases',
+  }
+}
+
+/**
+ * Explicit Opus 4.6 with the 1M context window. Same idea as the pinned Opus
+ * 4.8 row above: always pins Opus 4.6 so it stays selectable after the default
+ * moves on.
  */
 export function getOpus46Pinned1MOption(fastMode = false): ModelOption {
   const model = getModelStrings().opus46
@@ -328,8 +345,20 @@ export function getOpus46Pinned1MOption(fastMode = false): ModelOption {
   }
 }
 
-/** Whether the pinned Opus 4.6 1M row may be offered on this first-party session. */
-function canOfferOpus46Pinned1M(): boolean {
+/**
+ * The pinned Opus 1M rows (4.8 and 4.6) to offer, newest first. Empty unless
+ * this is a first-party session on the first-party base URL that may use the
+ * 1M window. Both rows share one gate: pinned values are explicit model
+ * strings, so they never collide with the alias-valued `opus[1m]` rows.
+ */
+function getPinnedOpus1MOptions(fastMode = false): ModelOption[] {
+  return canOfferPinnedOpus1M()
+    ? [getOpus48Pinned1MOption(fastMode), getOpus46Pinned1MOption(fastMode)]
+    : []
+}
+
+/** Whether the pinned Opus 1M rows may be offered on this first-party session. */
+function canOfferPinnedOpus1M(): boolean {
   return (
     getAPIProvider() === 'firstParty' &&
     isFirstPartyAnthropicBaseUrl() &&
@@ -701,7 +730,7 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
 
     return [
       getDefaultOptionForUser(),
-      ...(canOfferOpus46Pinned1M() ? [getOpus46Pinned1MOption(fastMode)] : []),
+      ...getPinnedOpus1MOptions(fastMode),
       ...antModelOptions,
       getMergedOpus1MOption(fastMode),
       getFable51Option(),
@@ -715,9 +744,7 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
     if (isMaxSubscriber() || isTeamPremiumSubscriber()) {
       // Max and Team Premium users: Opus is default, show Sonnet as alternative
       const premiumOptions = [getDefaultOptionForUser(fastMode)]
-      if (canOfferOpus46Pinned1M()) {
-        premiumOptions.push(getOpus46Pinned1MOption(fastMode))
-      }
+      premiumOptions.push(...getPinnedOpus1MOptions(fastMode))
       if (!isOpus1mMergeEnabled() && checkOpus1mAccess()) {
         premiumOptions.push(getMaxOpus46_1MOption(fastMode))
       }
@@ -732,9 +759,7 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
 
     // Pro/Team Standard/Enterprise users: Sonnet is default, show Opus as alternative
     const standardOptions = [getDefaultOptionForUser(fastMode)]
-    if (canOfferOpus46Pinned1M()) {
-      standardOptions.push(getOpus46Pinned1MOption(fastMode))
-    }
+    standardOptions.push(...getPinnedOpus1MOptions(fastMode))
 
     if (isOpus1mMergeEnabled()) {
       standardOptions.push(getMergedOpus1MOption(fastMode))
@@ -779,12 +804,10 @@ function getModelOptionsBase(fastMode = false): ModelOption[] {
     ]
   }
 
-  // PAYG 1P API: Default (Sonnet 5, 1M-native) + Opus 4.6 1M + Opus (newest) + Opus 4.8 + Opus 4.7 + Opus 4.6 + Opus 1M + Haiku
+  // PAYG 1P API: Default (Sonnet 5, 1M-native) + Opus 4.8 1M + Opus 4.6 1M + Opus (newest) + Opus 4.8 + Opus 4.7 + Opus 4.6 + Opus 1M + Haiku
   if (getAPIProvider() === 'firstParty' && isFirstPartyAnthropicBaseUrl()) {
     const payg1POptions = [getDefaultOptionForUser(fastMode)]
-    if (canOfferOpus46Pinned1M()) {
-      payg1POptions.push(getOpus46Pinned1MOption(fastMode))
-    }
+    payg1POptions.push(...getPinnedOpus1MOptions(fastMode))
     if (isOpus1mMergeEnabled()) {
       payg1POptions.push(getMergedOpus1MOption(fastMode))
     } else {
