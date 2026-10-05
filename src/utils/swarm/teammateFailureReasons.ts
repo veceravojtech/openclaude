@@ -41,14 +41,22 @@ const TRANSIENT_KINDS: ReadonlySet<TeammateFailureKind> = new Set([
  * that is written to a mailbox or an attention item goes through here first.
  */
 export function redactFailureDetail(text: string): string {
-  // `chatgpt-account-id` identifies an account (header or JSON field).
-  const withoutAccount = text.replace(
-    /(["']?chatgpt-account-id["']?\s*[:=]\s*)(["']?)[^\s"',;}]+\2/gi,
-    '$1[REDACTED_ACCOUNT_ID]',
+  // Named fields (any escaping depth), header values, URLs and well-known
+  // token prefixes: the shared scrubber.
+  let redacted = redactLikelySecrets(text).replace(
+    /https?:\/\/[^\s"'<>)\\]+/g,
+    url => redactUrlForDisplay(url),
   )
-  return redactLikelySecrets(withoutAccount).replace(/https?:\/\/[^\s"'<>)]+/g, url =>
-    redactUrlForDisplay(url),
-  )
+  // Final sweep for values that sit outside any named field, so they are
+  // caught wherever they appear: account ids, JWTs, and token prefixes.
+  redacted = redacted
+    .replace(/(?<![A-Za-z0-9_-])acct[-_][A-Za-z0-9_-]{6,}/gi, '[REDACTED_ACCOUNT_ID]')
+    .replace(/(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+){0,2}/g, '[REDACTED_TOKEN]')
+    .replace(/(?<![A-Za-z0-9_-])sk-ant-[A-Za-z0-9_-]{6,}/g, '[REDACTED_API_KEY]')
+    .replace(/(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}/g, '[REDACTED_OPENAI_KEY]')
+    .replace(/(?<![A-Za-z0-9_-])gh[pousr]_[A-Za-z0-9]{16,}/g, '[REDACTED_GITHUB_TOKEN]')
+    .replace(/(?<![A-Za-z0-9_-])AIza[A-Za-z0-9_-]{16,}/g, '[REDACTED_GCP_KEY]')
+  return redacted
 }
 
 /** Separates the fixed reason text from the provider's own error text. */

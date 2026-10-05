@@ -2025,7 +2025,9 @@ export const AgentTool = buildTool({
                 subtype: 'task_notification',
                 task_id: foregroundTaskId,
                 tool_use_id: toolUseContext.toolUseId,
-                status: syncAgentError ? 'failed' : wasAborted ? 'stopped' : 'completed',
+                // A provider failure ends the run as an API-error message, not an
+                // exception: SDK consumers must see it as failed too.
+                status: syncAgentError || (!wasAborted && findTurnFailure(agentMessages)) ? 'failed' : wasAborted ? 'stopped' : 'completed',
                 output_file: '',
                 summary: description,
                 usage: {

@@ -67,7 +67,7 @@ const GCP_KEY_PATTERN =
 
 // Vertex AI service account emails
 const GCP_SERVICE_ACCOUNT_PATTERN =
-  /(?<![A-Za-z0-9])([a-z0-9-]+@[a-z0-9-]+\.iam\.gserviceaccount\.com)(?![A-Za-z0-9])/g;
+  /(?<![A-Za-z0-9])([a-z0-9-]{1,128}@[a-z0-9-]{1,128}\.iam\.gserviceaccount\.com)(?![A-Za-z0-9])/g;
 
 // GitHub personal access tokens (ghp_, gho_, ghs_, ghu_, ghr_, github_pat_)
 const GITHUB_TOKEN_PATTERN =
@@ -76,12 +76,351 @@ const GITHUB_TOKEN_PATTERN =
 // "AWS key: \"AKIA...\"" — provider-specific debug-message wrapping
 const AWS_KEY_LABELED_PATTERN = /AWS key:\s*"(AWS[A-Z0-9]{20,})"/g;
 
+// ---------------------------------------------------------------------------
+// Field patterns that tolerate escaped JSON.
+//
+// Provider errors embed request/response bodies as JSON strings inside JSON
+// strings, so a credential field arrives as `"k":"v"`, `\"k\":\"v\"`,
+// `\\\"k\\\":\\\"v\\\"`, with `\u0022` instead of a quote, ... Every
+// field-name pattern below matches all of them, keeps the surrounding text and
+// keeps the closing quote with its escaping.
+//
+// A field is found in two steps, both linear:
+//   1. a regex finds `name [quote] <sep>` (the "head"). It has no
+//      back-references and nothing that re-scans a backslash run: a quote
+//      before the name is not matched at all (it is only ever written back
+//      unchanged, and matching it would re-scan the run from every start
+//      position inside it -- quadratic), and OPT_QUOTE after the name is only
+//      reached once the name has matched.
+//   2. the value is read by `scanQuotedValue` / a sticky regex, once.
+// A quoted value ends at the quote that closes its opening quote: a quote
+// preceded by MORE backslashes than the opening quote is part of the value, so
+// `\"pw\":\"a\\\"b\"` redacts `a\\\"b` whole.
+// ---------------------------------------------------------------------------
+
+/** A quote after a field name: `"`, `'`, `\"`, `\\\"`, `\u0022`, ... */
+const OPT_QUOTE = String.raw`(?:\\*["']|\\+u00(?:22|27))?`;
+
+// Unquoted values stop at their delimiters.
+const SECRET_VALUE = String.raw`(?:[^"',\n&#;\\]|\\+(?![\\"']))+`;
+const ENV_VALUE = String.raw`(?:[^"',\s)}\]&#;\\]|\\+(?![\\"']))+`;
+const COOKIE_VALUE = String.raw`(?:[^"'\n&\\]|\\+(?![\\"']))+`;
+
+type FieldSpec = {
+  /** Global; `[lookbehind] name OPT_QUOTE \s* [:=] \s*`, no capture groups. */
+  head: RegExp;
+  /** Sticky; text between the opening quote and the value, e.g. `Bearer `. */
+  after?: RegExp;
+  /** Sticky; an unquoted value. */
+  unquoted: RegExp;
+  /**
+   * Rejects a head by its text. A rejected head is skipped WITHOUT reading its
+   * value, and scanning resumes right after the head, so a field inside that
+   * value (`Error: AWS_SECRET_ACCESS_KEY=...` -- head `Error: `) is still found.
+   */
+  keep?: (head: string) => boolean;
+};
+
+type FieldParts = {
+  match: string;
+  /** `name [quote] <sep>`, up to (not including) the value's opening quote. */
+  head: string;
+  /** The value's opening quote with its escaping; empty for unquoted values. */
+  open: string;
+  /** Text between the opening quote and the value (e.g. `Bearer `). */
+  after: string;
+  value: string;
+};
+
+function fieldSpec(o: {
+  lookbehind?: string;
+  /** Name, optional quote and separator; no capture groups. */
+  head: string;
+  after?: string;
+  unquoted: string;
+  keep?: (head: string) => boolean;
+}): FieldSpec {
+  return {
+    head: new RegExp(`${o.lookbehind ?? ""}${o.head}`, "gi"),
+    ...(o.after ? { after: new RegExp(o.after, "iy") } : {}),
+    unquoted: new RegExp(o.unquoted, "y"),
+    ...(o.keep ? { keep: o.keep } : {}),
+  };
+}
+
+const OPENING_QUOTE = /\\*["']|\\+u00(?:22|27)/y;
+const BACKSLASH = 92;
+
+/**
+ * How a candidate closing quote is judged against the opening quote.
+ *
+ * Nested JSON doubles every backslash per level and adds one per quote
+ * escape, so for an opening quote preceded by `depth` backslashes a closing
+ * quote is preceded by `depth + k * period` of them, where `k` is the number
+ * of literal backslashes that end the value and `period` is what one such
+ * backslash becomes: `2 * (depth + 1)` for `"`/`\"`/`\\\"` quotes,
+ * `2 * depth` for `\u0022` quotes. Any other run is a quote INSIDE the value.
+ */
+function closesValue(
+  run: number,
+  depth: number,
+  openUnicode: boolean,
+  candidateUnicode: boolean,
+): boolean {
+  if (run < depth) return true; // an outer string ended: stop
+  if (openUnicode !== candidateUnicode) return run <= depth; // mixed forms
+  const period = openUnicode ? 2 * depth : 2 * (depth + 1);
+  return period === 0 ? run === depth : (run - depth) % period === 0;
+}
+
+/**
+ * End (exclusive) of a quoted value that starts at `from`, opened by the quote
+ * character `quoteChar` (34 `"` or 39 `'`), escaped with `depth` backslashes.
+ * The value ends only at that same quote character (raw, backslash-escaped or
+ * `\u00XX`), or at a newline: the other quote character is ordinary content
+ * (`"don't"`). Single pass.
+ */
+function scanQuotedValue(
+  text: string,
+  from: number,
+  depth: number,
+  quoteChar: number,
+  openUnicode: boolean,
+): number {
+  const length = text.length;
+  let i = from;
+  while (i < length) {
+    const c = text.charCodeAt(i);
+    if (c === 10) return i;
+    if (c === 34 || c === 39) {
+      if (c === quoteChar) return i; // a raw closing quote
+      i++;
+      continue;
+    }
+    if (c !== BACKSLASH) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < length && text.charCodeAt(j) === BACKSLASH) j++;
+    const run = j - i;
+    const next = text.charCodeAt(j);
+    let candidate = 0;
+    let candidateLength = 0;
+    let candidateUnicode = false;
+    if (next === 34 || next === 39) {
+      candidate = next;
+      candidateLength = 1;
+    } else if (
+      next === 117 /* u */ &&
+      text.startsWith("u00", j) &&
+      (text.startsWith("22", j + 3) || text.startsWith("27", j + 3))
+    ) {
+      candidate = text.startsWith("22", j + 3) ? 34 : 39;
+      candidateLength = 5;
+      candidateUnicode = true;
+    }
+    if (candidateLength === 0) {
+      i = j; // backslashes inside the value (a path, a password)
+      continue;
+    }
+    if (candidate === quoteChar && closesValue(run, depth, openUnicode, candidateUnicode)) {
+      // The quote and its `depth` escaping backslashes stay in the output; the
+      // backslashes before them are the value's own (it ends in a backslash).
+      return i + Math.max(0, run - depth);
+    }
+    i = j + candidateLength; // a quote inside the value
+  }
+  return i;
+}
+
+function matchAt(re: RegExp, text: string, at: number): string | undefined {
+  re.lastIndex = at;
+  return re.exec(text)?.[0];
+}
+
+function replaceFields(
+  text: string,
+  spec: FieldSpec,
+  render: (parts: FieldParts) => string,
+): string {
+  const { head, after, unquoted, keep } = spec;
+  let out = "";
+  let copied = 0;
+  head.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = head.exec(text)) !== null) {
+    const start = m.index;
+    const headText = m[0];
+    if (headText.length === 0) {
+      head.lastIndex = start + 1;
+      continue;
+    }
+    const valueStart = start + headText.length;
+    if (keep && !keep(headText)) {
+      // Not ours: step over the head only, so the value is scanned for heads.
+      head.lastIndex = valueStart;
+      continue;
+    }
+    let open = "";
+    let afterText = "";
+    let value = "";
+    let end = -1;
+
+    const quote = matchAt(OPENING_QUOTE, text, valueStart);
+    if (quote !== undefined) {
+      let p = valueStart + quote.length;
+      const a = after ? (matchAt(after, text, p) ?? "") : "";
+      p += a.length;
+      const openUnicode = quote.endsWith("u0022") || quote.endsWith("u0027");
+      const depth = quote.length - (openUnicode ? 5 : 1);
+      const quoteChar = openUnicode
+        ? quote.endsWith("u0022") ? 34 : 39
+        : quote.charCodeAt(quote.length - 1);
+      const valueEnd = scanQuotedValue(text, p, depth, quoteChar, openUnicode);
+      if (valueEnd > p) {
+        open = quote;
+        afterText = a;
+        value = text.slice(p, valueEnd);
+        end = valueEnd;
+      }
+    }
+    if (end < 0) {
+      let p = valueStart;
+      const a = after ? (matchAt(after, text, p) ?? "") : "";
+      p += a.length;
+      const v = matchAt(unquoted, text, p);
+      if (v !== undefined && v.length > 0) {
+        afterText = a;
+        value = v;
+        end = p + v.length;
+      }
+    }
+    if (end < 0) {
+      head.lastIndex = start + 1;
+      continue;
+    }
+    out +=
+      text.slice(copied, start) +
+      render({
+        match: text.slice(start, end),
+        head: headText,
+        open,
+        after: afterText,
+        value,
+      });
+    copied = end;
+    head.lastIndex = end;
+  }
+  return copied === 0 ? text : out + text.slice(copied);
+}
+
 // Generic x-api-key header redaction
-const X_API_KEY_PATTERN = /(["']?x-api-key["']?\s*[:=]\s*["']?)[^"',\n&#;]+/gi;
+const X_API_KEY_PATTERN = fieldSpec({
+  head: `x-api-key${OPT_QUOTE}\\s*[:=]\\s*`,
+  unquoted: SECRET_VALUE,
+});
 
 // Authorization header / Bearer token redaction
-const AUTHORIZATION_PATTERN =
-  /(["']?authorization["']?\s*[:=]\s*["']?(?:bearer\s+)?)[^"',\n&#;]+/gi;
+const AUTHORIZATION_PATTERN = fieldSpec({
+  head: `authorization${OPT_QUOTE}\\s*[:=]\\s*`,
+  after: String.raw`bearer\s+`,
+  unquoted: SECRET_VALUE,
+});
+
+// Groups: 1 = name, quote and separator; 2 = the value's opening quote, if any.
+const PEM_HEAD = new RegExp(
+  `(private[-_]?key${OPT_QUOTE}\\s*[:=]\\s*)(\\\\*["']|\\\\+u00(?:22|27))?-{3,}BEGIN`,
+  "gi",
+);
+const PEM_END = /END/gi;
+const PEM_END_TAIL = /\s+(?:\w+\s+)?PRIVATE\s+KEY-{3,}/iy;
+
+/**
+ * Index of the first blank line (`\n` + optional spaces + `\n`, either with an
+ * optional `\r`) in `text[from, limit)`, or -1. Looks at the span only, so a
+ * caller that resumes at `limit` reads each character once.
+ */
+function findBlankLine(text: string, from: number, limit: number): number {
+  let i = text.indexOf("\n", from);
+  while (i !== -1 && i < limit) {
+    let j = i + 1;
+    while (j < limit && (text.charCodeAt(j) === 32 || text.charCodeAt(j) === 9)) j++;
+    if (j < limit && text.charCodeAt(j) === 13 /* \r */) j++;
+    if (j < limit && text.charCodeAt(j) === 10) {
+      return i > from && text.charCodeAt(i - 1) === 13 ? i - 1 : i;
+    }
+    i = text.indexOf("\n", i + 1);
+  }
+  return -1;
+}
+
+/**
+ * `private_key: -----BEGIN ... PRIVATE KEY-----` blocks, redacted whole.
+ * Single forward scan: each `BEGIN` looks for the first valid `-----END ...
+ * PRIVATE KEY-----` after it, and once one search finds none, no later `BEGIN`
+ * can either, so a text with many BEGINs and no END is read once, not once per
+ * BEGIN (a lazy `[\s\S]*?` made that quadratic).
+ *
+ * A key that is cut off (a BEGIN with no END, e.g. a truncated log line) is
+ * redacted from its BEGIN to the first blank line, or to the end of the text:
+ * leaving the body would leak the key. Real keys keep exactly the old output.
+ */
+function redactPemBlocks(text: string): string {
+  let out = "";
+  let copied = 0;
+  let noEndAnywhere = false;
+  PEM_HEAD.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = PEM_HEAD.exec(text)) !== null) {
+    const from = m.index + m[0].length;
+    let end = -1;
+    if (!noEndAnywhere) {
+      PEM_END.lastIndex = from;
+      let e: RegExpExecArray | null;
+      while ((e = PEM_END.exec(text)) !== null) {
+        let k = e.index;
+        while (k > from && text.charCodeAt(k - 1) === 45 /* - */) k--;
+        if (e.index - k < 3) continue;
+        PEM_END_TAIL.lastIndex = e.index + 3;
+        const tail = PEM_END_TAIL.exec(text);
+        if (tail) {
+          end = e.index + 3 + tail[0].length;
+          break;
+        }
+      }
+      // No END after this BEGIN, so none after any later one.
+      if (end < 0) noEndAnywhere = true;
+    }
+    if (end < 0) {
+      // A key inside a quoted (possibly escaped) JSON string ends at that
+      // string's own closing quote: escaped `\\n` never forms a blank line.
+      let limit = text.length;
+      const quote = m[2];
+      if (quote !== undefined) {
+        const unicode = quote.endsWith("u0022") || quote.endsWith("u0027");
+        const depth = quote.length - (unicode ? 5 : 1);
+        const quoteChar = unicode
+          ? quote.endsWith("u0022") ? 34 : 39
+          : quote.charCodeAt(quote.length - 1);
+        limit = scanQuotedValue(text, from, depth, quoteChar, unicode);
+        // The scanner also stops at a raw newline. A raw multi-line quoted
+        // string (YAML/TOML style) is not bounded by its first line break, so
+        // that stop says nothing about where the key ends: use the blank-line
+        // rule instead. A real closing quote keeps the bound.
+        if (limit < text.length && text.charCodeAt(limit) === 10) {
+          limit = text.length;
+        }
+      }
+      const blank = findBlankLine(text, from, limit);
+      end = blank >= 0 ? blank : limit;
+    }
+    out += text.slice(copied, m.index) + m[1] + (m[2] ?? "") + "[REDACTED]";
+    copied = end;
+    PEM_HEAD.lastIndex = end;
+  }
+  return copied === 0 ? text : out + text.slice(copied);
+}
 
 // Bare Bearer token (without preceding key name)
 const BARE_BEARER_PATTERN =
@@ -91,22 +430,38 @@ const BARE_BEARER_PATTERN =
 const JWT_TOKEN_PATTERN =
   /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])/g;
 
-// AWS_* / GOOGLE_* / provider-prefixed env var redaction
-const PROVIDER_PREFIXED_ENV_PATTERN =
-  /((?:AWS|GOOGLE)[_-][A-Za-z0-9_]+\s*[=:]\s*)["']?[^"',\s)}\]&#;]+["']?/gi;
+// AWS_* / GOOGLE_* / provider-prefixed env var redaction. The whole name is
+// matched once, from a word start, and kept only when it contains an `AWS_`/
+// `GOOGLE_` segment (`AWS_X`, `STAGING_AWS_SECRET_ACCESS_KEY`, `DEV_GOOGLE_...`):
+// trying every `AWS_` inside a long word as a start would be quadratic, and a
+// lookbehind that skips prefixed names would leak exactly the names CI uses.
+const PROVIDER_PREFIXED_NAME = /(?:^|[_-])(?:AWS|GOOGLE)[_-]/i;
+const PROVIDER_PREFIXED_ENV_PATTERN = fieldSpec({
+  lookbehind: "(?<![A-Za-z0-9_-])",
+  head: `[A-Za-z0-9_-]+${OPT_QUOTE}\\s*[:=]\\s*`,
+  unquoted: ENV_VALUE,
+  keep: (head) => PROVIDER_PREFIXED_NAME.test(head),
+});
 
 // Generic credential env var names (*_API_KEY, *_SECRET, *_TOKEN, *_PASSWORD)
 // with strict negative lookarounds so we don't redact normal text that
 // happens to contain "API_KEY=" mid-sentence.
-const GENERIC_CREDENTIAL_ENV_PATTERN =
-  /(?<![A-Za-z0-9_-])((?:[A-Za-z0-9_]*_)?(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD)\s*[=:]\s*)["']?[^"',\n&#;]+["']?/gi;
+const GENERIC_CREDENTIAL_ENV_PATTERN = fieldSpec({
+  lookbehind: "(?<![A-Za-z0-9_-])",
+  head: `(?:[A-Za-z0-9_]*_)?(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD)${OPT_QUOTE}\\s*[:=]\\s*`,
+  unquoted: SECRET_VALUE,
+});
 
 // Header-style key-value: x-api-key, authorization, bearer, api_key, token,
 // access_token, refresh_token, secret, password, cookie, set-cookie, id_token,
 // private_key. This is the catch-all for "the secret sits next to a known
 // field name in arbitrary text" — header dumps, log lines, error payloads.
-const GENERIC_HEADER_FIELD_PATTERN =
-  /(["']?(?:x-api-key|x[-_]?auth|authorization|auth|bearer|api[-_]?key|token|access[-_]?token|refresh[-_]?token|secret|password|cookie|set[-_]?cookie|id[-_]?token|exchanged[-_]?api[-_]?key|trusted[-_]?device[-_]?token|private[-_]?key)["']?\s*[:=]\s*["']?)(?:bearer\s+)?([^"',\n&#;]+)/gi;
+const GENERIC_HEADER_FIELD_PATTERN = fieldSpec({
+  head: `(?:x-api-key|x[-_]?auth|authorization|auth|bearer|api[-_]?key|token|access[-_]?token|refresh[-_]?token|secret|password|cookie|set[-_]?cookie|id[-_]?token|exchanged[-_]?api[-_]?key|trusted[-_]?device[-_]?token|private[-_]?key|chatgpt[-_]?account[-_]?id)${OPT_QUOTE}\\s*[:=]\\s*`,
+  // Skipped over, not kept: only the value is redacted.
+  after: String.raw`bearer\s+`,
+  unquoted: SECRET_VALUE,
+});
 
 // Cookie/Set-Cookie header values — scoped to header-shaped text only (not URL
 // query params) via negative lookbehind on ? or &. Uses a permissive value
@@ -115,8 +470,11 @@ const GENERIC_HEADER_FIELD_PATTERN =
 // values (e.g. `sid=one, refresh=two`) are fully redacted. This runs first in
 // redactSensitiveInfo so the generic pattern below (which stops at `;`) never
 // sees partial cookie values.
-const COOKIE_PATTERN =
-  /(?<![?&;])(["']?(?:set[-_]?cookie|(?<!set[-_])cookie)["']?\s*[:=]\s*["']?)[^"'\n&]+/gi;
+const COOKIE_PATTERN = fieldSpec({
+  lookbehind: "(?<![?&;])",
+  head: `(?:set[-_]?cookie|(?<!set[-_])cookie)${OPT_QUOTE}\\s*[:=]\\s*`,
+  unquoted: COOKIE_VALUE,
+});
 
 // Substrings that flag a JSON field name as a credential container, used by
 // `jsonRedactor`. Normalized keys (lowercased, dashes/underscores stripped)
@@ -147,24 +505,25 @@ const AUTH_WHOLE_WORDS = new Set(["auth", "xauth"]);
  * Generated from `getKnownProviderSecretEnvKeys()` so a new provider added
  * to the descriptor registry is automatically covered.
  */
-function buildKnownEnvVarPattern(): RegExp {
+function buildKnownEnvVarPattern(): FieldSpec {
   const keys = getKnownProviderSecretEnvKeys();
   if (keys.length === 0) {
     // Should never happen in practice (FALLBACK_SECRET_ENV_KEYS is non-empty),
     // but returning a non-matching pattern keeps the call site branchless.
-    return /(?!)/;
+    return fieldSpec({ head: "(?!)", unquoted: "(?!)" });
   }
   // Sort longest-first so OPENAI_API_KEY is tried before API_KEY would be.
   const sorted = [...keys].sort((a, b) => b.length - a.length);
   const escaped = sorted.map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  return new RegExp(
-    `(?<![A-Za-z0-9_])(${escaped.join("|")})(\\s*[=:]\\s*)["']?[^"'\\s)\\}&#;\\]]+["']?`,
-    "gi",
-  );
+  return fieldSpec({
+    lookbehind: "(?<![A-Za-z0-9_])",
+    head: `(?:${escaped.join("|")})${OPT_QUOTE}\\s*[:=]\\s*`,
+    unquoted: ENV_VALUE,
+  });
 }
 
-let cachedEnvVarPattern: RegExp | null = null;
-function getKnownEnvVarPattern(): RegExp {
+let cachedEnvVarPattern: FieldSpec | null = null;
+function getKnownEnvVarPattern(): FieldSpec {
   if (cachedEnvVarPattern === null) {
     cachedEnvVarPattern = buildKnownEnvVarPattern();
   }
@@ -217,10 +576,18 @@ export function redactSensitiveInfo(text: string): string {
   redacted = redacted.replace(GITHUB_TOKEN_PATTERN, "[REDACTED_GITHUB_TOKEN]");
 
   // x-api-key header values
-  redacted = redacted.replace(X_API_KEY_PATTERN, "$1[REDACTED_API_KEY]");
+  redacted = replaceFields(
+    redacted,
+    X_API_KEY_PATTERN,
+    (f) => `${f.head}${f.open}[REDACTED_API_KEY]`,
+  );
 
   // Authorization: Bearer ... headers
-  redacted = redacted.replace(AUTHORIZATION_PATTERN, "$1[REDACTED_TOKEN]");
+  redacted = replaceFields(
+    redacted,
+    AUTHORIZATION_PATTERN,
+    (f) => `${f.head}${f.open}${f.after}[REDACTED_TOKEN]`,
+  );
 
   // Bare Bearer token (no preceding key name) — runs before env-var patterns
   // so OPENAI_AUTH_HEADER_VALUE=Bearer secret-value is caught by the Bearer
@@ -231,41 +598,51 @@ export function redactSensitiveInfo(text: string): string {
   redacted = redacted.replace(JWT_TOKEN_PATTERN, "[REDACTED_TOKEN]");
 
   // AWS_*/GOOGLE_* env vars
-  redacted = redacted.replace(PROVIDER_PREFIXED_ENV_PATTERN, "$1[REDACTED]");
+  redacted = replaceFields(
+    redacted,
+    PROVIDER_PREFIXED_ENV_PATTERN,
+    (f) => `${f.head}${f.open}[REDACTED]`,
+  );
 
   // Known provider env vars (from descriptor registry)
-  redacted = redacted.replace(getKnownEnvVarPattern(), "$1$2[REDACTED]");
+  redacted = replaceFields(
+    redacted,
+    getKnownEnvVarPattern(),
+    (f) => `${f.head}${f.open}[REDACTED]`,
+  );
 
   // Generic *_API_KEY / *_SECRET / *_TOKEN / *_PASSWORD env vars
-  redacted = redacted.replace(GENERIC_CREDENTIAL_ENV_PATTERN, "$1[REDACTED]");
+  redacted = replaceFields(
+    redacted,
+    GENERIC_CREDENTIAL_ENV_PATTERN,
+    (f) => `${f.head}${f.open}[REDACTED]`,
+  );
 
   // PEM private keys — the generic header-field pattern below only captures
   // up to the first whitespace, so a value like
   // `private_key: -----BEGIN RSA PRIVATE KEY-----\n...` would redact only
   // the `-----BEGIN` prefix and leak the rest. This pass consumes the full
   // multi-line PEM block before the generic regex touches it.
-  redacted = redacted.replace(
-    /(["']?private[-_]?key["']?\s*[:=]\s*["']?)-{3,}BEGIN[\s\S]*?-{3,}END\s+(?:\w+\s+)?PRIVATE\s+KEY-{3,}/gi,
-    "$1[REDACTED]",
-  );
+  redacted = redactPemBlocks(redacted);
 
   // Cookie/Set-Cookie header values — permissive `;`-allowing pass runs
   // before GENERIC_HEADER_FIELD_PATTERN (which stops at `;`) so
   // semicolon-delimited cookie attributes are fully redacted.
-  redacted = redacted.replace(COOKIE_PATTERN, "$1[REDACTED]");
+  redacted = replaceFields(
+    redacted,
+    COOKIE_PATTERN,
+    (f) => `${f.head}${f.open}[REDACTED]`,
+  );
 
   // Catch-all: any of the standard credential field names with a value
-  redacted = redacted.replace(
-    GENERIC_HEADER_FIELD_PATTERN,
-    (match, prefix: string, value: string) => {
-      // Only bypass if the value is EXACTLY the canonical placeholder
-      // "[REDACTED]" produced by this generic pattern. Reject any other
-      // variation like "[REDACTED_API_KEY]" or "[REDACTED_actual_secret]"
-      // which may carry a real secret suffix.
-      if (value === "[REDACTED]") return match;
-      return `${prefix}[REDACTED]`;
-    },
-  );
+  redacted = replaceFields(redacted, GENERIC_HEADER_FIELD_PATTERN, (f) => {
+    // Only bypass if the value is EXACTLY the canonical placeholder
+    // "[REDACTED]" produced by this generic pattern. Reject any other
+    // variation like "[REDACTED_API_KEY]" or "[REDACTED_actual_secret]"
+    // which may carry a real secret suffix.
+    if (f.value === "[REDACTED]") return f.match;
+    return `${f.head}${f.open}[REDACTED]`;
+  });
 
   // URLs embedded in free-form text or serialized objects
   redacted = redacted.replace(
@@ -288,7 +665,7 @@ export function redactSensitiveInfo(text: string): string {
   // patterns don't cover, even when another param was already redacted by a
   // generic pattern (e.g. `api_key=XXX` matched by GENERIC_HEADER_FIELD_PATTERN).
   redacted = redacted.replace(
-    /(?:https?:)?\/\/[^\s"',)}>]+/gi,
+    /(?:https?:)?\/\/[^\s"',)}>\\]+/gi,
     (url) => redactUrlForDisplay(url),
   );
 

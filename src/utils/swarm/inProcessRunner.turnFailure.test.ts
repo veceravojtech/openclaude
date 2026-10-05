@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 // Load the tool graph first (import-cycle TDZ otherwise).
 import '../../constants/tools.js'
-import { mkdtempSync, rmSync } from 'fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { getErrorMessageIfRefusal } from '../../services/api/errors.js'
@@ -12,7 +12,7 @@ import {
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
 import type { ToolUseContext } from '../../Tool.js'
-import { listAttentionItems } from '../attentionItems.js'
+import { listAttentionItems, settleAttentionWritesForTesting } from '../attentionItems.js'
 import { createTask, getSubTeamTaskListId, getTask, listTasks } from '../tasks.js'
 import { setClaudeConfigHomeDirForTesting } from '../envUtils.js'
 import { createAssistantAPIErrorMessage } from '../messages.js'
@@ -484,5 +484,54 @@ test('only the first idle notification of a failed turn says failed; a later ref
   await run.waitForNotifications(2)
   expect(run.notifications[1]!.idleReason).toBe('waiting_for_children')
   expect(run.notifications[1]!.failureReason).toBeUndefined()
+  await run.stop()
+})
+
+/** Every file under `dir`, read as text: the actual bytes on disk. */
+function readAllFiles(dir: string): string {
+  let out = ''
+  for (const name of readdirSync(dir)) {
+    const path = join(dir, name)
+    if (statSync(path).isDirectory()) out += readAllFiles(path)
+    else out += `\n--- ${name}\n${readFileSync(path, 'utf-8')}`
+  }
+  return out
+}
+
+test('an escaped-JSON provider body puts no secret into the lead notification or any file on disk', async () => {
+  const body = JSON.stringify({
+    error: {
+      message: JSON.stringify({
+        'chatgpt-account-id': 'acct-SECRETACCT99',
+        api_key: 'ak_SECRETKEY_1',
+        access_token: 'at_SECRETTOKEN_2',
+        authorization: 'Bearer SECRETBEARER3',
+        'x-api-key': 'xk_SECRETXKEY_4',
+        note: 'visible-context',
+      }),
+    },
+  })
+  const run = await runTeammate(() => [
+    createAssistantAPIErrorMessage({ content: `API Error: 400 ${body}` }),
+  ])
+  await run.waitForNotification()
+  await settleAttentionWritesForTesting()
+
+  const onDisk = readAllFiles(configDir!)
+  const leadMessages = run.rawLeadMessages.join('\n')
+  // The item file really was written, so the assertion below is not vacuous.
+  expect(onDisk).toContain('failure-')
+  expect(onDisk).toContain('visible-context')
+  expect(leadMessages).toContain('visible-context')
+  for (const secret of [
+    'SECRETACCT99',
+    'SECRETKEY_1',
+    'SECRETTOKEN_2',
+    'SECRETBEARER3',
+    'SECRETXKEY_4',
+  ]) {
+    expect(onDisk).not.toContain(secret)
+    expect(leadMessages).not.toContain(secret)
+  }
   await run.stop()
 })

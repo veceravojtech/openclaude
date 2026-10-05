@@ -133,6 +133,8 @@ afterEach(() => {
 type WorktreeModule = typeof import('../../utils/worktree.js')
 let actualWorktreeModule: WorktreeModule | undefined
 
+const sdkTaskNotifications: Array<{ status?: string; task_id?: string }> = []
+
 type Script = {
   messages: () => unknown[]
   background?: boolean
@@ -170,6 +172,13 @@ async function importAgentTool(script: Script) {
   mock.module('../../constants/prompts.js', () => ({
     ...actualPromptsModule!,
     enhanceSystemPromptWithEnvDetails: mock(async (prompts: string[]) => prompts),
+  }))
+  sdkTaskNotifications.length = 0
+  mock.module('../../utils/sdkEventQueue.js', () => ({
+    ...actualSdkEventQueueModule!,
+    enqueueSdkEvent: (event: { subtype?: string; status?: string; task_id?: string }) => {
+      if (event.subtype === 'task_notification') sdkTaskNotifications.push(event)
+    },
   }))
   mock.module('./runAgent.js', () => ({
     ...actualRunAgentModule!,
@@ -317,6 +326,19 @@ test('a sync run that ends on a refusal comes back as an explicit failure, not a
   expect(block.is_error).toBe(true)
   expect(block.content[0]!.text).toStartWith('Agent failed: ')
   expect(block.content[0]!.text).toContain(TEAMMATE_FAILURE_REASONS.refusal)
+})
+
+test('the SDK task_notification for a sync run that ends on a refusal says failed, and completed for a normal run', async () => {
+  const refusal = getErrorMessageIfRefusal('refusal', 'some-other-model')!
+  const failing = await importAgentTool({
+    messages: () => [assistant('partial work'), refusal],
+  })
+  await callWorker(failing.AgentTool, createToolUseContext())
+  expect(sdkTaskNotifications.map(e => e.status)).toEqual(['failed'])
+
+  const ok = await importAgentTool({ messages: () => [assistant('all done')] })
+  await callWorker(ok.AgentTool, createToolUseContext())
+  expect(sdkTaskNotifications.map(e => e.status)).toEqual(['completed'])
 })
 
 test('a failed sync run keeps its partial work and the worktree it left changes in', async () => {
