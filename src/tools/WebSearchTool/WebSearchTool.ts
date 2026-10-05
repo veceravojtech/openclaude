@@ -87,6 +87,7 @@ export type Output = z.infer<OutputSchema>
 export type { WebSearchProgress } from '../../types/tools.js'
 
 import type { WebSearchProgress } from '../../types/tools.js'
+import { redactFailureDetail } from '../../utils/swarm/teammateFailureReasons.js'
 
 // ---------------------------------------------------------------------------
 // Shared formatting: ProviderOutput → Output
@@ -377,7 +378,8 @@ export const __test = {
   buildAdapterUnavailableError,
 }
 
-async function runCodexWebSearch(
+// Exported for tests.
+export async function runCodexWebSearch(
   input: Input,
   signal: AbortSignal,
 ): Promise<Output> {
@@ -426,7 +428,12 @@ async function runCodexWebSearch(
 
   if (!response.ok) {
     const errorBody = await response.text().catch(() => 'unknown error')
-    throw new Error(`Codex web search error ${response.status}: ${errorBody}`)
+    // The backend's response body is provider text and can echo credentials.
+    throw new Error(
+      redactFailureDetail(
+        `Codex web search error ${response.status}: ${errorBody}`,
+      ),
+    )
   }
 
   const payload = await collectCodexCompletedResponse(response)

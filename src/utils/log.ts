@@ -20,7 +20,8 @@ import { stripDisplayTags, stripDisplayTagsAllowEmpty } from './displayTags.js'
 import { isEnvTruthy } from './envUtils.js'
 import { toError } from './errors.js'
 import { isEssentialTrafficOnly } from './privacyLevel.js'
-import { jsonRedactor, redactSensitiveInfo } from './redaction.js'
+import { jsonRedactor } from './redaction.js'
+import { redactFailureDetail } from './swarm/teammateFailureReasons.js'
 import { jsonParse } from './slowOperations.js'
 
 /**
@@ -212,9 +213,9 @@ export function logError(error: unknown): void {
  */
 export function sanitizeError(err: Error): Error {
   const sanitizedErr = Object.assign(Object.create(Object.getPrototypeOf(err)), err)
-  sanitizedErr.message = redactSensitiveInfo(err.message)
+  sanitizedErr.message = redactFailureDetail(err.message)
   if (err.stack) {
-    sanitizedErr.stack = redactSensitiveInfo(err.stack)
+    sanitizedErr.stack = redactFailureDetail(err.stack)
   }
   for (const key of Object.keys(err)) {
     const value = (err as unknown as Record<string, unknown>)[key]

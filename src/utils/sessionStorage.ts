@@ -101,6 +101,7 @@ import {
 } from './transcriptFileLock.js'
 import type { ContentReplacementRecord } from './toolResultStorage.js'
 import { validateUuid } from './uuid.js'
+import { redactFailureDetail } from './swarm/teammateFailureReasons.js'
 
 // Cache MACRO.VERSION at module level to work around bun --define bug in async contexts
 // See: https://github.com/oven-sh/bun/issues/26168
@@ -1632,6 +1633,11 @@ class Project {
             message.type === 'user' ? (getPromptId() ?? undefined) : undefined,
           agentId,
           ...message,
+          // A retried provider error is kept whole (status, parsed body).
+          // The body can echo credentials, so persist a scrubbed copy.
+          ...(message.type === 'system' && message.subtype === 'api_error'
+            ? { error: redactRetryErrorForTranscript(message.error) }
+            : {}),
           // Session-stamp fields MUST come after the spread. On --fork-session
           // and --resume, messages arrive as SerializedMessage (carries source
           // sessionId/cwd/etc. because removeExtraFields only strips parentUuid
@@ -1668,7 +1674,10 @@ class Project {
             if (message.subtype === 'api_error') {
               getReplayIndexBuilder().trackRetry(
                 'api',
-                message.error.message || `API error ${message.error.status ?? ''}`.trim(),
+                redactFailureDetail(
+                  message.error.message ||
+                    `API error ${message.error.status ?? ''}`.trim(),
+                ),
                 message.timestamp ?? new Date().toISOString(),
                 {
                   attempt: message.retryAttempt,
@@ -5347,6 +5356,23 @@ export async function loadAllSubagentTranscriptsFromDisk(): Promise<{
 
 // Exported so useLogMessages can sync-compute the last loggable uuid
 // without awaiting recordTranscript's return value (race-free hint tracking).
+/**
+ * The persisted form of a retried provider error. The live message keeps the
+ * real APIError for the UI and the retry logic; the transcript gets the same
+ * shape with every secret in the provider's response body scrubbed.
+ */
+export function redactRetryErrorForTranscript<T extends object>(error: T): T {
+  const redacted = redactFailureDetail(JSON.stringify(error) ?? '')
+  try {
+    return JSON.parse(redacted) as T
+  } catch {
+    // Scrubbing can leave a fragment that is no longer valid JSON (a
+    // truncated key block). Keep the status and the scrubbed text only.
+    const status = (error as { status?: unknown }).status
+    return { status, error: redacted } as unknown as T
+  }
+}
+
 export function isLoggableMessage(m: Message): boolean {
   if (m.type === 'progress') return false
   // IMPORTANT: We deliberately filter out most attachments for non-ants because

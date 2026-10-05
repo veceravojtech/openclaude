@@ -57,7 +57,7 @@ import { isInProcessEnabled } from '../../utils/swarm/backends/registry.js';
 import { getAssistantMessageContentLength } from '../../utils/tokens.js';
 import { createAgentId } from '../../utils/uuid.js';
 import { findTurnFailure } from '../../utils/swarm/turnFailure.js';
-import { formatTeammateFailureReason } from '../../utils/swarm/teammateFailureReasons.js';
+import { formatTeammateFailureReason, redactFailureDetail, redactThrownError } from '../../utils/swarm/teammateFailureReasons.js';
 import { createAgentWorktree, createDetachedReviewWorktree, type DetachedReviewWorktree, hasWorktreeChanges, removeAgentWorktree, removeDetachedReviewWorktree } from '../../utils/worktree.js';
 import { findCanonicalGitRoot } from '../../utils/git.js';
 import { BASH_TOOL_NAME } from '../BashTool/toolName.js';
@@ -1838,7 +1838,9 @@ export const AgentTool = buildTool({
                       });
                       return;
                     }
-                    const errMsg = errorMessage(error);
+                    // A thrown provider error carries the raw response body; it is
+                    // stored on the task and sent to the lead, so scrub it first.
+                    const errMsg = redactFailureDetail(errorMessage(error));
                     failAsyncAgent(backgroundedTaskId, errMsg, rootSetAppState);
                     const worktreeResult = await cleanupWorktreeIfNeeded();
                     enqueueAgentNotification({
@@ -2082,7 +2084,9 @@ export const AgentTool = buildTool({
           const hasAssistantMessages = agentMessages.some(msg => msg.type === 'assistant');
           if (!hasAssistantMessages) {
             // No messages collected, re-throw the error
-            throw syncAgentError;
+            // The run's own error can carry the provider's response body; it
+            // becomes the tool error the model sees and the lead's transcript.
+            throw redactThrownError(syncAgentError);
           }
 
           // We have some messages, try to finalize and return them
@@ -2115,14 +2119,26 @@ export const AgentTool = buildTool({
         // result itself as a failure instead of letting the error text read
         // as the agent's answer.
         const syncTurnFailure = findTurnFailure(agentMessages);
+        const syncFailure = syncTurnFailure
+          ? formatTeammateFailureReason(syncTurnFailure.kind, syncTurnFailure.errorText)
+          : undefined;
+        const syncFailurePartial = syncTurnFailure ? partialResultBeforeFailure(agentMessages) : undefined;
         return {
           data: {
             status: 'completed' as const,
             prompt,
             ...agentResult,
+            // `data` is persisted as-is (toolUseResult in the lead's session
+            // transcript) and sent onward, and on a failed run `agentResult.content`
+            // is the raw provider error message. Replace it with the redacted
+            // failure reason; the partial work is redacted by its helper.
             ...(syncTurnFailure && {
-              failure: formatTeammateFailureReason(syncTurnFailure.kind, syncTurnFailure.errorText),
-              failurePartial: partialResultBeforeFailure(agentMessages)
+              content: [{
+                type: 'text' as const,
+                text: syncFailure!
+              }],
+              failure: syncFailure,
+              failurePartial: syncFailurePartial
             }),
             ...worktreeResult,
             ...(worktreeIsolationFallback && { worktreeIsolationFallback: true as const }),

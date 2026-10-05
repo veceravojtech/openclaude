@@ -47,7 +47,8 @@ import {
   logEvent,
 } from '../../services/analytics/index.js'
 import { getAgentContext } from '../../utils/agentContext.js'
-import { errorMessage } from '../../utils/errors.js'
+import { errorMessage, isAbortError } from '../../utils/errors.js'
+import { redactThrownError } from '../../utils/swarm/teammateFailureReasons.js'
 import {
   createRootAppStateGetter,
   extractResultText,
@@ -120,7 +121,8 @@ const remoteSkillModules = feature('EXPERIMENTAL_SKILL_SEARCH')
  * Executes a skill in a forked sub-agent context.
  * This runs the skill prompt in an isolated agent with its own token budget.
  */
-async function executeForkedSkill(
+// Exported for tests.
+export async function executeForkedSkill(
   command: Command & { type: 'prompt' },
   commandName: string,
   args: string | undefined,
@@ -284,6 +286,10 @@ async function executeForkedSkill(
         result: resultText,
       },
     }
+  } catch (error) {
+    // The forked agent's own error can carry the provider's response body;
+    // it becomes the tool error the model sees and the lead's transcript.
+    throw isAbortError(error) ? error : redactThrownError(error)
   } finally {
     // Release skill content from invokedSkills state
     clearInvokedSkillsForAgent(agentId)

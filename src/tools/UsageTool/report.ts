@@ -32,6 +32,7 @@ import {
 import { getTotalCostUSD, getTotalInputTokens, getTotalOutputTokens } from '../../bootstrap/state.js'
 import { getActiveProviderProfile } from '../../utils/providerProfiles.js'
 import { getAPIProvider } from '../../utils/model/providers.js'
+import { redactFailureDetail } from '../../utils/swarm/teammateFailureReasons.js'
 import { accountUsageLabel, readAccounts } from '../../utils/accountSwitch.js'
 import {
   formatRelativeTime,
@@ -296,7 +297,10 @@ async function tryFetch<T>(
   try {
     return await fetcher()
   } catch (error) {
-    section.note = `refresh failed: ${error instanceof Error ? error.message : String(error)}`
+    // The usage endpoint's error text is provider text.
+    section.note = redactFailureDetail(
+      `refresh failed: ${error instanceof Error ? error.message : String(error)}`,
+    )
     return undefined
   }
 }

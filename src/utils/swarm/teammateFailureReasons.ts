@@ -40,6 +40,17 @@ const TRANSIENT_KINDS: ReadonlySet<TeammateFailureKind> = new Set([
  * proxy URLs with embedded credentials or secret query parameters. Everything
  * that is written to a mailbox or an attention item goes through here first.
  */
+/**
+ * A bare ChatGPT/Codex account id (`acct-` plus an id) that sits outside any
+ * named field. Narrow on purpose: this runs on log lines and failure reasons,
+ * where `/srv/acct-service/...`, `acct_number=12` or `acct-shared-registry`
+ * are ordinary text. An id has a digit in it, or is a hex/UUID-like run of 8+
+ * characters (`acct-9f3a...`). The id after a named field
+ * (`chatgpt-account-id: ...`) is redacted by name, whatever its shape.
+ */
+const ACCOUNT_ID_PATTERN =
+  /(?<![A-Za-z0-9_-])acct-(?:(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{6,}|[0-9a-f]{8,}(?![A-Za-z0-9_-]))/gi
+
 export function redactFailureDetail(text: string): string {
   // Named fields (any escaping depth), header values, URLs and well-known
   // token prefixes: the shared scrubber.
@@ -50,12 +61,59 @@ export function redactFailureDetail(text: string): string {
   // Final sweep for values that sit outside any named field, so they are
   // caught wherever they appear: account ids, JWTs, and token prefixes.
   redacted = redacted
-    .replace(/(?<![A-Za-z0-9_-])acct[-_][A-Za-z0-9_-]{6,}/gi, '[REDACTED_ACCOUNT_ID]')
+    .replace(ACCOUNT_ID_PATTERN, '[REDACTED_ACCOUNT_ID]')
     .replace(/(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]+){0,2}/g, '[REDACTED_TOKEN]')
     .replace(/(?<![A-Za-z0-9_-])sk-ant-[A-Za-z0-9_-]{6,}/g, '[REDACTED_API_KEY]')
     .replace(/(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{16,}/g, '[REDACTED_OPENAI_KEY]')
     .replace(/(?<![A-Za-z0-9_-])gh[pousr]_[A-Za-z0-9]{16,}/g, '[REDACTED_GITHUB_TOKEN]')
     .replace(/(?<![A-Za-z0-9_-])AIza[A-Za-z0-9_-]{16,}/g, '[REDACTED_GCP_KEY]')
+  return redacted
+}
+
+/**
+ * A thrown error whose message may carry provider text, with the secrets in
+ * its message (and stack, which embeds it) scrubbed. For the throw sites that
+ * wrap a model call, where provider text enters a tool error; generic tool
+ * output (a failing command, a stack trace) must NOT go through this. An error
+ * that needs no scrubbing is returned as is, so its class is kept.
+ */
+export function redactThrownError(error: unknown): Error {
+  const original = error instanceof Error ? error : new Error(String(error))
+  const message = redactFailureDetail(original.message)
+  if (message === original.message) return original
+  // Same class (instanceof APIError, AbortError, ... still holds) and the
+  // scalar fields callers branch on. The response body (`error`), `headers`
+  // and `cause` carry the raw provider text and are not copied.
+  const redacted = Object.create(Object.getPrototypeOf(original)) as Error
+  Object.defineProperty(redacted, 'message', {
+    value: message,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  })
+  redacted.name = original.name
+  const source = original as unknown as Record<string, unknown>
+  const target = redacted as unknown as Record<string, unknown>
+  for (const key of ['status', 'code', 'requestID'] as const) {
+    const value = source[key]
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      target[key] = value
+    } else if (typeof value === 'string') {
+      target[key] = redactFailureDetail(value)
+    }
+  }
+  // TelemetrySafeError: defaults to the (provider) message, so scrub it too.
+  if (typeof source.telemetryMessage === 'string') {
+    target.telemetryMessage = redactFailureDetail(source.telemetryMessage)
+  }
+  Object.defineProperty(redacted, 'stack', {
+    value: original.stack
+      ? redactFailureDetail(original.stack)
+      : `${redacted.name}: ${message}`,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  })
   return redacted
 }
 

@@ -588,3 +588,56 @@ for (const [name, input, budget] of perfInputs) {
     })
   }
 }
+
+// The bare account-id sweep (an `acct-` id outside any named field) runs on log
+// lines and failure reasons, so it must not eat ordinary text that starts with
+// `acct-` / `acct_`.
+test('ordinary text containing acct is left alone', () => {
+  for (const text of [
+    'at /home/u/acct-service/src/index.ts:3',
+    'acct_number=12',
+    'marketplace acct-shared-registry',
+    'NameError: name acct_number is not defined',
+    'see /srv/acct-service/config/app.yaml',
+  ]) {
+    expect(redactFailureDetail(text)).toBe(text)
+  }
+})
+
+test('a bare account id is still redacted: digit-bearing, hex and UUID-shaped ids', () => {
+  for (const [text, secret] of [
+    ['id acct-SECRET123 rejected', 'SECRET123'],
+    ['id acct-9f3a4b7c1d2e rejected', '9f3a4b7c1d2e'],
+    ['id acct-deadbeefcafe rejected', 'deadbeefcafe'],
+    ['id acct-123e4567-e89b-12d3-a456-426614174000 rejected', '123e4567'],
+    ['id acct-SECRETACCT99, then more', 'SECRETACCT99'],
+  ] as const) {
+    const out = redactFailureDetail(text)
+    expect(out).not.toContain(secret)
+    expect(out).toContain('[REDACTED_ACCOUNT_ID]')
+    expect(out.startsWith('id ')).toBe(true)
+  }
+})
+
+test('a named account field is redacted by name whatever the id looks like', () => {
+  for (const text of [
+    '{"chatgpt-account-id":"acct-service"}',
+    'chatgpt-account-id: acct_number',
+    '{"chatgpt-account-id":"plainvalue"}',
+  ]) {
+    const out = redactFailureDetail(text)
+    expect(out).not.toContain('acct-service')
+    expect(out).not.toContain('acct_number')
+    expect(out).not.toContain('plainvalue')
+  }
+})
+
+test('the narrowed account-id pattern stays linear on long runs', () => {
+  const longRun = 'acct-' + 'a'.repeat(1_000_000)
+  const many = 'acct-x '.repeat(100_000)
+  for (const input of [longRun, many, 'acct-'.repeat(200_000)]) {
+    const started = performance.now()
+    redactFailureDetail(input)
+    expect(performance.now() - started).toBeLessThan(1500)
+  }
+})

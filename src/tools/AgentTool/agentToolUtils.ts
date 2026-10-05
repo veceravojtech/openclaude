@@ -3,6 +3,7 @@ import { findTurnFailure } from '../../utils/swarm/turnFailure.js'
 import {
   classifyTeammateFailureReason,
   formatTeammateFailureReason,
+  redactFailureDetail,
 } from '../../utils/swarm/teammateFailureReasons.js'
 import { z } from 'zod/v4'
 import { clearInvokedSkillsForAgent } from '../../bootstrap/state.js'
@@ -938,16 +939,19 @@ type SetAppState = (f: (prev: AppState) => AppState) => void
 
 /**
  * What a failed run produced before it failed: the last text it wrote, with
- * the API-error messages themselves left out.
+ * the API-error messages themselves left out, and redacted: it is sent to the
+ * lead (notification, tool result) and persisted with the lead's transcript,
+ * and a failing run is exactly when an echoed credential is most likely.
  */
 export function partialResultBeforeFailure(
   agentMessages: MessageType[],
 ): string | undefined {
-  return extractPartialResult(
+  const partial = extractPartialResult(
     agentMessages.filter(
       m => m.type !== 'assistant' || m.isApiErrorMessage !== true,
     ),
   )
+  return partial === undefined ? undefined : redactFailureDetail(partial)
 }
 
 /**
@@ -1194,7 +1198,8 @@ export async function runAsyncAgentLifecycle({
       })
       return
     }
-    const msg = errorMessage(error)
+    // A thrown provider error carries the raw response body.
+    const msg = redactFailureDetail(errorMessage(error))
     failAsyncAgent(taskId, msg, rootSetAppState)
     const worktreeResult = await getWorktreeResult()
     enqueueAgentNotification({

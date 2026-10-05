@@ -182,6 +182,18 @@ describe('runAsyncAgentLifecycle failure detection', () => {
     expect(everything).toContain('proxy.example.com')
   })
 
+  test('the partial work in a failed run\'s notification is redacted too', async () => {
+    const { notifications } = await runLifecycle(async function* () {
+      yield assistant('wrote the file; key sk-ant-api03-SECRETANTKEY1234567890, "password":"don\'t-leak-me"')
+      yield createAssistantAPIErrorMessage({ content: 'API Error: 529 Overloaded' })
+    })
+    const joined = notifications.join('\n')
+    expect(joined).toContain('<status>failed</status>')
+    expect(joined).toContain('wrote the file')
+    expect(joined).not.toContain('SECRETANTKEY')
+    expect(joined).not.toContain("don't-leak-me")
+  })
+
   test('a thrown exception is still a failed run with an attention item', async () => {
     const { task } = await runLifecycle(async function* () {
       yield assistant('working')

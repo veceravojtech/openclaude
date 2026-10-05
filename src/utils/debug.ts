@@ -13,7 +13,7 @@ import {
 import { getClaudeConfigHomeDir, isEnvTruthy } from './envUtils.js'
 import { getFsImplementation } from './fsOperations.js'
 import { writeToStderr } from './process.js'
-import { redactSensitiveInfo } from './redaction.js'
+import { redactFailureDetail } from './swarm/teammateFailureReasons.js'
 import { jsonStringify } from './slowOperations.js'
 
 export type DebugLogLevel = 'verbose' | 'debug' | 'info' | 'warn' | 'error'
@@ -217,7 +217,9 @@ export function logForDebugging(
   // Strip credentials from debug logs before JSON formatting, so the
   // redactor sees the raw (unescaped) message and can match patterns
   // like private_key / PEM blocks that JSON encoding would obscure.
-  message = redactSensitiveInfo(message)
+  // redactFailureDetail adds the bare account-id / token sweep that a
+  // provider error echoed into a debug line needs. Log sinks only.
+  message = redactFailureDetail(message)
 
   // Multiline messages break the jsonl output format, so make any multiline messages JSON.
   if (hasFormattedOutput && message.includes('\n')) {

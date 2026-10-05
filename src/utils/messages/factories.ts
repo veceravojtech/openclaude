@@ -27,6 +27,7 @@ import type {
 } from '../../types/message.js'
 import type { PermissionMode } from '../../types/permissions.js'
 import { isDangerousPermissionMode } from '../permissions/PermissionMode.js'
+import { redactFailureDetail } from '../swarm/teammateFailureReasons.js'
 
 export const INTERRUPT_MESSAGE = '[Request interrupted by user]'
 export const INTERRUPT_MESSAGE_FOR_TOOL_USE =
@@ -179,17 +180,25 @@ export function createAssistantAPIErrorMessage({
   error?: SDKAssistantMessageError
   errorDetails?: string
 }): AssistantMessage {
+  // The text is built from the provider's own error body, which can carry
+  // credentials (account ids, bearer tokens, key fields, escaped JSON). Every
+  // later copy of this message - the sidechain and lead transcripts, mailbox
+  // and notification reasons, task output, the UI - inherits what is stored
+  // here, so scrub it once at the source. Redaction only replaces secret
+  // values; error classification (refusal, prompt-too-long token counts,
+  // quota, rate limit, auth) reads the surrounding wording and digits.
   return baseCreateAssistantMessage({
     content: [
       {
         type: 'text' as const,
-        text: content === '' ? NO_CONTENT_MESSAGE : content,
+        text: content === '' ? NO_CONTENT_MESSAGE : redactFailureDetail(content),
       } as BetaContentBlock, // NOTE: citations field is not supported in Bedrock API
     ],
     isApiErrorMessage: true,
     apiError,
     error,
-    errorDetails,
+    errorDetails:
+      errorDetails === undefined ? undefined : redactFailureDetail(errorDetails),
   })
 }
 
