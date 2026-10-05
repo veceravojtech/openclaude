@@ -102,6 +102,8 @@ export type AttentionItem = {
    * for a teammate (a respawn under the same name keeps it).
    */
   retryKey?: string
+  /** How many more times the same run failed while this item was undecided. */
+  repeatCount?: number
   decision?: AttentionDecisionRecord
   supersededReason?: string
 }

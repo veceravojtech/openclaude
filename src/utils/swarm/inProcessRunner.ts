@@ -198,10 +198,18 @@ import {
   takeSubLeadHandoff,
   writeSubLeadHandoffFile,
 } from './subLeadHandoff.js'
+import { findTurnFailure, type TurnFailure } from './turnFailure.js'
+import {
+  classifyTeammateFailureReason,
+  formatTeammateFailureReason,
+  redactFailureDetail,
+} from './teammateFailureReasons.js'
 import {
   failureItemId,
   linkTasksToAttentionItem,
   noteRunFailure,
+  readAttentionItem,
+  refreshFailureItem,
 } from '../attentionItems.js'
 import {
   noteSubLeadFailure,
@@ -906,10 +914,51 @@ function formatTaskAsPrompt(task: Task): string {
  * in the runner loop). Without the id there is nothing to release and the task
  * would be stranded `in_progress` under an owner that has exited.
  */
+/**
+ * Teammates whose last turn ended in a provider failure the lead has not yet
+ * decided. Keyed by task list + name. Without it a teammate that fails every
+ * turn (a 401, a persistent refusal) claims task after task and raises one
+ * attention item per task, each of which blocks the lead from spawning.
+ * `itemId` is the attention item whose decision lifts the block; a failure
+ * with no item (a sub-team member's) blocks until a turn succeeds.
+ */
+const failedTeammateHolds = new Map<
+  string,
+  { itemId?: string; list?: string }
+>()
+/** Number of runners currently blocked from claiming; for tests. */
+export function failedTeammateHoldCountForTesting(): number {
+  return failedTeammateHolds.size
+}
+// Keyed by the runner's own task id, which is unique per spawn: a later
+// teammate that reuses the name is a different runner and starts unblocked.
+// The entry is removed when the runner exits.
+async function isBlockedByUndecidedFailure(
+  runnerTaskId: string | undefined,
+): Promise<boolean> {
+  if (runnerTaskId === undefined) return false
+  const key = runnerTaskId
+  const hold = failedTeammateHolds.get(key)
+  if (!hold) return false
+  if (!hold.itemId) return true
+  const item = await readAttentionItem(hold.itemId, hold.list).catch(
+    () => undefined,
+  )
+  if (item?.status === 'undecided') return true
+  failedTeammateHolds.delete(key)
+  return false
+}
+
 export async function tryClaimNextTask(
   taskListId: string,
   agentName: string,
+  /** The calling runner's task id, for its failure block (see above). */
+  runnerTaskId?: string,
 ): Promise<{ prompt: string; taskId: string } | undefined> {
+  if (await isBlockedByUndecidedFailure(runnerTaskId)) {
+    return undefined
+  }
+
   // The account, not this task, is what cannot proceed. Claiming here would
   // pick up a task only to fail on it instantly, release it, and let the next
   // teammate repeat that — the cross-teammate form of the same spin.
@@ -1585,7 +1634,11 @@ async function pollForNextPromptOrShutdown(
     }
 
     // Check the team's task list for unclaimed tasks
-    const claimed = await tryClaimNextTask(taskListId, identity.agentName)
+    const claimed = await tryClaimNextTask(
+      taskListId,
+      identity.agentName,
+      taskId,
+    )
     if (claimed) {
       return {
         type: 'new_message',
@@ -2171,6 +2224,10 @@ async function idleUntilNextPrompt(params: {
   workWasAborted: boolean
   /** The turn that just ended; absent for an idle spawn (no turn ran). */
   turnReport?: TeammateTurnReport
+  /** Set when the turn ended in a failure the lead must be told about: the
+   *  idle notification then carries `failed` and the reason instead of
+   *  `available`. */
+  turnFailureReason?: string
   /** Notify the lead even if the task is already flagged idle (idle spawn:
    *  the task is registered idle, but the lead has not been told yet). */
   forceIdleNotification?: boolean
@@ -2183,6 +2240,7 @@ async function idleUntilNextPrompt(params: {
     allMessages,
     workWasAborted,
     turnReport,
+    turnFailureReason,
     forceIdleNotification = false,
   } = params
   const { setAppState } = toolUseContext
@@ -2213,6 +2271,9 @@ async function idleUntilNextPrompt(params: {
 
   // Self-idle stays a scheduling fact; availability additionally includes the
   // recursive delegation tree. Refresh in the existing poll, never a timer.
+  // The `failed` verdict is told once. A later refresh (delegated activity
+  // changed) is a status update and must say what the teammate is now.
+  let failureReportPending = turnFailureReason !== undefined
   let lastDelegated = wasAlreadyIdle
     ? JSON.stringify(readDelegatedActivity(identity, toolUseContext.getAppState().tasks))
     : undefined
@@ -2224,9 +2285,11 @@ async function idleUntilNextPrompt(params: {
     const key = JSON.stringify(delegatedActivity)
     if (key === lastDelegated) return
     lastDelegated = key
+    const reportFailure = failureReportPending ? turnFailureReason : undefined
     await sendIdleNotification(identity.agentName, identity.color, identity.teamName, {
-      idleReason: current.parkedNotice ? 'parked' : workWasAborted ? 'interrupted'
+      idleReason: reportFailure ? 'failed' : current.parkedNotice ? 'parked' : workWasAborted ? 'interrupted'
         : delegatedActivity.status === 'none' ? 'available' : 'waiting_for_children',
+      ...(reportFailure ? { failureReason: reportFailure } : {}),
       delegatedActivity,
       summary: getLastPeerDmSummary(allMessages),
       ...turnReport,
@@ -2236,6 +2299,7 @@ async function idleUntilNextPrompt(params: {
         latest.isIdle && latest.pendingUserMessages.length === 0 &&
         JSON.stringify(readDelegatedActivity(identity, toolUseContext.getAppState().tasks)) === key
     })
+    if (reportFailure) failureReportPending = false
   }
   await refreshDelegated()
 
@@ -2325,6 +2389,17 @@ async function idleUntilNextPrompt(params: {
  * @returns Result with messages and success status
  */
 export async function runInProcessTeammate(
+  config: InProcessRunnerConfig,
+): Promise<InProcessRunnerResult> {
+  try {
+    return await runInProcessTeammateInner(config)
+  } finally {
+    // The claim block belongs to this runner; it must not outlive it.
+    failedTeammateHolds.delete(config.taskId)
+  }
+}
+
+async function runInProcessTeammateInner(
   config: InProcessRunnerConfig,
 ): Promise<InProcessRunnerResult> {
   const {
@@ -2478,6 +2553,8 @@ export async function runInProcessTeammate(
    * failure tails put it in the lead's notification.
    */
   let lastTurnReport: TeammateTurnReport = {}
+  /** Failed turns so far; numbers each turn's attention item (0 is the terminal failure). */
+  let failedTurnCount = 0
   // Wrap initial prompt with XML for proper styling in transcript view.
   // Undefined for an idle spawn: the teammate waits for its first message.
   const wrappedInitialPrompt =
@@ -2507,7 +2584,7 @@ export async function runInProcessTeammate(
   // its own inbox must not have it pre-empted here.
   const claimedTask = skipInitialClaim
     ? undefined
-    : await tryClaimNextTask(taskListId, identity.agentName)
+    : await tryClaimNextTask(taskListId, identity.agentName, taskId)
   // Owned from here whether or not its text becomes the first prompt: a
   // prompted spawn runs the lead's prompt but still holds the claim, so the
   // usage-limit stop must hand this one back too.
@@ -3049,6 +3126,104 @@ export async function runInProcessTeammate(
         }
       }
 
+      // The turn ended in an API-error message (usage-policy refusal, 401,
+      // overloaded, context too long, ...) without throwing, so nothing below
+      // would call it a failure: the idle notification would say `available`
+      // and the lead would never hear. Decide failure here, once, from the
+      // turn's own messages. A usage limit was reported above as `parked`; a
+      // user abort is a stop, not a failure.
+      let turnFailureReason: string | undefined
+      let turnFailure: TurnFailure | undefined
+      if (!usageLimitNotice && !workWasAborted) {
+        turnFailure = findTurnFailure(iterationMessages)
+        if (turnFailure) {
+          turnFailureReason = formatTeammateFailureReason(
+            turnFailure.kind,
+            turnFailure.errorText,
+          )
+          logForDebugging(
+            `[inProcessRunner] ${identity.agentId} turn failed (${turnFailure.kind})`,
+          )
+          const holdKey = taskId
+          const existing = failedTeammateHolds.get(holdKey)
+          // Same rule as the terminal failure tail: only a root-team
+          // member's failure is the root lead's to decide.
+          if (getParentTeamName(identity.teamName) === undefined) {
+            // A repeat failure while the lead has not yet decided the last
+            // one folds into that item instead of raising item N+1.
+            let itemId = existing?.itemId
+            const list = getTaskListId()
+            const stillUndecided =
+              itemId !== undefined &&
+              (await readAttentionItem(itemId, existing?.list).catch(
+                () => undefined,
+              ))?.status === 'undecided'
+            const failure = {
+              taskId,
+              runSeq: failedTurnCount,
+              description: identity.agentName,
+              error: turnFailureReason,
+              backend: 'in_process' as const,
+              agentId: identity.agentId,
+              agentName: identity.agentName,
+              teamName: identity.teamName,
+              transient: classifyTeammateFailureReason(turnFailureReason),
+            }
+            if (!stillUndecided) {
+              itemId = failureItemId(taskId, ++failedTurnCount)
+              await noteRunFailure({ ...failure, runSeq: failedTurnCount }, list)
+            } else {
+              // The lead has not decided the earlier failure: bring that item
+              // up to date with this one (the kind may have changed).
+              await refreshFailureItem(failure, itemId!, existing?.list)
+            }
+            failedTeammateHolds.set(holdKey, {
+              itemId,
+              list: stillUndecided ? existing?.list : list,
+            })
+            // Hold the task this turn was working on for the lead's decision,
+            // exactly as the terminal failure tail does, and stop claiming.
+            currentClaimedTaskId = undefined
+            try {
+              const unassigned = await unassignTeammateTasks(
+                taskListId,
+                identity.agentId,
+                identity.agentName,
+                'failed',
+                { attentionHold: itemId!, attentionHoldList: stillUndecided ? existing?.list : list },
+              )
+              if (unassigned.unassignedTasks.length > 0) {
+                await linkTasksToAttentionItem(
+                  itemId!,
+                  unassigned.unassignedTasks.map(t => t.id),
+                  stillUndecided ? existing?.list : list,
+                  taskListId,
+                )
+              }
+            } catch (err) {
+              logForDebugging(
+                `[inProcessRunner] ${identity.agentId} could not hold tasks after a failed turn: ${err}`,
+              )
+            }
+          } else {
+            // A sub-team member's failure is its sub-lead's: no root item,
+            // but the task goes back and the teammate stops claiming until a
+            // turn succeeds.
+            failedTeammateHolds.set(holdKey, {})
+            if (currentClaimedTaskId) {
+              await releaseClaimedTask(taskListId, currentClaimedTaskId)
+              currentClaimedTaskId = undefined
+            }
+          }
+        } else {
+          // A turn that succeeded lifts a block that had no attention item.
+          const holdKey = taskId
+          if (failedTeammateHolds.get(holdKey)?.itemId === undefined) {
+            failedTeammateHolds.delete(holdKey)
+          }
+        }
+      }
+
       // If work was aborted (Escape), log it and add interrupt message, then continue to idle state
       if (workWasAborted) {
         logForDebugging(
@@ -3081,6 +3256,7 @@ export async function runInProcessTeammate(
         allMessages,
         workWasAborted,
         turnReport: lastTurnReport,
+        turnFailureReason,
       })
       if (nextPrompt === undefined) {
         shouldExit = true
@@ -3220,8 +3396,11 @@ export async function runInProcessTeammate(
 
     return { success: true, messages: allMessages }
   } catch (error) {
-    const errorMessage =
-      error instanceof Error ? error.message : 'Unknown error'
+    // Raw exception text can carry credentials or proxy URLs; it goes to the
+    // task row, the attention item and the lead's mailbox, so redact it once.
+    const errorMessage = redactFailureDetail(
+      error instanceof Error ? error.message : 'Unknown error',
+    )
 
     logForDebugging(
       `[inProcessRunner] Agent ${identity.agentId} failed: ${errorMessage}`,

@@ -30,6 +30,7 @@ import {
   decideAttentionItemIn,
   listAttentionItemsIn,
   listUndecidedAttentionItemsIn,
+  mutateAttentionItemIn,
   type NewAttentionItem,
   readAttentionItemIn,
   supersedeAttentionItemIn,
@@ -261,6 +262,38 @@ export function noteRunFailure(
   } catch (error) {
     reportLost(failureItemId(failure.taskId, failure.runSeq), error, reportLostAttentionItem)
     return Promise.resolve()
+  }
+}
+
+/**
+ * A run failed again while its earlier failure item is still undecided: bring
+ * the item up to date (latest reason, transient class, repeat count) instead of
+ * raising another one, so the lead decides on what is true now. Best-effort,
+ * and a no-op once the item is decided or superseded.
+ */
+export async function refreshFailureItem(
+  failure: RunFailure,
+  itemId: string,
+  taskListId: string = getTaskListId(),
+): Promise<void> {
+  try {
+    const next = runFailureItem(failure)
+    await mutateAttentionItemIn(getTasksDir(taskListId), itemId, current => {
+      if (current.status !== 'undecided') return null
+      const repeatCount = (current.repeatCount ?? 0) + 1
+      return {
+        ...current,
+        summary: `${next.summary} (failed again, ${repeatCount + 1} times)`,
+        transient: next.transient,
+        transientReason: next.transientReason,
+        repeatCount,
+      }
+    })
+  } catch (error) {
+    logForDebugging(
+      `[attentionItems] could not refresh ${itemId}: ${errorMessage(error)}`,
+      { level: 'error' },
+    )
   }
 }
 

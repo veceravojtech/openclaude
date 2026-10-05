@@ -56,6 +56,8 @@ import { isInProcessTeammate } from '../../utils/teammateContext.js';
 import { isInProcessEnabled } from '../../utils/swarm/backends/registry.js';
 import { getAssistantMessageContentLength } from '../../utils/tokens.js';
 import { createAgentId } from '../../utils/uuid.js';
+import { findTurnFailure } from '../../utils/swarm/turnFailure.js';
+import { formatTeammateFailureReason } from '../../utils/swarm/teammateFailureReasons.js';
 import { createAgentWorktree, createDetachedReviewWorktree, type DetachedReviewWorktree, hasWorktreeChanges, removeAgentWorktree, removeDetachedReviewWorktree } from '../../utils/worktree.js';
 import { findCanonicalGitRoot } from '../../utils/git.js';
 import { BASH_TOOL_NAME } from '../BashTool/toolName.js';
@@ -65,7 +67,7 @@ import { spawnTeammate, generateUniqueTeammateName } from '../shared/spawnMultiA
 import { PROVIDER_PROFILE_IN_PROCESS_ERROR, resolveProviderProfileEnv } from './providerProfileBinding.js';
 import { getTeammateSpawnCapError, MAX_TEAMMATE_REPLICAS_CEILING } from './teammateReplicas.js';
 import { setAgentColor } from './agentColorManager.js';
-import { type AgentToolResult, agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extractPartialResult, clearVerificationVerdictBeforeRun, clearFinalReviewBeforeRun, type FinalReviewTarget, finalizeAgentTool, formatFinalReviewLine, formatVerificationVerdictLine, getLastToolUseName, isBuiltInFinalReviewRun, recordFinalReviewIfApplicable, recordVerificationVerdictIfApplicable, runAsyncAgentLifecycle } from './agentToolUtils.js';
+import { type AgentToolResult, agentToolResultSchema, classifyHandoffIfNeeded, emitTaskProgress, extractPartialResult, failAgentRunIfTurnFailed, partialResultBeforeFailure, clearVerificationVerdictBeforeRun, clearFinalReviewBeforeRun, type FinalReviewTarget, finalizeAgentTool, formatFinalReviewLine, formatVerificationVerdictLine, getLastToolUseName, isBuiltInFinalReviewRun, recordFinalReviewIfApplicable, recordVerificationVerdictIfApplicable, runAsyncAgentLifecycle } from './agentToolUtils.js';
 import { GENERAL_PURPOSE_AGENT } from './built-in/generalPurposeAgent.js';
 import { checkAttentionSpawnGate } from '../../utils/attentionItems.js';
 import { AGENT_TOOL_NAME, FINAL_REVIEW_AGENT_TYPE, LEGACY_AGENT_TOOL_NAME, ONE_SHOT_BUILTIN_AGENT_TYPES } from './constants.js';
@@ -284,6 +286,8 @@ export const outputSchema = lazySchema(() => {
   const syncOutputSchema = agentToolResultSchema().extend({
     status: z.literal('completed'),
     prompt: z.string(),
+    failurePartial: z.string().optional().describe('What the run wrote before it failed, with the API-error messages removed'),
+    failure: z.string().optional().describe('Set when the run ended on a provider failure (refusal, auth, overloaded, ...): the classified reason plus the redacted original error text'),
     worktreeIsolationFallback: z.boolean().optional().describe('True when worktree isolation was requested but fell back because no git repository was available'),
   });
   const asyncOutputSchema = z.object({
@@ -1743,6 +1747,18 @@ export const AgentTool = buildTool({
                         emitTaskProgress(tracker, backgroundedTaskId, toolUseContext.toolUseId, description, startTime, lastToolName);
                       }
                     }
+                    // A provider failure ends the stream as an API-error message,
+                    // not an exception: report it as a failure, not a completion.
+                    if (await failAgentRunIfTurnFailed({
+                      agentMessages,
+                      taskId: backgroundedTaskId,
+                      description,
+                      rootSetAppState,
+                      toolUseId: toolUseContext.toolUseId,
+                      getWorktreeResult: cleanupWorktreeIfNeeded
+                    })) {
+                      return;
+                    }
                     const agentResult = finalizeAgentTool(agentMessages, backgroundedTaskId, metadata);
                     await recordVerificationVerdictIfApplicable(agentResult, metadata);
                     await recordFinalReviewIfApplicable(agentResult, metadata);
@@ -2092,11 +2108,20 @@ export const AgentTool = buildTool({
             }, ...agentResult.content];
           }
         }
+        // A provider failure ends the run as an API-error message, not an
+        // exception. Answered inline there is no notification, so mark the
+        // result itself as a failure instead of letting the error text read
+        // as the agent's answer.
+        const syncTurnFailure = findTurnFailure(agentMessages);
         return {
           data: {
             status: 'completed' as const,
             prompt,
             ...agentResult,
+            ...(syncTurnFailure && {
+              failure: formatTeammateFailureReason(syncTurnFailure.kind, syncTurnFailure.errorText),
+              failurePartial: partialResultBeforeFailure(agentMessages)
+            }),
             ...worktreeResult,
             ...(worktreeIsolationFallback && { worktreeIsolationFallback: true as const }),
           }
@@ -2191,6 +2216,21 @@ The agent is now running and will receive instructions via mailbox.${spawnData.d
         content: [{
           type: 'text',
           text
+        }]
+      };
+    }
+    if (data.status === 'completed' && data.failure) {
+      const failedWorktree = data as Record<string, unknown> as {
+        worktreePath?: string;
+        worktreeBranch?: string;
+      };
+      return {
+        tool_use_id: toolUseID,
+        type: 'tool_result',
+        is_error: true,
+        content: [{
+          type: 'text',
+          text: `Agent failed: ${data.failure}${data.failurePartial ? `\n\nWork the agent produced before it failed:\n${data.failurePartial}` : ''}${failedWorktree.worktreePath ? `\n\nworktreePath: ${failedWorktree.worktreePath}${failedWorktree.worktreeBranch ? `\nworktreeBranch: ${failedWorktree.worktreeBranch}` : ''}` : ''}\n\nagentId: ${data.agentId}`
         }]
       };
     }

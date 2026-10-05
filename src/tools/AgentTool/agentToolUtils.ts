@@ -1,4 +1,9 @@
 import { feature } from 'bun:bundle'
+import { findTurnFailure } from '../../utils/swarm/turnFailure.js'
+import {
+  classifyTeammateFailureReason,
+  formatTeammateFailureReason,
+} from '../../utils/swarm/teammateFailureReasons.js'
 import { z } from 'zod/v4'
 import { clearInvokedSkillsForAgent } from '../../bootstrap/state.js'
 import {
@@ -932,6 +937,69 @@ export function extractPartialResult(
 type SetAppState = (f: (prev: AppState) => AppState) => void
 
 /**
+ * What a failed run produced before it failed: the last text it wrote, with
+ * the API-error messages themselves left out.
+ */
+export function partialResultBeforeFailure(
+  agentMessages: MessageType[],
+): string | undefined {
+  return extractPartialResult(
+    agentMessages.filter(
+      m => m.type !== 'assistant' || m.isApiErrorMessage !== true,
+    ),
+  )
+}
+
+/**
+ * Shared by every path that drives an agent to completion in the background
+ * (`runAsyncAgentLifecycle` and the foreground run that was backgrounded
+ * mid-flight): when the run's last assistant message is an API-error message,
+ * mark the task failed, and tell the lead with a `failed` notification carrying
+ * the classified reason, the redacted original text and whatever the agent
+ * produced before it failed. The notification also creates the attention item.
+ * Returns true when the run failed (the caller must not complete it).
+ */
+export async function failAgentRunIfTurnFailed({
+  agentMessages,
+  taskId,
+  description,
+  rootSetAppState,
+  toolUseId,
+  getWorktreeResult,
+}: {
+  agentMessages: MessageType[]
+  taskId: string
+  description: string
+  rootSetAppState: SetAppState
+  toolUseId: string | undefined
+  getWorktreeResult: () => Promise<{
+    worktreePath?: string
+    worktreeBranch?: string
+  }>
+}): Promise<boolean> {
+  const turnFailure = findTurnFailure(agentMessages)
+  if (!turnFailure) return false
+  const reason = formatTeammateFailureReason(
+    turnFailure.kind,
+    turnFailure.errorText,
+  )
+  failAsyncAgent(taskId, reason, rootSetAppState)
+  const worktreeResult = await getWorktreeResult()
+  enqueueAgentNotification({
+    taskId,
+    description,
+    status: 'failed',
+    error: reason,
+    setAppState: rootSetAppState,
+    toolUseId,
+    attentionTransient: classifyTeammateFailureReason(reason),
+    finalMessage: partialResultBeforeFailure(agentMessages),
+    ...worktreeResult,
+  })
+  return true
+}
+
+/**
  * Drives a background agent from spawn to terminal notification.
  * Shared between AgentTool's async-from-start path and resumeAgentBackground.
  */
@@ -1023,6 +1091,23 @@ export async function runAsyncAgentLifecycle({
     }
 
     stopSummarization?.()
+
+    // A provider failure (usage-policy refusal, 401, overloaded, ...) is
+    // yielded as an API-error assistant message, not thrown, so the stream
+    // above simply ends. Without this check the run would be reported as
+    // "completed" with the error text as its result and no attention item.
+    if (
+      await failAgentRunIfTurnFailed({
+        agentMessages,
+        taskId,
+        description,
+        rootSetAppState,
+        toolUseId: toolUseContext.toolUseId,
+        getWorktreeResult,
+      })
+    ) {
+      return
+    }
 
     const agentResult = finalizeAgentTool(agentMessages, taskId, metadata)
     // Record before completion is signalled, so a caller woken by the

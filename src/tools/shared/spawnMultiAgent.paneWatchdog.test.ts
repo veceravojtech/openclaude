@@ -2905,3 +2905,81 @@ test('hardening: the ghost sweep holds a swept member’s tasks for its undecide
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// A pane teammate's usage-policy refusal (or any API error turned into an
+// assistant message) used to end its turn with no signal: the REPL only knew
+// the generic provider/runtime kinds, and its report carried no error text.
+// This drives the REAL teammate-side reporter into a real mailbox file, then
+// feeds exactly what the lead reads through the watchdog.
+test('a pane teammate refusal reaches the lead as a failed notification with the original text, and an attention item', async () => {
+  await withAttentionStore(async () => {
+    const { writeTeamFileAsync } = await import('../../utils/swarm/teamHelpers.js')
+    const { reportTeammateTurnFailure } = await import('../../utils/swarm/teammateInit.js')
+    const { classifyTeammateApiError, TEAMMATE_FAILURE_REASONS } = await import(
+      '../../utils/swarm/teammateFailureReasons.js'
+    )
+    const { getErrorMessageIfRefusal } = await import('../../services/api/errors.js')
+    const { readMailbox } = await import('../../utils/teammateMailbox.js')
+    const { listAttentionItems, settleAttentionWritesForTesting } = await import(
+      '../../utils/attentionItems.js'
+    )
+
+    await writeTeamFileAsync('team', {
+      name: 'team',
+      createdAt: Date.now(),
+      leadAgentId: 'team-lead@team',
+      members: [
+        { agentId: 'team-lead@team', name: 'team-lead', joinedAt: Date.now(), cwd: '/tmp' },
+        { agentId: 'worker@team', name: 'worker', joinedAt: Date.now(), cwd: '/tmp' },
+      ],
+    } as never)
+
+    // What the teammate's REPL does when its turn ends on the refusal message.
+    const refusal = getErrorMessageIfRefusal('refusal', 'some-other-model')!
+    const originalText = (refusal.message.content[0] as { text: string }).text
+    const kind = classifyTeammateApiError(refusal.error, originalText, refusal.apiError)
+    expect(kind).toBe('refusal')
+    // The pane process resolves its team through the dynamic context set from
+    // its CLI args; clear it afterwards so other tests are unaffected.
+    const { setDynamicTeamContext, clearDynamicTeamContext } = await import(
+      '../../utils/teammate.js'
+    )
+    setDynamicTeamContext({
+      agentId: 'worker@team',
+      agentName: 'worker',
+      teamName: 'team',
+      planModeRequired: false,
+    })
+    try {
+      await reportTeammateTurnFailure('team', 'worker', kind, originalText)
+    } finally {
+      clearDynamicTeamContext()
+    }
+
+    const inbox = await readMailbox('team-lead', 'team')
+    expect(inbox).toHaveLength(1)
+
+    const world = makeWorld()
+    registerTeammate(world)
+    worldToDispose.push(...world.handles)
+    world.teamFile.members[1]!.isActive = true
+    world.mailbox.push(inbox[0]!)
+    await world.handles[0]!.scan()
+
+    expect(taskStatus(world)).toBe('failed')
+    const notifications = world.notifications()
+    expect(notifications).toHaveLength(1)
+    expect(notifications[0]).toContain('<status>failed</status>')
+    expect(notifications[0]).toContain(unescapeXml(TEAMMATE_FAILURE_REASONS.refusal).slice(0, 40))
+    expect(notifications[0]).toContain('violate our Usage Policy')
+
+    await settleAttentionWritesForTesting()
+    const items = await listAttentionItems()
+    expect(items).toHaveLength(1)
+    expect(items[0]).toMatchObject({
+      kind: 'failure',
+      status: 'undecided',
+      source: { backend: 'pane', agentName: 'worker' },
+    })
+  })
+})

@@ -1831,6 +1831,9 @@ export function getErrorMessageIfRefusal(
 
   return createAssistantAPIErrorMessage({
     content: baseMessage + modelSuggestion,
+    // Structured marker: teammate/agent failure reporting classifies on this
+    // rather than on the message text above.
+    apiError: 'refusal',
     error: 'invalid_request',
   })
 }

@@ -45,7 +45,8 @@ import { isEnvTruthy } from '../utils/envUtils.js';
 import { formatTokens, truncateToWidth } from '../utils/format.js';
 import { consumeEarlyInput } from '../utils/earlyInput.js';
 import { setMemberActive } from '../utils/swarm/teamHelpers.js';
-import { classifyTeammateApiError, reportTeammateTurnFailure, type TeammateFailureKind } from '../utils/swarm/teammateInit.js';
+import { reportTeammateTurnFailure, type TeammateFailureKind } from '../utils/swarm/teammateInit.js';
+import { findTurnFailure } from '../utils/swarm/turnFailure.js';
 import { isSwarmWorker, generateSandboxRequestId, sendSandboxPermissionRequestViaMailbox, sendSandboxPermissionResponseViaMailbox } from '../utils/swarm/permissionSync.js';
 import { registerSandboxPermissionCallback } from '../hooks/useSwarmPermissionPoller.js';
 import { getTeamName, getAgentName, isTeammate } from '../utils/teammate.js';
@@ -1572,7 +1573,10 @@ export function REPL({
   const queryLifecycleTrackerRef = useRef(new QueryLifecycleOperationTracker());
   // API-error turns intentionally skip Stop hooks. Keep a per-turn marker so
   // pane teammates can report that terminal failure to their leader promptly.
-  const teammateApiErrorRef = useRef<false | Exclude<TeammateFailureKind, 'runtime'>>(false);
+  const teammateApiErrorRef = useRef<false | {
+    kind: Exclude<TeammateFailureKind, 'runtime'>;
+    text: string;
+  }>(false);
 
   // Remote session hook - manages WebSocket connection and message handling for --remote mode
   const remoteSession = useRemoteSession({
@@ -3134,15 +3138,15 @@ export function REPL({
         // A later successful retry clears the marker; an API error that ends
         // the turn remains set for the teammate failure report in onQuery's
         // finally block.
-        if (newMessage.isApiErrorMessage === true) {
-          const content = newMessage.message?.content;
-          const firstText = Array.isArray(content)
-            ? content.find(block => block.type === 'text')
-            : undefined;
-          teammateApiErrorRef.current = classifyTeammateApiError(
-            newMessage.error,
-            firstText && 'text' in firstText ? firstText.text : undefined,
-          );
+        // One detector for "this turn ended in a failure" (also used by the
+        // in-process runner and the agent lifecycle). A user abort is a stop,
+        // so it clears the marker like a successful message does.
+        const turnFailure = findTurnFailure([newMessage]);
+        if (turnFailure) {
+          teammateApiErrorRef.current = {
+            kind: turnFailure.kind,
+            text: turnFailure.errorText
+          };
         } else {
           teammateApiErrorRef.current = false;
         }
@@ -3609,14 +3613,19 @@ export function REPL({
           });
         }
       };
-      const teammateFailureKind = modelTurnStarted
+      const teammateFailure: {
+        kind: TeammateFailureKind;
+        text?: string;
+      } | undefined = modelTurnStarted
         ? teammateApiErrorRef.current
           ? teammateApiErrorRef.current
           : didThrow || queryTerminal?.reason === 'model_error'
-            ? 'runtime'
+            ? {
+              kind: 'runtime'
+            }
             : undefined
         : undefined;
-      if (teammateFailureKind) {
+      if (teammateFailure) {
         const teamName = getTeamName();
         const agentName = getAgentName();
         if (teamName && agentName) {
@@ -3624,7 +3633,8 @@ export function REPL({
             await reportTeammateTurnFailure(
               teamName,
               agentName,
-              teammateFailureKind,
+              teammateFailure.kind,
+              teammateFailure.text,
             );
           } catch (error) {
             // Reporting is best effort. Keep the original query outcome and

@@ -2,14 +2,18 @@
  * The fixed vocabulary a teammate uses to report a failed turn, and how each
  * kind is classified for the lead's attention items. Kept dependency-free so
  * both the teammate side (teammateInit) and the lead side (the pane watchdog,
- * attention items) can import it.
+ * attention items) can import it. Its only import is the pure redaction
+ * helper.
  */
+import { redactLikelySecrets, redactUrlForDisplay } from '../redaction.js'
+
 export type TeammateFailureKind =
   | 'provider'
   | 'runtime'
   | 'authentication'
   | 'quota'
   | 'rate_limit'
+  | 'refusal'
 
 export const TEAMMATE_FAILURE_REASONS: Record<TeammateFailureKind, string> = {
   authentication:
@@ -18,6 +22,8 @@ export const TEAMMATE_FAILURE_REASONS: Record<TeammateFailureKind, string> = {
     "Teammate provider quota exhausted or not enabled. Pick a model on another provider or wait for the provider's quota to reset.",
   rate_limit:
     'Teammate provider rate limit reached. Retry later or pick a model on another provider.',
+  refusal:
+    "Teammate request was refused by the model provider's usage policy. Rephrase the task or retry on another model.",
   provider: 'Teammate provider request failed before completion.',
   runtime: 'Teammate runtime failed before completion.',
 }
@@ -29,14 +35,90 @@ const TRANSIENT_KINDS: ReadonlySet<TeammateFailureKind> = new Set([
   'quota',
 ])
 
+/**
+ * Provider error text is untrusted: it can carry API keys, bearer tokens,
+ * proxy URLs with embedded credentials or secret query parameters. Everything
+ * that is written to a mailbox or an attention item goes through here first.
+ */
+export function redactFailureDetail(text: string): string {
+  // `chatgpt-account-id` identifies an account (header or JSON field).
+  const withoutAccount = text.replace(
+    /(["']?chatgpt-account-id["']?\s*[:=]\s*)(["']?)[^\s"',;}]+\2/gi,
+    '$1[REDACTED_ACCOUNT_ID]',
+  )
+  return redactLikelySecrets(withoutAccount).replace(/https?:\/\/[^\s"'<>)]+/g, url =>
+    redactUrlForDisplay(url),
+  )
+}
+
+/** Separates the fixed reason text from the provider's own error text. */
+const DETAIL_SEPARATOR = '\n\nProvider message: '
+const MAX_DETAIL_CHARS = 1_000
+
+/**
+ * The lead-facing failure reason for `kind`: the fixed text, followed by the
+ * original error text when there is one, so the lead sees what actually
+ * happened and not only a category. `teammateFailureKindOfReason` still
+ * recognises the result.
+ */
+export function formatTeammateFailureReason(
+  kind: TeammateFailureKind,
+  detail?: string,
+): string {
+  const text = TEAMMATE_FAILURE_REASONS[kind]
+  const trimmed = detail?.trim() ? redactFailureDetail(detail.trim()) : ''
+  if (!trimmed) return text
+  const clipped =
+    trimmed.length > MAX_DETAIL_CHARS
+      ? `${trimmed.slice(0, MAX_DETAIL_CHARS)}…`
+      : trimmed
+  return `${text}${DETAIL_SEPARATOR}${clipped}`
+}
+
 export function teammateFailureKindOfReason(
   reason: string | undefined,
 ): TeammateFailureKind | undefined {
   if (!reason) return undefined
   for (const [kind, text] of Object.entries(TEAMMATE_FAILURE_REASONS)) {
-    if (text === reason) return kind as TeammateFailureKind
+    if (text === reason || reason.startsWith(text + DETAIL_SEPARATOR)) {
+      return kind as TeammateFailureKind
+    }
   }
   return undefined
+}
+
+/**
+ * Map a terminal API-error message to a fixed failure category. Prefers the
+ * structured signal (`apiError`/`errorCode`) and falls back to the message
+ * text. Only the category leaves this function — never the raw text.
+ */
+export function classifyTeammateApiError(
+  errorCode: string | undefined,
+  text: string | undefined,
+  apiError?: string,
+): Exclude<TeammateFailureKind, 'runtime'> {
+  if (
+    apiError === 'refusal' ||
+    (text !== undefined &&
+      /unable to respond to this request, which appears to violate our Usage Policy/i.test(
+        text,
+      ))
+  ) {
+    return 'refusal'
+  }
+  if (
+    errorCode === 'authentication_failed' ||
+    (text !== undefined && /OAuth token (has been )?revoked|Please run \/login/i.test(text))
+  ) {
+    return 'authentication'
+  }
+  if (text !== undefined && /quota exhausted|insufficient_quota|exceeded your current quota|usage limit has been reached/i.test(text)) {
+    return 'quota'
+  }
+  if (errorCode === 'rate_limit' || (text !== undefined && /rate limit|429/i.test(text))) {
+    return 'rate_limit'
+  }
+  return 'provider'
 }
 
 /**
