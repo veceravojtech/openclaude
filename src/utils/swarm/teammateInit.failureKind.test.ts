@@ -25,6 +25,13 @@ describe('classifyTeammateApiError', () => {
     expect(
       classifyTeammateApiError(undefined, 'You exceeded your current quota'),
     ).toBe('quota')
+    // A ChatGPT plan (Codex) usage limit, as getCodexPlanLimitMessage words it.
+    expect(
+      classifyTeammateApiError(
+        undefined,
+        "Your ChatGPT plan's Codex usage limit has been reached. It resets at 3:05pm (UTC) (in 2h 5m).\nFix:\n- Wait for the limit to reset\n- Or switch provider via /provider",
+      ),
+    ).toBe('quota')
   })
 
   test('rate limits map to rate_limit', () => {

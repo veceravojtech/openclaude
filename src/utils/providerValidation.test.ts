@@ -131,6 +131,27 @@ test('still errors when no Gemini credential source is available', async () => {
   )
 })
 
+test('codex sign-in hint prints the clean model id, without the [1m] tag or query', async () => {
+  process.env.CLAUDE_CODE_USE_OPENAI = '1'
+  delete process.env.OPENAI_BASE_URL
+  delete process.env.OPENAI_API_BASE
+  delete process.env.OPENAI_API_KEY
+  delete process.env.OPENAI_API_KEYS
+  delete process.env.CLAUDE_CODE_USE_GITHUB
+  delete process.env.CODEX_API_KEY
+  delete process.env.CHATGPT_ACCOUNT_ID
+  delete process.env.CODEX_ACCOUNT_ID
+
+  for (const model of ['gpt-6-sol[1m]', 'gpt-6-sol?reasoning=low[1m]']) {
+    process.env.OPENAI_MODEL = model
+    const message = await getProviderValidationError(process.env)
+    expect(message).not.toBeNull()
+    expect(message!).toContain('gpt-6-sol is served on api.openai.com with an API key')
+    expect(message!).not.toContain('[1m]')
+    expect(message!).not.toContain('reasoning=')
+  }
+})
+
 test('openai missing key error includes recovery guidance and config locations', async () => {
   process.env.CLAUDE_CODE_USE_OPENAI = '1'
   process.env.OPENAI_BASE_URL = 'https://api.openai.com/v1'

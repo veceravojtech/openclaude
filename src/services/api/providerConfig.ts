@@ -36,7 +36,6 @@ import {
 } from '../../integrations/runtimeMetadata.js'
 
 export const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1'
-
 export const DEFAULT_CODEX_BASE_URL = 'https://chatgpt.com/backend-api/codex'
 export const DEFAULT_MISTRAL_BASE_URL = 'https://api.mistral.ai/v1'
 export const DEFAULT_OPENCODE_BASE_URL = 'https://opencode.ai/zen/v1'
@@ -489,7 +488,7 @@ export function canonicalizeOverrideModel(
 ): string {
   if (!asEnvUrl(baseUrl)) return model
   const base = normalizeModelBaseId(model)
-  if (!OPENAI_CODEX_SHORTCUT_ALIASES.has(base) || !Object.hasOwn(CODEX_ALIAS_MODELS, base)) {
+  if (!OPENAI_CODEX_SHORTCUT_ALIASES.has(base)) {
     return model
   }
   const concrete = (CODEX_ALIAS_MODELS[base as CodexAlias] as { model: string }).model

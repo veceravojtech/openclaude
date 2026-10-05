@@ -42,7 +42,7 @@ import {
   PDF_TARGET_RAW_SIZE,
 } from '../../constants/apiLimits.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
-import { formatFileSize } from '../../utils/format.js'
+import { formatFileSize, formatResetTime } from '../../utils/format.js'
 import { ImageResizeError } from '../../utils/imageResizer.js'
 import { RequestImageDimensionsError } from '../../utils/requestImageValidation.js'
 import { ImageSizeError } from '../../utils/imageValidation.js'
@@ -550,6 +550,103 @@ function formatResetDuration(seconds: number): string {
   if (hours > 0) parts.push(`${hours}h`)
   if (minutes > 0 && days === 0) parts.push(`${minutes}m`)
   return parts.join(' ') || 'soon'
+}
+
+// ChatGPT plan (Codex backend) usage limit. codexShim.ts surfaces a non-2xx
+// Codex response as APIError.generate(status, parsedBody, ..., headers); for a
+// plan limit the backend answers 429 with
+//   {"error":{"type":"usage_limit_reached","plan_type":"plus",
+//             "resets_at":<unix seconds>,"resets_in_seconds":<n>}}
+// The SDK builds the message from the parsed body, so the body's
+// `usage_limit_reached` type (not message text) is what identifies it.
+// "Enable billing" is wrong advice there: the limit clears on its own.
+
+const CODEX_MAX_RESET_SECONDS = 366 * 86400
+
+function parseCodexPlanLimitError(
+  error: unknown,
+): { resetsAtSeconds?: number; resetsInSeconds?: number } | null {
+  if (!(error instanceof APIError) || error.status !== 429) return null
+
+  const asRecord = (v: unknown): Record<string, unknown> | undefined =>
+    typeof v === 'object' && v !== null ? (v as Record<string, unknown>) : undefined
+  let body = asRecord(error.error)
+  if (!body) {
+    // Non-JSON-parsed fallback: the raw body is embedded in the message.
+    const start = error.message.indexOf('{')
+    if (start >= 0) {
+      try {
+        body = asRecord(JSON.parse(error.message.slice(start)))
+      } catch {
+        /* not JSON */
+      }
+    }
+  }
+  const detail = asRecord(body?.error) ?? body
+  if (!detail) return null
+  const code = detail.type ?? detail.code
+  if (code !== 'usage_limit_reached') return null
+
+  // A reset that is not a finite positive number, or that lies more than a
+  // year ahead (a millisecond timestamp, garbage), is treated as missing so
+  // the message omits the time instead of printing an invalid date.
+  const nowSeconds = Date.now() / 1000
+  const positive = (v: unknown): number | undefined => {
+    const n = typeof v === 'string' && v.trim() !== '' ? Number(v) : v
+    return typeof n === 'number' && Number.isFinite(n) && n > 0 ? n : undefined
+  }
+  const plausibleAt = (v: unknown): number | undefined => {
+    const n = positive(v)
+    return n !== undefined && n - nowSeconds <= CODEX_MAX_RESET_SECONDS ? n : undefined
+  }
+  const plausibleIn = (v: unknown): number | undefined => {
+    const n = positive(v)
+    return n !== undefined && n <= CODEX_MAX_RESET_SECONDS ? n : undefined
+  }
+  return {
+    resetsAtSeconds: plausibleAt(detail.resets_at),
+    resetsInSeconds:
+      plausibleIn(detail.resets_in_seconds) ??
+      plausibleIn(error.headers?.get?.('retry-after')),
+  }
+}
+
+/** True for a 429 `usage_limit_reached` from the ChatGPT Codex backend. */
+export function isCodexPlanLimitError(error: unknown): boolean {
+  return parseCodexPlanLimitError(error) !== null
+}
+
+/**
+ * User-facing text for a Codex plan limit, or null for any other error. The
+ * reset time is shown only when the response carried one.
+ */
+export function getCodexPlanLimitMessage(
+  error: unknown,
+  nowMs: number = Date.now(),
+): string | null {
+  const limit = parseCodexPlanLimitError(error)
+  if (!limit) return null
+  const remainingSeconds =
+    limit.resetsAtSeconds !== undefined
+      ? Math.max(0, Math.round(limit.resetsAtSeconds - nowMs / 1000))
+      : limit.resetsInSeconds
+  const resetAtSeconds =
+    limit.resetsAtSeconds ??
+    (limit.resetsInSeconds !== undefined
+      ? Math.round(nowMs / 1000 + limit.resetsInSeconds)
+      : undefined)
+  let reset = ''
+  if (resetAtSeconds !== undefined && remainingSeconds !== undefined) {
+    const at = formatResetTime(resetAtSeconds, true)
+    reset = ` It resets at ${at} (in ${formatResetDuration(remainingSeconds)}).`
+  }
+  return (
+    "Your ChatGPT plan's Codex usage limit has been reached." +
+    reset +
+    '\nFix:\n' +
+    '- Wait for the limit to reset\n' +
+    '- Or switch provider via /provider'
+  )
 }
 
 export { isOAuthGrantRevokedMessage }

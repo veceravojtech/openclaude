@@ -33,6 +33,7 @@ import {
   isCodexBackendRoute,
   isLikelyOllamaEndpoint,
   isLocalProviderUrl,
+  normalizeModelBaseId,
   resolveCodexApiCredentials,
   resolveProviderRequest,
 } from '../services/api/providerConfig.js'
@@ -126,7 +127,7 @@ function getCodexSignInHint(env: NodeJS.ProcessEnv): string | null {
   if (!model || hasBaseUrl || !isCodexAlias(model)) {
     return null
   }
-  return `${model.split('?', 1)[0]} is served on api.openai.com with an API key when no base URL is set. To use ChatGPT/Codex sign-in instead, set OPENAI_BASE_URL=${DEFAULT_CODEX_BASE_URL} or select a Codex OAuth profile with /provider.`
+  return `${normalizeModelBaseId(model)} is served on api.openai.com with an API key when no base URL is set. To use ChatGPT/Codex sign-in instead, set OPENAI_BASE_URL=${DEFAULT_CODEX_BASE_URL} or select a Codex OAuth profile with /provider.`
 }
 
 function getOpenAIMissingKeyMessage(env: NodeJS.ProcessEnv = process.env): string {

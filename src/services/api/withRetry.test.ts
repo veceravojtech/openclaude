@@ -576,6 +576,153 @@ describe('OpenAI-compatible retry classification', () => {
     )
   })
 
+  describe('quota exhaustion messages', () => {
+    async function runQuota(error: APIError, model: string) {
+      process.env.OPENCLAUDE_RETRY_DELAY_MS = '1'
+      const { CannotRetryError, withRetry } =
+        await importFreshWithRetryModule('openai')
+      let attempts = 0
+      let caught: unknown
+      try {
+        await drainAsyncGenerator(
+          withRetry(
+            async () => ({} as Anthropic),
+            async () => {
+              attempts++
+              throw error
+            },
+            { maxRetries: 2, model, thinkingConfig: { type: 'disabled' } },
+          ),
+        )
+      } catch (e) {
+        caught = e
+      }
+      return { caught, attempts, CannotRetryError }
+    }
+
+    // The error codexShim.ts builds for a non-2xx Codex response.
+    function codexError(body: object, headers = new Headers()): APIError {
+      return APIError.generate(
+        429,
+        body,
+        `Codex API error 429: ${JSON.stringify(body)}`,
+        headers,
+      )
+    }
+
+    test('Codex usage_limit_reached shows the plan limit with the reset time, not billing advice', async () => {
+      const resetsAt = Math.floor(Date.now() / 1000) + 2 * 3600 + 5 * 60 + 30
+      const { caught, attempts, CannotRetryError } = await runQuota(
+        codexError({
+          error: {
+            type: 'usage_limit_reached',
+            message: 'The usage limit has been reached',
+            plan_type: 'plus',
+            resets_at: resetsAt,
+            resets_in_seconds: 2 * 3600 + 5 * 60 + 30,
+          },
+        }),
+        'gpt-5.6-sol',
+      )
+      expect(caught).toBeInstanceOf(CannotRetryError)
+      expect(attempts).toBe(1)
+      const message = (caught as Error).message
+      expect(message).toContain("ChatGPT plan's Codex usage limit has been reached")
+      expect(message).toMatch(/It resets at .+ \(in 2h 5m\)\./)
+      expect(message).toContain('/provider')
+      expect(message).not.toContain('Enable billing')
+      expect(message).not.toContain('API quota exhausted')
+    })
+
+    test('Codex usage_limit_reached with only resets_in_seconds derives the reset time', async () => {
+      const { caught } = await runQuota(
+        codexError({
+          error: { type: 'usage_limit_reached', resets_in_seconds: 90 * 60 },
+        }),
+        'gpt-5.6-sol',
+      )
+      expect((caught as Error).message).toMatch(/It resets at .+ \(in 1h 30m\)\./)
+    })
+
+    test('Codex usage_limit_reached with no reset info omits the reset time', async () => {
+      const { caught, attempts, CannotRetryError } = await runQuota(
+        codexError({ error: { type: 'usage_limit_reached' } }),
+        'gpt-5.6-sol',
+      )
+      expect(caught).toBeInstanceOf(CannotRetryError)
+      expect(attempts).toBe(1)
+      const message = (caught as Error).message
+      expect(message).toContain("Codex usage limit has been reached")
+      expect(message).not.toContain('resets at')
+      expect(message).not.toContain('Enable billing')
+    })
+
+    test('Codex usage_limit_reached is recognised when the body was not JSON-parsed', async () => {
+      const body = { error: { type: 'usage_limit_reached', resets_in_seconds: 3600 } }
+      const { caught } = await runQuota(
+        APIError.generate(
+          429,
+          undefined,
+          `Codex API error 429: ${JSON.stringify(body)}`,
+          new Headers(),
+        ),
+        'gpt-5.6-sol',
+      )
+      expect((caught as Error).message).toMatch(/It resets at .+ \(in 1h\)\./)
+      expect((caught as Error).message).not.toContain('Enable billing')
+    })
+
+    test('implausible reset values are treated as missing, not printed', async () => {
+      const cases: Array<Record<string, unknown>> = [
+        { resets_at: 1e15 },
+        { resets_at: Date.now() + 3600_000 }, // milliseconds, not seconds
+        { resets_in_seconds: 1e12 },
+        { resets_at: 'garbage' },
+      ]
+      for (const fields of cases) {
+        const { caught } = await runQuota(
+          codexError({ error: { type: 'usage_limit_reached', ...fields } }),
+          'gpt-5.6-sol',
+        )
+        const message = (caught as Error).message
+        expect(message).toContain('Codex usage limit has been reached')
+        expect(message).not.toContain('resets at')
+        expect(message).not.toContain('Invalid Date')
+      }
+    })
+
+    test('a past reset time still shows, as "soon"', async () => {
+      const { caught } = await runQuota(
+        codexError({
+          error: {
+            type: 'usage_limit_reached',
+            resets_at: Math.floor(Date.now() / 1000) - 60,
+          },
+        }),
+        'gpt-5.6-sol',
+      )
+      expect((caught as Error).message).toMatch(/It resets at .+ \(in soon\)\./)
+    })
+
+    test('a non-Codex quota error keeps the generic billing message', async () => {
+      const { caught, attempts, CannotRetryError } = await runQuota(
+        APIError.generate(
+          429,
+          undefined,
+          'OpenAI API error 429: You exceeded your current quota, please check your plan and billing details.',
+          new Headers(),
+        ),
+        'gpt-4o',
+      )
+      expect(caught).toBeInstanceOf(CannotRetryError)
+      expect(attempts).toBe(1)
+      const message = (caught as Error).message
+      expect(message).toContain('API quota exhausted or not enabled.')
+      expect(message).toContain('Enable billing for your provider')
+      expect(message).not.toContain('Codex usage limit')
+    })
+  })
+
   test('terminates OpenCode Go quota 429 immediately in fast mode (no fast-mode retry/cooldown)', async () => {
     // Regression for #1749 (CodeRabbit): the OpenCode Go terminal throw must run
     // BEFORE the fast-mode 429 fallback, otherwise fast mode retries/cooldowns a

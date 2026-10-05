@@ -120,13 +120,9 @@ export function isGithubNativeAnthropicMode(resolvedModel?: string): boolean {
 // with no model of its own runs the openai route's default model, exactly as
 // startup validation resolves it.
 function isCodexModel(): boolean {
-  try {
-    return isCodexBackendRoute(
-      resolveProviderRequest({ fallbackModel: getRouteDefaultModel('openai') }),
-    )
-  } catch {
-    return false
-  }
+  return isCodexBackendRoute(
+    resolveProviderRequest({ fallbackModel: getRouteDefaultModel('openai') }),
+  )
 }
 
 export function getAPIProviderForStatsig(): AnalyticsMetadata_I_VERIFIED_THIS_IS_NOT_CODE_OR_FILEPATHS {

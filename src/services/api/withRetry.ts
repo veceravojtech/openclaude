@@ -56,6 +56,8 @@ import {
 } from '../rateLimitMocking.js'
 import {
   clearUsageLimitAccountSwitch,
+  getCodexPlanLimitMessage,
+  isCodexPlanLimitError,
   isOAuthGrantRevokedError,
   isOpenCodeGoQuotaError,
   noteUsageLimitAccountSwitch,
@@ -404,6 +406,12 @@ export async function* withRetry<T>(
         extractOpenAICategoryMarker(error.message) === 'quota_exhausted'
       ) {
         throw new CannotRetryError(error, retryContext)
+      }
+      // ChatGPT/Codex plan limit: terminal, but "enable billing" is wrong
+      // advice - show the plan-limit message with the reset time instead.
+      const codexPlanLimitMessage = getCodexPlanLimitMessage(error)
+      if (codexPlanLimitMessage !== null) {
+        throw new CannotRetryError(new Error(codexPlanLimitMessage), retryContext)
       }
       if (isQuotaExhausted(error)) {
         throw new CannotRetryError(
@@ -1181,7 +1189,7 @@ function shouldRetry(error: APIError, persistentRetryEnabled: boolean): boolean 
   // Retry on rate limits, but not for ClaudeAI Subscription users
   // Enterprise users can retry because they typically use PAYG instead of rate limits
   if (error.status === 429) {
-    if (isQuotaExhausted(error)) return false
+    if (isQuotaExhausted(error) || isCodexPlanLimitError(error)) return false
     return !isClaudeAISubscriber() || isEnterpriseSubscriber()
   }
 

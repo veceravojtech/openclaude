@@ -394,19 +394,15 @@ function codexOr(
   if (isCodexBaseUrl(baseUrl)) return 'codex'
   // A profile/override with no model names no shortcut: only its URL decides.
   if (!env) return route
-  try {
-    return isCodexBackendRoute(resolveProviderRequest({
-        model,
-        baseUrl,
-        processEnv: env,
-        // A session with no model runs the openai route's default model.
-        fallbackModel: getRouteDefaultModel('openai'),
-      }))
-      ? 'codex'
-      : route
-  } catch {
-    return route
-  }
+  return isCodexBackendRoute(resolveProviderRequest({
+      model,
+      baseUrl,
+      processEnv: env,
+      // A session with no model runs the openai route's default model.
+      fallbackModel: getRouteDefaultModel('openai'),
+    }))
+    ? 'codex'
+    : route
 }
 
 function routeFromOpenAIBaseUrl(baseUrl: string | undefined): string {

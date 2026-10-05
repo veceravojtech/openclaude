@@ -257,7 +257,7 @@ export function classifyTeammateApiError(
   ) {
     return 'authentication'
   }
-  if (text !== undefined && /quota exhausted|insufficient_quota|exceeded your current quota/i.test(text)) {
+  if (text !== undefined && /quota exhausted|insufficient_quota|exceeded your current quota|usage limit has been reached/i.test(text)) {
     return 'quota'
   }
   if (errorCode === 'rate_limit' || (text !== undefined && /rate limit|429/i.test(text))) {

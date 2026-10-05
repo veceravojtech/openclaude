@@ -140,7 +140,12 @@ on the Codex URL). With no override URL the shortcut still routes to Codex, and 
 bound saved profile is judged on its own URL. This
 applies to the OpenAI/Codex path; GitHub Copilot sessions use their own endpoint.
 Codex's `codexplan` resolves to `gpt-5.6-sol`, which is not in the matrix, so
-pin a `gpt-6*` model for Codex teammates.
+pin a `gpt-6*` model for Codex teammates. That pinned teammate runs on Codex only
+when the leader session itself has a Codex base URL
+(`OPENAI_BASE_URL=https://chatgpt.com/backend-api/codex`) or a Codex OAuth
+profile. A leader on `OPENAI_MODEL=codexplan` with no base URL that spawns a
+`gpt-6.1-sol` teammate gets a teammate on `api.openai.com`, which needs
+`OPENAI_API_KEY`.
 
 A teammate that simply inherits the leader's own model and provider (no
 `model`, `inherit`, or the leader's exact model, with no routing and no

@@ -361,7 +361,7 @@ function resolveCatalogReasoningMetadata(
   if (
     !entry &&
     routeId === 'custom' &&
-    (baseUrlSupportsResponsesAutoRoute(fallbackBaseUrl, context?.processEnv ?? process.env) ||
+    (baseUrlSupportsResponsesAutoRoute(fallbackBaseUrl, processEnv) ||
       isCodexBackendRoute(
         resolveProviderRequest({ model, baseUrl: context?.baseUrl, processEnv }),
       ))
