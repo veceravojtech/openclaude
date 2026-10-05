@@ -953,12 +953,31 @@ async function* readSseEvents(
 function determineStopReason(
   response: Record<string, any> | undefined,
   sawToolUse: boolean,
-): 'end_turn' | 'tool_use' | 'max_tokens' {
+): 'end_turn' | 'tool_use' | 'max_tokens' | 'refusal' {
   const output = Array.isArray(response?.output) ? response.output : []
-  if (
+  const hasToolCall =
     sawToolUse ||
     output.some((item: { type?: string }) => item?.type === 'function_call')
-  ) {
+  // The Responses API ends a response blocked by its safety / usage policy as
+  // `incomplete` with reason `content_filter`, and a model refusal arrives as
+  // a `refusal` content part of a message output: both are refusals, like
+  // Anthropic's. Flagged output that also carries a tool call is not: the tool
+  // runs and the turn goes on, so it stays `tool_use` (a refusal would show the
+  // policy banner mid-turn).
+  const refused =
+    response?.incomplete_details?.reason === 'content_filter' ||
+    output.some(
+      (item: { type?: string; content?: Array<{ type?: string; refusal?: string }> }) =>
+        item?.type === 'message' &&
+        Array.isArray(item.content) &&
+        item.content.some(
+          part => part?.type === 'refusal' && typeof part.refusal === 'string' && part.refusal.trim() !== '',
+        ),
+    )
+  if (refused && !hasToolCall) {
+    return 'refusal'
+  }
+  if (hasToolCall) {
     return 'tool_use'
   }
 
@@ -1135,8 +1154,23 @@ async function* codexStreamToAnthropicWithReadOptions(
       }
 
       if (event.event === 'response.content_part.added') {
-        if (payload.part?.type === 'output_text') {
+        if (payload.part?.type === 'output_text' || payload.part?.type === 'refusal') {
           yield* startTextBlockIfNeeded()
+        }
+        continue
+      }
+
+      // A model refusal streams as `response.refusal.delta`; show it as text.
+      // The terminal payload carries the refusal part, which sets the stop reason.
+      if (event.event === 'response.refusal.delta') {
+        yield* startTextBlockIfNeeded()
+        if (activeTextBlockIndex !== null && typeof payload.delta === 'string' && payload.delta) {
+          throwIfStreamAborted(signal)
+          yield {
+            type: 'content_block_delta',
+            index: activeTextBlockIndex,
+            delta: { type: 'text_delta', text: payload.delta },
+          }
         }
         continue
       }
@@ -1494,6 +1528,8 @@ export function convertCodexResponseToAnthropicMessage(
             type: 'text',
             text: stripThinkTags(part.text ?? ''),
           })
+        } else if (part?.type === 'refusal' && typeof part.refusal === 'string' && part.refusal.trim()) {
+          content.push({ type: 'text', text: part.refusal })
         }
       }
       continue

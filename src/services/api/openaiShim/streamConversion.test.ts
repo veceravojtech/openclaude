@@ -686,9 +686,10 @@ test('Gemini converter starts an empty message and maps blocked finishes', async
     undefined,
     commonControlDependencies,
   ))
+  // A safety block is a refusal, not an output-limit truncation.
   expect(safetyEvents).toContainEqual({
     type: 'message_delta',
-    delta: { stop_reason: 'max_tokens' },
+    delta: { stop_reason: 'refusal' },
     usage: {},
   })
 })

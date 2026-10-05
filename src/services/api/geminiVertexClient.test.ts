@@ -549,3 +549,101 @@ test('Gemini Vertex client propagates HTTP errors', async () => {
     messages: [{ role: 'user', content: 'Salut' }],
   })).rejects.toThrow('Gemini Vertex request failed: 403 permission denied')
 })
+
+// A safety / policy block is a refusal, returned with a `refusal` stop reason
+// (so it is reported the same way as an Anthropic refusal) instead of thrown.
+function vertexClientFor(json: unknown) {
+  return createGeminiVertexClient({
+    project: 'project-123',
+    location: 'us-central1',
+    model: 'gemini-3.5-flash',
+    getAccessToken: async () => 'access-token-123',
+    fetch: (async () =>
+      new Response(JSON.stringify(json), {
+        headers: { 'Content-Type': 'application/json' },
+      })) as unknown as typeof fetch,
+  })
+}
+
+const vertexRequest = {
+  model: 'gemini-3.5-flash',
+  max_tokens: 16,
+  messages: [{ role: 'user' as const, content: 'hi' }],
+}
+
+test('Gemini Vertex safety finishes with no text are a refusal with an explanatory note, not a thrown error', async () => {
+  for (const finishReason of ['SAFETY', 'RECITATION', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII']) {
+    const message = await vertexClientFor({
+      candidates: [{ content: { parts: [] }, finishReason }],
+    }).messages.create(vertexRequest)
+    expect(message.stop_reason).toBe('refusal')
+    expect(message.content).toEqual([
+      expect.objectContaining({
+        type: 'text',
+        text: expect.stringContaining(`Gemini Vertex refused to answer (${finishReason})`),
+      }),
+    ])
+  }
+})
+
+test('Gemini Vertex safety finish after partial text keeps the text and is a refusal', async () => {
+  const message = await vertexClientFor({
+    candidates: [{ content: { parts: [{ text: 'partial answer' }] }, finishReason: 'SAFETY' }],
+  }).messages.create(vertexRequest)
+  expect(message.stop_reason).toBe('refusal')
+  expect(message.content).toEqual([{ type: 'text', text: 'partial answer' }])
+})
+
+test('Gemini Vertex prompt-level block is a refusal', async () => {
+  const message = await vertexClientFor({
+    promptFeedback: { blockReason: 'PROHIBITED_CONTENT' },
+  }).messages.create(vertexRequest)
+  expect(message.stop_reason).toBe('refusal')
+  expect(message.content[0]).toMatchObject({
+    type: 'text',
+    text: expect.stringContaining('blocked the prompt (PROHIBITED_CONTENT)'),
+  })
+})
+
+test('Gemini Vertex normal finish, MAX_TOKENS with no text and an empty STOP behave as before', async () => {
+  const ok = await vertexClientFor({
+    candidates: [{ content: { parts: [{ text: 'fine' }] }, finishReason: 'STOP' }],
+  }).messages.create(vertexRequest)
+  expect(ok.stop_reason).toBe('end_turn')
+  await expect(
+    vertexClientFor({
+      candidates: [{ content: { parts: [] }, finishReason: 'MAX_TOKENS' }],
+    }).messages.create(vertexRequest),
+  ).rejects.toThrow('hit MAX_TOKENS')
+  await expect(
+    vertexClientFor({
+      candidates: [{ content: { parts: [] }, finishReason: 'STOP' }],
+    }).messages.create(vertexRequest),
+  ).rejects.toThrow('returned an empty response')
+})
+
+test('Gemini Vertex refusal streams a refusal stop reason', async () => {
+  const { data } = await vertexClientFor({
+    candidates: [{ content: { parts: [] }, finishReason: 'SAFETY' }],
+  }).messages.create(vertexRequest).withResponse()
+  const events: GeminiVertexStreamEvent[] = []
+  for await (const event of data) events.push(event)
+  expect(events).toContainEqual(
+    expect.objectContaining({
+      type: 'message_delta',
+      delta: { stop_reason: 'refusal', stop_sequence: null },
+    }),
+  )
+})
+
+test('Gemini Vertex safety finish next to a function call stays tool_use', async () => {
+  const message = await vertexClientFor({
+    candidates: [
+      {
+        content: { parts: [{ functionCall: { name: 'Read', args: { path: 'a' } } }] },
+        finishReason: 'SAFETY',
+      },
+    ],
+  }).messages.create(vertexRequest)
+  expect(message.stop_reason).toBe('tool_use')
+})

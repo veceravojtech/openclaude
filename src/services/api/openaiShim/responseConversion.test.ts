@@ -200,6 +200,8 @@ test('preserves structured Gemini signatures and safety terminal responses', () 
     { type: 'text', text: '\n\n[Content blocked by provider safety filter]' },
   ])
   expect(message.model).toBe('gemini')
+  // A flagged finish next to a tool call is not a refusal: the tool runs and
+  // the turn goes on.
   expect(message.stop_reason).toBe('tool_use')
 })
 
@@ -225,4 +227,61 @@ test('normalizes array content and length stop reasons', () => {
   expect(message.content).toEqual([{ type: 'text', text: 'first\nsecond' }])
   expect(message.stop_reason).toBe('max_tokens')
   expect(message.id).toBe('msg-test')
+})
+
+test('a message.refusal is visible text and a refusal stop reason; an empty one is ignored', () => {
+  const deps = {
+    makeMessageId: () => 'msg',
+    buildUsage: () => ({}),
+    stripThinkTags: (t: string) => t,
+    parseXmlToolCalls: () => ({ calls: [], toolCallRanges: [] }),
+    isHy3Model: () => false,
+    stripRanges: (t: string) => t,
+    parseRawToolCalls: () => null,
+    normalizeToolArguments: (_n: string, a: string) => JSON.parse(a),
+    getGeminiThoughtSignature: () => undefined,
+    mergeGeminiThoughtSignature: () => undefined,
+  }
+  const refused = convertNonStreamingResponseToAnthropicMessage(
+    { choices: [{ message: { role: 'assistant', content: null, refusal: "I can't help." }, finish_reason: 'stop' }] },
+    'gpt-4o',
+    deps as never,
+  )
+  expect(refused.stop_reason).toBe('refusal')
+  expect(refused.content).toEqual([{ type: 'text', text: "I can't help." }])
+  for (const refusal of [null, '', '  ']) {
+    const normal = convertNonStreamingResponseToAnthropicMessage(
+      { choices: [{ message: { role: 'assistant', content: 'hello', refusal }, finish_reason: 'stop' }] },
+      'gpt-4o',
+      deps as never,
+    )
+    expect(normal.stop_reason).toBe('end_turn')
+    expect(normal.content).toEqual([{ type: 'text', text: 'hello' }])
+  }
+})
+
+test('a filter finish or refusal next to a tool call stays tool_use; without one it is a refusal', () => {
+  const deps = {
+    makeMessageId: () => 'msg',
+    buildUsage: () => ({}),
+    stripThinkTags: (t: string) => t,
+    parseXmlToolCalls: () => ({ calls: [], toolCallRanges: [] }),
+    isHy3Model: () => false,
+    stripRanges: (t: string) => t,
+    parseRawToolCalls: () => null,
+    normalizeToolArguments: (_n: string, a: string) => JSON.parse(a),
+    getGeminiThoughtSignature: () => undefined,
+    mergeGeminiThoughtSignature: () => undefined,
+  }
+  const toolCalls = [{ id: 'c1', function: { name: 'Read', arguments: '{"file_path":"a"}' } }]
+  const run = (message: Record<string, unknown>, finish_reason: string) =>
+    convertNonStreamingResponseToAnthropicMessage(
+      { choices: [{ message: { role: 'assistant', ...message }, finish_reason }] },
+      'gpt-4o',
+      deps as never,
+    ).stop_reason
+  expect(run({ content: 'x', tool_calls: toolCalls }, 'content_filter')).toBe('tool_use')
+  expect(run({ content: null, refusal: 'no', tool_calls: toolCalls }, 'stop')).toBe('tool_use')
+  expect(run({ content: 'x' }, 'content_filter')).toBe('refusal')
+  expect(run({ content: null, refusal: 'no' }, 'stop')).toBe('refusal')
 })

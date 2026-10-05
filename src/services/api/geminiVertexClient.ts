@@ -1,5 +1,6 @@
 import type { ClientOptions } from '@anthropic-ai/sdk'
 import type { MessageCreateParamsBase } from '@anthropic-ai/sdk/resources/messages/messages'
+import { GEMINI_REFUSAL_FINISH_REASONS } from './openaiShim/geminiStreamConversion.js'
 
 type AccessTokenProvider = () => Promise<string>
 
@@ -166,7 +167,7 @@ type GeminiVertexToolUseBlock = {
   input: Record<string, unknown>
 }
 type GeminiVertexContentBlock = GeminiVertexTextBlock | GeminiVertexToolUseBlock
-type GeminiVertexStopReason = 'end_turn' | 'tool_use'
+type GeminiVertexStopReason = 'end_turn' | 'tool_use' | 'refusal'
 
 type GeminiVertexMessage = {
   id: string
@@ -686,6 +687,20 @@ export function createGeminiVertexClient(options: GeminiVertexClientOptions) {
       const finishReason = candidate?.finishReason
       const thoughtsTokenCount = json.usageMetadata?.thoughtsTokenCount ?? 0
       const hasToolCall = contentBlocks.some(b => b.type === 'tool_use')
+      // A safety / policy block is a refusal, not a failure of the request:
+      // it is returned as a `refusal` stop reason (like Anthropic's), which the
+      // caller turns into the refusal API-error message, instead of being
+      // thrown as a generic error. Either a candidate-level finish
+      // (SAFETY, RECITATION, BLOCKLIST, PROHIBITED_CONTENT, SPII) or a
+      // prompt-level block (promptFeedback.blockReason) counts.
+      const promptBlockReason = json.promptFeedback?.blockReason
+      const refused =
+        (typeof finishReason === 'string' &&
+          GEMINI_REFUSAL_FINISH_REASONS.has(finishReason) &&
+          // A tool call wins: the tool runs and the turn goes on.
+          !hasToolCall) ||
+        Boolean(promptBlockReason && !text && !hasToolCall)
+      let refusalNote: string | undefined
 
       // Surface every silent-empty-response path explicitly. We treat the
       // response as empty only when the candidate produced neither text nor
@@ -694,19 +709,18 @@ export function createGeminiVertexClient(options: GeminiVertexClientOptions) {
       if (!text && !hasToolCall) {
         // 1. Prompt-level block: Vertex refuses to process the input before
         //    producing any candidate (safety filter at the prompt layer).
-        const promptBlock = json.promptFeedback?.blockReason
+        const promptBlock = promptBlockReason
         if (promptBlock) {
           const detail =
             json.promptFeedback?.blockReasonMessage ??
             summarizeBlockedSafetyRatings(json.promptFeedback?.safetyRatings)
-          throw new Error(
+          refusalNote =
             `Gemini Vertex blocked the prompt (${promptBlock})${detail ? `: ${detail}` : ''}. ` +
-              `Try a less sensitive prompt or another Vertex model.`,
-          )
+            `Try a less sensitive prompt or another Vertex model.`
         }
 
         // 2. Thinking model exhausted its output budget on internal reasoning.
-        if (finishReason === 'MAX_TOKENS') {
+        if (refusalNote === undefined && finishReason === 'MAX_TOKENS') {
           const usedForThinking = thoughtsTokenCount > 0
             ? ` (${thoughtsTokenCount} tokens consumed by internal thinking)`
             : ''
@@ -719,17 +733,14 @@ export function createGeminiVertexClient(options: GeminiVertexClientOptions) {
 
         // 3. Candidate-level safety / recitation / blocklist refusal.
         if (
-          finishReason === 'SAFETY' ||
-          finishReason === 'RECITATION' ||
-          finishReason === 'BLOCKLIST' ||
-          finishReason === 'PROHIBITED_CONTENT' ||
-          finishReason === 'SPII'
+          refusalNote === undefined &&
+          typeof finishReason === 'string' &&
+          GEMINI_REFUSAL_FINISH_REASONS.has(finishReason)
         ) {
           const detail = summarizeBlockedSafetyRatings(candidate?.safetyRatings)
-          throw new Error(
+          refusalNote =
             `Gemini Vertex refused to answer (${finishReason})${detail}. ` +
-              `Try rephrasing or another Vertex model.`,
-          )
+            `Try rephrasing or another Vertex model.`
         }
 
         // 4. Malformed function call: the model tried to emit a tool call
@@ -737,7 +748,7 @@ export function createGeminiVertexClient(options: GeminiVertexClientOptions) {
         //    or the schema was unparseable. The toGeminiTools/toVertexSchema
         //    pipeline above should prevent this, but surface a clear error
         //    if it still happens (e.g. an unusual tool definition).
-        if (finishReason === 'MALFORMED_FUNCTION_CALL') {
+        if (refusalNote === undefined && finishReason === 'MALFORMED_FUNCTION_CALL') {
           throw new Error(
             `Gemini Vertex emitted a malformed function call from "${model}". ` +
               `This usually indicates a tool schema Vertex couldn't parse. ` +
@@ -750,27 +761,31 @@ export function createGeminiVertexClient(options: GeminiVertexClientOptions) {
         //    diagnostic of the raw response — instead of silently dropping, so
         //    the true cause (thought-only output, empty parts, blocked content)
         //    is visible from one test rather than guessed at.
-        throw new Error(
-          `Gemini Vertex returned an empty response from "${model}"` +
-            `${finishReason ? ` (finishReason: ${finishReason})` : ''}. ` +
-            `This usually means the model couldn't generate output for this prompt — try another model or rephrase. ` +
-            diagnoseEmptyResponse(json) +
-            ' ' +
-            summarizeRequestContents(contents),
-        )
+        if (refusalNote === undefined) {
+          throw new Error(
+            `Gemini Vertex returned an empty response from "${model}"` +
+              `${finishReason ? ` (finishReason: ${finishReason})` : ''}. ` +
+              `This usually means the model couldn't generate output for this prompt — try another model or rephrase. ` +
+              diagnoseEmptyResponse(json) +
+              ' ' +
+              summarizeRequestContents(contents),
+          )
+        }
       }
 
+      // A refusal that produced nothing still returns a non-empty message
+      // (the note says why); the refusal API-error message follows it.
       const finalBlocks: GeminiVertexContentBlock[] =
         contentBlocks.length > 0
           ? contentBlocks
-          : [{ type: 'text', text }]
+          : [{ type: 'text', text: text || refusalNote || '' }]
 
       return {
         id: `gemini-vertex-${Date.now()}`,
         type: 'message',
         role: 'assistant',
         model,
-        stop_reason: hasToolCall ? 'tool_use' : 'end_turn',
+        stop_reason: refused ? 'refusal' : hasToolCall ? 'tool_use' : 'end_turn',
         stop_sequence: null,
         usage: {
           input_tokens: json.usageMetadata?.promptTokenCount ?? 0,

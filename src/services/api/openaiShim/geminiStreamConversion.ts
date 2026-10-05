@@ -12,6 +12,19 @@ type StreamReadResult = Awaited<
   ReturnType<ReadableStreamDefaultReader<Uint8Array>['read']>
 >
 
+/**
+ * Gemini candidate finish reasons that mean the provider blocked the output
+ * on safety / content policy. Mapped to an Anthropic-style `refusal` stop
+ * reason so the turn is reported as refused instead of as a truncation.
+ */
+export const GEMINI_REFUSAL_FINISH_REASONS: ReadonlySet<string> = new Set([
+  'SAFETY',
+  'RECITATION',
+  'BLOCKLIST',
+  'PROHIBITED_CONTENT',
+  'SPII',
+])
+
 export type GeminiStreamDependencies = {
   createReaderCanceller(
     reader: ReadableStreamDefaultReader<Uint8Array>,
@@ -90,9 +103,13 @@ export async function* geminiSseToAnthropic(
   const mapFinishReason = (
     reason: string | undefined,
     hasToolUse: boolean,
-  ): 'tool_use' | 'max_tokens' | 'end_turn' => {
+  ): 'tool_use' | 'max_tokens' | 'end_turn' | 'refusal' => {
+    // A tool call wins: the tool runs and the turn goes on, so a flagged
+    // output next to it is not reported as a refusal.
     if (hasToolUse) return 'tool_use'
-    if (reason === 'MAX_TOKENS' || reason === 'SAFETY' || reason === 'RECITATION') return 'max_tokens'
+    // A safety / policy block is a refusal, not an output-limit truncation.
+    if (GEMINI_REFUSAL_FINISH_REASONS.has(reason ?? '')) return 'refusal'
+    if (reason === 'MAX_TOKENS') return 'max_tokens'
     return 'end_turn'
   }
 

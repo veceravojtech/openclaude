@@ -23,7 +23,10 @@ import {
 } from './responseConversion.js'
 import { openaiStreamToAnthropic as convertOpenAIStream } from './streamConversion.js'
 import { stripMarkerEchoesFromStream } from './markerEchoGuard.js'
-import { geminiSseToAnthropic as convertGeminiStream } from './geminiStreamConversion.js'
+import {
+  GEMINI_REFUSAL_FINISH_REASONS,
+  geminiSseToAnthropic as convertGeminiStream,
+} from './geminiStreamConversion.js'
 import {
   anthropicSsePassthrough as parseAnthropicSsePassthrough,
   createProviderStreamTrace,
@@ -198,11 +201,14 @@ export function convertGeminiToAnthropicResponse(
     role: 'assistant',
     content,
     model,
+    // A tool call wins over a flagged finish (the tool runs, the turn goes on).
     stop_reason: hasToolUse
       ? 'tool_use'
-      : candidate?.finishReason === 'MAX_TOKENS'
-        ? 'max_tokens'
-        : 'end_turn',
+      : GEMINI_REFUSAL_FINISH_REASONS.has(String(candidate?.finishReason ?? ''))
+        ? 'refusal'
+        : candidate?.finishReason === 'MAX_TOKENS'
+          ? 'max_tokens'
+          : 'end_turn',
     stop_sequence: null,
     usage: buildAnthropicUsageFromRawUsage({
       input_tokens: usageMetadata?.promptTokenCount ?? 0,

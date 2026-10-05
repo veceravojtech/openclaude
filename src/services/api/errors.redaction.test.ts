@@ -1,5 +1,12 @@
 import { APIError } from '@anthropic-ai/sdk'
-import { expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { clearOAuthTokenCache } from '../../utils/auth.js'
+import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
+import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
 
 import { createAssistantAPIErrorMessage } from '../../utils/messages.js'
 import { findTurnFailure } from '../../utils/swarm/turnFailure.js'
@@ -39,6 +46,57 @@ import {
 // lead transcripts, mailbox, notifications, task output, UI) is already clean.
 // These tests pin both halves: no secret survives creation, and every consumer
 // that reads the text still classifies it correctly.
+
+// getAssistantMessageFromError answers a 429 differently for a claude.ai
+// subscriber (the rate-limit branch) and for everyone else, and whether the
+// process counts as a subscriber is cached state (OAuth tokens, user settings)
+// that other test files in the same bun process can leave behind. Pin it: a
+// private config dir whose user settings say the account is a subscriber, with
+// both caches cleared on the way in and out.
+//
+// The refusal wording also depends on the active provider (first-party links
+// to anthropic.com/legal/aup; any other provider says "your provider's
+// acceptable use policy"), which is read from provider env vars. Those are
+// saved, cleared and restored too, so a developer or CI shell with
+// CLAUDE_CODE_USE_OPENAI / _BEDROCK / ... set cannot change the result.
+const PROVIDER_ENV_KEYS = [
+  'CLAUDE_CODE_USE_ANTHROPIC',
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'CLAUDE_CODE_USE_GEMINI',
+  'CLAUDE_CODE_USE_GITHUB',
+  'CLAUDE_CODE_USE_MISTRAL',
+  'CLAUDE_CODE_USE_OPENAI',
+  'CLAUDE_CODE_USE_VERTEX',
+  'ANTHROPIC_BASE_URL',
+  'OPENAI_BASE_URL',
+  'OPENAI_API_BASE',
+] as const
+const savedProviderEnv: Partial<Record<(typeof PROVIDER_ENV_KEYS)[number], string>> = {}
+let configDir: string
+
+beforeEach(() => {
+  for (const key of PROVIDER_ENV_KEYS) {
+    savedProviderEnv[key] = process.env[key]
+    delete process.env[key]
+  }
+  configDir = mkdtempSync(join(tmpdir(), 'openclaude-errors-redaction-'))
+  writeFileSync(join(configDir, 'settings.json'), JSON.stringify({ subscriptionType: 'pro' }))
+  setClaudeConfigHomeDirForTesting(configDir)
+  resetSettingsCache()
+  clearOAuthTokenCache()
+})
+
+afterEach(() => {
+  for (const key of PROVIDER_ENV_KEYS) {
+    if (savedProviderEnv[key] === undefined) delete process.env[key]
+    else process.env[key] = savedProviderEnv[key]
+  }
+  setClaudeConfigHomeDirForTesting(undefined)
+  resetSettingsCache()
+  clearOAuthTokenCache()
+  rmSync(configDir, { recursive: true, force: true })
+})
 
 const SECRET_FRAGMENTS = [
   'SECRETACCT99',

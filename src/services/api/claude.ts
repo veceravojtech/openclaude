@@ -3268,6 +3268,15 @@ async function* queryModelInner(
       }
       traceFallbackSettlement('completed', fallbackStartedEventId)
       yield fallbackResultMessage
+      // A non-streaming response that ended on a refusal is reported the same
+      // way as a streamed one (see the message_delta handler).
+      const fallbackRefusal = getErrorMessageIfRefusal(
+        fallbackResultMessage.message.stop_reason,
+        options.model,
+      )
+      if (fallbackRefusal) {
+        yield fallbackRefusal
+      }
     } finally {
       clearStreamIdleTimers()
     }
@@ -3414,6 +3423,13 @@ async function* queryModelInner(
         fallbackMessage = m
         traceFallbackSettlement('completed', fallbackStartedEventId)
         yield m
+        const retryFallbackRefusal = getErrorMessageIfRefusal(
+          m.message.stop_reason,
+          options.model,
+        )
+        if (retryFallbackRefusal) {
+          yield retryFallbackRefusal
+        }
 
         // Continue to success logging below
       } catch (fallbackError) {

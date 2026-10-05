@@ -1,3 +1,4 @@
+import { logForDebugging } from '../../../utils/debug.js'
 import {
   TOOL_RESULTS_RECEIVED_MARKER,
   stripEchoedToolResultsMarker,
@@ -10,6 +11,8 @@ export type NonStreamingOpenAIResponse = {
     message?: {
       role?: string
       content?: string | null | Array<{ type?: string; text?: string }>
+      // OpenAI puts a model refusal here instead of in `content`.
+      refusal?: string | null
       reasoning_content?: string | null
       extra_content?: Record<string, unknown>
       tool_calls?: Array<{
@@ -106,9 +109,34 @@ export function convertNonStreamingResponseToAnthropicMessage(
     }
   }
 
-  const stopReason = choice?.finish_reason === 'tool_calls' || content.some(block => block.type === 'tool_use')
-    ? 'tool_use' : choice?.finish_reason === 'length' ? 'max_tokens' : 'end_turn'
-  if (choice?.finish_reason === 'content_filter' || choice?.finish_reason === 'safety') {
+  // A provider safety / usage-policy filter is a refusal, the same as an
+  // Anthropic `stop_reason: 'refusal'`: the caller turns it into the refusal
+  // API-error message, so the turn is reported as failed and not as an answer.
+  // A model refusal (`message.refusal`) is shown as text and ends the turn as
+  // a refusal, the same as a safety-filter finish.
+  const refusalText = typeof choice?.message?.refusal === 'string' ? choice.message.refusal.trim() : ''
+  if (refusalText) content.push({ type: 'text', text: refusalText })
+  const filtered =
+    refusalText !== '' ||
+    choice?.finish_reason === 'content_filter' ||
+    choice?.finish_reason === 'safety'
+  // Flagged output that also carries a tool call is not a refusal: the tool
+  // runs and the turn goes on, so keep `tool_use` (a refusal here would show
+  // the policy banner mid-turn). Refusal only when there is no tool call.
+  const hasToolCall =
+    choice?.finish_reason === 'tool_calls' || content.some(block => block.type === 'tool_use')
+  if (filtered && hasToolCall) {
+    logForDebugging(
+      '[openaiShim] provider flagged the output (content filter / refusal) but the turn carries a tool call; continuing as tool_use',
+    )
+  }
+  const stopReason = filtered && !hasToolCall
+    ? 'refusal'
+    : hasToolCall
+      ? 'tool_use' : choice?.finish_reason === 'length' ? 'max_tokens' : 'end_turn'
+  // The refusal API-error message that follows says why; the marker only keeps
+  // the message from being empty (and never replaces real text as the last word).
+  if (filtered && !content.some(block => block.type === 'text')) {
     content.push({ type: 'text', text: '\n\n[Content blocked by provider safety filter]' })
   }
   return {

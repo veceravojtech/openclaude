@@ -12,7 +12,9 @@ import {
 } from '../bootstrap/state.js'
 import { createSystemAPIErrorMessage } from './messages.js'
 import { createUserMessage } from './messages.js'
+import { clearOAuthTokenCache } from './auth.js'
 import { setClaudeConfigHomeDirForTesting } from './envUtils.js'
+import { resetSettingsCache } from './settings/settingsCache.js'
 import {
   flushSessionStorage,
   getTranscriptPath,
@@ -56,6 +58,8 @@ beforeEach(() => {
 })
 afterEach(() => {
   setClaudeConfigHomeDirForTesting(undefined)
+  resetSettingsCache()
+  clearOAuthTokenCache()
   rmSync(configDir, { recursive: true, force: true })
 })
 

@@ -8,6 +8,7 @@ import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
 } from '../../test/sharedMutationLock.js'
+import { clearOAuthTokenCache } from '../../utils/auth.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
 import {
   createFileStateCacheWithSizeLimit,
@@ -135,6 +136,9 @@ afterEach(() => {
       process.env.CLAUDE_CODE_TASK_LIST_ID = previousListId
     }
     setClaudeConfigHomeDirForTesting(undefined)
+    // Settings and OAuth tokens read under the private config dir are cached.
+    resetSettingsCache()
+    clearOAuthTokenCache()
     if (configDir) rmSync(configDir, { recursive: true, force: true })
     configDir = undefined
     for (const key of ROUTE_ENV_KEYS) {

@@ -37,6 +37,8 @@ type OpenAIStreamChunk = {
     delta: {
       reasoning_content?: string | null
       content?: string | null
+      // OpenAI puts a model refusal here instead of in `content`.
+      refusal?: string | null
       tool_calls?: OpenAIToolCallDelta[]
       extra_content?: Record<string, unknown>
     }
@@ -154,7 +156,7 @@ export async function* openaiStreamToAnthropic(
   let hasEmittedThinkingStart = false
   let hasClosedThinking = false
   const thinkFilter = createThinkTagFilter()
-  let lastStopReason: 'tool_use' | 'max_tokens' | 'end_turn' | null = null
+  let lastStopReason: 'tool_use' | 'max_tokens' | 'end_turn' | 'refusal' | null = null
   let hasEmittedFinalUsage = false
   let protocolComplete = false
   let providerTerminalObserved = false
@@ -162,6 +164,10 @@ export async function* openaiStreamToAnthropic(
   let hasProcessedFinishReason = false
   // Accumulated text for Ollama text-based tool call fallback parsing (#1053)
   let accumulatedText = ''
+  // The provider streamed a `refusal` (instead of, or besides, `content`).
+  let sawRefusalField = false
+  // A tool_use block was started in this stream (structured, XML or raw-text tool calls).
+  let sawToolUseBlock = false
   // Use the resolved value threaded from the call site (resolveProviderRequest)
   // rather than re-reading env vars inside the generator.
   const isOllamaStream = isOllama
@@ -256,6 +262,7 @@ export async function* openaiStreamToAnthropic(
         contentBlockIndex++
       } else if (block.type === 'tool_use') {
         const { type: _t, input, ...rest } = block
+        sawToolUseBlock = true
         yield {
           type: 'content_block_start',
           index: contentBlockIndex,
@@ -370,6 +377,7 @@ export async function* openaiStreamToAnthropic(
     for (const toolCall of toolCalls) {
       throwIfStreamAborted(signal)
       const toolBlockIndex = contentBlockIndex
+      sawToolUseBlock = true
       yield {
         type: 'content_block_start',
         index: toolBlockIndex,
@@ -556,6 +564,13 @@ export async function* openaiStreamToAnthropic(
       for (const choice of chunk.choices ?? []) {
         throwIfStreamAborted(signal)
         const delta = choice.delta
+        // OpenAI reports a model refusal in `delta.refusal`, not `content`.
+        // Show it as ordinary text (so the user and the lead read the reason)
+        // and remember it: the turn ends as a refusal, not as an answer.
+        if (typeof delta.refusal === 'string' && delta.refusal.trim() !== '') {
+          sawRefusalField = true
+          delta.content = (delta.content ?? '') + delta.refusal
+        }
 
         // Reasoning models (e.g. GLM-5, DeepSeek) may stream chain-of-thought
         // in `reasoning_content` before the actual reply appears in `content`.
@@ -721,6 +736,7 @@ export async function* openaiStreamToAnthropic(
               })
 
               throwIfStreamAborted(signal)
+              sawToolUseBlock = true
               yield {
                 type: 'content_block_start',
                 index: toolBlockIndex,
@@ -839,6 +855,7 @@ export async function* openaiStreamToAnthropic(
               for (const tc of textToolCalls) {
                 throwIfStreamAborted(signal)
                 const toolBlockIndex = contentBlockIndex
+                sawToolUseBlock = true
                 yield {
                   type: 'content_block_start',
                   index: toolBlockIndex,
@@ -908,6 +925,7 @@ export async function* openaiStreamToAnthropic(
               for (const tc of calls) {
                 throwIfStreamAborted(signal)
                 const toolBlockIndex = contentBlockIndex
+                sawToolUseBlock = true
                 yield {
                   type: 'content_block_start',
                   index: toolBlockIndex,
@@ -1022,29 +1040,56 @@ export async function* openaiStreamToAnthropic(
             yield { type: 'content_block_stop', index: tc.index }
           }
 
+          // A provider safety / usage-policy filter is a refusal (see
+          // responseConversion): claude.ts turns `refusal` into the refusal
+          // API-error message after the partial text already streamed.
+          // A flagged output that also carries a tool call is not a refusal:
+          // the tool runs and the turn goes on, so keep `tool_use` (reporting
+          // a refusal mid-turn would show the policy banner for a turn that
+          // then completes). Refusal only when there is no tool call.
+          const flagged =
+            sawRefusalField ||
+            choice.finish_reason === 'content_filter' ||
+            choice.finish_reason === 'safety'
+          // (A truncated tool call, finish `length`, keeps reporting max_tokens.)
+          const hasToolCall =
+            sawToolUseBlock || Boolean(parsedBufferedToolCalls) || choice.finish_reason === 'tool_calls'
+          if (flagged && hasToolCall) {
+            logForDebugging(
+              '[openaiShim] provider flagged the output (content filter / refusal) but the turn carries a tool call; continuing as tool_use',
+            )
+          }
           const stopReason =
-            parsedBufferedToolCalls || choice.finish_reason === 'tool_calls'
-              ? 'tool_use'
-              : choice.finish_reason === 'length'
-                ? 'max_tokens'
-                : 'end_turn'
+            flagged && !hasToolCall
+              ? 'refusal'
+              : parsedBufferedToolCalls || choice.finish_reason === 'tool_calls' || (flagged && hasToolCall)
+                ? 'tool_use'
+                : choice.finish_reason === 'length'
+                  ? 'max_tokens'
+                  : 'end_turn'
           if (choice.finish_reason === 'content_filter' || choice.finish_reason === 'safety') {
             // Gemini/Azure content safety filter blocked the response.
-            // Emit a visible text block so the user knows why output was truncated.
-            if (!hasEmittedContentStart) {
+            // The `refusal` stop reason becomes the refusal API-error message
+            // downstream, which already tells the user why. A marker line is
+            // added only when nothing was streamed, so the message is not
+            // empty; after real partial text it would only replace that text
+            // as the "last thing the model said".
+            if (!accumulatedText.trim()) {
+              if (!hasEmittedContentStart) {
+                throwIfStreamAborted(signal)
+                yield {
+                  type: 'content_block_start',
+                  index: contentBlockIndex,
+                  content_block: { type: 'text', text: '' },
+                }
+                hasEmittedContentStart = true
+              }
               throwIfStreamAborted(signal)
               yield {
-                type: 'content_block_start',
+                type: 'content_block_delta',
                 index: contentBlockIndex,
-                content_block: { type: 'text', text: '' },
+                delta: { type: 'text_delta', text: '\n\n[Content blocked by provider safety filter]' },
               }
-              hasEmittedContentStart = true
-            }
-            throwIfStreamAborted(signal)
-            yield {
-              type: 'content_block_delta',
-              index: contentBlockIndex,
-              delta: { type: 'text_delta', text: '\n\n[Content blocked by provider safety filter]' },
             }
           } else if (choice.finish_reason === 'length') {
             // Response was truncated — either the model hit max_tokens, or
@@ -1068,9 +1113,10 @@ export async function* openaiStreamToAnthropic(
             }
           }
           if (
-            choice.finish_reason === 'content_filter' ||
-            choice.finish_reason === 'safety' ||
-            choice.finish_reason === 'length'
+            hasEmittedContentStart &&
+            (choice.finish_reason === 'content_filter' ||
+              choice.finish_reason === 'safety' ||
+              choice.finish_reason === 'length')
           ) {
             throwIfStreamAborted(signal)
             yield { type: 'content_block_stop', index: contentBlockIndex }

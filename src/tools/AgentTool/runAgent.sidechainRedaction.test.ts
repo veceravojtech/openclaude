@@ -11,6 +11,7 @@ import {
   switchSession,
 } from '../../bootstrap/state.js'
 import type { ToolUseContext } from '../../Tool.js'
+import { clearOAuthTokenCache } from '../../utils/auth.js'
 import { enableConfigs } from '../../utils/config.js'
 import { setClaudeConfigHomeDirForTesting } from '../../utils/envUtils.js'
 import {
@@ -21,6 +22,7 @@ import {
   resetProjectForTesting,
 } from '../../utils/sessionStorage.js'
 import { getAssistantMessageFromError } from '../../services/api/errors.js'
+import { resetSettingsCache } from '../../utils/settings/settingsCache.js'
 import type { AgentDefinition } from './loadAgentsDir.js'
 
 // runAgent records every message of an agent run, including a failed turn's
@@ -63,6 +65,10 @@ beforeEach(() => {
 afterEach(() => {
   mock.restore()
   setClaudeConfigHomeDirForTesting(undefined)
+  // Whatever was read while the private config dir was active (settings, OAuth
+  // tokens) is cached; do not leave that behind for the next test file.
+  resetSettingsCache()
+  clearOAuthTokenCache()
   rmSync(configDir, { recursive: true, force: true })
 })
 
