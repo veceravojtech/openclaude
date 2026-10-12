@@ -385,11 +385,13 @@ test('unset message threshold forces compaction at the 200-message default', asy
   expect(seenTracking[0]?.forceReason).toBe('message-count')
 })
 
-test('the message-count default scales with a 1M context window', async () => {
+test('the message-count default does not apply on a 1M context window', async () => {
   // Regression: a [1m] session was force-compacted at ~230k tokens because the
-  // 200-message default is window-agnostic (#1949 tuned it for 200k).
+  // 200-message default is window-agnostic (#1949 tuned it for 200k), and
+  // still at ~400k once that default was scaled linearly to 1000 messages.
+  // Past the old scaled limit, the token threshold governs.
   const under = await runMessageCountHardCapQuery(
-    manySmallMessages(201),
+    manySmallMessages(1001),
     'claude-opus-5[1m]',
   )
 
@@ -397,13 +399,27 @@ test('the message-count default scales with a 1M context window', async () => {
   expect(under.callModel).toHaveBeenCalledTimes(1)
   expect(under.seenTracking[0]?.forceReason).toBeUndefined()
 
-  // The scaled limit (1000) still applies above it.
+  // The window-scaled hard cap (5000) still applies above it.
   const over = await runMessageCountHardCapQuery(
-    manySmallMessages(1001),
+    manySmallMessages(5001),
     'claude-opus-5[1m]',
   )
 
   expect(over.seenTracking[0]?.forceReason).toBe('message-count')
+})
+
+test('a chosen message-count threshold applies as written on a 1M context window', async () => {
+  saveGlobalConfig(current => ({
+    ...current,
+    maxMessagesCompactionThreshold: '1000',
+  }))
+
+  const { seenTracking } = await runMessageCountHardCapQuery(
+    manySmallMessages(1001),
+    'claude-opus-5[1m]',
+  )
+
+  expect(seenTracking[0]?.forceReason).toBe('message-count')
 })
 
 test('progress messages never count toward the active-message limit', async () => {

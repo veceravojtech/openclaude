@@ -856,8 +856,12 @@ For `dev:atomic-chat`, make sure Atomic Chat is running with a model loaded befo
 ## Message-Count Compaction Threshold
 
 By default, OpenClaude compacts conversations based on token usage and also
-applies a safety hard cap of 1000 active messages. The hard cap catches long
-sessions that accumulate many small messages with negligible token cost.
+applies a safety hard cap of 1000 active messages on a 200k-token context
+window, scaled proportionally on larger windows (5000 on a 1M model). The hard
+cap catches long sessions that accumulate many small messages with negligible
+token cost. Messages are counted as transcript records: every thinking, text
+and tool-use block and every attachment counts as one, so a single tool call
+is usually several.
 
 This hard cap is a safety net: it can still trigger compaction even when
 `DISABLE_COMPACT`, `DISABLE_AUTO_COMPACT`, or a disabled auto-compact setting
@@ -872,11 +876,20 @@ compaction via the in-app `/config` command:
 /config
 ```
 
-Message-count compaction defaults to `200` messages. Select
-**Message-count compaction** to choose a different threshold (`100`, `500`, or
-`1000`), or set it to `off` to disable the setting's proactive guard. The
-built-in hard cap remains, and an `OPENCLAUDE_MAX_ACTIVE_MESSAGES` override
-remains active when configured.
+Message-count compaction defaults to `200` messages on models with a context
+window of 200k tokens or less. On a larger window (for example a 1M model) that
+default does not apply: compaction follows the token threshold, and only the
+window-scaled hard cap still counts messages. Select **Message-count
+compaction** to choose a different threshold (`100`, `200`, `500`, or `1000`),
+or set it to `off` to disable the setting's proactive guard. The built-in hard
+cap remains, and an `OPENCLAUDE_MAX_ACTIVE_MESSAGES` override remains active
+when configured.
+
+A threshold you choose, including `200`, is honored as written on every
+window. On a 1M model, `1000` compacts after about 400k tokens of a typical
+coding session, well before the window is full. To get the window-aware
+default back, remove `maxMessagesCompactionThreshold` from
+`~/.openclaude.json`.
 
 The legacy `OPENCLAUDE_MAX_ACTIVE_MESSAGES` environment variable is honored
 when the setting is unset or `off`. An explicit numeric setting takes

@@ -2763,9 +2763,10 @@ async function runInProcessTeammateInner(
         isAutoCompactEnabled() ||
         hasExplicitMessageCountThreshold ||
         hasLegacyMessageCountThreshold
-      // Same window scaling as the main loop (query.ts): the message-count
-      // defaults were tuned for a 200k window, so a teammate on a larger one
-      // would otherwise compact at a fraction of its budget.
+      // Same window handling as the main loop (query.ts): the message-count
+      // defaults were tuned for a 200k window, so on a larger one the implicit
+      // default yields to the token threshold and the window-scaled hard cap;
+      // otherwise a teammate would compact at a fraction of its budget.
       const activeMessageContextWindow = getContextWindowForModel(
         teammateModel,
         getSdkBetas(),
@@ -2782,7 +2783,7 @@ async function runInProcessTeammateInner(
             process.env.OPENCLAUDE_MAX_ACTIVE_MESSAGES,
             {
               contextWindow: activeMessageContextWindow,
-              scaleDefault: !hasExplicitActiveMessageLimit,
+              implicitDefault: !hasExplicitActiveMessageLimit,
             },
           )
         : getMaxActiveMessagesHardCap(process.env, activeMessageContextWindow)
