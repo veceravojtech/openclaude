@@ -6,6 +6,7 @@ import React from 'react'
 
 import { render } from '../ink.js'
 import { AppStateProvider, getDefaultAppState } from '../state/AppState.js'
+import { captureRealModules } from '../test/moduleMockRestore.js'
 import {
   acquireSharedMutationLock,
   releaseSharedMutationLock,
@@ -21,6 +22,15 @@ type SettingsModule = typeof import('../utils/settings/settings.js')
 
 let actualSettingsModule: SettingsModule | undefined
 let settingsForTest: SettingsJson = {}
+
+// mock.restore() does not undo mock.module(). Without putting these back, the
+// stubs below outlived this file: once settingsForTest was reset to {}, the
+// stub allowlist allowed every model, so a later suite's availableModels
+// checks (e.g. codexOverrideIdentity) silently passed everything.
+const restoreRealModules = await captureRealModules(import.meta.dir, [
+  '../utils/settings/settings.js',
+  '../utils/model/modelAllowlist.js',
+])
 
 function useSettings(settings: SettingsJson): void {
   settingsForTest = settings
@@ -83,6 +93,7 @@ beforeEach(async () => {
 afterEach(() => {
   try {
     mock.restore()
+    restoreRealModules()
     resetSettingsCache()
     settingsForTest = {}
   } finally {

@@ -1141,7 +1141,16 @@ describe('usage-limit account switch', () => {
   async function importWithAccountSwitch(
     provider: 'firstParty' | 'openai' = 'firstParty',
   ) {
-    const retryModule = await importFreshWithRetryModule(provider)
+    // Account switching only exists for Claude.ai subscribers, and a 429 is
+    // retried only for non-subscribers or enterprise. Pin the subscriber the
+    // scenarios assume; left to the real predicate it reads the machine's own
+    // login, so a host without one (CI) saw the 429s retried and extra notices.
+    const retryModule = await importFreshWithRetryModule(provider, {
+      auth: {
+        isClaudeAISubscriber: () => true,
+        isEnterpriseSubscriber: () => false,
+      },
+    })
     originalAccountSwitchModule ??= await importActualAccountSwitch()
     mock.module('src/utils/accountSwitch.js', () => ({
       ...originalAccountSwitchModule!,

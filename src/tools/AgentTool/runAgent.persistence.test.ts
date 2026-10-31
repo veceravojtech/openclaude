@@ -2,6 +2,14 @@ import { afterEach, beforeEach, expect, mock, test } from 'bun:test'
 import type { AgentDefinition } from './loadAgentsDir.js'
 import type { ToolUseContext } from '../../Tool.js'
 
+// Captured before any mock.module call, and spread rather than handed back as
+// the namespace object itself: mock.module mutates the registration in place,
+// so returning the namespace would re-install the stub instead of undoing it.
+const realSessionStorage = {
+  ...(await import('../../utils/sessionStorage.js')),
+}
+const realQuery = { ...(await import('../../query.js')) }
+
 // Track how many times each storage function is called
 let metadataWriteCount = 0
 let transcriptWriteCount = 0
@@ -13,6 +21,13 @@ beforeEach(() => {
 
 afterEach(() => {
   mock.restore()
+  // mock.restore() does not undo mock.module(): without this the stubs below
+  // stayed installed for every later file in the sweep, so a later suite that
+  // imported getProjectDir from sessionStorage failed to link.
+  mock.module('../../utils/sessionStorage.js', () => ({
+    ...realSessionStorage,
+  }))
+  mock.module('../../query.js', () => ({ ...realQuery }))
 })
 
 async function importRunAgentWithMocks() {
@@ -40,8 +55,13 @@ async function importRunAgentWithMocks() {
     },
   }
 
-  mock.module('../../utils/sessionStorage.js', () => sessionStorageMock)
-  mock.module('../../query.js', () => queryMock)
+  // Override only what this test observes; runAgent imports more than these
+  // from both modules (e.g. getProjectDir), so a bare stub failed to link.
+  mock.module('../../utils/sessionStorage.js', () => ({
+    ...realSessionStorage,
+    ...sessionStorageMock,
+  }))
+  mock.module('../../query.js', () => ({ ...realQuery, ...queryMock }))
 
   const module = await import(`./runAgent.js?persistence=${Date.now()}-${Math.random()}`)
   return module.runAgent
