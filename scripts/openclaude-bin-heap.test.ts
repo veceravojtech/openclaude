@@ -22,6 +22,12 @@ const BIN_PATH = join(import.meta.dir, '..', 'bin', 'openclaude')
 const COMPILE_CACHE_PATH = join(import.meta.dir, '..', 'bin', 'node-compile-cache.mjs')
 const HEAP_LIMIT_PATH = join(import.meta.dir, '..', 'bin', 'heap-limit.mjs')
 const FOUR_GIB = 4 * 1024 * 1024 * 1024
+// A real launcher spawn: cold start plus a possible heap relaunch. The spawn
+// gets LAUNCHER_SPAWN_TIMEOUT_MS, so the test itself must outlive it; under
+// bun's 5s default the harness killed a slow (but successful) spawn at ~5s and
+// reported status null.
+const LAUNCHER_SPAWN_TIMEOUT_MS = 8_000
+const LAUNCHER_TEST_TIMEOUT_MS = LAUNCHER_SPAWN_TIMEOUT_MS + 7_000
 
 function expectSuccessfulLauncherSpawn(
   result: ReturnType<typeof spawnSync>,
@@ -89,7 +95,7 @@ describe('openclaude launcher heap guard', () => {
       ],
       {
         encoding: 'utf8',
-        timeout: 8000,
+        timeout: LAUNCHER_SPAWN_TIMEOUT_MS,
         env,
       },
     )
@@ -98,7 +104,7 @@ describe('openclaude launcher heap guard', () => {
     expect(output).not.toContain(
       "unknown option '--max-old-space-size-percentage=50'",
     )
-  })
+  }, LAUNCHER_TEST_TIMEOUT_MS)
 
   test('strips launcher-only percentage before Commander when heap relaunch is disabled', () => {
     const env = {
@@ -111,7 +117,7 @@ describe('openclaude launcher heap guard', () => {
       [BIN_PATH, '--max-old-space-size-percentage=50', '--version'],
       {
         encoding: 'utf8',
-        timeout: 8000,
+        timeout: LAUNCHER_SPAWN_TIMEOUT_MS,
         env,
       },
     )
@@ -120,7 +126,7 @@ describe('openclaude launcher heap guard', () => {
     expect(output).not.toContain(
       "unknown option '--max-old-space-size-percentage=50'",
     )
-  })
+  }, LAUNCHER_TEST_TIMEOUT_MS)
 
   test('strips launcher-only percentage when OPENCLAUDE_HEAP_RELAUNCHED is already set', () => {
     const env = {
@@ -133,7 +139,7 @@ describe('openclaude launcher heap guard', () => {
       [BIN_PATH, '--max-old-space-size-percentage=50', '--version'],
       {
         encoding: 'utf8',
-        timeout: 8000,
+        timeout: LAUNCHER_SPAWN_TIMEOUT_MS,
         env,
       },
     )
@@ -142,7 +148,7 @@ describe('openclaude launcher heap guard', () => {
     expect(output).not.toContain(
       "unknown option '--max-old-space-size-percentage=50'",
     )
-  })
+  }, LAUNCHER_TEST_TIMEOUT_MS)
 })
 
 describe('heap-limit percentage resolution', () => {
