@@ -717,11 +717,23 @@ describe('background session finalizer', () => {
     name: string,
   ): Promise<void> {
     const artifacts = sessionArtifactPaths(id, name)
+    const terminalFacts = async (): Promise<string[]> =>
+      (await readdir(join(sessionsRoot, 'terminal'))).filter(file =>
+        file.startsWith(`${id}~`),
+      )
+    // Wait for everything asserted below. The worker removes the terminal
+    // facts after the metadata, so waiting on the four artifacts alone could
+    // catch the facts in that last step and fail a cleanup that was finishing.
     for (let attempt = 0; attempt < 500; attempt += 1) {
       const present = await Promise.all(
         artifacts.map(async path => await Bun.file(path).exists()),
       )
-      if (present.every(exists => !exists)) break
+      if (
+        present.every(exists => !exists) &&
+        (await terminalFacts()).length === 0
+      ) {
+        break
+      }
       await new Promise(resolve => setTimeout(resolve, 10))
     }
     expect(
@@ -729,11 +741,7 @@ describe('background session finalizer', () => {
         artifacts.map(async path => await Bun.file(path).exists()),
       ),
     ).toEqual([false, false, false, false])
-    expect(
-      (await readdir(join(sessionsRoot, 'terminal'))).filter(file =>
-        file.startsWith(`${id}~`),
-      ),
-    ).toEqual([])
+    expect(await terminalFacts()).toEqual([])
   }
 
   async function expectSessionArtifactsRetained(
