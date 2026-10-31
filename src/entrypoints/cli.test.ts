@@ -529,6 +529,11 @@ describe('cli.tsx — background routing behavior', () => {
 
   afterEach(() => {
     process.argv = [...savedArgv]
+    // runCliEntrypoint() remembers a --provider flag so settings env cannot
+    // override it, in module state that outlives this file. Left set, a later
+    // suite's applyConfigEnvironmentVariables() re-applied this file's
+    // provider and model (e.g. managedEnv.test.ts saw Command Code routing).
+    clearRememberedProviderFlagForTests()
   })
 
   it('dispatches background management commands before startup work', async () => {
@@ -1292,6 +1297,11 @@ describe('cli.tsx — --yolo alias (PR #1939)', () => {
 
   afterEach(() => {
     process.argv = [...savedArgv]
+    // runCliEntrypoint() remembers a --provider flag so settings env cannot
+    // override it, in module state that outlives this file. Left set, a later
+    // suite's applyConfigEnvironmentVariables() re-applied this file's
+    // provider and model (e.g. managedEnv.test.ts saw Command Code routing).
+    clearRememberedProviderFlagForTests()
   })
 
   // Mirrors the registration in main.tsx. commander derives the option's

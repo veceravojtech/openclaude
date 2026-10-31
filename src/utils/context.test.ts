@@ -13,7 +13,7 @@ import {
   modelSupports1M,
   clearSessionContextWindowOverride,
 } from './context.ts'
-import { scaleActiveMessageLimitToContextWindow } from './maxActiveMessages.js'
+import { getMaxActiveMessagesHardCap } from './maxActiveMessages.js'
 import { runWithAgentContext } from './agentContext.js'
 
 test('cyber limits follow the serving saved profile and off restores active-route limits', () => {
@@ -1402,21 +1402,19 @@ test('cross-provider teammate route does not leak into an un-hinted lookup', () 
 
 test('message-count limit scales with a cross-provider teammate route window', () => {
   const zaiRoute = { baseUrl: 'https://api.z.ai/api/coding/paas/v4' }
-  // Under the 200k lead's ambient env the default 200-message limit stays
-  // unscaled — the gap that made leakcheck compact early on message count.
+  // Under the 200k lead's ambient env the hard cap stays at its 200k value —
+  // the gap that made leakcheck compact early on message count.
   expect(
-    scaleActiveMessageLimitToContextWindow(
-      200,
-      getContextWindowForModel('glm-5.3'),
-    ),
-  ).toBe(200)
-  // The teammate's own 1M route scales the same default to 1000 messages.
+    getMaxActiveMessagesHardCap({}, getContextWindowForModel('glm-5.3')),
+  ).toBe(1000)
+  // The teammate's own 1M route scales the hard cap to 5000 messages, which
+  // is its whole count limit: above 200k the implicit default does not apply.
   expect(
-    scaleActiveMessageLimitToContextWindow(
-      200,
+    getMaxActiveMessagesHardCap(
+      {},
       getContextWindowForModel('glm-5.3', [], undefined, zaiRoute),
     ),
-  ).toBe(1000)
+  ).toBe(5000)
 })
 
 test('agent context route drives window, threshold, message cap and output clamp', () => {
@@ -1433,11 +1431,8 @@ test('agent context route drives window, threshold, message cap and output clamp
       expect(getAutoCompactThreshold('glm-5.3')).toBeGreaterThan(900_000)
       // Message cap scales off the route's window, not the 200k default.
       expect(
-        scaleActiveMessageLimitToContextWindow(
-          200,
-          getContextWindowForModel('glm-5.3'),
-        ),
-      ).toBe(1000)
+        getMaxActiveMessagesHardCap({}, getContextWindowForModel('glm-5.3')),
+      ).toBe(5000)
       // Output clamp follows the route (131_072), not Claude's 32k/64k ladder.
       expect(getModelMaxOutputTokens('glm-5.3')).toEqual({
         default: 131_072,

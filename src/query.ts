@@ -1070,8 +1070,9 @@ async function* queryLoop(
         hasValidLegacyActiveMessageLimit)
     // The message-count defaults were tuned for a 200k window (#1949); on a
     // larger window they fire long before the token budget is close to full
-    // (a [1m] session compacted at ~230k). Scale the defaults with the model's
-    // window; a limit the user set by hand is honored as written.
+    // (a [1m] session compacted at ~400k). There the implicit default yields
+    // to the token threshold and only the window-scaled hard cap counts
+    // messages; a limit the user set by hand is honored as written.
     const activeMessageContextWindow = getContextWindowForModel(
       toolUseContext.options.mainLoopModel,
       getSdkBetas(),
@@ -1088,7 +1089,7 @@ async function* queryLoop(
           process.env.OPENCLAUDE_MAX_ACTIVE_MESSAGES,
           {
             contextWindow: activeMessageContextWindow,
-            scaleDefault: !hasActiveMessageLimitOverride,
+            implicitDefault: !hasActiveMessageLimitOverride,
           },
         )
       : 0
